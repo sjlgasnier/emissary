@@ -1,11 +1,20 @@
-[package]
-name = "emissary"
-version = "0.1.0"
+[workspace.package]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/altonen/emissary"
+readme = "README.md"
+authors = []
+keywords = []
+categories = []
 
-[dependencies]
-anyhow = "1.0.86"
-clap = { version = "4.5.7", features = ["derive"] }
-tokio = { version = "1.38.0", features = ["full"] }
-tracing = { version = "0.1.40", features = ["log"] }
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+[workspace]
+resolver = "2"
+
+members = [
+  "emissary-netdb",
+  "emissary-node",
+]
+
+default-members = ["emissary-node"]
+
+[workspace.dependencies]
