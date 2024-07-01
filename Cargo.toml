@@ -11,7 +11,7 @@ categories = []
 resolver = "2"
 
 members = [
-  "emissary-netdb",
+  "emissary-lib",
   "emissary-node",
 ]
 
