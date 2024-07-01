@@ -16,6 +16,9 @@ use std::{
 pub struct Config {
     /// Base path.
     base_path: PathBuf,
+
+    /// Router info.
+    routers: Vec<Vec<u8>>,
 }
 
 impl TryFrom<Option<PathBuf>> for Config {
@@ -44,7 +47,7 @@ impl TryFrom<Option<PathBuf>> for Config {
         // if base path doesn't exist, create it and return empty config
         if !path.exists() {
             fs::create_dir_all(&path)?;
-            return Ok(Config { base_path: path });
+            return Ok(Config::new_empty(path));
         }
 
         let config_path = {
@@ -53,25 +56,77 @@ impl TryFrom<Option<PathBuf>> for Config {
             path
         };
 
-        match fs::File::open(&config_path) {
+        // parse configuration, if it exists
+        let mut config = match fs::File::open(&config_path) {
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?path,
+                    ?config_path,
                     %error,
                     "router config missing",
                 );
 
-                Ok(Config { base_path: path })
+                Config::new_empty(path.clone())
             }
             Ok(router) => {
                 todo!();
             }
+        };
+
+        // parse router info
+        let router_path = {
+            let mut path = path.clone();
+            path.push("routers");
+            path
+        };
+
+        let router_dir = match fs::read_dir(&router_path) {
+            Ok(router_dir) => router_dir,
+            Err(error) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?router_path,
+                    ?error,
+                    "failed to open router directory, try reseeding",
+                );
+
+                return Ok(config);
+            }
+        };
+
+        config.routers = router_dir
+            .into_iter()
+            .filter_map(|entry| {
+                let dir = entry.ok()?;
+                let mut file = fs::File::open(dir.path()).ok()?;
+
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents).ok()?;
+
+                Some(contents)
+            })
+            .collect::<Vec<_>>();
+
+        if config.routers.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "no routers, try reseeding the router",
+            );
         }
+
+        Ok(config)
     }
 }
 
 impl Config {
+    /// Create empty config.
+    fn new_empty(base_path: PathBuf) -> Self {
+        Self {
+            base_path,
+            routers: Vec::new(),
+        }
+    }
+
     /// Reseed router from `file`.
     ///
     /// Returns the number of routers found in the reseed file
