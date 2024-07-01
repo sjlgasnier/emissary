@@ -1,3 +1,5 @@
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
+
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }

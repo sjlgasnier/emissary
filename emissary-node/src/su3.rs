@@ -1,3 +1,5 @@
+use crate::error::Error;
+
 use nom::{
     do_parse, named,
     number::streaming::{be_u16, be_u64, be_u8},
@@ -21,7 +23,7 @@ pub enum SignatureType {
 }
 
 /// File type.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
     Zip,
     Xml,
@@ -33,7 +35,7 @@ pub enum FileType {
 }
 
 /// Content type.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ContentType {
     Unknown,
     RouterUpdate,
@@ -81,8 +83,10 @@ pub struct Su3 {
 
 impl Su3 {
     /// Create [`Su3`] from a byte slice.
-    fn from_bytes(bytes: &[u8]) -> Result<Su3, ()> {
-        parse_su3(bytes).map(|(_, su3)| su3).map_err(|_| ())
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Su3> {
+        parse_su3(bytes)
+            .map(|(_, su3)| su3)
+            .map_err(|error| Error::Custom(error.to_string()))
     }
 }
 
@@ -160,5 +164,7 @@ mod tests {
 
         assert_eq!(parsed.file_type, FileType::Zip);
         assert_eq!(parsed.content_type, ContentType::ReseedData);
+
+        println!("content len = {}", parsed.content.len());
     }
 }
