@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+pub use date::Date;
 pub use router_identity::RouterIdentity;
 
+mod date;
 mod router_identity;
