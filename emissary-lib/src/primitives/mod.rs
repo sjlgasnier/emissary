@@ -17,9 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 pub use date::Date;
+pub use mapping::Mapping;
 pub use router_identity::RouterIdentity;
 pub use string::Str;
 
 mod date;
+mod mapping;
 mod router_identity;
 mod string;

@@ -32,6 +32,21 @@ pub struct Str {
 }
 
 impl Str {
+    /// Create new [`Str`].
+    pub fn new(string: Vec<u8>) -> Self {
+        Self { string }
+    }
+
+    /// Serialize [`Str`] into a byte vector.
+    pub fn serialize(self) -> Vec<u8> {
+        let mut out = vec![0u8; self.string.len() + 1];
+
+        out[0] = self.string.len() as u8;
+        out[1..].copy_from_slice(&self.string);
+
+        out
+    }
+
     /// Parse [`Str`] from `input`, returning rest of `input` and parsed address.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Str> {
         let (rest, size) = be_u8(input)?;
@@ -59,6 +74,8 @@ impl Str {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+
+    use nom::AsBytes;
 
     use super::*;
 
@@ -130,5 +147,17 @@ mod tests {
             }
         );
         assert_eq!(rest, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn serialize_works() {
+        let bytes = Str::new("hello, world!".as_bytes().to_vec()).serialize();
+
+        assert_eq!(
+            Str::from_bytes(bytes),
+            Some(Str {
+                string: "hello, world!".as_bytes().to_vec()
+            })
+        );
     }
 }
