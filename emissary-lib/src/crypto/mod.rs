@@ -1,0 +1,74 @@
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+use crate::Error;
+
+use std::convert::TryInto;
+
+#[derive(Debug, Clone)]
+pub enum StaticPublicKey {
+    /// x25519
+    X25519(x25519_dalek::PublicKey),
+
+    /// ElGamal.
+    ElGamal([u8; 256]),
+}
+
+impl StaticPublicKey {
+    /// Create new x25519 static public key.
+    pub fn new_x25519(key: &[u8]) -> crate::Result<Self> {
+        let key: [u8; 32] = key.try_into().map_err(|_| Error::InvalidData)?;
+        Ok(StaticPublicKey::X25519(x25519_dalek::PublicKey::from(key)))
+    }
+
+    /// Create new ElGamal static public key.
+    pub fn new_elgamal(key: &[u8]) -> crate::Result<Self> {
+        let key: [u8; 256] = key.try_into().map_err(|_| Error::InvalidData)?;
+        Ok(StaticPublicKey::ElGamal(key))
+    }
+}
+
+/// Static private key.
+pub enum StaticPrivateKey {
+    /// x25519.
+    X25519(x25519_dalek::SharedSecret),
+}
+
+/// Signing private key.
+pub enum SigningPrivateKey {
+    /// EdDSA.
+    Ed25519(ed25519_dalek::SecretKey),
+}
+
+/// Signing public key.
+#[derive(Debug, Clone)]
+pub enum SigningPublicKey {
+    /// EdDSA.
+    Ed25519(ed25519_dalek::VerifyingKey),
+}
+
+impl SigningPublicKey {
+    /// Create signing public key from bytes.
+    pub fn from_bytes(key: &Vec<u8>) -> crate::Result<Self> {
+        let key: [u8; 32] = key.to_vec().try_into().map_err(|_| Error::InvalidData)?;
+
+        Ok(SigningPublicKey::Ed25519(
+            ed25519_dalek::VerifyingKey::from_bytes(&key)?,
+        ))
+    }
+}

@@ -16,12 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// #![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(unused)]
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Ed25519 error: `{0:?}`")]
+    Ed25519(#[from] ed25519_dalek::ed25519::Error),
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-pub use error::Error;
-
-mod crypto;
-mod error;
+    #[error("Invalid data")]
+    InvalidData,
+}
