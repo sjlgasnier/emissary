@@ -31,15 +31,15 @@ pub enum StaticPublicKey {
 
 impl StaticPublicKey {
     /// Create new x25519 static public key.
-    pub fn new_x25519(key: &[u8]) -> crate::Result<Self> {
-        let key: [u8; 32] = key.try_into().map_err(|_| Error::InvalidData)?;
-        Ok(StaticPublicKey::X25519(x25519_dalek::PublicKey::from(key)))
+    pub fn new_x25519(key: &[u8]) -> Option<Self> {
+        let key: [u8; 32] = key.try_into().ok()?;
+        Some(StaticPublicKey::X25519(x25519_dalek::PublicKey::from(key)))
     }
 
     /// Create new ElGamal static public key.
-    pub fn new_elgamal(key: &[u8]) -> crate::Result<Self> {
-        let key: [u8; 256] = key.try_into().map_err(|_| Error::InvalidData)?;
-        Ok(StaticPublicKey::ElGamal(key))
+    pub fn new_elgamal(key: &[u8]) -> Option<Self> {
+        let key: [u8; 256] = key.try_into().ok()?;
+        Some(StaticPublicKey::ElGamal(key))
     }
 }
 
@@ -64,11 +64,11 @@ pub enum SigningPublicKey {
 
 impl SigningPublicKey {
     /// Create signing public key from bytes.
-    pub fn from_bytes(key: &Vec<u8>) -> crate::Result<Self> {
-        let key: [u8; 32] = key.to_vec().try_into().map_err(|_| Error::InvalidData)?;
+    pub fn from_bytes(key: &[u8]) -> Option<Self> {
+        let key: [u8; 32] = key.to_vec().try_into().ok()?;
 
-        Ok(SigningPublicKey::Ed25519(
-            ed25519_dalek::VerifyingKey::from_bytes(&key)?,
+        Some(SigningPublicKey::Ed25519(
+            ed25519_dalek::VerifyingKey::from_bytes(&key).ok()?,
         ))
     }
 }
