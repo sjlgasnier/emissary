@@ -18,6 +18,8 @@
 
 pub use date::Date;
 pub use router_identity::RouterIdentity;
+pub use string::Str;
 
 mod date;
 mod router_identity;
+mod string;
