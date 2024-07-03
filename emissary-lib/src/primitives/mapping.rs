@@ -26,6 +26,8 @@ use nom::{
     Err, IResult,
 };
 
+use std::fmt;
+
 /// Key-value mapping
 #[derive(Debug, PartialEq, Eq)]
 pub struct Mapping {
@@ -34,6 +36,12 @@ pub struct Mapping {
 
     /// Value.
     value: Str,
+}
+
+impl fmt::Display for Mapping {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}={}", self.key, self.value)
+    }
 }
 
 impl Mapping {
@@ -77,6 +85,11 @@ impl Mapping {
     /// Get reference to inner key-value mapping.
     pub fn mapping(&self) -> (&Str, &Str) {
         (&self.key, &self.value)
+    }
+
+    /// Get serialized length of [`Mapping`].
+    pub fn serialized_len(&self) -> usize {
+        self.key.len() + self.value.len() + 2
     }
 }
 

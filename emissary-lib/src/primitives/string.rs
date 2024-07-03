@@ -24,11 +24,19 @@ use nom::{
     Err, IResult,
 };
 
+use std::fmt;
+
 /// String.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Str {
     /// String as byte vector.
     string: Vec<u8>,
+}
+
+impl fmt::Display for Str {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", std::str::from_utf8(&self.string).unwrap_or("..."))
+    }
 }
 
 impl Str {
@@ -68,6 +76,16 @@ impl Str {
     /// Get reference to inner string.
     pub fn string(&self) -> &[u8] {
         &self.string
+    }
+
+    /// Get length of inner string.
+    pub fn len(&self) -> usize {
+        self.string.len()
+    }
+
+    /// Get serialized length of [`Str`].
+    pub fn serialized_len(&self) -> usize {
+        self.string.len() + 1
     }
 }
 
