@@ -27,6 +27,7 @@ use nom::{
 };
 
 /// Router identity.
+#[derive(Debug)]
 pub struct RouterIdentity {
     /// Router's public key.
     public_key: StaticPublicKey,
@@ -56,8 +57,6 @@ impl RouterIdentity {
             _ => todo!("unsupported public key type"),
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-        println!("pub key parse");
 
         let signing_key = match sig_key_type {
             0x0007 => SigningPublicKey::from_bytes(&initial_bytes[384 - 32..384]),

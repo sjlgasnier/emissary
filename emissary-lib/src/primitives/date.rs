@@ -34,7 +34,7 @@ pub struct Date {
 }
 
 impl Date {
-    /// Parse [`Date`] from input`, returning rest of `input` and parsed date.
+    /// Parse [`Date`] from `input`, returning rest of `input` and parsed date.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Date> {
         let (rest, date) = be_u64(input)?;
 

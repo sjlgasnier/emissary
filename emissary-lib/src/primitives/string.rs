@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::{primitives::LOG_TARGET, Error};
+
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -24,7 +26,7 @@ use nom::{
     Err, IResult,
 };
 
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 /// String.
 #[derive(Debug, Hash, PartialEq, Eq)]
@@ -36,6 +38,25 @@ pub struct Str {
 impl fmt::Display for Str {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", std::str::from_utf8(&self.string).unwrap_or("..."))
+    }
+}
+
+impl FromStr for Str {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() > 255 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                len = ?s.len(),
+                "string is too large",
+            );
+            return Err(Error::InvalidData);
+        }
+
+        Ok(Str {
+            string: s.as_bytes().to_vec(),
+        })
     }
 }
 

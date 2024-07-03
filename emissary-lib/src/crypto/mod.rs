@@ -71,4 +71,17 @@ impl SigningPublicKey {
             ed25519_dalek::VerifyingKey::from_bytes(&key).ok()?,
         ))
     }
+
+    /// Verify `signature` of `message`.
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> crate::Result<()> {
+        match self {
+            Self::Ed25519(key) => {
+                let signature: [u8; 64] = signature.try_into().map_err(|_| Error::InvalidData)?;
+                let signature = ed25519_dalek::Signature::from_bytes(&signature);
+
+                key.verify_strict(&message[..message.len() - 64], &signature)
+                    .map_err(From::from)
+            }
+        }
+    }
 }

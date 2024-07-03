@@ -16,14 +16,19 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+/// Logging target for the module.
+const LOG_TARGET: &str = "emissary::primitives";
+
 pub use date::Date;
 pub use mapping::Mapping;
 pub use router_address::RouterAddress;
 pub use router_identity::RouterIdentity;
+pub use router_info::RouterInfo;
 pub use string::Str;
 
 mod date;
 mod mapping;
 mod router_address;
 mod router_identity;
+mod router_info;
 mod string;

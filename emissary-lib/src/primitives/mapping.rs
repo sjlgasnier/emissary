@@ -77,6 +77,22 @@ impl Mapping {
         Ok((rest, Mapping { key, value }))
     }
 
+    /// Parse multiple [`Mapping`]s from `input`.
+    pub fn parse_multi_frame(input: &[u8]) -> IResult<&[u8], Vec<Mapping>> {
+        let (mut rest, mut num_option_bytes) = be_u16(input)?;
+        let mut options = Vec::<Mapping>::new();
+
+        while num_option_bytes > 0 {
+            let (_rest, mapping) = Mapping::parse_frame(rest)?;
+            rest = _rest;
+
+            num_option_bytes = num_option_bytes.saturating_sub(mapping.serialized_len() as u16);
+            options.push(mapping);
+        }
+
+        Ok((rest, options))
+    }
+
     /// Try to convert `bytes` into a [`Mapping`].
     pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Mapping> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
@@ -216,6 +232,60 @@ mod tests {
         let (rest, mapping) = Mapping::parse_frame(rest).unwrap();
         assert_eq!(
             mapping,
+            Mapping {
+                key: Str::new("siip".as_bytes().to_vec()),
+                value: Str::new("huup".as_bytes().to_vec()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_multi_frame() {
+        let mapping1 = Mapping::new(
+            Str::new("hello".as_bytes().to_vec()),
+            Str::new("world".as_bytes().to_vec()),
+        )
+        .serialize();
+        let mapping2 = Mapping::new(
+            Str::new("foo".as_bytes().to_vec()),
+            Str::new("bar".as_bytes().to_vec()),
+        )
+        .serialize();
+        let mapping3 = Mapping::new(
+            Str::new("siip".as_bytes().to_vec()),
+            Str::new("huup".as_bytes().to_vec()),
+        )
+        .serialize();
+
+        let mut mappings = ((mapping1.len() + mapping2.len() + mapping3.len()) as u16)
+            .to_be_bytes()
+            .to_vec();
+
+        mappings.extend_from_slice(&mapping1);
+        mappings.extend_from_slice(&mapping2);
+        mappings.extend_from_slice(&mapping3);
+
+        let (rest, mappings) = Mapping::parse_multi_frame(&mappings).unwrap();
+
+        assert!(rest.is_empty());
+        assert_eq!(mappings.len(), 3);
+
+        assert_eq!(
+            mappings[0],
+            Mapping {
+                key: Str::new("hello".as_bytes().to_vec()),
+                value: Str::new("world".as_bytes().to_vec()),
+            }
+        );
+        assert_eq!(
+            mappings[1],
+            Mapping {
+                key: Str::new("foo".as_bytes().to_vec()),
+                value: Str::new("bar".as_bytes().to_vec()),
+            }
+        );
+        assert_eq!(
+            mappings[2],
             Mapping {
                 key: Str::new("siip".as_bytes().to_vec()),
                 value: Str::new("huup".as_bytes().to_vec()),

@@ -29,6 +29,7 @@ use nom::{
 use std::{collections::HashMap, fmt};
 
 /// Router address information.
+#[derive(Debug)]
 pub struct RouterAddress {
     /// Router cost.
     cost: u8,
@@ -61,16 +62,7 @@ impl RouterAddress {
         let (rest, cost) = be_u8(input)?;
         let (rest, expires) = Date::parse_frame(rest)?;
         let (rest, transport) = Str::parse_frame(rest)?;
-        let (mut rest, mut num_option_bytes) = be_u16(rest)?;
-        let mut options = Vec::<Mapping>::new();
-
-        while num_option_bytes > 0 {
-            let (_rest, mapping) = Mapping::parse_frame(rest)?;
-            rest = _rest;
-
-            num_option_bytes = num_option_bytes.saturating_sub(mapping.serialized_len() as u16);
-            options.push(mapping);
-        }
+        let (rest, options) = Mapping::parse_multi_frame(rest)?;
 
         Ok((
             rest,
@@ -86,5 +78,20 @@ impl RouterAddress {
     /// Try to convert `bytes` into a [`RouterAddress`].
     pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<RouterAddress> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
+    }
+
+    /// Get address cost.
+    pub fn cost(&self) -> u8 {
+        self.cost
+    }
+
+    /// Get address transport.
+    pub fn transport(&self) -> &Str {
+        &self.transport
+    }
+
+    /// Get address options.
+    pub fn options(&self) -> &HashMap<Str, Str> {
+        &self.options
     }
 }
