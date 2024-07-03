@@ -26,7 +26,7 @@ use nom::{
     Err, IResult,
 };
 
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 /// Key-value mapping
 #[derive(Debug, PartialEq, Eq)]
@@ -89,7 +89,15 @@ impl Mapping {
 
     /// Get serialized length of [`Mapping`].
     pub fn serialized_len(&self) -> usize {
-        self.key.len() + self.value.len() + 2
+        self.key.serialized_len() + self.value.serialized_len() + 2
+    }
+
+    /// Convert a vector of [`Mapping`]s into a hashmap.
+    pub fn into_hashmap(mappings: Vec<Mapping>) -> HashMap<Str, Str> {
+        mappings
+            .into_iter()
+            .map(|mapping| (mapping.key, mapping.value))
+            .collect()
     }
 }
 

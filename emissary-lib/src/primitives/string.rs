@@ -27,7 +27,7 @@ use nom::{
 use std::fmt;
 
 /// String.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Str {
     /// String as byte vector.
     string: Vec<u8>,

@@ -18,10 +18,12 @@
 
 pub use date::Date;
 pub use mapping::Mapping;
+pub use router_address::RouterAddress;
 pub use router_identity::RouterIdentity;
 pub use string::Str;
 
 mod date;
 mod mapping;
+mod router_address;
 mod router_identity;
 mod string;
