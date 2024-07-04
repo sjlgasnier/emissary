@@ -16,15 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use nom::{
-    bytes::complete::take,
-    error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u64, be_u8},
-    sequence::tuple,
-    Err, IResult,
-};
-
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use nom::{number::complete::be_u64, IResult};
 
 /// Date.
 #[derive(Debug, PartialEq, Eq)]

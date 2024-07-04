@@ -18,7 +18,7 @@
 
 use crate::Error;
 
-use std::convert::TryInto;
+use core::convert::TryInto;
 
 #[derive(Debug, Clone)]
 pub enum StaticPublicKey {

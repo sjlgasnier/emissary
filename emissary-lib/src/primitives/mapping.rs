@@ -18,15 +18,14 @@
 
 use crate::primitives::Str;
 
+use hashbrown::HashMap;
 use nom::{
-    bytes::complete::{take, take_till1, take_until},
-    error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u64, be_u8},
-    sequence::tuple,
-    Err, IResult,
+    number::complete::{be_u16, be_u8},
+    IResult,
 };
 
-use std::{collections::HashMap, fmt};
+use alloc::{vec, vec::Vec};
+use core::fmt;
 
 /// Key-value mapping
 #[derive(Debug, PartialEq, Eq)]

@@ -16,11 +16,14 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("Ed25519 error: `{0:?}`")]
-    Ed25519(#[from] ed25519_dalek::ed25519::Error),
-
-    #[error("Invalid data")]
+    Ed25519(ed25519_dalek::ed25519::Error),
     InvalidData,
+}
+
+impl From<ed25519_dalek::ed25519::Error> for Error {
+    fn from(value: ed25519_dalek::ed25519::Error) -> Self {
+        Error::Ed25519(value)
+    }
 }

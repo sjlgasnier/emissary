@@ -18,15 +18,10 @@
 
 use crate::primitives::{Date, Mapping, Str};
 
-use nom::{
-    bytes::complete::take,
-    error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u64, be_u8},
-    sequence::tuple,
-    Err, IResult,
-};
+use hashbrown::HashMap;
+use nom::{number::complete::be_u8, IResult};
 
-use std::{collections::HashMap, fmt};
+use core::fmt;
 
 /// Router address information.
 #[derive(Debug)]

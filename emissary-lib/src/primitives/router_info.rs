@@ -18,15 +18,14 @@
 
 use crate::primitives::{Date, Mapping, RouterAddress, RouterIdentity, Str, LOG_TARGET};
 
+use hashbrown::HashMap;
 use nom::{
-    bytes::complete::take,
     error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u8},
-    sequence::tuple,
+    number::complete::be_u8,
     Err, IResult,
 };
 
-use std::collections::HashMap;
+use alloc::vec::Vec;
 
 /// Router information
 pub struct RouterInfo {

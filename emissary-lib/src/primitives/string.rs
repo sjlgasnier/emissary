@@ -18,15 +18,10 @@
 
 use crate::{primitives::LOG_TARGET, Error};
 
-use nom::{
-    bytes::complete::take,
-    error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u64, be_u8},
-    sequence::tuple,
-    Err, IResult,
-};
+use nom::{bytes::complete::take, number::complete::be_u8, IResult};
 
-use std::{fmt, str::FromStr};
+use alloc::{vec, vec::Vec};
+use core::{fmt, str::FromStr};
 
 /// String.
 #[derive(Debug, Hash, PartialEq, Eq)]
@@ -37,7 +32,7 @@ pub struct Str {
 
 impl fmt::Display for Str {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", std::str::from_utf8(&self.string).unwrap_or("..."))
+        write!(f, "{}", core::str::from_utf8(&self.string).unwrap_or("..."))
     }
 }
 
