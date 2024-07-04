@@ -28,4 +28,5 @@ pub use error::Error;
 mod crypto;
 mod error;
 mod primitives;
-mod runtime;
+
+pub mod runtime;

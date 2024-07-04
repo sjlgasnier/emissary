@@ -18,29 +18,19 @@
 
 use futures_lite::{AsyncRead, AsyncWrite, Future};
 
-use core::task::Context;
-
 pub trait TcpStream: AsyncRead + AsyncWrite + Send + Sized {
-    async fn close(&mut self);
+    fn connect(address: &str) -> impl Future<Output = Option<Self>>;
+    fn close(&mut self) -> impl Future<Output = ()>;
 }
 
 pub trait TcpListener<TcpStream>: Send + Sized {
-    fn bind(address: &str) -> Self;
-    async fn accept(&mut self) -> Option<TcpStream>;
-}
-
-pub trait UdpSocket: Send + Sized {
-    fn connect(address: &str);
-    fn bind(address: &str);
-
-    fn poll_recv_from(&mut self, buffer: &mut &[u8], cx: Context<'_>);
-    fn poll_send_to(&mut self, buffer: &mut &[u8], cx: Context<'_>);
+    fn bind(address: &str) -> impl Future<Output = Option<Self>>;
+    fn accept(&mut self) -> impl Future<Output = Option<TcpStream>>;
 }
 
 pub trait Runtime: Clone {
     type TcpStream: TcpStream;
     type TcpListener: TcpListener<Self::TcpStream>;
-    type UdpSocket: UdpSocket;
 
     fn spawn<F>(future: F)
     where

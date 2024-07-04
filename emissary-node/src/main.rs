@@ -14,6 +14,7 @@ mod config;
 mod error;
 mod logger;
 mod su3;
+mod tokio_runtime;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
