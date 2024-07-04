@@ -16,16 +16,34 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
+use futures_lite::{AsyncRead, AsyncWrite, Future};
 
-extern crate alloc;
+use core::task::Context;
 
-pub type Result<T> = core::result::Result<T, Error>;
+pub trait TcpStream: AsyncRead + AsyncWrite + Send + Sized {
+    async fn close(&mut self);
+}
 
-pub use error::Error;
+pub trait TcpListener<TcpStream>: Send + Sized {
+    fn bind(address: &str) -> Self;
+    async fn accept(&mut self) -> Option<TcpStream>;
+}
 
-mod crypto;
-mod error;
-mod primitives;
-mod runtime;
+pub trait UdpSocket: Send + Sized {
+    fn connect(address: &str);
+    fn bind(address: &str);
+
+    fn poll_recv_from(&mut self, buffer: &mut &[u8], cx: Context<'_>);
+    fn poll_send_to(&mut self, buffer: &mut &[u8], cx: Context<'_>);
+}
+
+pub trait Runtime: Clone {
+    type TcpStream: TcpStream;
+    type TcpListener: TcpListener<Self::TcpStream>;
+    type UdpSocket: UdpSocket;
+
+    fn spawn<F>(future: F)
+    where
+        F: Future + Send + 'static,
+        F::Output: Send;
+}
