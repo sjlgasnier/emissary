@@ -5,9 +5,12 @@ use crate::{
     config::Config,
     error::Error,
     logger::init_logger,
+    tokio_runtime::TokioRuntime,
 };
 
 use clap::Parser;
+use emissary_lib::router::Router;
+use futures::StreamExt;
 
 mod cli;
 mod config;
@@ -38,10 +41,11 @@ async fn main() -> anyhow::Result<()> {
     let mut config = Config::try_from(base_path)?;
 
     match command {
-        None => tracing::info!(
-            target: LOG_TARGET,
-            "start router"
-        ),
+        None => {
+            while let Some(event) = Router::new(TokioRuntime::new()).await.unwrap().next().await {
+                tracing::info!("event: {event:?}");
+            }
+        }
         Some(Command::Reseed { file }) => match config.reseed(file) {
             Ok(num_routers) => tracing::info!(
                 target: LOG_TARGET,

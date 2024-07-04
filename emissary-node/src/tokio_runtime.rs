@@ -10,9 +10,15 @@ use std::{
 };
 
 #[derive(Clone)]
-struct TokioRuntime {}
+pub struct TokioRuntime {}
 
-struct TokioTcpStream(Compat<net::TcpStream>);
+impl TokioRuntime {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+pub struct TokioTcpStream(Compat<net::TcpStream>);
 
 impl TokioTcpStream {
     fn new(stream: net::TcpStream) -> Self {

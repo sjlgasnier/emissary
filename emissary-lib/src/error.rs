@@ -16,10 +16,23 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use core::fmt;
+
 #[derive(Debug)]
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
+    Socket,
     InvalidData,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519(error) => write!(f, "ed25519 error: {error:?}"),
+            Self::Socket => write!(f, "socket failure"),
+            Self::InvalidData => write!(f, "invalid data"),
+        }
+    }
 }
 
 impl From<ed25519_dalek::ed25519::Error> for Error {

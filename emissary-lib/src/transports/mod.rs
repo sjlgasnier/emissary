@@ -16,19 +16,4 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
-
-extern crate alloc;
-
-pub type Result<T> = core::result::Result<T, Error>;
-
-pub use error::Error;
-
-mod crypto;
-mod error;
-mod primitives;
-mod transports;
-
-pub mod router;
-pub mod runtime;
+pub mod ntcp2;

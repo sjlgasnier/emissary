@@ -16,19 +16,33 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
+use crate::{
+    runtime::{Runtime, TcpListener},
+    Error,
+};
 
-extern crate alloc;
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::ntcp2::listener";
 
-pub type Result<T> = core::result::Result<T, Error>;
+/// NTCP2 listener.
+pub struct Ntcp2Listener<R: Runtime> {
+    /// TCP Listener.
+    listener: R::TcpListener,
+}
 
-pub use error::Error;
+impl<R: Runtime> Ntcp2Listener<R> {
+    /// Create new [`Ntcp2Listener`].
+    pub async fn new() -> crate::Result<Self> {
+        tracing::debug!(
+            target: LOG_TARGET,
+            address = "127.0.0.1:8888",
+            "create ntcp2 listener",
+        );
 
-mod crypto;
-mod error;
-mod primitives;
-mod transports;
+        let listener = R::TcpListener::bind("127.0.0.1:8888")
+            .await
+            .ok_or(Error::Socket)?;
 
-pub mod router;
-pub mod runtime;
+        Ok(Self { listener })
+    }
+}
