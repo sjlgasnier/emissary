@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::crypto::{SigningPublicKey, StaticPublicKey};
+use crate::crypto::{base64_encode, SigningPublicKey, StaticPublicKey};
 
 use nom::{
     bytes::complete::take,
@@ -25,6 +25,9 @@ use nom::{
     sequence::tuple,
     Err, IResult,
 };
+use sha2::{Digest, Sha256};
+
+use alloc::string::String;
 
 /// Router identity.
 #[derive(Debug)]
@@ -34,13 +37,15 @@ pub struct RouterIdentity {
 
     /// Router's signing key.
     signing_key: SigningPublicKey,
+
+    /// Identity hash.
+    identity_hash: String,
 }
 
 impl RouterIdentity {
     /// Parse [`RouterIdentity`] from `input`, returning rest of `input` and parsed router identity.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterIdentity> {
-        let (input, (initial_bytes, rest)) =
-            tuple((take(384usize), take(input.len() - 384)))(input)?;
+        let (_, (initial_bytes, rest)) = tuple((take(384usize), take(input.len() - 384)))(input)?;
 
         let (rest, cert_type) = be_u8(rest)?;
         let (rest, cert_len) = be_u16(rest)?;
@@ -64,11 +69,17 @@ impl RouterIdentity {
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
+        let mut identity_hash = Sha256::new();
+        identity_hash.update(&input[..391]);
+        let digest = identity_hash.finalize().to_vec();
+        let identity_hash = base64_encode(&digest);
+
         Ok((
             rest,
             RouterIdentity {
                 public_key,
                 signing_key,
+                identity_hash,
             },
         ))
     }
@@ -86,5 +97,21 @@ impl RouterIdentity {
     /// Get reference to router's signing public key.
     pub fn signing_key(&self) -> &SigningPublicKey {
         &self.signing_key
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_router_hash() {
+        let router = include_bytes!("../../test-vectors/router1.dat");
+        let identity = RouterIdentity::from_bytes(router).unwrap();
+
+        assert_eq!(
+            identity.identity_hash,
+            "jLD5rTYg4zg~d4oQ29ogPtGcZPQYM3pHAKY8VHNZv30="
+        );
     }
 }
