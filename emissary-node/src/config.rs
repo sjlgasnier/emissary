@@ -5,6 +5,7 @@ use crate::{
 };
 
 use home::home_dir;
+use rand::rngs::OsRng;
 
 use std::{
     fs,
@@ -19,6 +20,12 @@ pub struct Config {
 
     /// Router info.
     routers: Vec<Vec<u8>>,
+
+    /// Static key.
+    static_key: x25519_dalek::StaticSecret,
+
+    /// Signing key.
+    signing_key: ed25519_dalek::SigningKey,
 }
 
 impl TryFrom<Option<PathBuf>> for Config {
@@ -47,31 +54,60 @@ impl TryFrom<Option<PathBuf>> for Config {
         // if base path doesn't exist, create it and return empty config
         if !path.exists() {
             fs::create_dir_all(&path)?;
-            return Ok(Config::new_empty(path));
+            return Ok(Config::new_empty(path)?);
         }
 
-        let config_path = {
-            let mut path = path.clone();
-            path.push("router.toml");
-            path
-        };
-
-        // parse configuration, if it exists
-        let mut config = match fs::File::open(&config_path) {
+        // read static & signing keys from disk or generate new ones
+        let static_key = match Self::load_key(path.clone(), "static") {
+            Ok(key) => x25519_dalek::StaticSecret::from(key),
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?config_path,
-                    %error,
-                    "router config missing",
+                    ?error,
+                    "failed to load static key, regenerating",
                 );
 
-                Config::new_empty(path.clone())
-            }
-            Ok(router) => {
-                todo!();
+                Self::create_static_key(path.clone())?
             }
         };
+
+        let signing_key = match Self::load_key(path.clone(), "signing") {
+            Ok(key) => ed25519_dalek::SigningKey::from(key),
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to load signing key, regenerating",
+                );
+
+                Self::create_signing_key(path.clone())?
+            }
+        };
+
+        let mut config = Config::from_keys(path.clone(), static_key, signing_key);
+
+        // let config_path = {
+        //     let mut path = path.clone();
+        //     path.push("router.toml");
+        //     path
+        // };
+        // TODO: parse configuration if it exists
+        // // parse configuration, if it exists
+        // let mut config = match fs::File::open(&config_path) {
+        //     Err(error) => {
+        //         tracing::debug!(
+        //             target: LOG_TARGET,
+        //             ?config_path,
+        //             %error,
+        //             "router config missing",
+        //         );
+
+        //         Config::new_empty(path.clone())?
+        //     }
+        //     Ok(router) => {
+        //         todo!();
+        //     }
+        // };
 
         // parse router info
         let router_path = {
@@ -119,11 +155,69 @@ impl TryFrom<Option<PathBuf>> for Config {
 }
 
 impl Config {
+    /// Create static key.
+    fn create_static_key(base_path: PathBuf) -> crate::Result<x25519_dalek::StaticSecret> {
+        let key = x25519_dalek::StaticSecret::random();
+        Self::save_key(base_path, "static", &key).map(|_| key)
+    }
+
+    /// Create signing key.
+    fn create_signing_key(base_path: PathBuf) -> crate::Result<ed25519_dalek::SigningKey> {
+        let key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key)
+    }
+
+    /// Save key to disk.
+    fn save_key<K: AsRef<[u8]>>(mut path: PathBuf, key_type: &str, key: &K) -> crate::Result<()> {
+        path.push(format!("{key_type}.key"));
+
+        let mut file = fs::File::create(path)?;
+        file.write_all(key.as_ref())?;
+
+        Ok(())
+    }
+
+    /// Load key from disk.
+    fn load_key(mut path: PathBuf, key_type: &str) -> crate::Result<[u8; 32]> {
+        path.push(format!("{key_type}.key"));
+
+        let mut file = fs::File::open(&path)?;
+        let mut key_bytes = [0u8; 32];
+        file.read_exact(&mut key_bytes)?;
+
+        Ok(key_bytes)
+    }
+
     /// Create empty config.
-    fn new_empty(base_path: PathBuf) -> Self {
+    fn new_empty(base_path: PathBuf) -> crate::Result<Self> {
+        let static_key = Self::create_static_key(base_path.clone())?;
+        let signing_key = Self::create_signing_key(base_path.clone())?;
+
+        tracing::info!(
+            target: LOG_TARGET,
+            ?base_path,
+            "emissary starting for the first time",
+        );
+
+        Ok(Self {
+            base_path,
+            routers: Vec::new(),
+            static_key,
+            signing_key,
+        })
+    }
+
+    /// Create new empty config from static & signing keys.
+    fn from_keys(
+        base_path: PathBuf,
+        static_key: x25519_dalek::StaticSecret,
+        signing_key: ed25519_dalek::SigningKey,
+    ) -> Self {
         Self {
             base_path,
             routers: Vec::new(),
+            static_key,
+            signing_key,
         }
     }
 
