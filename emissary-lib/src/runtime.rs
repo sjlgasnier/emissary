@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use futures_lite::{AsyncRead, AsyncWrite, Future};
+use futures::{AsyncRead, AsyncWrite, Future};
 
 pub trait TcpStream: AsyncRead + AsyncWrite + Send + Sized {
     fn connect(address: &str) -> impl Future<Output = Option<Self>>;

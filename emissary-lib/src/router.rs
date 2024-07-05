@@ -3,7 +3,7 @@ use crate::{
     transports::ntcp2::Ntcp2Listener,
 };
 
-use futures_lite::Stream;
+use futures::Stream;
 
 use core::{
     pin::Pin,
