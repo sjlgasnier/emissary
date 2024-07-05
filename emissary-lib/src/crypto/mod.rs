@@ -18,7 +18,37 @@
 
 use crate::Error;
 
+use data_encoding::{Encoding, Specification};
+use lazy_static::lazy_static;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::convert::TryInto;
+
+// Taken from `ire` which is licensed under MIT
+//
+// Credits to str4d
+lazy_static! {
+    pub static ref I2P_BASE64: Encoding = {
+        let mut spec = Specification::new();
+        spec.symbols
+            .push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~");
+        spec.padding = Some('=');
+        spec.encoding().unwrap()
+    };
+}
+
+/// Base64 encode `data`
+pub fn base64_encode(data: &Vec<u8>) -> String {
+    I2P_BASE64.encode(data)
+}
+
+/// Base64 decode `data`
+pub fn base64_decode<T: AsRef<[u8]>>(data: T) -> Vec<u8> {
+    I2P_BASE64.decode(data.as_ref()).unwrap()
+}
+
+// TODO: add tests
 
 #[derive(Debug, Clone)]
 pub enum StaticPublicKey {
