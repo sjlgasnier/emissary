@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::crypto::{base64_encode, SigningPublicKey, StaticPublicKey};
+use crate::crypto::{base64_decode, base64_encode, SigningPublicKey, StaticPublicKey};
 
 use nom::{
     bytes::complete::take,
@@ -27,7 +27,7 @@ use nom::{
 };
 use sha2::{Digest, Sha256};
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 /// Router identity.
 #[derive(Debug)]
@@ -97,6 +97,12 @@ impl RouterIdentity {
     /// Get reference to router's signing public key.
     pub fn signing_key(&self) -> &SigningPublicKey {
         &self.signing_key
+    }
+
+    /// Router identity hash as bytes.
+    // TODO: optimize
+    pub fn hash(&self) -> Vec<u8> {
+        base64_decode(self.identity_hash.clone())
     }
 }
 

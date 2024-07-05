@@ -80,8 +80,28 @@ impl RouterInfo {
     }
 
     /// Try to parse router information from `bytes`.
-    fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
+    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
+    }
+
+    /// Get reference to router addresses.
+    pub fn addresses(&self) -> &Vec<RouterAddress> {
+        &self.addresses
+    }
+
+    /// Get reference to router options.
+    pub fn options(&self) -> &HashMap<Str, Str> {
+        &self.options
+    }
+
+    /// Get reference to [`RouterIdentity`](super::RouterIdentity)
+    pub fn identity(&self) -> &RouterIdentity {
+        &self.identity
+    }
+
+    /// Get reference to router's publish date.
+    pub fn date(&self) -> &Date {
+        &self.published
     }
 }
 
@@ -89,7 +109,7 @@ impl RouterInfo {
 mod tests {
     use super::*;
 
-    use std::{fs, io::Read, str::FromStr};
+    use std::str::FromStr;
 
     #[test]
     fn parse_router_1() {
