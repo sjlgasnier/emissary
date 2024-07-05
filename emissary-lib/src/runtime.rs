@@ -18,7 +18,7 @@
 
 use futures::{AsyncRead, AsyncWrite, Future};
 
-pub trait TcpStream: AsyncRead + AsyncWrite + Send + Sized {
+pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sized {
     fn connect(address: &str) -> impl Future<Output = Option<Self>>;
     fn close(&mut self) -> impl Future<Output = ()>;
 }
