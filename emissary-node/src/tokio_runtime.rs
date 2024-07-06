@@ -7,6 +7,7 @@ use std::{
     future::Future,
     pin::{pin, Pin},
     task::{Context, Poll},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone)]
@@ -83,6 +84,10 @@ impl TcpStream for TokioTcpStream {
     async fn connect(address: &str) -> Option<Self> {
         net::TcpStream::connect(address)
             .await
+            .map_err(|error| {
+                tracing::warn!("error: {error:?}");
+                ()
+            })
             .ok()
             .map(|stream| Self::new(stream))
     }
@@ -121,5 +126,9 @@ impl Runtime for TokioRuntime {
         F::Output: Send,
     {
         tokio::spawn(future);
+    }
+
+    fn time_since_epoch() -> Option<Duration> {
+        SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
     }
 }

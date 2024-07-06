@@ -16,29 +16,25 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use futures::{AsyncRead, AsyncWrite, Future};
+use alloc::{string::String, vec::Vec};
 
-use core::time::Duration;
-
-pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sized {
-    fn connect(address: &str) -> impl Future<Output = Option<Self>>;
-    fn close(&mut self) -> impl Future<Output = ()>;
+pub enum Transport {
+    Enabled { port: u16, host: Option<String> },
+    Disabled,
 }
 
-pub trait TcpListener<TcpStream>: Send + Sized {
-    fn bind(address: &str) -> impl Future<Output = Option<Self>>;
-    fn accept(&mut self) -> impl Future<Output = Option<TcpStream>>;
-}
+/// Router configuration.
+pub struct Config {
+    /// Router static key.
+    pub static_key: Vec<u8>,
 
-pub trait Runtime: Clone {
-    type TcpStream: TcpStream;
-    type TcpListener: TcpListener<Self::TcpStream>;
+    /// Router signing key.
+    pub signing_key: Vec<u8>,
 
-    fn spawn<F>(future: F)
-    where
-        F: Future + Send + 'static,
-        F::Output: Send;
+    // TODO: zzz
+    pub ntcp2_port: u16,
+    pub ntc2p_host: Option<String>,
 
-    // TODO: return `Duration` without option
-    fn time_since_epoch() -> Option<Duration>;
+    /// Known routers.
+    pub routers: Vec<Vec<u8>>,
 }

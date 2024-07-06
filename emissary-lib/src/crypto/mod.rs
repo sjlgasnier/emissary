@@ -25,6 +25,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 
+pub mod aead;
+
 // Taken from `ire` which is licensed under MIT
 //
 // Credits to str4d

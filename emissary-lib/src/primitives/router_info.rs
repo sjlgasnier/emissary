@@ -47,6 +47,28 @@ pub struct RouterInfo {
     options: HashMap<Str, Str>,
 }
 
+impl core::fmt::Display for RouterInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "\n------------\n")?;
+        write!(f, "RouterInfo\n")?;
+
+        write!(f, "published = {:?}\n", &self.published)?;
+        write!(f, "addresess:\n")?;
+
+        for address in &self.addresses {
+            write!(f, "--> {address}")?;
+        }
+
+        write!(f, "options:\n")?;
+        for (key, value) in &self.options {
+            write!(f, "--> {key}={value}\n")?;
+        }
+        write!(f, "------------")?;
+
+        Ok(())
+    }
+}
+
 impl RouterInfo {
     pub fn new(now: u64, config: Config) -> Self {
         let Config {
@@ -96,6 +118,11 @@ impl RouterInfo {
         // ignore `peer_size`
         let (rest, _) = be_u8(rest)?;
         let (rest, options) = Mapping::parse_multi_frame(rest)?;
+
+        tracing::info!(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz len = {}",
+            input.len() - 64
+        );
 
         identity.signing_key().verify(input, rest).or_else(|_| {
             tracing::warn!(

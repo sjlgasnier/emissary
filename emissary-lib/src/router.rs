@@ -1,9 +1,6 @@
 use crate::{
-    crypto::SigningPrivateKey,
-    primitives::{RouterIdentity, RouterInfo},
-    runtime::Runtime,
-    transports::ntcp2::Ntcp2Listener,
-    Config,
+    crypto::SigningPrivateKey, primitives::RouterInfo, runtime::Runtime,
+    transports::ntcp2::Ntcp2Listener, Config,
 };
 
 use futures::Stream;
@@ -32,28 +29,24 @@ pub struct Router<R: Runtime> {
 impl<R: Runtime> Router<R> {
     /// Create new router.
     pub async fn new(runtime: R, config: Config, router: Vec<u8>) -> crate::Result<Self> {
-        tracing::debug!(target: LOG_TARGET, "start router");
+        tracing::debug!(target: LOG_TARGET, "start router, router size = {}", router.len());
 
         let router = RouterInfo::from_bytes(router).unwrap();
-        let now = R::time_since_epoch().unwrap().as_secs();
+        let now = R::time_since_epoch().unwrap().as_millis() as u64;
+        let ss: [u8; 32] = config.static_key.clone().try_into().unwrap();
+        let ss = x25519_dalek::StaticSecret::from(ss);
         let test = config.signing_key.clone();
         let key = SigningPrivateKey::new(&test).unwrap();
-        let local_info = RouterInfo::new(now, config);
+        let local_info = RouterInfo::new(now, config).serialize(key);
 
-        tracing::info!(%local_info);
+        // let test = RouterInfo::from_bytes(&local_info).unwrap();
+        // tracing::info!(%test);
 
-        let test = local_info.serialize(key);
-
-        let new_test = RouterInfo::from_bytes(test).unwrap();
-
-        tracing::info!(%new_test);
-
-        todo!();
-        // let ntcp2_listener = Ntcp2Listener::<R>::new(router).await?;
-        // Ok(Self {
-        //     runtime,
-        //     ntcp2_listener,
-        // })
+        let ntcp2_listener = Ntcp2Listener::<R>::new(router, local_info, ss).await?;
+        Ok(Self {
+            runtime,
+            ntcp2_listener,
+        })
     }
 }
 

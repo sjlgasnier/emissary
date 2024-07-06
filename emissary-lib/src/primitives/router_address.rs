@@ -47,17 +47,25 @@ impl fmt::Display for RouterAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RouterAddress (cost {}, transport {}, num options {})",
+            "RouterAddress (cost {}, transport {}, num options {})\n",
             self.cost,
             self.transport,
             self.options.len()
-        )
+        )?;
+
+        write!(f, "addresses:\n")?;
+        for (key, value) in &self.options {
+            write!(f, "--> {key}={value}\n")?;
+        }
+
+        Ok(())
     }
 }
 
 impl RouterAddress {
     /// Create new unpublished [`RouterAddress`].
     pub fn new_unpublished(static_key: Vec<u8>) -> Self {
+        let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
         let key = base64_encode(&static_key.to_vec());
 
         let mut options = HashMap::<Str, Str>::new();
