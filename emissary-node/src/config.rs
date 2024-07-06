@@ -6,12 +6,24 @@ use crate::{
 
 use home::home_dir;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use std::{
     fs,
     io::{self, Read, Write},
     path::PathBuf,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Ntcp2Config {
+    port: u16,
+    host: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EmissaryConfig {
+    ntcp2: Ntcp2Config,
+}
 
 /// Router configuration.
 pub struct Config {
@@ -20,6 +32,9 @@ pub struct Config {
 
     /// Router info.
     routers: Vec<Vec<u8>>,
+
+    ntcp2_host: Option<String>,
+    ntcp2_port: u16,
 
     /// Static key.
     static_key: x25519_dalek::StaticSecret,
@@ -84,7 +99,7 @@ impl TryFrom<Option<PathBuf>> for Config {
             }
         };
 
-        let mut config = Config::from_keys(path.clone(), static_key, signing_key);
+        let mut config = Config::from_keys(path.clone(), static_key, signing_key)?;
 
         // let config_path = {
         //     let mut path = path.clone();
@@ -146,7 +161,7 @@ impl TryFrom<Option<PathBuf>> for Config {
         if config.routers.is_empty() {
             tracing::warn!(
                 target: LOG_TARGET,
-                "no routers, try reseeding the router",
+                "no routers found, try reseeding the router",
             );
         }
 
@@ -193,6 +208,18 @@ impl Config {
         let static_key = Self::create_static_key(base_path.clone())?;
         let signing_key = Self::create_signing_key(base_path.clone())?;
 
+        let config = EmissaryConfig {
+            ntcp2: Ntcp2Config {
+                port: 8888u16,
+                host: None,
+            },
+        };
+        let config = toml::to_string(&config).expect("to succeed");
+        let mut path = base_path.clone();
+        path.push("router.toml");
+        let mut file = fs::File::create(path)?;
+        file.write_all(&config.as_bytes())?;
+
         tracing::info!(
             target: LOG_TARGET,
             ?base_path,
@@ -202,6 +229,8 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
+            ntcp2_host: None,
+            ntcp2_port: 8888u16,
             static_key,
             signing_key,
         })
@@ -212,13 +241,27 @@ impl Config {
         base_path: PathBuf,
         static_key: x25519_dalek::StaticSecret,
         signing_key: ed25519_dalek::SigningKey,
-    ) -> Self {
-        Self {
+    ) -> crate::Result<Self> {
+        let config = EmissaryConfig {
+            ntcp2: Ntcp2Config {
+                port: 8888u16,
+                host: None,
+            },
+        };
+        let config = toml::to_string(&config).expect("to succeed");
+        let mut path = base_path.clone();
+        path.push("router.toml");
+        let mut file = fs::File::create(path)?;
+        file.write_all(&config.as_bytes())?;
+
+        Ok(Self {
             base_path,
             routers: Vec::new(),
+            ntcp2_host: None,
+            ntcp2_port: 8888u16,
             static_key,
             signing_key,
-        }
+        })
     }
 
     /// Reseed router from `file`.
