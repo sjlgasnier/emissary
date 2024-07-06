@@ -23,8 +23,10 @@ extern crate alloc;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+pub use config::Config;
 pub use error::Error;
 
+mod config;
 mod crypto;
 mod error;
 mod primitives;

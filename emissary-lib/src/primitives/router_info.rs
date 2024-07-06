@@ -16,7 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{Date, Mapping, RouterAddress, RouterIdentity, Str, LOG_TARGET};
+use crate::{
+    crypto::SigningPrivateKey,
+    primitives::{Date, Mapping, RouterAddress, RouterIdentity, Str, LOG_TARGET},
+    Config,
+};
 
 use hashbrown::HashMap;
 use nom::{
@@ -25,7 +29,8 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
+use core::str::FromStr;
 
 /// Router information
 pub struct RouterInfo {
@@ -43,6 +48,38 @@ pub struct RouterInfo {
 }
 
 impl RouterInfo {
+    pub fn new(now: u64, config: Config) -> Self {
+        let Config {
+            static_key,
+            signing_key,
+            ..
+        } = config;
+
+        tracing::error!(
+            "static key len = {}, signing key len = {}",
+            static_key.len(),
+            signing_key.len()
+        );
+
+        let identity =
+            RouterIdentity::from_keys(static_key.clone(), signing_key).expect("to succeed");
+        let ntcp2 = RouterAddress::new_unpublished(static_key);
+        let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
+        let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
+        let router_version = Mapping::new(
+            Str::from_str("router.version").unwrap(),
+            Str::from_str("0.9.62").unwrap(),
+        );
+        let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
+
+        RouterInfo {
+            identity,
+            published: Date::new(now),
+            addresses: vec![ntcp2],
+            options,
+        }
+    }
+
     fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterInfo> {
         let (rest, identity) = RouterIdentity::parse_frame(input.as_ref())?;
         let (rest, published) = Date::parse_frame(rest)?;
@@ -77,6 +114,39 @@ impl RouterInfo {
                 options: Mapping::into_hashmap(options),
             },
         ))
+    }
+
+    // TODO: zzz
+    pub fn serialize(&self, signing_key: SigningPrivateKey) -> Vec<u8> {
+        let identity = self.identity.serialize();
+        let published = self.published.serialize();
+        let ntcp2 = self.addresses[0].serialize();
+        let options = self
+            .options
+            .clone()
+            .into_iter()
+            .map(|(key, value)| Mapping::new(key, value).serialize())
+            .flatten()
+            .collect::<Vec<_>>();
+
+        let size = identity.len() + published.len() + ntcp2.len() + options.len() + 4 + 64;
+        let mut out = vec![0u8; size];
+
+        out[..391].copy_from_slice(&identity);
+        out[391..399].copy_from_slice(&published);
+        out[399] = 1;
+        out[400..400 + ntcp2.len()].copy_from_slice(&ntcp2);
+        out[400 + ntcp2.len()] = 0;
+
+        let mapping_size = (options.len() as u16).to_be_bytes().to_vec();
+        out[400 + ntcp2.len() + 1..400 + ntcp2.len() + 3].copy_from_slice(&mapping_size);
+        out[400 + ntcp2.len() + 3..400 + ntcp2.len() + 3 + options.len()].copy_from_slice(&options);
+
+        let signature = signing_key.sign(&out[..size - 64]);
+        out[400 + ntcp2.len() + 3 + options.len()..400 + ntcp2.len() + 3 + options.len() + 64]
+            .copy_from_slice(&signature);
+
+        out
     }
 
     /// Try to parse router information from `bytes`.

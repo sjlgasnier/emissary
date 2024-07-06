@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::crypto::{base64_decode, base64_encode, SigningPublicKey, StaticPublicKey};
+use crate::{
+    crypto::{base64_decode, base64_encode, SigningPublicKey, StaticPublicKey},
+    Error,
+};
 
 use nom::{
     bytes::complete::take,
@@ -27,13 +30,16 @@ use nom::{
 };
 use sha2::{Digest, Sha256};
 
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::String,
+    {vec, vec::Vec},
+};
 
 /// Router identity.
 #[derive(Debug)]
 pub struct RouterIdentity {
     /// Router's public key.
-    public_key: StaticPublicKey,
+    static_key: StaticPublicKey,
 
     /// Router's signing key.
     signing_key: SigningPublicKey,
@@ -43,6 +49,20 @@ pub struct RouterIdentity {
 }
 
 impl RouterIdentity {
+    /// Create new [`RouterIdentity`] from keys.
+    pub fn from_keys(static_key: Vec<u8>, signing_key: Vec<u8>) -> crate::Result<Self> {
+        let static_key =
+            StaticPublicKey::from_private_x25519(&static_key).ok_or(Error::InvalidData)?;
+        let signing_key =
+            SigningPublicKey::from_private_ed25519(&signing_key).ok_or(Error::InvalidData)?;
+
+        Ok(Self {
+            static_key,
+            signing_key,
+            identity_hash: String::from("fix"),
+        })
+    }
+
     /// Parse [`RouterIdentity`] from `input`, returning rest of `input` and parsed router identity.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterIdentity> {
         let (_, (initial_bytes, rest)) = tuple((take(384usize), take(input.len() - 384)))(input)?;
@@ -56,7 +76,7 @@ impl RouterIdentity {
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         };
 
-        let public_key = match pub_key_type {
+        let static_key = match pub_key_type {
             0x0000 => StaticPublicKey::new_elgamal(&initial_bytes[..256]),
             0x0004 => StaticPublicKey::new_x25519(&initial_bytes[..32]),
             _ => todo!("unsupported public key type"),
@@ -77,7 +97,7 @@ impl RouterIdentity {
         Ok((
             rest,
             RouterIdentity {
-                public_key,
+                static_key,
                 signing_key,
                 identity_hash,
             },
@@ -89,9 +109,28 @@ impl RouterIdentity {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
+    // TODO: zzz
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = vec![0u8; 391];
+
+        out[..32].copy_from_slice(&self.static_key.to_vec());
+        out[384 - 32..384].copy_from_slice(&self.signing_key.to_vec());
+
+        out[384] = 0x05;
+        out[385] = 0x00;
+        out[386] = 0x04;
+
+        out[387] = 0x00;
+        out[388] = 0x07;
+        out[389] = 0x00;
+        out[390] = 0x04;
+
+        out
+    }
+
     /// Get reference to router's static public key.
-    pub fn public_key(&self) -> &StaticPublicKey {
-        &self.public_key
+    pub fn static_key(&self) -> &StaticPublicKey {
+        &self.static_key
     }
 
     /// Get reference to router's signing public key.

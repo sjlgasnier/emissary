@@ -60,6 +60,14 @@ pub enum StaticPublicKey {
 }
 
 impl StaticPublicKey {
+    pub fn from_private_x25519(key: &[u8]) -> Option<Self> {
+        let key: [u8; 32] = key.try_into().ok()?;
+        let key = x25519_dalek::StaticSecret::from(key);
+        let key = x25519_dalek::PublicKey::from(&key);
+
+        Some(StaticPublicKey::X25519(key))
+    }
+
     /// Create new x25519 static public key.
     pub fn new_x25519(key: &[u8]) -> Option<Self> {
         let key: [u8; 32] = key.try_into().ok()?;
@@ -70,6 +78,13 @@ impl StaticPublicKey {
     pub fn new_elgamal(key: &[u8]) -> Option<Self> {
         let key: [u8; 256] = key.try_into().ok()?;
         Some(StaticPublicKey::ElGamal(key))
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        match self {
+            Self::X25519(key) => key.to_bytes().to_vec(),
+            Self::ElGamal(key) => key.to_vec(),
+        }
     }
 }
 
@@ -82,7 +97,24 @@ pub enum StaticPrivateKey {
 /// Signing private key.
 pub enum SigningPrivateKey {
     /// EdDSA.
-    Ed25519(ed25519_dalek::SecretKey),
+    Ed25519(ed25519_dalek::SigningKey),
+}
+
+use ed25519_dalek::Signer;
+
+impl SigningPrivateKey {
+    pub fn new(key: &[u8]) -> Option<Self> {
+        let key: [u8; 32] = key.to_vec().try_into().ok()?;
+        let key = ed25519_dalek::SigningKey::from_bytes(&key);
+
+        Some(SigningPrivateKey::Ed25519(key))
+    }
+
+    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Ed25519(key) => key.sign(&message).to_bytes().to_vec(),
+        }
+    }
 }
 
 /// Signing public key.
@@ -93,6 +125,14 @@ pub enum SigningPublicKey {
 }
 
 impl SigningPublicKey {
+    pub fn from_private_ed25519(key: &[u8]) -> Option<Self> {
+        let key: [u8; 32] = key.to_vec().try_into().ok()?;
+        let key = ed25519_dalek::SigningKey::from_bytes(&key);
+        let key = key.verifying_key();
+
+        Some(SigningPublicKey::Ed25519(key))
+    }
+
     /// Create signing public key from bytes.
     pub fn from_bytes(key: &[u8]) -> Option<Self> {
         let key: [u8; 32] = key.to_vec().try_into().ok()?;
@@ -112,6 +152,12 @@ impl SigningPublicKey {
                 key.verify_strict(&message[..message.len() - 64], &signature)
                     .map_err(From::from)
             }
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        match self {
+            Self::Ed25519(key) => key.to_bytes().to_vec(),
         }
     }
 }

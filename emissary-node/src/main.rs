@@ -40,9 +40,16 @@ async fn main() -> anyhow::Result<()> {
     // TODO: this should also take any cli params
     let mut config = Config::try_from(base_path)?;
 
+    let router = include_bytes!("/home/altonen/.i2pd/router.info").to_vec();
+
     match command {
         None => {
-            while let Some(event) = Router::new(TokioRuntime::new()).await.unwrap().next().await {
+            let config: emissary_lib::Config = config.into();
+            let mut router = Router::new(TokioRuntime::new(), config, router)
+                .await
+                .unwrap();
+
+            while let Some(event) = router.next().await {
                 tracing::info!("event: {event:?}");
             }
         }

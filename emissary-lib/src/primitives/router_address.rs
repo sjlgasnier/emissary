@@ -16,12 +16,16 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{Date, Mapping, Str};
+use crate::{
+    crypto::{base64_encode, StaticPublicKey},
+    primitives::{Date, Mapping, Str},
+};
 
 use hashbrown::HashMap;
 use nom::{number::complete::be_u8, IResult};
 
-use core::fmt;
+use alloc::{vec, vec::Vec};
+use core::{fmt, str::FromStr};
 
 /// Router address information.
 #[derive(Debug)]
@@ -52,6 +56,22 @@ impl fmt::Display for RouterAddress {
 }
 
 impl RouterAddress {
+    /// Create new unpublished [`RouterAddress`].
+    pub fn new_unpublished(static_key: Vec<u8>) -> Self {
+        let key = base64_encode(&static_key.to_vec());
+
+        let mut options = HashMap::<Str, Str>::new();
+        options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
+        options.insert(Str::from_str("s").unwrap(), Str::from_str(&key).unwrap());
+
+        Self {
+            cost: 10,
+            expires: Date::new(0),
+            transport: Str::from_str("NTCP2").unwrap(),
+            options,
+        }
+    }
+
     /// Parse [`RouterAddress`] from `input`, returning rest of `input` and parsed address.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterAddress> {
         let (rest, cost) = be_u8(input)?;
@@ -73,6 +93,30 @@ impl RouterAddress {
     /// Try to convert `bytes` into a [`RouterAddress`].
     pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<RouterAddress> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
+    }
+
+    // TODO: zzz
+    pub fn serialize(&self) -> Vec<u8> {
+        let options = self
+            .options
+            .clone()
+            .into_iter()
+            .map(|(key, value)| Mapping::new(key, value).serialize())
+            .flatten()
+            .collect::<Vec<_>>();
+
+        let transport = self.transport.clone().serialize();
+        let size = (options.len() as u16).to_be_bytes().to_vec();
+        let mut out = vec![0u8; 1 + 8 + transport.len() + options.len() + 2];
+
+        out[0] = self.cost;
+        out[1..9].copy_from_slice(&self.expires.serialize());
+        out[9..9 + transport.len()].copy_from_slice(&transport);
+        out[9 + transport.len()..9 + transport.len() + 2].copy_from_slice(&size);
+        out[9 + transport.len() + 2..9 + transport.len() + 2 + options.len()]
+            .copy_from_slice(&options);
+
+        out
     }
 
     /// Get address cost.

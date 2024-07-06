@@ -1,10 +1,14 @@
 use crate::{
-    runtime::{Runtime, TcpListener},
+    crypto::SigningPrivateKey,
+    primitives::{RouterIdentity, RouterInfo},
+    runtime::Runtime,
     transports::ntcp2::Ntcp2Listener,
+    Config,
 };
 
 use futures::Stream;
 
+use alloc::vec::Vec;
 use core::{
     pin::Pin,
     task::{Context, Poll},
@@ -27,15 +31,29 @@ pub struct Router<R: Runtime> {
 
 impl<R: Runtime> Router<R> {
     /// Create new router.
-    pub async fn new(runtime: R) -> crate::Result<Self> {
+    pub async fn new(runtime: R, config: Config, router: Vec<u8>) -> crate::Result<Self> {
         tracing::debug!(target: LOG_TARGET, "start router");
 
-        let ntcp2_listener = Ntcp2Listener::<R>::new().await?;
+        let router = RouterInfo::from_bytes(router).unwrap();
+        let now = R::time_since_epoch().unwrap().as_secs();
+        let test = config.signing_key.clone();
+        let key = SigningPrivateKey::new(&test).unwrap();
+        let local_info = RouterInfo::new(now, config);
 
-        Ok(Self {
-            runtime,
-            ntcp2_listener,
-        })
+        tracing::info!(%local_info);
+
+        let test = local_info.serialize(key);
+
+        let new_test = RouterInfo::from_bytes(test).unwrap();
+
+        tracing::info!(%new_test);
+
+        todo!();
+        // let ntcp2_listener = Ntcp2Listener::<R>::new(router).await?;
+        // Ok(Self {
+        //     runtime,
+        //     ntcp2_listener,
+        // })
     }
 }
 

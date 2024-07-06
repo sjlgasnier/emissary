@@ -43,6 +43,18 @@ pub struct Config {
     signing_key: Vec<u8>,
 }
 
+impl Into<emissary_lib::Config> for Config {
+    fn into(self) -> emissary_lib::Config {
+        emissary_lib::Config {
+            static_key: self.static_key,
+            signing_key: self.signing_key,
+            ntcp2_port: self.ntcp2_port,
+            ntc2p_host: self.ntcp2_host,
+            routers: self.routers,
+        }
+    }
+}
+
 impl TryFrom<Option<PathBuf>> for Config {
     type Error = Error;
 

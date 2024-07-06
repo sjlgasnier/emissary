@@ -24,7 +24,7 @@ use alloc::{vec, vec::Vec};
 use core::{fmt, str::FromStr};
 
 /// String.
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub struct Str {
     /// String as byte vector.
     string: Vec<u8>,
