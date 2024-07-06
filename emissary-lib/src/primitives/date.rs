@@ -18,6 +18,8 @@
 
 use nom::{number::complete::be_u64, IResult};
 
+use alloc::vec::Vec;
+
 /// Date.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Date {
@@ -26,6 +28,16 @@ pub struct Date {
 }
 
 impl Date {
+    /// Create new [`Date`].
+    pub fn new(date: u64) -> Self {
+        Self { date }
+    }
+
+    /// Serialize [`Date`] into a byte vector.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.date.to_be_bytes().to_vec()
+    }
+
     /// Parse [`Date`] from `input`, returning rest of `input` and parsed date.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Date> {
         let (rest, date) = be_u64(input)?;
@@ -47,6 +59,20 @@ impl Date {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::SystemTime;
+
+    #[test]
+    fn serialize() {
+        let since_epoch = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let serialized = Date::new(since_epoch).serialize();
+        let date = Date::from_bytes(&serialized).unwrap();
+
+        assert_eq!(date.date, since_epoch);
+    }
 
     #[test]
     fn valid_date() {
