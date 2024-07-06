@@ -37,10 +37,10 @@ pub struct Config {
     ntcp2_port: u16,
 
     /// Static key.
-    static_key: x25519_dalek::StaticSecret,
+    static_key: Vec<u8>,
 
     /// Signing key.
-    signing_key: ed25519_dalek::SigningKey,
+    signing_key: Vec<u8>,
 }
 
 impl TryFrom<Option<PathBuf>> for Config {
@@ -74,7 +74,7 @@ impl TryFrom<Option<PathBuf>> for Config {
 
         // read static & signing keys from disk or generate new ones
         let static_key = match Self::load_key(path.clone(), "static") {
-            Ok(key) => x25519_dalek::StaticSecret::from(key),
+            Ok(key) => x25519_dalek::StaticSecret::from(key).to_bytes().to_vec(),
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -87,7 +87,7 @@ impl TryFrom<Option<PathBuf>> for Config {
         };
 
         let signing_key = match Self::load_key(path.clone(), "signing") {
-            Ok(key) => ed25519_dalek::SigningKey::from(key),
+            Ok(key) => ed25519_dalek::SigningKey::from(key).to_bytes().to_vec(),
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -171,15 +171,15 @@ impl TryFrom<Option<PathBuf>> for Config {
 
 impl Config {
     /// Create static key.
-    fn create_static_key(base_path: PathBuf) -> crate::Result<x25519_dalek::StaticSecret> {
+    fn create_static_key(base_path: PathBuf) -> crate::Result<Vec<u8>> {
         let key = x25519_dalek::StaticSecret::random();
-        Self::save_key(base_path, "static", &key).map(|_| key)
+        Self::save_key(base_path, "static", &key).map(|_| key.to_bytes().to_vec())
     }
 
     /// Create signing key.
-    fn create_signing_key(base_path: PathBuf) -> crate::Result<ed25519_dalek::SigningKey> {
+    fn create_signing_key(base_path: PathBuf) -> crate::Result<Vec<u8>> {
         let key = ed25519_dalek::SigningKey::generate(&mut OsRng);
-        Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key)
+        Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes().to_vec())
     }
 
     /// Save key to disk.
@@ -239,8 +239,8 @@ impl Config {
     /// Create new empty config from static & signing keys.
     fn from_keys(
         base_path: PathBuf,
-        static_key: x25519_dalek::StaticSecret,
-        signing_key: ed25519_dalek::SigningKey,
+        static_key: Vec<u8>,
+        signing_key: Vec<u8>,
     ) -> crate::Result<Self> {
         let config = EmissaryConfig {
             ntcp2: Ntcp2Config {
