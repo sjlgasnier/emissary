@@ -9,7 +9,7 @@ use crate::{
 };
 
 use clap::Parser;
-use emissary_lib::router::Router;
+use emissary::router::Router;
 use futures::StreamExt;
 
 mod cli;
@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     match command {
         None => {
-            let config: emissary_lib::Config = config.into();
+            let config: emissary::Config = config.into();
             let mut router = Router::new(TokioRuntime::new(), config, router)
                 .await
                 .unwrap();

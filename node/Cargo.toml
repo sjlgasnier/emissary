@@ -13,7 +13,7 @@ readme.workspace = true
 anyhow = "1.0.86"
 clap = { version = "4.5.7", features = ["derive"] }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
-emissary-lib = { path = "../emissary-lib" }
+emissary-base = { path = "../base" }
 futures = "0.3.30"
 home = "0.5.9"
 nom = "6.1.2"

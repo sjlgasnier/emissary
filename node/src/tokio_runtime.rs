@@ -1,4 +1,4 @@
-use emissary_lib::runtime::{Runtime, TcpListener, TcpStream};
+use emissary::runtime::{Runtime, TcpListener, TcpStream};
 use futures::{AsyncRead, AsyncWrite};
 use tokio::{io::AsyncWriteExt, net};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};

@@ -43,9 +43,9 @@ pub struct Config {
     signing_key: Vec<u8>,
 }
 
-impl Into<emissary_lib::Config> for Config {
-    fn into(self) -> emissary_lib::Config {
-        emissary_lib::Config {
+impl Into<emissary::Config> for Config {
+    fn into(self) -> emissary::Config {
+        emissary::Config {
             static_key: self.static_key,
             signing_key: self.signing_key,
             ntcp2_port: self.ntcp2_port,
