@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use core::convert::TryInto;
 
 pub mod aead;
+pub mod aes;
 pub mod hmac;
 pub mod sha256;
 
