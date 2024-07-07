@@ -23,6 +23,7 @@ use crate::{
     },
     primitives::{RouterInfo, Str},
     runtime::{Runtime, TcpStream},
+    transports::ntcp2::message::Message,
 };
 
 use futures::{AsyncReadExt, AsyncWriteExt};
@@ -32,25 +33,7 @@ use zeroize::Zeroize;
 use alloc::vec::Vec;
 use core::str::FromStr;
 
-enum BlockFormat {
-    DateTime,
-    Options,
-    RouterInfo,
-    I2Np,
-    Termination,
-}
-
-impl BlockFormat {
-    fn as_u8(&self) -> u8 {
-        match self {
-            Self::DateTime => 0,
-            Self::Options => 1,
-            Self::RouterInfo => 2,
-            Self::I2Np => 3,
-            Self::Termination => 4,
-        }
-    }
-}
+mod message;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::listener";
@@ -268,11 +251,7 @@ impl<R: Runtime> Ntcp2Listener<R> {
         let k = Hmac::new(&temp_key).update(&ck).update(&[0x02]).finalize();
 
         // h from message 3 part 1 is used as the associated data for the AEAD in message 3 part 2
-        let mut test = alloc::vec![0u8; local_info.len() + 4];
-        test[0] = BlockFormat::RouterInfo.as_u8();
-        test[1..3].copy_from_slice(&(local_info.len() as u16 + 1u16).to_be_bytes().to_vec());
-        test[3] = 0;
-        test[4..].copy_from_slice(&local_info);
+        let mut test = Message::new_router_info(&local_info);
 
         let mut cipher = ChaChaPoly::with_nonce(&k, 0);
         let tag2 = cipher.encrypt_with_ad(&h, &mut test).unwrap();
@@ -322,8 +301,14 @@ impl<R: Runtime> Ntcp2Listener<R> {
 
         let data_block = ChaChaPoly::new(&receive_key).decrypt(test).unwrap();
 
-        tracing::info!("block type = {}", data_block[0]);
-        tracing::info!("block size = {}{}", data_block[1], data_block[2]);
+        match Message::from_bytes(&data_block) {
+            Some(message) => {
+                tracing::info!("message received: {message:?}");
+            }
+            None => {
+                tracing::warn!("invalid message received, ignoring");
+            }
+        }
 
         todo!();
     }
