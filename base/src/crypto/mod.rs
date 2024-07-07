@@ -25,8 +25,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 
-pub mod aead;
 pub mod aes;
+pub mod chachapoly;
 pub mod hmac;
 pub mod sha256;
 pub mod siphash;

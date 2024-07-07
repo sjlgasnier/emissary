@@ -21,6 +21,7 @@ use core::fmt;
 #[derive(Debug)]
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
+    Chacha20Poly1305(chacha20poly1305::Error),
     Socket,
     InvalidData,
 }
@@ -29,6 +30,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ed25519(error) => write!(f, "ed25519 error: {error:?}"),
+            Self::Chacha20Poly1305(error) => write!(f, "chacha20poly1305 error: {error:?}"),
             Self::Socket => write!(f, "socket failure"),
             Self::InvalidData => write!(f, "invalid data"),
         }
@@ -38,5 +40,11 @@ impl fmt::Display for Error {
 impl From<ed25519_dalek::ed25519::Error> for Error {
     fn from(value: ed25519_dalek::ed25519::Error) -> Self {
         Error::Ed25519(value)
+    }
+}
+
+impl From<chacha20poly1305::Error> for Error {
+    fn from(value: chacha20poly1305::Error) -> Self {
+        Error::Chacha20Poly1305(value)
     }
 }

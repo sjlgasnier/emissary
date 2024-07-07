@@ -17,17 +17,15 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{aead::ChaChaPoly, base64_decode},
+    crypto::{
+        aes::Aes, base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
+        siphash::SipHash,
+    },
     primitives::{RouterInfo, Str},
-    runtime::{Runtime, TcpListener, TcpStream},
-    Error,
+    runtime::{Runtime, TcpStream},
 };
 
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, IvState, KeyIvInit};
 use futures::{AsyncReadExt, AsyncWriteExt};
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use zeroize::Zeroize;
 
@@ -82,27 +80,17 @@ impl<R: Runtime> Ntcp2Listener<R> {
             .as_bytes()
             .to_vec();
 
-        let mut hasher = Sha256::new();
-        hasher.update(&protocol_name);
-
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&protocol_name).finalize();
         let ck = h.clone();
 
         // MixHash (null prologue)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).finalize();
 
         // MixHash(rs)
         let static_key = ntcp2.options().get(&Str::from_str("s").unwrap()).unwrap();
         let decoded = base64_decode(static_key.string());
 
-        // tracing::error!("len = {}", decoded.len());
-
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&decoded);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&decoded).finalize();
 
         // generate ephemeral key pair
         // apply mixhash
@@ -110,60 +98,33 @@ impl<R: Runtime> Ntcp2Listener<R> {
         let pe = x25519_dalek::PublicKey::from(&se);
 
         // MixHash(epub)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&pe);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&pe).finalize();
 
         // perform DH
         let rs_b: [u8; 32] = decoded.try_into().unwrap();
         let mut shared = se.diffie_hellman(&x25519_dalek::PublicKey::from(rs_b));
 
         // temp key
-        let mut mac = Hmac::<Sha256>::new_from_slice(&ck).expect("to succeed");
-        mac.update(shared.as_ref());
-        let temp_key = mac.finalize().into_bytes();
+        let temp_key = Hmac::new(&ck).update(shared.as_ref()).finalize();
 
         // output 1
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&[0x01]);
-        let ck = mac.finalize().into_bytes();
+        let ck = Hmac::new(&temp_key).update(&[0x01]).finalize();
 
         // output 2
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&ck);
-        mac.update(&[0x02]);
-        let l_k = mac.finalize().into_bytes();
+        let l_k = Hmac::new(&temp_key).update(&ck).update(&[0x02]).finalize();
 
         shared.zeroize();
 
-        // encrypt x
-        let key: [u8; 32] = router.identity().hash().try_into().unwrap();
-        let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
-        let iv: [u8; 16] = base64_decode(i.string()).try_into().unwrap();
+        // encrypt X
+        let key = router.identity().hash();
+        let iv = {
+            let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
+            base64_decode(i.string())
+        };
 
-        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
-        type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
-
-        // encrypt alice's ephemeral key
-        let pe_bytes = pe.to_bytes().to_vec();
-
-        // tracing::info!("public key = {pe_bytes:?}");
-
-        let pe_first: [u8; 16] = pe_bytes[..16].try_into().unwrap();
-        let pe_second: [u8; 16] = pe_bytes[16..].try_into().unwrap();
-
-        // XXX: works (now)
-        let mut blocks = [GenericArray::from(pe_first), GenericArray::from(pe_second)];
-        let mut enc = Aes256CbcEnc::new(&key.into(), &iv.into());
-        let _ = enc.encrypt_blocks_mut(&mut blocks);
-        let iv = enc.iv_state();
-
-        let test = blocks
-            .into_iter()
-            .map(|block| block.into_iter().collect::<Vec<u8>>())
-            .flatten()
-            .collect::<Vec<u8>>();
+        let mut aes = Aes::new_encryptor(&key, &iv);
+        let test = aes.encrypt(pe.to_bytes().to_vec());
+        let iv = aes.iv();
 
         // create `SessionRequest` message
         let mut buffer = alloc::vec![0u8; 96];
@@ -198,10 +159,8 @@ impl<R: Runtime> Ntcp2Listener<R> {
         .as_bytes()
         .to_vec();
 
-        // tracing::info!("key = {l_k:?}");
-
         let tag = ChaChaPoly::new(&l_k)
-            .encrypt_detached(&h, &mut options)
+            .encrypt_with_ad(&h, &mut options)
             .unwrap();
 
         buffer[..32].copy_from_slice(&test);
@@ -212,16 +171,10 @@ impl<R: Runtime> Ntcp2Listener<R> {
         let mut stream = R::TcpStream::connect("0.0.0.0:8889").await.unwrap();
 
         // MixHash(encrypted payload)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&buffer[32..64]);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&buffer[32..64]).finalize();
 
         // MixHash(padding)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&buffer[64..96]);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&buffer[64..96]).finalize();
 
         stream.write_all(&buffer).await.unwrap();
 
@@ -229,25 +182,14 @@ impl<R: Runtime> Ntcp2Listener<R> {
         stream.read_exact(&mut reply).await.unwrap();
 
         // decrypt `Y`
-        let b1 = GenericArray::from(TryInto::<[u8; 16]>::try_into(&reply[..16]).unwrap());
-        let b2 = GenericArray::from(TryInto::<[u8; 16]>::try_into(&reply[16..32]).unwrap());
-        let mut in_blocks = [b1, b2];
-
-        let _ct = Aes256CbcDec::new(&key.into(), &iv.into()).decrypt_blocks_mut(&mut in_blocks);
-
-        let y: [u8; 32] = in_blocks
-            .into_iter()
-            .map(|block| block.into_iter().collect::<Vec<u8>>())
-            .flatten()
-            .collect::<Vec<u8>>()
+        let mut aes = Aes::new_decryptor(&key, &iv);
+        let y: [u8; 32] = aes
+            .decrypt(reply[..32].to_vec())
             .try_into()
-            .unwrap();
+            .expect("to succeed");
 
         // MixHash(e.pubkey)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&y);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&y).finalize();
         let mut bob_public = x25519_dalek::PublicKey::from(y);
 
         let shared = se.diffie_hellman(&bob_public);
@@ -255,54 +197,37 @@ impl<R: Runtime> Ntcp2Listener<R> {
         // TODO: zero out out our public and private key
 
         // TODO: mixkey
-        let mut mac = Hmac::<Sha256>::new_from_slice(&ck).expect("to succeed");
-        mac.update(shared.as_ref());
-        let temp_key = mac.finalize().into_bytes();
+        let temp_key = Hmac::new(&ck).update(shared).finalize();
 
         // TODO: zero out `shared`
 
         // output 1
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&[0x01]);
-        let ck = mac.finalize().into_bytes();
+        let ck = Hmac::new(&temp_key).update(&[0x01]).finalize();
 
         // output 2
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&ck);
-        mac.update(&[0x02]);
-        let k_r = mac.finalize().into_bytes();
+        let k_r = Hmac::new(&temp_key).update(&ck).update(&[0x02]).finalize();
 
         // TODO: zeroize temp key
 
         let mut options = reply[32..64].to_vec();
         let clone = options.clone();
 
-        let _result = ChaChaPoly::new(&k_r).decrypt(&h, &mut options).unwrap();
+        let _result = ChaChaPoly::new(&k_r)
+            .decrypt_with_ad(&h, &mut options)
+            .unwrap();
 
         let options = Options::ref_from_prefix(&options).unwrap();
         let padding = u16::from_be_bytes(options.padding_length);
-        let timestamp = u32::from_be_bytes(options.timestamp);
-
-        // tracing::info!(
-        //     "local timestamp = {:?}, remote timestamp = {timestamp:?}",
-        //     R::time_since_epoch().unwrap().as_secs() as u32
-        // );
-        // tracing::info!("padding = {padding}");
+        let _timestamp = u32::from_be_bytes(options.timestamp);
 
         let mut reply = alloc::vec![0u8; padding as usize];
         stream.read_exact(&mut reply).await.unwrap();
 
         // MixHash(encrypted payload)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&clone);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&clone).finalize();
 
         // MixHash(padding)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&reply);
-        let h = hasher.finalize();
+        let h = Sha256::new().update(&h).update(&reply).finalize();
 
         // generate static key and shared secret
         //
@@ -312,19 +237,17 @@ impl<R: Runtime> Ntcp2Listener<R> {
         let mut s_p_bytes = s_p.to_bytes().to_vec();
 
         let mut cipher = ChaChaPoly::with_nonce(&k_r, 1);
-        let tag1 = cipher.encrypt_detached(&h, &mut s_p_bytes).unwrap();
+        let tag1 = cipher.encrypt_with_ad(&h, &mut s_p_bytes).unwrap();
 
         // MixHash(ciphertext)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&s_p_bytes);
-        hasher.update(&tag1);
-        let h = hasher.finalize();
+        let h = Sha256::new()
+            .update(&h)
+            .update(&s_p_bytes)
+            .update(&tag1)
+            .finalize();
 
         let mut shared = s_s.diffie_hellman(&bob_public);
         bob_public.zeroize();
-
-        // TODO: mixkey
 
         // MixKey(DH())
 
@@ -332,25 +255,17 @@ impl<R: Runtime> Ntcp2Listener<R> {
         // Define HMAC-SHA256(key, data) as in [RFC-2104]_
         // Generate a temp key from the chaining key and DH result
         // ck is the chaining key, from the KDF for handshake message 1
-        let mut mac = Hmac::<Sha256>::new_from_slice(&ck).expect("to succeed");
-        mac.update(shared.as_ref());
-        let temp_key = mac.finalize().into_bytes();
+        let temp_key = Hmac::new(&ck).update(&shared).finalize();
 
         shared.zeroize();
 
         // Output 1
         // Set a new chaining key from the temp key
-        // byte() below means a single byte
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&[0x01]);
-        let mut ck = mac.finalize().into_bytes();
+        let mut ck = Hmac::new(&temp_key).update(&[0x01]).finalize();
 
         // Output 2
         // Generate the cipher key k
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&ck);
-        mac.update(&[0x02]);
-        let k = mac.finalize().into_bytes();
+        let k = Hmac::new(&temp_key).update(&ck).update(&[0x02]).finalize();
 
         // h from message 3 part 1 is used as the associated data for the AEAD in message 3 part 2
         let mut test = alloc::vec![0u8; local_info.len() + 4];
@@ -360,14 +275,14 @@ impl<R: Runtime> Ntcp2Listener<R> {
         test[4..].copy_from_slice(&local_info);
 
         let mut cipher = ChaChaPoly::with_nonce(&k, 0);
-        let tag2 = cipher.encrypt_detached(&h, &mut test).unwrap();
+        let tag2 = cipher.encrypt_with_ad(&h, &mut test).unwrap();
 
         // MixHash(ciphertext)
-        hasher = Sha256::new();
-        hasher.update(&h);
-        hasher.update(&test);
-        hasher.update(&tag2);
-        let h = hasher.finalize();
+        let h = Sha256::new()
+            .update(&h)
+            .update(&test)
+            .update(&tag2)
+            .finalize();
 
         let mut total_buffer = alloc::vec![0u8; local_info.len() + 20 + 48];
 
@@ -379,99 +294,36 @@ impl<R: Runtime> Ntcp2Listener<R> {
 
         stream.write_all(&total_buffer).await.unwrap();
 
-        mac = Hmac::<Sha256>::new_from_slice(&ck).expect("to succeed");
-        mac.update(&[]);
-        let mut temp_key = mac.finalize().into_bytes();
+        let temp_key = Hmac::new(&ck).update(&[]).finalize();
 
         ck.zeroize();
 
         // alice's key
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&[0x01]);
-        let send_key = mac.finalize().into_bytes();
+        let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
 
         // bob's key
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&send_key);
-        mac.update(&[0x02]);
-        let receive_key = mac.finalize().into_bytes();
+        let receive_key = Hmac::new(&temp_key)
+            .update(&send_key)
+            .update(&[0x02])
+            .finalize();
 
-        tracing::info!("alice's key: {send_key:?}");
-        tracing::info!("bob's key: {receive_key:?}");
-
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&b"ask"[..]);
-        mac.update(&[0x01]);
-        let mut ask_master = mac.finalize().into_bytes();
-
-        tracing::info!("h = {h:?}");
-
-        mac = Hmac::<Sha256>::new_from_slice(&ask_master).expect("to succeed");
-        mac.update(&h);
-        mac.update(&b"siphash"[..]);
-        temp_key = mac.finalize().into_bytes();
-        ask_master.zeroize();
-
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&[0x01]);
-        let mut sip_master = mac.finalize().into_bytes();
-
-        mac = Hmac::<Sha256>::new_from_slice(&sip_master).expect("to succeed");
-        mac.update(&[]);
-        temp_key = mac.finalize().into_bytes();
-        sip_master.zeroize();
-
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&[0x01]);
-        let sipkeys_ab = mac.finalize().into_bytes();
-
-        let sipk1_ab =
-            u64::from_le_bytes(TryInto::<[u8; 8]>::try_into(&sipkeys_ab[..8]).expect("to succeed"));
-        let sipk2_ab = u64::from_le_bytes(
-            TryInto::<[u8; 8]>::try_into(&sipkeys_ab[8..16]).expect("to succeed"),
-        );
-        let sipkiv_ab = sipkeys_ab[16..24].to_vec();
-
-        mac = Hmac::<Sha256>::new_from_slice(&temp_key).expect("to succeed");
-        mac.update(&sipkeys_ab);
-        mac.update(&[0x02]);
-        let sipkeys_ba = mac.finalize().into_bytes();
-
-        let sipk1_ba =
-            u64::from_le_bytes(TryInto::<[u8; 8]>::try_into(&sipkeys_ba[..8]).expect("to succeed"));
-        let sipk2_ba = u64::from_le_bytes(
-            TryInto::<[u8; 8]>::try_into(&sipkeys_ba[8..16]).expect("to succeed"),
-        );
-        let sipkiv_ba = sipkeys_ba[16..24].to_vec();
-
-        tracing::info!("alice's iv: {sipkiv_ab:?}");
-        tracing::info!("bob's iv: {sipkiv_ba:?}");
-
-        tracing::warn!("try to read someting");
+        let mut sip = SipHash::new(&temp_key, &h);
 
         let mut reply = alloc::vec![0u8; 2];
         stream.read_exact(&mut reply).await.unwrap();
         let test = u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(reply).unwrap());
 
-        use siphasher::sip::SipHasher24;
-
-        let hasher = SipHasher24::new_with_keys(sipk1_ba, sipk2_ba);
-        let hash = hasher.hash(&sipkiv_ba);
-
-        let len = test ^ ((hash & 0xffff) as u16);
-
-        // TODO: reset iv
+        let len = sip.deobfuscate(test);
 
         tracing::info!("read {len} bytes from socket");
 
         let mut test = alloc::vec![0u8; len as usize];
         stream.read_exact(&mut test).await.unwrap();
 
-        let data_block = ChaChaPoly::new(&receive_key).decrypt_no_ad(test).unwrap();
+        let data_block = ChaChaPoly::new(&receive_key).decrypt(test).unwrap();
 
         tracing::info!("block type = {}", data_block[0]);
         tracing::info!("block size = {}{}", data_block[1], data_block[2]);
-        temp_key.zeroize();
 
         todo!();
     }
