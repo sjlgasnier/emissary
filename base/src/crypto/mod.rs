@@ -29,6 +29,7 @@ pub mod aead;
 pub mod aes;
 pub mod hmac;
 pub mod sha256;
+pub mod siphash;
 
 // Taken from `ire` which is licensed under MIT
 //
