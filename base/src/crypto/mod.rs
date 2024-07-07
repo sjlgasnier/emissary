@@ -21,9 +21,9 @@ use crate::Error;
 use data_encoding::{Encoding, Specification};
 use lazy_static::lazy_static;
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::convert::TryInto;
+use zeroize::Zeroize;
 
 pub mod aes;
 pub mod chachapoly;
@@ -92,12 +92,119 @@ impl StaticPublicKey {
             Self::ElGamal(key) => key.to_vec(),
         }
     }
+
+    /// Try to create [`StaticPublicKey`] from `bytes`.
+    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
+        let key: [u8; 32] = bytes.try_into().ok()?;
+
+        Some(Self::X25519(x25519_dalek::PublicKey::from(key)))
+    }
+
+    /// Zeroize private key.
+    pub fn zeroize(self) {
+        match self {
+            Self::X25519(mut key) => key.zeroize(),
+            Self::ElGamal(_) => todo!(),
+        }
+    }
 }
 
 /// Static private key.
 pub enum StaticPrivateKey {
     /// x25519.
-    X25519(x25519_dalek::SharedSecret),
+    X25519(x25519_dalek::StaticSecret),
+}
+
+impl StaticPrivateKey {
+    /// Get public key.
+    pub fn public(&self) -> StaticPublicKey {
+        match self {
+            Self::X25519(key) => StaticPublicKey::X25519(x25519_dalek::PublicKey::from(key)),
+        }
+    }
+
+    /// Perform Diffie-Hellman and return the shared secret as byte vector.
+    pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
+        match (self, public_key) {
+            (Self::X25519(sk), StaticPublicKey::X25519(pk)) => {
+                sk.diffie_hellman(pk).to_bytes().to_vec()
+            }
+            _ => todo!("not implemented"),
+        }
+    }
+}
+
+impl From<Vec<u8>> for StaticPrivateKey {
+    fn from(value: Vec<u8>) -> Self {
+        let ss: [u8; 32] = value.try_into().expect("valid static private key");
+
+        StaticPrivateKey::X25519(x25519_dalek::StaticSecret::from(ss))
+    }
+}
+
+/// Ephemeral private key.
+pub enum EphemeralPrivateKey {
+    X25519(x25519_dalek::ReusableSecret),
+}
+
+impl EphemeralPrivateKey {
+    /// Create new [`EphemeralPrivateKey`].
+    pub fn new() -> Self {
+        Self::X25519(x25519_dalek::ReusableSecret::random())
+    }
+
+    /// Get associated public key.
+    pub fn public_key(&self) -> EphemeralPublicKey {
+        match self {
+            Self::X25519(key) => EphemeralPublicKey::X25519(x25519_dalek::PublicKey::from(key)),
+        }
+    }
+
+    /// Perform Diffie-Hellman and return the shared secret as byte vector.
+    pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
+        match (self, public_key) {
+            (Self::X25519(sk), StaticPublicKey::X25519(pk)) => {
+                sk.diffie_hellman(pk).to_bytes().to_vec()
+            }
+            _ => todo!("not implemented"),
+        }
+    }
+
+    /// Zeroize private key.
+    pub fn zeroize(self) {
+        match self {
+            Self::X25519(mut key) => key.zeroize(),
+        }
+    }
+}
+
+/// Ephemeral public key.
+pub enum EphemeralPublicKey {
+    X25519(x25519_dalek::PublicKey),
+}
+
+impl EphemeralPublicKey {
+    /// Try to create [`EphemeralPublicKey`] from `bytes`.
+    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
+        let key: [u8; 32] = bytes.try_into().ok()?;
+
+        Some(Self::X25519(x25519_dalek::PublicKey::from(key)))
+    }
+
+    /// Zeroize private key.
+    pub fn zeroize(self) {
+        match self {
+            Self::X25519(mut key) => key.zeroize(),
+        }
+    }
+}
+
+impl AsRef<[u8]> for EphemeralPublicKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::X25519(key) => key.as_ref(),
+        }
+    }
 }
 
 /// Signing private key.

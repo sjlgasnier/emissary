@@ -1,6 +1,9 @@
 use crate::{
-    crypto::SigningPrivateKey, primitives::RouterInfo, runtime::Runtime,
-    transports::ntcp2::Ntcp2Listener, Config,
+    crypto::{SigningPrivateKey, StaticPrivateKey},
+    primitives::RouterInfo,
+    runtime::Runtime,
+    transports::ntcp2::Ntcp2Listener,
+    Config,
 };
 
 use futures::Stream;
@@ -33,8 +36,7 @@ impl<R: Runtime> Router<R> {
 
         let router = RouterInfo::from_bytes(router).unwrap();
         let now = R::time_since_epoch().unwrap().as_millis() as u64;
-        let ss: [u8; 32] = config.static_key.clone().try_into().unwrap();
-        let ss = x25519_dalek::StaticSecret::from(ss);
+        let ss = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let key = SigningPrivateKey::new(&test).unwrap();
         let local_info = RouterInfo::new(now, config).serialize(key);
@@ -42,7 +44,8 @@ impl<R: Runtime> Router<R> {
         // let test = RouterInfo::from_bytes(&local_info).unwrap();
         // tracing::info!(%test);
 
-        let ntcp2_listener = Ntcp2Listener::<R>::new(router, local_info, ss).await?;
+        let ntcp2_listener =
+            Ntcp2Listener::<R>::new(runtime.clone(), router, local_info, ss).await?;
         Ok(Self {
             runtime,
             ntcp2_listener,

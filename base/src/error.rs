@@ -24,6 +24,8 @@ pub enum Error {
     Chacha20Poly1305(chacha20poly1305::Error),
     Socket,
     InvalidData,
+    InvalidState,
+    NonceOverflow,
 }
 
 impl fmt::Display for Error {
@@ -33,6 +35,8 @@ impl fmt::Display for Error {
             Self::Chacha20Poly1305(error) => write!(f, "chacha20poly1305 error: {error:?}"),
             Self::Socket => write!(f, "socket failure"),
             Self::InvalidData => write!(f, "invalid data"),
+            Self::InvalidState => write!(f, "invalid state"),
+            Self::NonceOverflow => write!(f, "nonce overflow"),
         }
     }
 }

@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::Error;
+
 use aes::cipher::generic_array::GenericArray;
 use chacha20poly1305::{
     aead::{Aead, AeadInPlace, KeyInit},
@@ -26,7 +28,12 @@ use chacha20poly1305::{
 use alloc::vec::Vec;
 
 /// Nonce.
+///
+/// Upper 4 bytes are zeroed out, maximum number for nonce is `u64::MAX - 1`
+///
+/// https://geti2p.net/spec/ntcp2#chacha20-poly1305
 pub struct Nonce {
+    /// Nonce.
     nonce: u64,
 }
 
@@ -57,8 +64,8 @@ impl Nonce {
 
 /// Chacha20Poly1305 instance.
 pub struct ChaChaPoly {
-    /// Internal nonce.
-    nonce: GenericArray<u8, U12>,
+    /// Nonce.
+    nonce: Nonce,
 
     /// Internal cipher.
     cipher: ChaCha20Poly1305,
@@ -70,36 +77,37 @@ impl ChaChaPoly {
         let key: [u8; 32] = key.try_into().expect("valid chacha key");
         let key = GenericArray::from(key);
 
-        let nonce = GenericArray::from([0u8; 12]);
-        let cipher = ChaCha20Poly1305::new(&key);
-
-        Self { nonce, cipher }
+        Self {
+            cipher: ChaCha20Poly1305::new(&key),
+            nonce: Nonce::new(0u64),
+        }
     }
 
-    /// Create new [`ChachaPoly`] instance with custom `nonce`.
+    /// Create new [`ChachaPoly`] instance with a custom `nonce`.
     pub fn with_nonce(key: &[u8], nonce: u64) -> Self {
         let key: [u8; 32] = key.try_into().expect("valid chacha key");
         let key = GenericArray::from(key);
 
-        let nonce = Nonce::new(nonce)
-            .next()
-            .expect("start nonce to be less than `u64::MAX`");
-        let cipher = ChaCha20Poly1305::new(&key);
-
-        Self { nonce, cipher }
+        Self {
+            cipher: ChaCha20Poly1305::new(&key),
+            nonce: Nonce::new(nonce),
+        }
     }
 
     /// Encrypt `plaintext` and return ciphertext on success.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> crate::Result<Vec<u8>> {
         self.cipher
-            .encrypt(&self.nonce, plaintext)
+            .encrypt(&self.nonce.next().ok_or(Error::NonceOverflow)?, plaintext)
             .map_err(From::from)
     }
 
     /// Decrypto `ciphertext` and return plaintext on success.
     pub fn decrypt(&mut self, ciphertext: Vec<u8>) -> crate::Result<Vec<u8>> {
         self.cipher
-            .decrypt(&GenericArray::from([0u8; 12]), &ciphertext[..])
+            .decrypt(
+                &self.nonce.next().ok_or(Error::NonceOverflow)?,
+                &ciphertext[..],
+            )
             .map_err(From::from)
     }
 
@@ -111,9 +119,11 @@ impl ChaChaPoly {
         associated_data: &[u8],
         plaintext: &mut [u8],
     ) -> crate::Result<Vec<u8>> {
-        let tag = self
-            .cipher
-            .encrypt_in_place_detached(&self.nonce, associated_data, plaintext)?;
+        let tag = self.cipher.encrypt_in_place_detached(
+            &self.nonce.next().ok_or(Error::NonceOverflow)?,
+            associated_data,
+            plaintext,
+        )?;
 
         Ok(tag.as_slice().to_vec())
     }
@@ -127,7 +137,11 @@ impl ChaChaPoly {
         ciphertext: &mut Vec<u8>,
     ) -> crate::Result<()> {
         self.cipher
-            .decrypt_in_place(&GenericArray::from([0u8; 12]), associated_data, ciphertext)
+            .decrypt_in_place(
+                &self.nonce.next().ok_or(Error::NonceOverflow)?,
+                associated_data,
+                ciphertext,
+            )
             .map_err(From::from)
     }
 }
