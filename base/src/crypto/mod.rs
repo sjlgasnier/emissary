@@ -23,6 +23,7 @@ use lazy_static::lazy_static;
 
 use alloc::{string::String, vec::Vec};
 use core::convert::TryInto;
+use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
 pub mod aes;
@@ -155,8 +156,8 @@ pub enum EphemeralPrivateKey {
 
 impl EphemeralPrivateKey {
     /// Create new [`EphemeralPrivateKey`].
-    pub fn new() -> Self {
-        Self::X25519(x25519_dalek::ReusableSecret::random())
+    pub fn new(csprng: impl RngCore + CryptoRng) -> Self {
+        Self::X25519(x25519_dalek::ReusableSecret::random_from_rng(csprng))
     }
 
     /// Get associated public key.

@@ -1,5 +1,6 @@
 use emissary::runtime::{Runtime, TcpListener, TcpStream};
 use futures::{AsyncRead, AsyncWrite};
+use rand_core::{CryptoRng, RngCore};
 use tokio::{io::AsyncWriteExt, net};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -130,5 +131,9 @@ impl Runtime for TokioRuntime {
 
     fn time_since_epoch() -> Option<Duration> {
         SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
+    }
+
+    fn rng() -> impl RngCore + CryptoRng {
+        rand_core::OsRng
     }
 }

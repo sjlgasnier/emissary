@@ -252,7 +252,7 @@ impl Responder {
         let state = Sha256::new().update(&state).update(&padding).finalize();
 
         // generate ephemeral key pair and apply MixHash(epub)
-        let sk = EphemeralPrivateKey::new();
+        let sk = EphemeralPrivateKey::new(R::rng());
         let pk = sk.public_key();
         let state = Sha256::new().update(&state).update(&pk).finalize();
 

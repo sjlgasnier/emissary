@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use futures::{AsyncRead, AsyncWrite, Future};
+use rand_core::{CryptoRng, RngCore};
 
 use core::time::Duration;
 
@@ -41,4 +42,7 @@ pub trait Runtime: Clone {
 
     // TODO: return `Duration` without option
     fn time_since_epoch() -> Option<Duration>;
+
+    /// Return opaque type for generating random bytes.
+    fn rng() -> impl RngCore + CryptoRng;
 }
