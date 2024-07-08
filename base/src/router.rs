@@ -36,7 +36,7 @@ impl<R: Runtime> Router<R> {
         tracing::debug!(target: LOG_TARGET, "start router, router size = {}", router.len());
 
         let router = RouterInfo::from_bytes(router).unwrap();
-        let now = R::time_since_epoch().unwrap().as_millis() as u64;
+        let now = R::time_since_epoch().as_millis() as u64;
         let ss = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let key = SigningPrivateKey::new(&test).unwrap();

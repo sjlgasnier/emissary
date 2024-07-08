@@ -287,10 +287,7 @@ impl Responder {
             reserved1: [0u8; 2],
             padding_length: 32u16.to_be_bytes(),
             reserved2: [0u8; 4],
-            timestamp: (R::time_since_epoch()
-                .expect("to acquire system time successfully")
-                .as_secs() as u32)
-                .to_be_bytes(),
+            timestamp: (R::time_since_epoch().as_secs() as u32).to_be_bytes(),
             reserved3: [0u8; 4],
         }
         .as_bytes()

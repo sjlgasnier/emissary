@@ -129,8 +129,10 @@ impl Runtime for TokioRuntime {
         tokio::spawn(future);
     }
 
-    fn time_since_epoch() -> Option<Duration> {
-        SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
+    fn time_since_epoch() -> Duration {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("to succeed")
     }
 
     fn rng() -> impl RngCore + CryptoRng {

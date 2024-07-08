@@ -40,8 +40,8 @@ pub trait Runtime: Clone {
         F: Future + Send + 'static,
         F::Output: Send;
 
-    // TODO: return `Duration` without option
-    fn time_since_epoch() -> Option<Duration>;
+    /// Return duration since Unix epoch.
+    fn time_since_epoch() -> Duration;
 
     /// Return opaque type for generating random bytes.
     fn rng() -> impl RngCore + CryptoRng;
