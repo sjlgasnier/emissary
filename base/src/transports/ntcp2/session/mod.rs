@@ -25,7 +25,7 @@
 use crate::{
     crypto::{sha256::Sha256, siphash::SipHash, StaticPrivateKey, StaticPublicKey},
     runtime::Runtime,
-    transports::ntcp2::session::initiator::Initiator,
+    transports::ntcp2::session::{initiator::Initiator, responder::Responder},
 };
 
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
@@ -164,7 +164,20 @@ impl SessionManager {
     }
 
     /// Create new [`Handshaker`] for responder (Bob).
-    pub fn new_responder(&self) -> Self {
-        todo!()
+    pub fn register_session<R: Runtime>(
+        &self,
+        local_static_key: StaticPrivateKey,
+        local_router_hash: Vec<u8>,
+        iv: Vec<u8>,
+        message: Vec<u8>,
+    ) -> crate::Result<(Responder, usize)> {
+        Responder::new::<R>(
+            self.inbound_initial_state.clone(),
+            self.chaining_key.clone(),
+            local_router_hash,
+            local_static_key,
+            iv,
+            message,
+        )
     }
 }

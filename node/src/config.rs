@@ -241,7 +241,7 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
-            ntcp2_host: None,
+            ntcp2_host: Some(String::from("127.0.0.1")),
             ntcp2_port: 8888u16,
             static_key,
             signing_key,
@@ -269,7 +269,7 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
-            ntcp2_host: None,
+            ntcp2_host: Some(String::from("127.0.0.1")),
             ntcp2_port: 8888u16,
             static_key,
             signing_key,

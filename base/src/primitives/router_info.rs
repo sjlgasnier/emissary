@@ -74,6 +74,8 @@ impl RouterInfo {
         let Config {
             static_key,
             signing_key,
+            ntcp2_port,
+            ntc2p_host,
             ..
         } = config;
 
@@ -85,7 +87,8 @@ impl RouterInfo {
 
         let identity =
             RouterIdentity::from_keys(static_key.clone(), signing_key).expect("to succeed");
-        let ntcp2 = RouterAddress::new_unpublished(static_key);
+        // let ntcp2 = RouterAddress::new_unpublished(static_key.clone());
+        let ntcp2 = RouterAddress::new_published(static_key, ntcp2_port, ntc2p_host.unwrap());
         let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
         let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
         let router_version = Mapping::new(

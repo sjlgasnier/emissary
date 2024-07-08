@@ -44,9 +44,6 @@ use core::fmt;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::initiator";
 
-/// Noise protocol name.
-const PROTOCOL_NAME: &str = "Noise_XKaesobfse+hs2+hs3_25519_ChaChaPoly_SHA256";
-
 /// Initiator state.
 enum InitiatorState {
     /// Initiator has sent `SessionCreated` message to remote
@@ -281,7 +278,8 @@ impl Initiator {
         // MixHash(e.pubkey)
         state = Sha256::new().update(&state).update(&y).finalize();
 
-        // TODO: epxlain what happens here
+        // perform dh between local and remote ephemeral public keys
+        // and generate new chaining key & remote key
         let (chaining_key, remote_key, responder_public) = {
             let responder_public = StaticPublicKey::from_bytes(y).ok_or(Error::InvalidData)?;
             let mut shared = ephemeral_key.diffie_hellman(&responder_public);
@@ -432,7 +430,7 @@ impl Initiator {
                 .finalize();
 
             // siphash context for (de)obfuscating message sizes
-            let sip = SipHash::new(&temp_key, &state);
+            let sip = SipHash::new_initiator(&temp_key, &state);
 
             chaining_key.zeroize();
             shared.zeroize();

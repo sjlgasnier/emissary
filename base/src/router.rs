@@ -1,4 +1,5 @@
 use crate::{
+    crypto::base64_encode,
     crypto::{SigningPrivateKey, StaticPrivateKey},
     primitives::RouterInfo,
     runtime::Runtime,
@@ -39,17 +40,28 @@ impl<R: Runtime> Router<R> {
         let ss = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let key = SigningPrivateKey::new(&test).unwrap();
-        let local_info = RouterInfo::new(now, config).serialize(key);
+        // let local_info = RouterInfo::new(now, config).serialize(key);
+        let local_info = RouterInfo::new(now, config);
+        let local_router_hash = local_info.identity().hash().to_vec();
+        let local_info = local_info.serialize(key);
 
-        // let test = RouterInfo::from_bytes(&local_info).unwrap();
-        // tracing::info!(%test);
+        // tracing::info!(%local_info);
+        // tracing::info!(hash = %base64_encode(local_info.identity().hash()));
+
+        // Ok(local_info.serialize(key))
+
+        // todo!();
 
         let ntcp2_listener =
-            Ntcp2Listener::<R>::new(runtime.clone(), router, local_info, ss).await?;
-        Ok(Self {
-            runtime,
-            ntcp2_listener,
-        })
+            Ntcp2Listener::<R>::new(runtime.clone(), router, local_info, local_router_hash, ss)
+                .await?;
+
+        todo!();
+
+        // Ok(Self {
+        //     runtime,
+        //     ntcp2_listener,
+        // })
     }
 }
 

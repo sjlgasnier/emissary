@@ -80,6 +80,38 @@ impl RouterAddress {
         }
     }
 
+    /// Create new unpublished [`RouterAddress`].
+    pub fn new_published(static_key: Vec<u8>, _port: u16, host: alloc::string::String) -> Self {
+        let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
+        let key = base64_encode(&static_key.to_vec());
+
+        // TODO: zzz
+        let iv = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        let mut options = HashMap::<Str, Str>::new();
+        options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
+        options.insert(Str::from_str("s").unwrap(), Str::from_str(&key).unwrap());
+        options.insert(
+            Str::from_str("host").unwrap(),
+            Str::from_str(&host).unwrap(),
+        );
+        options.insert(
+            Str::from_str("port").unwrap(),
+            Str::from_str("8888").unwrap(),
+        );
+        options.insert(
+            Str::from_str("i").unwrap(),
+            Str::from_str(&base64_encode(iv)).unwrap(),
+        );
+
+        Self {
+            cost: 10,
+            expires: Date::new(0),
+            transport: Str::from_str("NTCP2").unwrap(),
+            options,
+        }
+    }
+
     /// Parse [`RouterAddress`] from `input`, returning rest of `input` and parsed address.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterAddress> {
         let (rest, cost) = be_u8(input)?;

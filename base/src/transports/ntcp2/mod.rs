@@ -19,7 +19,7 @@
 use crate::{
     crypto::{base64_decode, chachapoly::ChaChaPoly, StaticPrivateKey, StaticPublicKey},
     primitives::{RouterInfo, Str},
-    runtime::{Runtime, TcpStream},
+    runtime::{Runtime, TcpListener, TcpStream},
     transports::ntcp2::{
         message::Message,
         session::{Session, SessionManager},
@@ -52,6 +52,7 @@ impl<R: Runtime> Ntcp2Listener<R> {
         runtime: R,
         router: RouterInfo,
         local_info: Vec<u8>,
+        local_router_hash: Vec<u8>,
         local_static_key: StaticPrivateKey,
     ) -> crate::Result<Self> {
         tracing::debug!(
@@ -60,50 +61,105 @@ impl<R: Runtime> Ntcp2Listener<R> {
             "create ntcp2 listener",
         );
 
-        let ntcp2 = router.addresses().get(0).unwrap();
-
-        let mut stream = R::TcpStream::connect("0.0.0.0:8889").await.unwrap();
-
-        let remote_static_key = {
-            let static_key = ntcp2.options().get(&Str::from_str("s").unwrap()).unwrap();
-            let decoded = base64_decode(static_key.string());
-            StaticPublicKey::from_bytes(decoded).unwrap()
-        };
-        let router_hash = router.identity().hash();
-        let iv = {
-            let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
-            base64_decode(i.string())
-        };
-
         let handshaker = SessionManager::new(local_static_key.public());
-        let (mut initiator, message) = handshaker
-            .create_session::<R>(
-                local_info,
+
+        let mut listener = R::TcpListener::bind("0.0.0.0:8888").await.unwrap();
+
+        let mut stream = listener.accept().await.unwrap();
+
+        let mut message = alloc::vec![0u8; 64];
+        stream.read_exact(&mut message).await.unwrap();
+
+        // TODO: generate proper iv for local node
+        let (mut responder, padding_len) = handshaker
+            .register_session::<R>(
                 local_static_key,
-                &remote_static_key,
-                router_hash.to_vec(),
-                iv,
+                local_router_hash,
+                alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                message,
             )
             .unwrap();
 
+        let mut padding = alloc::vec![0u8; padding_len];
+        stream.read_exact(&mut padding).await.unwrap();
+
+        let (message, message_len) = responder.register_padding::<R>(padding).unwrap();
         stream.write_all(&message).await.unwrap();
 
-        let mut reply = alloc::vec![0u8; 64];
-        stream.read_exact(&mut reply).await.unwrap();
+        let mut message = alloc::vec![0u8; message_len];
+        stream.read_exact(&mut message).await.unwrap();
 
-        let padding = initiator.register_session_confirmed(&reply).unwrap();
+        let key_context = responder.finalize(message).unwrap();
 
-        let mut reply = alloc::vec![0u8; padding];
-        stream.read_exact(&mut reply).await.unwrap();
-
-        let (mut key_context, message) = initiator.finalize(&reply).unwrap();
-
-        stream.write_all(&message).await.unwrap();
-
-        // TODO: create session
-        let mut session = Session::<R>::new(runtime.clone(), stream, key_context);
+        let session = Session::<R>::new(runtime.clone(), stream, key_context);
 
         let _ = session.run().await;
+        // -------------------------------------------------------
+
+        // let remote_static_key = {
+        //     let static_key = ntcp2.options().get(&Str::from_str("s").unwrap()).unwrap();
+        //     let decoded = base64_decode(static_key.string());
+        //     StaticPublicKey::from_bytes(decoded).unwrap()
+        // };
+        // let router_hash = router.identity().hash();
+        // let iv = {
+        //     let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
+        //     base64_decode(i.string())
+        // };
+
+        // let handshaker = SessionManager::new(local_static_key.public());
+        // let (mut initiator, message) = handshaker
+        //     .create_session::<R>(
+        //         local_info,
+        //         local_static_key,
+        //         alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        //     )
+        //     .unwrap();
+
+        // let ntcp2 = router.addresses().get(0).unwrap();
+
+        // let mut stream = R::TcpStream::connect("0.0.0.0:8889").await.unwrap();
+
+        // let remote_static_key = {
+        //     let static_key = ntcp2.options().get(&Str::from_str("s").unwrap()).unwrap();
+        //     let decoded = base64_decode(static_key.string());
+        //     StaticPublicKey::from_bytes(decoded).unwrap()
+        // };
+        // let router_hash = router.identity().hash();
+        // let iv = {
+        //     let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
+        //     base64_decode(i.string())
+        // };
+
+        // let handshaker = SessionManager::new(local_static_key.public());
+        // let (mut initiator, message) = handshaker
+        //     .create_session::<R>(
+        //         local_info,
+        //         local_static_key,
+        //         &remote_static_key,
+        //         router_hash.to_vec(),
+        //         iv,
+        //     )
+        //     .unwrap();
+
+        // stream.write_all(&message).await.unwrap();
+
+        // let mut reply = alloc::vec![0u8; 64];
+        // stream.read_exact(&mut reply).await.unwrap();
+
+        // let padding = initiator.register_session_confirmed(&reply).unwrap();
+
+        // let mut reply = alloc::vec![0u8; padding];
+        // stream.read_exact(&mut reply).await.unwrap();
+
+        // let (mut key_context, message) = initiator.finalize(&reply).unwrap();
+
+        // stream.write_all(&message).await.unwrap();
+
+        // // TODO: create session
+        // let mut session = Session::<R>::new(runtime.clone(), stream, key_context);
+
+        // let _ = session.run().await;
 
         todo!("siip huup");
     }

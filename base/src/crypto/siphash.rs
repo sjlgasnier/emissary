@@ -45,8 +45,8 @@ pub struct SipHash {
 }
 
 impl SipHash {
-    /// Derive SipHash keys and return new [`SipHash`] instance.
-    pub fn new(key: &[u8], h: &[u8]) -> Self {
+    /// Derive SipHash (de)obfuscation keys.
+    fn derive_keys(key: &[u8], h: &[u8]) -> (KeyContext, KeyContext) {
         // from specification, generation additional symmetric key for SipHash
         let mut temp_key = {
             let mut ask_master = Hmac::new(&key)
@@ -103,17 +103,37 @@ impl SipHash {
             )
         };
 
-        Self {
-            sender: KeyContext {
+        (
+            KeyContext {
                 sip_key1: sipk1_initiator,
                 sip_key2: sipk2_initiator,
                 sip_iv: sipiv_initiator,
             },
-            receiver: KeyContext {
+            KeyContext {
                 sip_key1: sipk1_responder,
                 sip_key2: sipk2_responder,
                 sip_iv: sipiv_responder,
             },
+        )
+    }
+
+    /// Derive SipHash keys and return new [`SipHash`] instance.
+    pub fn new_initiator(key: &[u8], h: &[u8]) -> Self {
+        let (initiator, responder) = Self::derive_keys(key, h);
+
+        Self {
+            sender: initiator,
+            receiver: responder,
+        }
+    }
+
+    /// Derive SipHash keys and return new [`SipHash`] instance for responder.
+    pub fn new_responder(key: &[u8], h: &[u8]) -> Self {
+        let (initiator, responder) = Self::derive_keys(key, h);
+
+        Self {
+            sender: responder,
+            receiver: initiator,
         }
     }
 
