@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, base64_encode, SigningPublicKey, StaticPublicKey},
+    crypto::{sha256::Sha256, SigningPublicKey, StaticPublicKey},
     Error,
 };
 
@@ -28,12 +28,22 @@ use nom::{
     sequence::tuple,
     Err, IResult,
 };
-use sha2::{Digest, Sha256};
+use zerocopy::AsBytes;
 
-use alloc::{
-    string::String,
-    {vec, vec::Vec},
-};
+use alloc::vec::Vec;
+
+// TODO: doc
+#[derive(Debug, AsBytes)]
+#[repr(C)]
+struct RouterIdentitySerialized {
+    public_key: [u8; 32],
+    padding: [u8; 320],
+    signing_key: [u8; 32],
+    certificate_type: u8,
+    certificate_len: [u8; 2],
+    signing_key_type: [u8; 2],
+    public_key_type: [u8; 2],
+}
 
 /// Router identity.
 #[derive(Debug)]
@@ -45,7 +55,7 @@ pub struct RouterIdentity {
     signing_key: SigningPublicKey,
 
     /// Identity hash.
-    identity_hash: String,
+    identity_hash: Vec<u8>,
 }
 
 impl RouterIdentity {
@@ -56,10 +66,25 @@ impl RouterIdentity {
         let signing_key =
             SigningPublicKey::from_private_ed25519(&signing_key).ok_or(Error::InvalidData)?;
 
+        let identity_hash = Sha256::new()
+            .update(
+                &RouterIdentitySerialized {
+                    public_key: static_key.clone().to_bytes(),
+                    padding: [0u8; 320],
+                    signing_key: signing_key.clone().to_bytes(),
+                    certificate_type: 5u8,
+                    certificate_len: 4u16.to_be_bytes(),
+                    signing_key_type: 7u16.to_be_bytes(),
+                    public_key_type: 4u16.to_be_bytes(),
+                }
+                .as_bytes(),
+            )
+            .finalize();
+
         Ok(Self {
             static_key,
             signing_key,
-            identity_hash: String::from("fix"),
+            identity_hash,
         })
     }
 
@@ -89,17 +114,12 @@ impl RouterIdentity {
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
-        let mut identity_hash = Sha256::new();
-        identity_hash.update(&input[..391]);
-        let digest = identity_hash.finalize().to_vec();
-        let identity_hash = base64_encode(&digest);
-
         Ok((
             rest,
             RouterIdentity {
                 static_key,
                 signing_key,
-                identity_hash,
+                identity_hash: Sha256::new().update(&input[..391]).finalize(),
             },
         ))
     }
@@ -109,23 +129,19 @@ impl RouterIdentity {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
-    // TODO: zzz
+    /// Serialize [`RouterIdentity`] into a byte vector.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut out = vec![0u8; 391];
-
-        out[..32].copy_from_slice(&self.static_key.to_vec());
-        out[384 - 32..384].copy_from_slice(&self.signing_key.to_vec());
-
-        out[384] = 0x05;
-        out[385] = 0x00;
-        out[386] = 0x04;
-
-        out[387] = 0x00;
-        out[388] = 0x07;
-        out[389] = 0x00;
-        out[390] = 0x04;
-
-        out
+        RouterIdentitySerialized {
+            public_key: self.static_key.to_bytes(),
+            padding: [0u8; 320],
+            signing_key: self.signing_key.to_bytes(),
+            certificate_type: 5u8,
+            certificate_len: 4u16.to_be_bytes(),
+            signing_key_type: 7u16.to_be_bytes(),
+            public_key_type: 4u16.to_be_bytes(),
+        }
+        .as_bytes()
+        .to_vec()
     }
 
     /// Get reference to router's static public key.
@@ -139,15 +155,15 @@ impl RouterIdentity {
     }
 
     /// Router identity hash as bytes.
-    // TODO: optimize
-    pub fn hash(&self) -> Vec<u8> {
-        base64_decode(self.identity_hash.clone())
+    pub fn hash(&self) -> &[u8] {
+        self.identity_hash.as_ref()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::base64_encode;
 
     #[test]
     fn expected_router_hash() {
@@ -155,7 +171,7 @@ mod tests {
         let identity = RouterIdentity::from_bytes(router).unwrap();
 
         assert_eq!(
-            identity.identity_hash,
+            base64_encode(&identity.identity_hash),
             "jLD5rTYg4zg~d4oQ29ogPtGcZPQYM3pHAKY8VHNZv30="
         );
     }

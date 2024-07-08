@@ -81,7 +81,7 @@ impl<R: Runtime> Ntcp2Listener<R> {
                 local_info,
                 local_static_key,
                 &remote_static_key,
-                router_hash,
+                router_hash.to_vec(),
                 iv,
             )
             .unwrap();

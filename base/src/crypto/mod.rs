@@ -45,8 +45,8 @@ lazy_static! {
 }
 
 /// Base64 encode `data`
-pub fn base64_encode(data: &Vec<u8>) -> String {
-    I2P_BASE64.encode(data)
+pub fn base64_encode<T: AsRef<[u8]>>(data: T) -> String {
+    I2P_BASE64.encode(data.as_ref())
 }
 
 /// Base64 decode `data`
@@ -86,11 +86,17 @@ impl StaticPublicKey {
         Some(StaticPublicKey::ElGamal(key))
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
+    /// Convert public key to byte array.
+    pub fn to_bytes(&self) -> [u8; 32] {
         match self {
-            Self::X25519(key) => key.to_bytes().to_vec(),
-            Self::ElGamal(key) => key.to_vec(),
+            Self::X25519(key) => key.to_bytes(),
+            Self::ElGamal(_) => todo!("elgamal not supported"),
         }
+    }
+
+    /// Convert public key to byte vector.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.to_bytes().to_vec()
     }
 
     /// Try to create [`StaticPublicKey`] from `bytes`.
@@ -268,9 +274,15 @@ impl SigningPublicKey {
         }
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
+    /// Convert public key to byte array
+    pub fn to_bytes(&self) -> [u8; 32] {
         match self {
-            Self::Ed25519(key) => key.to_bytes().to_vec(),
+            Self::Ed25519(key) => key.to_bytes(),
         }
+    }
+
+    /// Convert public key to byte vector.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.to_bytes().to_vec()
     }
 }
