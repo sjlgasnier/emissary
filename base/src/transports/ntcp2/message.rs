@@ -229,7 +229,7 @@ impl Message {
             }
             2 => {
                 let size =
-                    u32::from_be_bytes(TryInto::<[u8; 4]>::try_into(&bytes[1..3]).ok()?) as usize;
+                    u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(&bytes[1..3]).ok()?) as usize;
 
                 match bytes.len() < size {
                     true => None,
