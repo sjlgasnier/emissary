@@ -23,6 +23,9 @@
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::ntcp2::message";
+
 /// Block format identifier.
 #[derive(Debug)]
 enum BlockFormat {
@@ -231,13 +234,19 @@ impl Message {
                 let size =
                     u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(&bytes[1..3]).ok()?) as usize;
 
-                match bytes.len() < size {
-                    true => None,
-                    false => Some(Self::RouterInfo {
-                        floodfill_request: bytes[3] >> 7 == 1,
-                        router_info: bytes[4..size].to_vec(),
-                    }),
-                }
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    block_len = ?size,
+                    input_len = ?bytes.len(),
+                    floodfill = ?bytes[3] & 1 == 1,
+                    "parse router info block",
+                );
+                assert!(bytes[3] == 0);
+
+                (bytes.len() >= size).then(|| Self::RouterInfo {
+                    floodfill_request: bytes[3] & 1 == 1,
+                    router_info: bytes[4..size + 3].to_vec(),
+                })
             }
             3 => {
                 tracing::warn!("i2np messages not supported");
@@ -247,7 +256,15 @@ impl Message {
                 tracing::warn!("termination not supported");
                 None
             }
-            _ => None,
+            block_id => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?block_id,
+                    "unrecognized block id",
+                );
+
+                None
+            }
         }
     }
 
