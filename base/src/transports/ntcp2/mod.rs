@@ -17,150 +17,154 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, chachapoly::ChaChaPoly, StaticPrivateKey, StaticPublicKey},
+    crypto::{
+        base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
+    },
     primitives::{RouterInfo, Str},
-    runtime::{Runtime, TcpListener, TcpStream},
-    transports::ntcp2::{
-        message::Message,
-        session::{Session, SessionManager},
+    runtime::{JoinSet, Runtime, TcpListener, TcpStream},
+    transports::{
+        ntcp2::{
+            listener::Ntcp2Listener,
+            message::Message,
+            session::{Ntcp2Session, SessionManager},
+        },
+        Transport, TransportEvent,
     },
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt};
+use futures::{AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
 
-use alloc::vec::Vec;
-use core::str::FromStr;
+use alloc::{boxed::Box, string::String, vec::Vec};
+use core::{
+    marker::PhantomData,
+    pin::Pin,
+    str::FromStr,
+    task::{Context, Poll},
+};
+use hashbrown::HashMap;
 
+mod listener;
 mod message;
 mod session;
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::ntcp2::listener";
+const LOG_TARGET: &str = "emissary::ntcp2";
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_XKaesobfse+hs2+hs3_25519_ChaChaPoly_SHA256";
 
-/// NTCP2 listener.
-pub struct Ntcp2Listener<R: Runtime> {
-    /// TCP Listener.
-    listener: R::TcpListener,
+/// NTCP2 transport.
+pub struct Ntcp2Transport<R: Runtime> {
+    // /// Local static key.
+    // local_key: StaticPrivateKey,
+
+    // /// Local router info.
+    // local_router_info: RouterInfo,
+    /// Session manager.
+    session_manager: SessionManager<R>,
+
+    /// NTCP2 connection listener.
+    listener: Ntcp2Listener<R>,
+
+    /// Pending connections.
+    pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
+
+    _marker: PhantomData<R>,
 }
 
-impl<R: Runtime> Ntcp2Listener<R> {
-    /// Create new [`Ntcp2Listener`].
+impl<R: Runtime> Ntcp2Transport<R> {
+    /// Create new [`Ntcp2Transport`].
     pub async fn new(
         runtime: R,
-        router: RouterInfo,
-        local_info: Vec<u8>,
-        local_router_hash: Vec<u8>,
-        local_static_key: StaticPrivateKey,
+        local_key: StaticPrivateKey,
+        local_signing_key: SigningPrivateKey,
+        local_router_info: RouterInfo,
     ) -> crate::Result<Self> {
-        tracing::debug!(
+        // TODO: get port and host from `local_router_info`
+
+        let session_manager =
+            SessionManager::new(runtime, local_key, local_signing_key, local_router_info);
+        let listener = Ntcp2Listener::new(String::from(""), 1337u16).await?;
+
+        tracing::trace!(
             target: LOG_TARGET,
-            address = "127.0.0.1:8888",
-            "create ntcp2 listener",
+            "starting ntcp2 transport",
         );
 
-        let handshaker = SessionManager::new(local_static_key.public());
+        Ok(Ntcp2Transport {
+            listener,
+            session_manager,
+            pending_handshakes: R::join_set(),
+            _marker: Default::default(),
+        })
+    }
 
-        let mut listener = R::TcpListener::bind("0.0.0.0:8888").await.unwrap();
+    /// Dial remote peer
+    pub fn dial(&mut self, router_info: RouterInfo) -> () {
+        todo!();
+    }
+}
 
-        let mut stream = listener.accept().await.unwrap();
+impl<R: Runtime> Transport for Ntcp2Transport<R> {
+    fn dial() -> crate::Result<()> {
+        todo!();
+    }
 
-        let mut message = alloc::vec![0u8; 64];
-        stream.read_exact(&mut message).await.unwrap();
+    fn accept() -> crate::Result<()> {
+        todo!();
+    }
 
-        // TODO: generate proper iv for local node
-        let (mut responder, padding_len) = handshaker
-            .register_session::<R>(
-                local_static_key,
-                local_router_hash,
-                alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                message,
-            )
-            .unwrap();
+    fn reject() -> crate::Result<()> {
+        todo!();
+    }
+}
 
-        let mut padding = alloc::vec![0u8; padding_len];
-        stream.read_exact(&mut padding).await.unwrap();
+impl<R: Runtime> Stream for Ntcp2Transport<R> {
+    type Item = TransportEvent;
 
-        let (message, message_len) = responder.register_padding::<R>(padding).unwrap();
-        stream.write_all(&message).await.unwrap();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.listener.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some(stream)) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    "inbound tcp connection, accept session",
+                );
 
-        let mut message = alloc::vec![0u8; message_len];
-        stream.read_exact(&mut message).await.unwrap();
+                let responder = self.session_manager.accept_session(stream);
+                self.pending_handshakes.push(responder);
+            }
+        }
 
-        let key_context = responder.finalize(message).unwrap();
+        if !self.pending_handshakes.is_empty() {
+            match futures::ready!(self.pending_handshakes.poll_next_unpin(cx)) {
+                Some(Ok(session)) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        role = ?session.role(),
+                        "new ntcp2 session opened",
+                    );
 
-        let session = Session::<R>::new(runtime.clone(), stream, key_context);
+                    R::spawn(session.run());
+                }
+                Some(Err(error)) => {
+                    todo!();
+                }
+                // Some(res) => {
+                //     let res: crate::Result<Ntcp2Session<R>> = res;
+                //     // let mut
+                //     //   = res;
+                //     // // let res =
+                // }
+                // Some(session) => {
+                //     let _: () = session;
+                //     // panic!("session has been negotiated");
+                // }
+                None => return Poll::Ready(None),
+            }
+        }
 
-        let _ = session.run().await;
-        // -------------------------------------------------------
-
-        // let remote_static_key = {
-        //     let static_key = ntcp2.options().get(&Str::from_str("s").unwrap()).unwrap();
-        //     let decoded = base64_decode(static_key.string());
-        //     StaticPublicKey::from_bytes(decoded).unwrap()
-        // };
-        // let router_hash = router.identity().hash();
-        // let iv = {
-        //     let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
-        //     base64_decode(i.string())
-        // };
-
-        // let handshaker = SessionManager::new(local_static_key.public());
-        // let (mut initiator, message) = handshaker
-        //     .create_session::<R>(
-        //         local_info,
-        //         local_static_key,
-        //         alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-        //     )
-        //     .unwrap();
-
-        // let ntcp2 = router.addresses().get(0).unwrap();
-
-        // let mut stream = R::TcpStream::connect("0.0.0.0:8889").await.unwrap();
-
-        // let remote_static_key = {
-        //     let static_key = ntcp2.options().get(&Str::from_str("s").unwrap()).unwrap();
-        //     let decoded = base64_decode(static_key.string());
-        //     StaticPublicKey::from_bytes(decoded).unwrap()
-        // };
-        // let router_hash = router.identity().hash();
-        // let iv = {
-        //     let i = ntcp2.options().get(&Str::from_str("i").unwrap()).unwrap();
-        //     base64_decode(i.string())
-        // };
-
-        // let handshaker = SessionManager::new(local_static_key.public());
-        // let (mut initiator, message) = handshaker
-        //     .create_session::<R>(
-        //         local_info,
-        //         local_static_key,
-        //         &remote_static_key,
-        //         router_hash.to_vec(),
-        //         iv,
-        //     )
-        //     .unwrap();
-
-        // stream.write_all(&message).await.unwrap();
-
-        // let mut reply = alloc::vec![0u8; 64];
-        // stream.read_exact(&mut reply).await.unwrap();
-
-        // let padding = initiator.register_session_confirmed(&reply).unwrap();
-
-        // let mut reply = alloc::vec![0u8; padding];
-        // stream.read_exact(&mut reply).await.unwrap();
-
-        // let (mut key_context, message) = initiator.finalize(&reply).unwrap();
-
-        // stream.write_all(&message).await.unwrap();
-
-        // // TODO: create session
-        // let mut session = Session::<R>::new(runtime.clone(), stream, key_context);
-
-        // let _ = session.run().await;
-
-        todo!("siip huup");
+        Poll::Pending
     }
 }

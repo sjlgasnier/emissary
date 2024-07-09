@@ -23,23 +23,38 @@
 //! Implementation refers to `ck` as `chaining_key` and to `h` as `state`.
 
 use crate::{
-    crypto::{sha256::Sha256, siphash::SipHash, StaticPrivateKey, StaticPublicKey},
+    crypto::{
+        sha256::Sha256, siphash::SipHash, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
+    },
+    primitives::RouterInfo,
     runtime::Runtime,
     transports::ntcp2::session::{initiator::Initiator, responder::Responder},
 };
 
+use futures::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-use alloc::vec::Vec;
-
-pub use active::Session;
+use alloc::{vec, vec::Vec};
+use core::future::Future;
 
 mod active;
 mod initiator;
 mod responder;
 
+pub use active::Ntcp2Session;
+
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_XKaesobfse+hs2+hs3_25519_ChaChaPoly_SHA256";
+
+/// Role of the session.
+#[derive(Debug, Clone, Copy)]
+pub enum Role {
+    /// Initiator (Alice).
+    Initiator,
+
+    /// Responder (Bob).
+    Responder,
+}
 
 /// Key context.
 pub(super) struct KeyContext {
@@ -91,7 +106,10 @@ pub(super) struct ResponderOptions {
 /// Session manager.
 ///
 /// Responsible for creating context for inbound and outboudn NTCP2 sessions.
-pub struct SessionManager {
+pub struct SessionManager<R: Runtime> {
+    /// Runtime.
+    runtime: R,
+
     /// State that is common for all outbound connections.
     outbound_initial_state: Vec<u8>,
 
@@ -102,9 +120,18 @@ pub struct SessionManager {
     /// Chaining key.
     // TODO: `bytes::Bytes`?
     chaining_key: Vec<u8>,
+
+    /// Local static key.
+    local_key: StaticPrivateKey,
+
+    /// Local signing key.
+    local_signing_key: SigningPrivateKey,
+
+    /// Local router info.
+    local_router_info: RouterInfo,
 }
 
-impl SessionManager {
+impl<R: Runtime> SessionManager<R> {
     /// Create new [`SessionManager`].
     ///
     /// This function initializes the common state for both inbound and outbound connections.
@@ -112,7 +139,12 @@ impl SessionManager {
     /// See the beginning of [1] for steps on generating start state.
     ///
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
-    pub fn new(local_static_key: StaticPublicKey) -> Self {
+    pub fn new(
+        runtime: R,
+        local_key: StaticPrivateKey,
+        local_signing_key: SigningPrivateKey,
+        local_router_info: RouterInfo,
+    ) -> Self {
         // initial state
         let state = Sha256::new()
             .update(&PROTOCOL_NAME.as_bytes().to_vec())
@@ -127,10 +159,14 @@ impl SessionManager {
         // MixHash(rs)
         let inbound_initial_state = Sha256::new()
             .update(&outbound_initial_state)
-            .update(local_static_key.to_vec())
+            .update(&local_key.public().to_vec())
             .finalize();
 
         Self {
+            runtime,
+            local_key,
+            local_signing_key,
+            local_router_info,
             chaining_key,
             inbound_initial_state,
             outbound_initial_state,
@@ -144,7 +180,7 @@ impl SessionManager {
     /// on the opening connection.
     ///
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
-    pub fn create_session<R: Runtime>(
+    pub fn create_session(
         &self,
         local_info: Vec<u8>,
         local_static_key: StaticPrivateKey,
@@ -164,20 +200,69 @@ impl SessionManager {
     }
 
     /// Create new [`Handshaker`] for responder (Bob).
-    pub fn register_session<R: Runtime>(
+    pub fn register_session(
         &self,
-        local_static_key: StaticPrivateKey,
-        local_router_hash: Vec<u8>,
         iv: Vec<u8>,
         message: Vec<u8>,
     ) -> crate::Result<(Responder, usize)> {
+        let iv = alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let local_info = self.local_router_info.serialize(&self.local_signing_key);
+        let local_router_hash = self.local_router_info.identity().hash().to_vec();
+
         Responder::new::<R>(
             self.inbound_initial_state.clone(),
             self.chaining_key.clone(),
             local_router_hash,
-            local_static_key,
+            self.local_key.clone(),
             iv,
             message,
         )
+    }
+
+    /// Accept inbound TCP connection and negotiate a NTCP2 session parameters for it.
+    pub fn accept_session(
+        &self,
+        mut stream: R::TcpStream,
+    ) -> impl Future<Output = crate::Result<(Ntcp2Session<R>)>> {
+        // TODO: correct iv
+        let iv = alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let local_info = self.local_router_info.serialize(&self.local_signing_key);
+        let local_router_hash = self.local_router_info.identity().hash().to_vec();
+        let local_key = self.local_key.clone();
+        let inbound_initial_state = self.inbound_initial_state.clone();
+        let chaining_key = self.chaining_key.clone();
+        let runtime = self.runtime.clone();
+
+        async move {
+            let mut message = vec![0u8; 64];
+            stream.read_exact(&mut message).await.unwrap();
+
+            let (mut responder, padding_len) = Responder::new::<R>(
+                inbound_initial_state.clone(),
+                chaining_key.clone(),
+                local_router_hash,
+                local_key.clone(),
+                iv,
+                message,
+            )?;
+
+            let mut padding = alloc::vec![0u8; padding_len];
+            stream.read_exact(&mut padding).await.unwrap();
+
+            let (message, message_len) = responder.register_padding::<R>(padding).unwrap();
+            stream.write_all(&message).await.unwrap();
+
+            let mut message = alloc::vec![0u8; message_len];
+            stream.read_exact(&mut message).await.unwrap();
+
+            let key_context = responder.finalize(message).unwrap();
+
+            Ok(Ntcp2Session::new(
+                Role::Responder,
+                runtime.clone(),
+                stream,
+                key_context,
+            ))
+        }
     }
 }

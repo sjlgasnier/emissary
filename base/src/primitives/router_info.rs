@@ -79,12 +79,6 @@ impl RouterInfo {
             ..
         } = config;
 
-        tracing::error!(
-            "static key len = {}, signing key len = {}",
-            static_key.len(),
-            signing_key.len()
-        );
-
         let identity =
             RouterIdentity::from_keys(static_key.clone(), signing_key).expect("to succeed");
         // let ntcp2 = RouterAddress::new_unpublished(static_key.clone());
@@ -147,7 +141,7 @@ impl RouterInfo {
     }
 
     // TODO: zzz
-    pub fn serialize(&self, signing_key: SigningPrivateKey) -> Vec<u8> {
+    pub fn serialize(&self, signing_key: &SigningPrivateKey) -> Vec<u8> {
         let identity = self.identity.serialize();
         let published = self.published.serialize();
         let ntcp2 = self.addresses[0].serialize();

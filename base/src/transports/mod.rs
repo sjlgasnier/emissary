@@ -16,5 +16,73 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-pub mod ntcp2;
-pub mod ssu2;
+use crate::{
+    crypto::{SigningPrivateKey, StaticPrivateKey},
+    primitives::RouterInfo,
+    runtime::Runtime,
+    transports::ntcp2::Ntcp2Transport,
+};
+
+use futures::{Stream, StreamExt};
+
+use core::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+mod ntcp2;
+mod ssu2;
+
+#[derive(Debug)]
+pub enum TransportEvent {
+    ConnectionEstablished {},
+    ConnectionClosed {},
+    ConnectionOpened {},
+}
+
+pub trait Transport: Stream + Unpin {
+    fn dial() -> crate::Result<()>;
+    fn accept() -> crate::Result<()>;
+    fn reject() -> crate::Result<()>;
+}
+
+/// Transport manager.
+pub struct TransportManager<R: Runtime> {
+    ntcp2: Ntcp2Transport<R>,
+}
+
+impl<R: Runtime> TransportManager<R> {
+    /// Create new [`TransportManager`].
+    pub async fn new(
+        runtime: R,
+        local_key: StaticPrivateKey,
+        local_signing_key: SigningPrivateKey,
+        local_router_info: RouterInfo,
+    ) -> crate::Result<Self> {
+        Ok(Self {
+            ntcp2: Ntcp2Transport::<R>::new(
+                runtime,
+                local_key,
+                local_signing_key,
+                local_router_info,
+            )
+            .await?,
+        })
+    }
+}
+
+impl<R: Runtime> Stream for TransportManager<R> {
+    type Item = ();
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.ntcp2.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(event) => {
+                    tracing::error!("got event = {event:?}");
+                }
+            }
+        }
+    }
+}

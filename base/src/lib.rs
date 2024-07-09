@@ -18,6 +18,7 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![allow(dead_code)]
+#![allow(unused)]
 
 extern crate alloc;
 
