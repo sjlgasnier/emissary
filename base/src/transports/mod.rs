@@ -35,15 +35,21 @@ mod ssu2;
 
 #[derive(Debug)]
 pub enum TransportEvent {
-    ConnectionEstablished {},
+    /// Connection successfully established to remote peer.
+    ConnectionEstablished {
+        /// `RouterInfo` for the connected peer.
+        router: RouterInfo,
+    },
     ConnectionClosed {},
     ConnectionOpened {},
+    ConnectionFailure {},
 }
 
 pub trait Transport: Stream + Unpin {
-    fn dial() -> crate::Result<()>;
-    fn accept() -> crate::Result<()>;
-    fn reject() -> crate::Result<()>;
+    /// Dial remote peer.
+    //
+    // TODO: how to signal preference for transport?
+    fn dial(&mut self, router: RouterInfo) -> crate::Result<()>;
 }
 
 /// Transport manager.
@@ -80,7 +86,7 @@ impl<R: Runtime> Stream for TransportManager<R> {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(event) => {
-                    tracing::error!("got event = {event:?}");
+                    panic!("zzz");
                 }
             }
         }

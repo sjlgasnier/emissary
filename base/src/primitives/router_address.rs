@@ -28,7 +28,9 @@ use alloc::{vec, vec::Vec};
 use core::{fmt, str::FromStr};
 
 /// Router address information.
-#[derive(Debug)]
+//
+// TODO: cheaply clonable
+#[derive(Debug, Clone)]
 pub struct RouterAddress {
     /// Router cost.
     cost: u8,

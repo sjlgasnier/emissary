@@ -46,7 +46,9 @@ struct RouterIdentitySerialized {
 }
 
 /// Router identity.
-#[derive(Debug)]
+//
+// TODO: cheaply cloanble
+#[derive(Debug, Clone)]
 pub struct RouterIdentity {
     /// Router's public key.
     static_key: StaticPublicKey,

@@ -33,6 +33,9 @@ use alloc::{vec, vec::Vec};
 use core::str::FromStr;
 
 /// Router information
+//
+// TODO: this should be cheaply clonable
+#[derive(Debug, Clone)]
 pub struct RouterInfo {
     /// Router identity.
     identity: RouterIdentity,
@@ -47,6 +50,7 @@ pub struct RouterInfo {
     options: HashMap<Str, Str>,
 }
 
+// TODO: remove
 impl core::fmt::Display for RouterInfo {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "\n------------\n")?;
@@ -116,18 +120,17 @@ impl RouterInfo {
         let (rest, _) = be_u8(rest)?;
         let (rest, options) = Mapping::parse_multi_frame(rest)?;
 
-        tracing::info!(
-            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz len = {}",
-            input.len() - 64
-        );
-
-        identity.signing_key().verify(input, rest).or_else(|_| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "invalid signature for router info",
-            );
-            Err(Err::Error(make_error(input, ErrorKind::Fail)))
-        })?;
+        identity
+            .signing_key()
+            .verify(input, rest)
+            .or_else(|error| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "invalid signature for router info",
+                );
+                Err(Err::Error(make_error(input, ErrorKind::Fail)))
+            })?;
 
         Ok((
             rest,

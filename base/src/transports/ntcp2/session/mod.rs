@@ -43,6 +43,9 @@ mod responder;
 
 pub use active::Ntcp2Session;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::ntcp2::session";
+
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_XKaesobfse+hs2+hs3_25519_ChaChaPoly_SHA256";
 
@@ -199,26 +202,6 @@ impl<R: Runtime> SessionManager<R> {
         )
     }
 
-    /// Create new [`Handshaker`] for responder (Bob).
-    pub fn register_session(
-        &self,
-        iv: Vec<u8>,
-        message: Vec<u8>,
-    ) -> crate::Result<(Responder, usize)> {
-        let iv = alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let local_info = self.local_router_info.serialize(&self.local_signing_key);
-        let local_router_hash = self.local_router_info.identity().hash().to_vec();
-
-        Responder::new::<R>(
-            self.inbound_initial_state.clone(),
-            self.chaining_key.clone(),
-            local_router_hash,
-            self.local_key.clone(),
-            iv,
-            message,
-        )
-    }
-
     /// Accept inbound TCP connection and negotiate a NTCP2 session parameters for it.
     pub fn accept_session(
         &self,
@@ -234,6 +217,11 @@ impl<R: Runtime> SessionManager<R> {
         let runtime = self.runtime.clone();
 
         async move {
+            tracing::trace!(
+                target: LOG_TARGET,
+                "read `SessionRequest` from socket",
+            );
+
             let mut message = vec![0u8; 64];
             stream.read_exact(&mut message).await.unwrap();
 
@@ -246,23 +234,50 @@ impl<R: Runtime> SessionManager<R> {
                 message,
             )?;
 
+            tracing::trace!(
+                target: LOG_TARGET,
+                ?padding_len,
+                "read padding for `SessionRequest`",
+            );
+
             let mut padding = alloc::vec![0u8; padding_len];
             stream.read_exact(&mut padding).await.unwrap();
 
-            let (message, message_len) = responder.register_padding::<R>(padding).unwrap();
+            let (message, message_len) = responder.create_session::<R>(padding).unwrap();
             stream.write_all(&message).await.unwrap();
+
+            tracing::trace!(
+                target: LOG_TARGET,
+                m3_p2_len = ?message_len,
+                "read `SessionConfirmed` message",
+            );
 
             let mut message = alloc::vec![0u8; message_len];
             stream.read_exact(&mut message).await.unwrap();
 
-            let key_context = responder.finalize(message).unwrap();
+            match responder.finalize(message) {
+                Ok((key_context, router)) => {
+                    tracing::info!(%router);
 
-            Ok(Ntcp2Session::new(
-                Role::Responder,
-                runtime.clone(),
-                stream,
-                key_context,
-            ))
+                    Ok(Ntcp2Session::new(
+                        Role::Responder,
+                        router,
+                        runtime.clone(),
+                        stream,
+                        key_context,
+                    ))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to accept session",
+                    );
+
+                    let _ = stream.close().await;
+                    Err(error)
+                }
+            }
         }
     }
 }

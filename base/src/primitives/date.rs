@@ -21,7 +21,7 @@ use nom::{number::complete::be_u64, IResult};
 use alloc::vec::Vec;
 
 /// Date.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Date {
     /// Date in milliseconds UNIX epoch.
     date: u64,

@@ -55,11 +55,6 @@ const PROTOCOL_NAME: &str = "Noise_XKaesobfse+hs2+hs3_25519_ChaChaPoly_SHA256";
 
 /// NTCP2 transport.
 pub struct Ntcp2Transport<R: Runtime> {
-    // /// Local static key.
-    // local_key: StaticPrivateKey,
-
-    // /// Local router info.
-    // local_router_info: RouterInfo,
     /// Session manager.
     session_manager: SessionManager<R>,
 
@@ -69,6 +64,7 @@ pub struct Ntcp2Transport<R: Runtime> {
     /// Pending connections.
     pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
 
+    /// Marker for `Runtime`.
     _marker: PhantomData<R>,
 }
 
@@ -106,15 +102,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
 }
 
 impl<R: Runtime> Transport for Ntcp2Transport<R> {
-    fn dial() -> crate::Result<()> {
-        todo!();
-    }
-
-    fn accept() -> crate::Result<()> {
-        todo!();
-    }
-
-    fn reject() -> crate::Result<()> {
+    fn dial(&mut self, router: RouterInfo) -> crate::Result<()> {
         todo!();
     }
 }
@@ -146,21 +134,17 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         "new ntcp2 session opened",
                     );
 
+                    // get router info of the connected peer, spawn the connection event loop
+                    // in the background and infrom `TransportManager` of the new connection
+                    let router = session.router();
+
                     R::spawn(session.run());
+
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router }));
                 }
                 Some(Err(error)) => {
                     todo!();
                 }
-                // Some(res) => {
-                //     let res: crate::Result<Ntcp2Session<R>> = res;
-                //     // let mut
-                //     //   = res;
-                //     // // let res =
-                // }
-                // Some(session) => {
-                //     let _: () = session;
-                //     // panic!("session has been negotiated");
-                // }
                 None => return Poll::Ready(None),
             }
         }

@@ -22,6 +22,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
+    primitives::RouterInfo,
     runtime::Runtime,
     transports::ntcp2::{
         message::Message,
@@ -35,6 +36,9 @@ use futures::AsyncReadExt;
 pub struct Ntcp2Session<R: Runtime> {
     /// Role of the session.
     role: Role,
+
+    /// `RouterInfo` of the remote peer.
+    router: RouterInfo,
 
     /// Runtime.
     runtime: R,
@@ -54,7 +58,13 @@ pub struct Ntcp2Session<R: Runtime> {
 
 impl<R: Runtime> Ntcp2Session<R> {
     /// Create new active NTCP2 [`Session`].
-    pub fn new(role: Role, runtime: R, stream: R::TcpStream, key_context: KeyContext) -> Self {
+    pub fn new(
+        role: Role,
+        router: RouterInfo,
+        runtime: R,
+        stream: R::TcpStream,
+        key_context: KeyContext,
+    ) -> Self {
         let KeyContext {
             send_key,
             recv_key,
@@ -63,6 +73,7 @@ impl<R: Runtime> Ntcp2Session<R> {
 
         Self {
             role,
+            router,
             runtime,
             stream,
             send_cipher: ChaChaPoly::new(&send_key),
@@ -74,6 +85,11 @@ impl<R: Runtime> Ntcp2Session<R> {
     /// Get role of the session.
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    /// Get `RouterInfo` of the remote peer.
+    pub fn router(&self) -> RouterInfo {
+        self.router.clone()
     }
 
     /// Start [`Session`] event loop.

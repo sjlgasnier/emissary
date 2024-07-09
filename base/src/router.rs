@@ -22,7 +22,6 @@ use crate::{
     primitives::RouterInfo,
     runtime::Runtime,
     transports::TransportManager,
-    // transports::ntcp2::Ntcp2Listener,
     Config,
 };
 
