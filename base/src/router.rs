@@ -17,17 +17,19 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::base64_encode,
-    crypto::{SigningPrivateKey, StaticPrivateKey},
-    primitives::RouterInfo,
+    crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
+    netdb::NetDb,
+    primitives::{RouterInfo, TransportKind},
     runtime::Runtime,
-    transports::TransportManager,
+    transports::{SubsystemKind, TransportManager},
     Config,
 };
 
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
+use hashbrown::HashMap;
+use thingbuf::mpsc;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -56,36 +58,36 @@ impl<R: Runtime> Router<R> {
     pub async fn new(runtime: R, config: Config, router: Vec<u8>) -> crate::Result<Self> {
         tracing::debug!(target: LOG_TARGET, "start emissary");
 
-        // let router = RouterInfo::from_bytes(router).unwrap();
+        // TODO: ugly
+        let router = RouterInfo::from_bytes(router).unwrap();
         let now = R::time_since_epoch().as_millis() as u64;
         let local_key = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
-        // let local_info = RouterInfo::new(now, config).serialize(key);
         let local_router_info = RouterInfo::new(now, config);
-        // let local_router_hash = local_info.identity().hash().to_vec();
-        // let local_info = local_info.serialize(&key);
 
-        // tracing::info!(%local_info);
-        // tracing::info!(hash = %base64_encode(local_info.identity().hash()));
-
-        // Ok(local_info.serialize(key))
-
-        // todo!();
-
-        // let ntcp2_listener =
-        //     Ntcp2Listener::<R>::new(runtime.clone(), router, local_info, local_router_hash, ss)
-        //         .await?;
-
-        // todo!();
-
-        let transport_manager = TransportManager::new(
+        // create transport manager and initialize & start enabled transports
+        //
+        // note: order of initialization is important
+        let mut transport_manager = TransportManager::new(
             runtime.clone(),
             local_key,
             local_signing_key,
             local_router_info,
-        )
-        .await?;
+        );
+
+        // initialize and start netdb
+        {
+            let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
+            let netdb = NetDb::new(transport_service);
+
+            R::spawn(netdb);
+        }
+
+        // initialize and start ntcp2
+        transport_manager
+            .register_transport(TransportKind::Ntcp2)
+            .await?;
 
         Ok(Self {
             runtime,
@@ -98,25 +100,6 @@ impl<R: Runtime> Future for Router<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        tracing::trace!("poll transport manager");
-
-        loop {
-            tracing::info!("polling again");
-
-            match self.transport_manager.poll_next_unpin(cx) {
-                Poll::Ready(None) => {
-                    tracing::error!(" got poll ready none");
-                    return Poll::Ready(());
-                }
-                Poll::Ready(Some(event)) => {
-                    tracing::error!("got event:");
-                }
-                Poll::Pending => break,
-            }
-        }
-
-        tracing::error!("nothing to do, return");
-
-        Poll::Pending
+        self.transport_manager.poll_unpin(cx)
     }
 }

@@ -20,14 +20,15 @@ use futures::{AsyncRead, AsyncWrite, Future, Stream};
 use rand_core::{CryptoRng, RngCore};
 
 use core::{
+    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
 
 pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sized + 'static {
-    fn connect(address: &str) -> impl Future<Output = Option<Self>>;
-    fn close(&mut self) -> impl Future<Output = ()>;
+    /// Establish connection to remote peer at `address`.
+    fn connect(address: SocketAddr) -> impl Future<Output = Option<Self>> + Send;
 }
 
 pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
@@ -35,7 +36,7 @@ pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
 }
 
-pub trait JoinSet<T>: Unpin + Stream<Item = T> {
+pub trait JoinSet<T>: Stream<Item = T> + Unpin {
     /// Returns whether the `JoinSet` is empty.
     fn is_empty(&self) -> bool;
 

@@ -216,6 +216,7 @@ impl AsRef<[u8]> for EphemeralPublicKey {
 }
 
 /// Signing private key.
+#[derive(Clone)]
 pub enum SigningPrivateKey {
     /// EdDSA.
     Ed25519(ed25519_dalek::SigningKey),

@@ -24,6 +24,7 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatE
 
 use std::{
     future::Future,
+    net::SocketAddr,
     pin::{pin, Pin},
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -100,7 +101,7 @@ impl AsyncWrite for TokioTcpStream {
 }
 
 impl TcpStream for TokioTcpStream {
-    async fn connect(address: &str) -> Option<Self> {
+    async fn connect(address: SocketAddr) -> Option<Self> {
         net::TcpStream::connect(address)
             .await
             .map_err(|error| {
@@ -110,15 +111,12 @@ impl TcpStream for TokioTcpStream {
             .ok()
             .map(|stream| Self::new(stream))
     }
-
-    async fn close(&mut self) {
-        let _ = self.0.get_mut().shutdown().await;
-    }
 }
 
 pub struct TokioTcpListener(net::TcpListener);
 
 impl TcpListener<TokioTcpStream> for TokioTcpListener {
+    // TODO: can be made sync with `socket2`
     async fn bind(address: &str) -> Option<Self> {
         net::TcpListener::bind(&address)
             .await

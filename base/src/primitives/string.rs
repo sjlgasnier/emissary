@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+// TODO: dx of `Str` needs a lot of work!
+
 use crate::{primitives::LOG_TARGET, Error};
 
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};

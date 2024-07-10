@@ -241,7 +241,9 @@ impl Message {
                     floodfill = ?bytes[3] & 1 == 1,
                     "parse router info block",
                 );
-                assert!(bytes[3] == 0);
+
+                assert!(bytes[3] == 0, "floodfill");
+                assert!(size + 3 == bytes.len(), "more packets");
 
                 (bytes.len() >= size).then(|| Self::RouterInfo {
                     floodfill_request: bytes[3] & 1 == 1,

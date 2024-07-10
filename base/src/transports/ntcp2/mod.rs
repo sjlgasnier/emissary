@@ -20,7 +20,7 @@ use crate::{
     crypto::{
         base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
-    primitives::{RouterInfo, Str},
+    primitives::{RouterAddress, RouterInfo, Str},
     runtime::{JoinSet, Runtime, TcpListener, TcpStream},
     transports::{
         ntcp2::{
@@ -28,20 +28,21 @@ use crate::{
             message::Message,
             session::{Ntcp2Session, SessionManager},
         },
-        Transport, TransportEvent,
+        SubsystemHandle, Transport, TransportEvent,
     },
 };
 
 use futures::{AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
+use hashbrown::HashMap;
+use thingbuf::mpsc::Sender;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
     marker::PhantomData,
     pin::Pin,
     str::FromStr,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
-use hashbrown::HashMap;
 
 mod listener;
 mod message;
@@ -50,22 +51,22 @@ mod session;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2";
 
-/// Noise protocol name;.
-const PROTOCOL_NAME: &str = "Noise_XKaesobfse+hs2+hs3_25519_ChaChaPoly_SHA256";
-
 /// NTCP2 transport.
 pub struct Ntcp2Transport<R: Runtime> {
-    /// Session manager.
-    session_manager: SessionManager<R>,
-
     /// NTCP2 connection listener.
     listener: Ntcp2Listener<R>,
 
     /// Pending connections.
     pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
 
-    /// Marker for `Runtime`.
-    _marker: PhantomData<R>,
+    /// Session manager.
+    session_manager: SessionManager<R>,
+
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
+
+    /// Waker.
+    waker: Option<Waker>,
 }
 
 impl<R: Runtime> Ntcp2Transport<R> {
@@ -75,6 +76,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
+        subsystem_handle: SubsystemHandle,
     ) -> crate::Result<Self> {
         // TODO: get port and host from `local_router_info`
 
@@ -89,21 +91,27 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
         Ok(Ntcp2Transport {
             listener,
-            session_manager,
             pending_handshakes: R::join_set(),
-            _marker: Default::default(),
+            session_manager,
+            subsystem_handle,
+            waker: None,
         })
-    }
-
-    /// Dial remote peer
-    pub fn dial(&mut self, router_info: RouterInfo) -> () {
-        todo!();
     }
 }
 
 impl<R: Runtime> Transport for Ntcp2Transport<R> {
-    fn dial(&mut self, router: RouterInfo) -> crate::Result<()> {
-        todo!();
+    fn connect(&mut self, router: RouterInfo) -> crate::Result<()> {
+        tracing::info!(
+            target: LOG_TARGET,
+            router = ?router.identity().hash(),
+            "negotiate ntcp2 session with peer",
+        );
+
+        let future = self.session_manager.create_session(router);
+        self.pending_handshakes.push(future);
+        self.waker.take().map(|waker| waker.wake());
+
+        Ok(())
     }
 }
 
@@ -111,6 +119,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
     type Item = TransportEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.waker = Some(cx.waker().clone());
+
         match self.listener.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
@@ -120,8 +130,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     "inbound tcp connection, accept session",
                 );
 
-                let responder = self.session_manager.accept_session(stream);
-                self.pending_handshakes.push(responder);
+                let future = self.session_manager.accept_session(stream);
+                self.pending_handshakes.push(future);
             }
         }
 
@@ -138,13 +148,13 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     // in the background and infrom `TransportManager` of the new connection
                     let router = session.router();
 
+                    // TODO: give event tx to `session`
+
                     R::spawn(session.run());
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router }));
                 }
-                Some(Err(error)) => {
-                    todo!();
-                }
+                Some(Err(error)) => todo!(),
                 None => return Poll::Ready(None),
             }
         }

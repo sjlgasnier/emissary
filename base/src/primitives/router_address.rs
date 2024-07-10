@@ -22,10 +22,57 @@ use crate::{
 };
 
 use hashbrown::HashMap;
-use nom::{number::complete::be_u8, IResult};
+use nom::{
+    error::{make_error, ErrorKind},
+    number::complete::be_u8,
+    Err, IResult,
+};
 
 use alloc::{vec, vec::Vec};
 use core::{fmt, str::FromStr};
+
+/// Transport kind.
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum TransportKind {
+    /// NTCP2.
+    Ntcp2,
+
+    /// SSU2.
+    Ssu2,
+}
+
+impl TryFrom<Str> for TransportKind {
+    type Error = ();
+
+    fn try_from(value: Str) -> Result<Self, Self::Error> {
+        let value = value.string();
+
+        // TODO: verify that `2` exists
+        if value[0] == b'S' && value[1] == b'S' && value[2] == b'U' {
+            return Ok(TransportKind::Ssu2);
+        }
+
+        if value[0] == b'N'
+            && value[1] == b'T'
+            && value[2] == b'C'
+            && value[3] == b'P'
+            && value[4] == b'2'
+        {
+            return Ok(TransportKind::Ntcp2);
+        }
+
+        Err(())
+    }
+}
+
+impl TransportKind {
+    fn serialize(&self) -> Vec<u8> {
+        match self {
+            Self::Ntcp2 => Str::from_str("NTCP2").expect("to succeed").serialize(),
+            Self::Ssu2 => Str::from_str("NTCP2").expect("to succeed").serialize(),
+        }
+    }
+}
 
 /// Router address information.
 //
@@ -39,7 +86,7 @@ pub struct RouterAddress {
     expires: Date,
 
     /// Transport.
-    transport: Str,
+    transport: TransportKind,
 
     /// Options.
     options: HashMap<Str, Str>,
@@ -49,7 +96,7 @@ impl fmt::Display for RouterAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RouterAddress (cost {}, transport {}, num options {})\n",
+            "RouterAddress (cost {}, transport {:?}, num options {})\n",
             self.cost,
             self.transport,
             self.options.len()
@@ -77,7 +124,7 @@ impl RouterAddress {
         Self {
             cost: 10,
             expires: Date::new(0),
-            transport: Str::from_str("NTCP2").unwrap(),
+            transport: TransportKind::Ntcp2,
             options,
         }
     }
@@ -109,7 +156,7 @@ impl RouterAddress {
         Self {
             cost: 10,
             expires: Date::new(0),
-            transport: Str::from_str("NTCP2").unwrap(),
+            transport: TransportKind::Ntcp2,
             options,
         }
     }
@@ -126,7 +173,8 @@ impl RouterAddress {
             RouterAddress {
                 cost,
                 expires,
-                transport,
+                transport: TransportKind::try_from(transport)
+                    .map_err(|_| Err::Error(make_error(input, ErrorKind::Fail)))?,
                 options: Mapping::into_hashmap(options),
             },
         ))
@@ -147,7 +195,7 @@ impl RouterAddress {
             .flatten()
             .collect::<Vec<_>>();
 
-        let transport = self.transport.clone().serialize();
+        let transport = self.transport.serialize();
         let size = (options.len() as u16).to_be_bytes().to_vec();
         let mut out = vec![0u8; 1 + 8 + transport.len() + options.len() + 2];
 
@@ -167,7 +215,7 @@ impl RouterAddress {
     }
 
     /// Get address transport.
-    pub fn transport(&self) -> &Str {
+    pub fn transport(&self) -> &TransportKind {
         &self.transport
     }
 

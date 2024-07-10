@@ -21,21 +21,32 @@
 //! https://geti2p.net/spec/ntcp2#overview
 //!
 //! Implementation refers to `ck` as `chaining_key` and to `h` as `state`.
+//!
+//1 This implementation also refers to Alice as initiator and to Bob as responder.
+//!
+//! [`SessionManager::create_session()`] and [`SessionManager::create_session()`]
+//! return futures which negotiate connection for initiators and responders, respectively.
+//!
+//! These two functions do not themselves implement code from the specification in order
+//! to prevent mixing that code with I/O code. Handshake implementations for initiator
+//! and responder can be found from `initiator.rs` and `responder.rs`.
 
 use crate::{
     crypto::{
-        sha256::Sha256, siphash::SipHash, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
+        base64_decode, sha256::Sha256, siphash::SipHash, SigningPrivateKey, StaticPrivateKey,
+        StaticPublicKey,
     },
-    primitives::RouterInfo,
-    runtime::Runtime,
+    primitives::{RouterInfo, Str, TransportKind},
+    runtime::{Runtime, TcpStream},
     transports::ntcp2::session::{initiator::Initiator, responder::Responder},
+    Error,
 };
 
 use futures::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use alloc::{vec, vec::Vec};
-use core::future::Future;
+use core::{future::Future, net::SocketAddr, str::FromStr};
 
 mod active;
 mod initiator;
@@ -185,24 +196,122 @@ impl<R: Runtime> SessionManager<R> {
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
     pub fn create_session(
         &self,
-        local_info: Vec<u8>,
-        local_static_key: StaticPrivateKey,
-        remote_static_key: &StaticPublicKey,
-        router_hash: Vec<u8>,
-        iv: Vec<u8>,
-    ) -> crate::Result<(Initiator, Vec<u8>)> {
-        Initiator::new::<R>(
-            self.outbound_initial_state.clone(),
-            self.chaining_key.clone(),
-            local_info,
-            local_static_key,
-            remote_static_key,
-            router_hash,
-            iv,
-        )
+        router: RouterInfo,
+    ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
+        let local_info = self.local_router_info.serialize(&self.local_signing_key);
+        let local_router_hash = self.local_router_info.identity().hash().to_vec();
+        let local_key = self.local_key.clone();
+        let outbound_initial_state = self.outbound_initial_state.clone();
+        let chaining_key = self.chaining_key.clone();
+        let runtime = self.runtime.clone();
+
+        async move {
+            let (remote_key, iv, socket_address) = {
+                let ntcp2 = router
+                    .addresses()
+                    .get(&TransportKind::Ntcp2)
+                    .ok_or(Error::NotSupported)?;
+
+                let static_key = ntcp2
+                    .options()
+                    .get(&Str::from_str("s").expect("to succeed"))
+                    .ok_or_else(|| {
+                        tracing::warn!(target: LOG_TARGET, "static key missing from ntcp2 info");
+                        Error::InvalidData
+                    })?;
+
+                let iv = ntcp2
+                    .options()
+                    .get(&Str::from_str("i").expect("to succeed"))
+                    .ok_or_else(|| {
+                        tracing::warn!(target: LOG_TARGET, "iv missing from ntcp2 info");
+                        Error::InvalidData
+                    })?;
+
+                // `format!()` is not available in `no_std`
+                // so socket address has to be constructed manually
+                //
+                // TODO: the `primitives` apis need a lot of work lol
+                // TODO: maybe add common getters for `RouterAddress`
+                let host = ntcp2
+                    .options()
+                    .get(&Str::from_str("host").expect("to succeed"))
+                    .ok_or_else(|| {
+                        tracing::warn!(target: LOG_TARGET, "host missing from ntcp2 info");
+                        Error::InvalidData
+                    })?;
+
+                // let host = core::str::from_utf8(host.string())
+                //     .unwrap()
+                //     .parse::<core::net::IpAddr>()
+                //     .unwrap();
+                let host = "127.0.0.1".parse::<core::net::IpAddr>().unwrap();
+
+                let port = ntcp2
+                    .options()
+                    .get(&Str::from_str("port").expect("to succeed"))
+                    .ok_or_else(|| {
+                        tracing::warn!(target: LOG_TARGET, "port missing from ntcp2 info");
+                        Error::InvalidData
+                    })?;
+
+                let port = core::str::from_utf8(port.string())
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap();
+
+                (
+                    StaticPublicKey::from_bytes(base64_decode(static_key.string())).unwrap(),
+                    base64_decode(iv.string()),
+                    core::net::SocketAddr::new(host, port),
+                )
+            };
+
+            tracing::trace!(
+                target: LOG_TARGET,
+                ?socket_address,
+                "start dialing remote peer",
+            );
+
+            let mut stream = R::TcpStream::connect(socket_address).await.unwrap();
+            let router_hash = router.identity().hash().to_vec();
+
+            // create `SessionRequest` message and send it remote peer
+            let (mut initiator, message) = Initiator::new::<R>(
+                outbound_initial_state,
+                chaining_key,
+                local_info,
+                local_key,
+                &remote_key,
+                router_hash,
+                iv,
+            )?;
+            stream.write_all(&message).await?;
+
+            // read `SessionCreated` and decrypt & parse it to find padding length
+            let mut reply = alloc::vec![0u8; 64];
+            stream.read_exact(&mut reply).await?;
+
+            let padding_len = initiator.register_session_confirmed(&reply)?;
+
+            // read padding and finalize session by sending `SessionConfirmed`
+            let mut reply = alloc::vec![0u8; padding_len];
+            stream.read_exact(&mut reply).await?;
+
+            let (mut key_context, message) = initiator.finalize(&reply)?;
+            stream.write_all(&message).await?;
+
+            Ok(Ntcp2Session::<R>::new(
+                Role::Initiator,
+                router,
+                runtime.clone(),
+                stream,
+                key_context,
+            ))
+        }
     }
 
-    /// Accept inbound TCP connection and negotiate a NTCP2 session parameters for it.
+    /// Accept inbound TCP connection and negotiate NTCP2 session parameters for it.
     pub fn accept_session(
         &self,
         mut stream: R::TcpStream,
@@ -222,8 +331,9 @@ impl<R: Runtime> SessionManager<R> {
                 "read `SessionRequest` from socket",
             );
 
+            /// read first part of `SessionRequest` which has fixed length
             let mut message = vec![0u8; 64];
-            stream.read_exact(&mut message).await.unwrap();
+            stream.read_exact(&mut message).await?;
 
             let (mut responder, padding_len) = Responder::new::<R>(
                 inbound_initial_state.clone(),
@@ -234,26 +344,16 @@ impl<R: Runtime> SessionManager<R> {
                 message,
             )?;
 
-            tracing::trace!(
-                target: LOG_TARGET,
-                ?padding_len,
-                "read padding for `SessionRequest`",
-            );
-
+            // read padding and create session if the peer is accepted
             let mut padding = alloc::vec![0u8; padding_len];
-            stream.read_exact(&mut padding).await.unwrap();
+            stream.read_exact(&mut padding).await?;
 
-            let (message, message_len) = responder.create_session::<R>(padding).unwrap();
-            stream.write_all(&message).await.unwrap();
+            let (message, message_len) = responder.create_session::<R>(padding)?;
+            stream.write_all(&message).await?;
 
-            tracing::trace!(
-                target: LOG_TARGET,
-                m3_p2_len = ?message_len,
-                "read `SessionConfirmed` message",
-            );
-
+            // read `SessionConfirmed` message and finalize session
             let mut message = alloc::vec![0u8; message_len];
-            stream.read_exact(&mut message).await.unwrap();
+            stream.read_exact(&mut message).await?;
 
             match responder.finalize(message) {
                 Ok((key_context, router)) => {
@@ -273,8 +373,8 @@ impl<R: Runtime> SessionManager<R> {
                         ?error,
                         "failed to accept session",
                     );
+                    let _ = AsyncWriteExt::close(&mut stream).await;
 
-                    let _ = stream.close().await;
                     Err(error)
                 }
             }

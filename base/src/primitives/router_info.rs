@@ -32,6 +32,8 @@ use nom::{
 use alloc::{vec, vec::Vec};
 use core::str::FromStr;
 
+use super::router_address::TransportKind;
+
 /// Router information
 //
 // TODO: this should be cheaply clonable
@@ -44,7 +46,7 @@ pub struct RouterInfo {
     published: Date,
 
     /// Router addresses.
-    addresses: Vec<RouterAddress>,
+    addresses: HashMap<TransportKind, RouterAddress>,
 
     /// Router options.
     options: HashMap<Str, Str>,
@@ -59,8 +61,8 @@ impl core::fmt::Display for RouterInfo {
         write!(f, "published = {:?}\n", &self.published)?;
         write!(f, "addresess:\n")?;
 
-        for address in &self.addresses {
-            write!(f, "--> {address}")?;
+        for (key, address) in &self.addresses {
+            write!(f, "--> {key:?} => {address}")?;
         }
 
         write!(f, "options:\n")?;
@@ -98,7 +100,7 @@ impl RouterInfo {
         RouterInfo {
             identity,
             published: Date::new(now),
-            addresses: vec![ntcp2],
+            addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2)]),
             options,
         }
     }
@@ -107,12 +109,12 @@ impl RouterInfo {
         let (rest, identity) = RouterIdentity::parse_frame(input.as_ref())?;
         let (rest, published) = Date::parse_frame(rest)?;
         let (mut rest, num_addresses) = be_u8(rest)?;
-        let mut addresses = Vec::<RouterAddress>::new();
+        let mut addresses = HashMap::<TransportKind, RouterAddress>::new();
 
         for _ in 0..num_addresses {
             let (_rest, address) = RouterAddress::parse_frame(rest)?;
 
-            addresses.push(address);
+            addresses.insert(*address.transport(), address);
             rest = _rest;
         }
 
@@ -143,11 +145,15 @@ impl RouterInfo {
         ))
     }
 
-    // TODO: zzz
+    // TODO: ugliest thing i've seen in my life
     pub fn serialize(&self, signing_key: &SigningPrivateKey) -> Vec<u8> {
         let identity = self.identity.serialize();
         let published = self.published.serialize();
-        let ntcp2 = self.addresses[0].serialize();
+        let ntcp2 = self
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .serialize();
         let options = self
             .options
             .clone()
@@ -182,7 +188,7 @@ impl RouterInfo {
     }
 
     /// Get reference to router addresses.
-    pub fn addresses(&self) -> &Vec<RouterAddress> {
+    pub fn addresses(&self) -> &HashMap<TransportKind, RouterAddress> {
         &self.addresses
     }
 
@@ -216,35 +222,53 @@ mod tests {
         assert_eq!(router_info.addresses.len(), 2);
 
         // ssu
-        assert_eq!(router_info.addresses[0].cost(), 10);
         assert_eq!(
-            router_info.addresses[0].transport(),
-            &Str::from_str("SSU").unwrap()
+            router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .cost(),
+            10
         );
         assert_eq!(
-            router_info.addresses[0]
+            router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
                 .options()
                 .get(&Str::from_str("host").unwrap()),
             Some(&Str::from_str("217.70.194.82").unwrap())
         );
         assert_eq!(
-            router_info.addresses[0]
+            router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
                 .options()
                 .get(&Str::from_str("port").unwrap()),
             Some(&Str::from_str("10994").unwrap())
         );
 
         // ntcp2
-        assert_eq!(router_info.addresses[1].cost(), 14);
         assert_eq!(
-            router_info.addresses[1].transport(),
-            &Str::from_str("NTCP2").unwrap()
+            router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .cost(),
+            14
         );
-        assert!(router_info.addresses[1]
+        assert!(router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
             .options()
             .get(&Str::from_str("host").unwrap())
             .is_none());
-        assert!(router_info.addresses[1]
+        assert!(router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
             .options()
             .get(&Str::from_str("port").unwrap())
             .is_none());
@@ -274,38 +298,56 @@ mod tests {
         assert_eq!(router_info.addresses.len(), 2);
 
         // ssu
-        assert_eq!(router_info.addresses[0].cost(), 10);
         assert_eq!(
-            router_info.addresses[0].transport(),
-            &Str::from_str("SSU").unwrap()
+            router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .cost(),
+            10
         );
         assert_eq!(
-            router_info.addresses[0]
+            router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
                 .options()
                 .get(&Str::from_str("host").unwrap()),
             Some(&Str::from_str("68.202.112.209").unwrap())
         );
         assert_eq!(
-            router_info.addresses[0]
+            router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
                 .options()
                 .get(&Str::from_str("port").unwrap()),
             Some(&Str::from_str("11331").unwrap())
         );
 
         // ntcp2
-        assert_eq!(router_info.addresses[1].cost(), 3);
         assert_eq!(
-            router_info.addresses[1].transport(),
-            &Str::from_str("NTCP2").unwrap()
+            router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .cost(),
+            3
         );
         assert_eq!(
-            router_info.addresses[1]
+            router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
                 .options()
                 .get(&Str::from_str("host").unwrap()),
             Some(&Str::from_str("68.202.112.209").unwrap())
         );
         assert_eq!(
-            router_info.addresses[1]
+            router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
                 .options()
                 .get(&Str::from_str("port").unwrap()),
             Some(&Str::from_str("11331").unwrap())

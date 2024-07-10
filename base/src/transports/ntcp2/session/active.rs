@@ -32,6 +32,9 @@ use crate::{
 
 use futures::AsyncReadExt;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::ntcp2::active";
+
 /// Active NTCP2 session.
 pub struct Ntcp2Session<R: Runtime> {
     /// Role of the session.
@@ -94,6 +97,8 @@ impl<R: Runtime> Ntcp2Session<R> {
 
     /// Start [`Session`] event loop.
     pub async fn run(mut self) {
+        tracing::debug!(target: LOG_TARGET, "start ntcp2 event loop");
+
         loop {
             let mut reply = alloc::vec![0u8; 2];
             self.stream.read_exact(&mut reply).await.unwrap();

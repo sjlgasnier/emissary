@@ -30,6 +30,9 @@ use core::{
     task::{Context, Poll},
 };
 
+// TODO: fix listen address
+// TODO: support both ipv4 and ipv6
+
 /// NTCP2 listener.
 pub struct Ntcp2Listener<R: Runtime> {
     /// TCP Listener.
@@ -39,7 +42,6 @@ pub struct Ntcp2Listener<R: Runtime> {
 impl<R: Runtime> Ntcp2Listener<R> {
     /// Create new [`Ntcp2Listener`].
     pub async fn new(address: String, port: u16) -> crate::Result<Self> {
-        // TODO: fix listen address
         let mut listener = R::TcpListener::bind("127.0.0.1:8888").await.unwrap();
 
         tracing::trace!(
@@ -172,19 +174,6 @@ impl<R: Runtime> Stream for Ntcp2Listener<R> {
     type Item = R::TcpStream;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // // let this = self.project();
-
-        // let _ = self.listener.poll_accept(cx);
-        // // self.listener.project();
-        // // let this: Pin<&mut Self> = Pin::into_inner(self);
-
-        // todo!();
-        // match futures::ready!(self.listener.poll_accept(cx)) {
-        //     None => return Poll::Ready(None),
-        //     Some()
-        //     _ => todo!(),
-        // }
-
         self.listener.poll_accept(cx).map(|value| value)
     }
 }

@@ -22,10 +22,12 @@ use core::fmt;
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
     Chacha20Poly1305(chacha20poly1305::Error),
+    IoError(futures::io::Error),
     Socket,
     InvalidData,
     InvalidState,
     NonceOverflow,
+    NotSupported,
 }
 
 impl fmt::Display for Error {
@@ -37,6 +39,8 @@ impl fmt::Display for Error {
             Self::InvalidData => write!(f, "invalid data"),
             Self::InvalidState => write!(f, "invalid state"),
             Self::NonceOverflow => write!(f, "nonce overflow"),
+            Self::IoError(error) => write!(f, "i/o error: {error:?}"),
+            Self::NotSupported => write!(f, "protocol or operation not supported"),
         }
     }
 }
@@ -50,5 +54,11 @@ impl From<ed25519_dalek::ed25519::Error> for Error {
 impl From<chacha20poly1305::Error> for Error {
     fn from(value: chacha20poly1305::Error) -> Self {
         Error::Chacha20Poly1305(value)
+    }
+}
+
+impl From<futures::io::Error> for Error {
+    fn from(value: futures::io::Error) -> Self {
+        Error::IoError(value)
     }
 }
