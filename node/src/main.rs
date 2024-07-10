@@ -49,9 +49,7 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .unwrap();
 
-            while let Some(event) = router.next().await {
-                tracing::info!("event: {event:?}");
-            }
+            let _ = router.await;
         }
         Some(Command::Reseed { file }) => match config.reseed(file) {
             Ok(num_routers) => tracing::info!(

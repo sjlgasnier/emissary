@@ -1,11 +1,30 @@
-use emissary::runtime::{Runtime, TcpListener, TcpStream};
-use futures::{AsyncRead, AsyncWrite};
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+use emissary::runtime::{JoinSet, Runtime, TcpListener, TcpStream};
+use futures::{AsyncRead, AsyncWrite, Stream};
 use rand_core::{CryptoRng, RngCore};
-use tokio::{io::AsyncWriteExt, net};
+use tokio::{io::AsyncWriteExt, net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
     future::Future,
+    net::SocketAddr,
     pin::{pin, Pin},
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -82,7 +101,7 @@ impl AsyncWrite for TokioTcpStream {
 }
 
 impl TcpStream for TokioTcpStream {
-    async fn connect(address: &str) -> Option<Self> {
+    async fn connect(address: SocketAddr) -> Option<Self> {
         net::TcpStream::connect(address)
             .await
             .map_err(|error| {
@@ -92,15 +111,12 @@ impl TcpStream for TokioTcpStream {
             .ok()
             .map(|stream| Self::new(stream))
     }
-
-    async fn close(&mut self) {
-        let _ = self.0.get_mut().shutdown().await;
-    }
 }
 
 pub struct TokioTcpListener(net::TcpListener);
 
 impl TcpListener<TokioTcpStream> for TokioTcpListener {
+    // TODO: can be made sync with `socket2`
     async fn bind(address: &str) -> Option<Self> {
         net::TcpListener::bind(&address)
             .await
@@ -108,18 +124,45 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
             .map(|listener| TokioTcpListener(listener))
     }
 
-    async fn accept(&mut self) -> Option<TokioTcpStream> {
-        self.0
-            .accept()
-            .await
-            .ok()
-            .map(|(stream, _)| TokioTcpStream::new(stream))
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
+        match futures::ready!(self.0.poll_accept(cx)) {
+            Err(_) => return Poll::Ready(None),
+            Ok((stream, _)) => return Poll::Ready(Some(TokioTcpStream::new(stream))),
+        }
+    }
+}
+
+pub struct TokioJoinSet<T>(task::JoinSet<T>);
+
+impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn push<F>(&mut self, future: F)
+    where
+        F: Future<Output = T> + Send + 'static,
+        F::Output: Send,
+    {
+        let _ = self.0.spawn(future);
+    }
+}
+
+impl<T: Send + 'static> Stream for TokioJoinSet<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match futures::ready!(self.0.poll_join_next(cx)) {
+            None | Some(Err(_)) => Poll::Ready(None),
+            Some(Ok(value)) => Poll::Ready(Some(value)),
+        }
     }
 }
 
 impl Runtime for TokioRuntime {
     type TcpStream = TokioTcpStream;
     type TcpListener = TokioTcpListener;
+    type JoinSet<T: Send + 'static> = TokioJoinSet<T>;
 
     fn spawn<F>(future: F)
     where
@@ -129,11 +172,17 @@ impl Runtime for TokioRuntime {
         tokio::spawn(future);
     }
 
-    fn time_since_epoch() -> Option<Duration> {
-        SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
+    fn time_since_epoch() -> Duration {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("to succeed")
     }
 
     fn rng() -> impl RngCore + CryptoRng {
         rand_core::OsRng
+    }
+
+    fn join_set<T: Send + 'static>() -> Self::JoinSet<T> {
+        TokioJoinSet(task::JoinSet::<T>::new())
     }
 }

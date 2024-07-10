@@ -22,14 +22,27 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
+    primitives::RouterInfo,
     runtime::Runtime,
-    transports::ntcp2::{message::Message, session::KeyContext},
+    transports::ntcp2::{
+        message::Message,
+        session::{KeyContext, Role},
+    },
 };
 
 use futures::AsyncReadExt;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::ntcp2::active";
+
 /// Active NTCP2 session.
-pub struct Session<R: Runtime> {
+pub struct Ntcp2Session<R: Runtime> {
+    /// Role of the session.
+    role: Role,
+
+    /// `RouterInfo` of the remote peer.
+    router: RouterInfo,
+
     /// Runtime.
     runtime: R,
 
@@ -46,9 +59,15 @@ pub struct Session<R: Runtime> {
     sip: SipHash,
 }
 
-impl<R: Runtime> Session<R> {
+impl<R: Runtime> Ntcp2Session<R> {
     /// Create new active NTCP2 [`Session`].
-    pub fn new(runtime: R, stream: R::TcpStream, key_context: KeyContext) -> Self {
+    pub fn new(
+        role: Role,
+        router: RouterInfo,
+        runtime: R,
+        stream: R::TcpStream,
+        key_context: KeyContext,
+    ) -> Self {
         let KeyContext {
             send_key,
             recv_key,
@@ -56,6 +75,8 @@ impl<R: Runtime> Session<R> {
         } = key_context;
 
         Self {
+            role,
+            router,
             runtime,
             stream,
             send_cipher: ChaChaPoly::new(&send_key),
@@ -64,27 +85,41 @@ impl<R: Runtime> Session<R> {
         }
     }
 
+    /// Get role of the session.
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Get `RouterInfo` of the remote peer.
+    pub fn router(&self) -> RouterInfo {
+        self.router.clone()
+    }
+
     /// Start [`Session`] event loop.
     pub async fn run(mut self) {
-        let mut reply = alloc::vec![0u8; 2];
-        self.stream.read_exact(&mut reply).await.unwrap();
-        let test = u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(reply).unwrap());
+        tracing::debug!(target: LOG_TARGET, "start ntcp2 event loop");
 
-        let len = self.sip.deobfuscate(test);
+        loop {
+            let mut reply = alloc::vec![0u8; 2];
+            self.stream.read_exact(&mut reply).await.unwrap();
+            let test = u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(reply).unwrap());
 
-        tracing::info!("read {len} bytes from socket");
+            let len = self.sip.deobfuscate(test);
 
-        let mut test = alloc::vec![0u8; len as usize];
-        self.stream.read_exact(&mut test).await.unwrap();
+            tracing::info!("read {len} bytes from socket");
 
-        let data_block = self.recv_cipher.decrypt(test).unwrap();
+            let mut test = alloc::vec![0u8; len as usize];
+            self.stream.read_exact(&mut test).await.unwrap();
 
-        match Message::from_bytes(&data_block) {
-            Some(message) => {
-                tracing::info!("message received: {message:?}");
-            }
-            None => {
-                tracing::warn!("invalid message received, ignoring");
+            let data_block = self.recv_cipher.decrypt(test).unwrap();
+
+            match Message::from_bytes(&data_block) {
+                Some(message) => {
+                    tracing::info!("message received: {message:?}");
+                }
+                None => {
+                    tracing::warn!("invalid message received, ignoring");
+                }
             }
         }
     }

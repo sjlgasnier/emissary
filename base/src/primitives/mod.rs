@@ -21,7 +21,7 @@ const LOG_TARGET: &str = "emissary::primitives";
 
 pub use date::Date;
 pub use mapping::Mapping;
-pub use router_address::RouterAddress;
+pub use router_address::{RouterAddress, TransportKind};
 pub use router_identity::RouterIdentity;
 pub use router_info::RouterInfo;
 pub use string::Str;

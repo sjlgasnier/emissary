@@ -117,6 +117,7 @@ impl StaticPublicKey {
 }
 
 /// Static private key.
+#[derive(Clone)]
 pub enum StaticPrivateKey {
     /// x25519.
     X25519(x25519_dalek::StaticSecret),
@@ -215,6 +216,7 @@ impl AsRef<[u8]> for EphemeralPublicKey {
 }
 
 /// Signing private key.
+#[derive(Clone)]
 pub enum SigningPrivateKey {
     /// EdDSA.
     Ed25519(ed25519_dalek::SigningKey),

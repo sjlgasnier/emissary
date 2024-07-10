@@ -197,10 +197,7 @@ impl Initiator {
             padding_length: 32u16.to_be_bytes(),
             m3_p2_len: (local_info.len() as u16 + 20u16).to_be_bytes(),
             reserved1: 0u16.to_be_bytes(),
-            timestamp: (R::time_since_epoch()
-                .expect("to acquire system time successfully")
-                .as_secs() as u32)
-                .to_be_bytes(),
+            timestamp: (R::time_since_epoch().as_secs() as u32).to_be_bytes(),
             reserved2: 0u32.to_be_bytes(),
         }
         .as_bytes()
