@@ -30,7 +30,7 @@ use crate::{
     primitives::RouterInfo,
     runtime::Runtime,
     transports::ntcp2::{
-        message::Message,
+        message::MessageBlock,
         session::{InitiatorOptions, KeyContext, ResponderOptions},
     },
     Error,
@@ -437,8 +437,8 @@ impl Responder {
                     error
                 })?;
 
-            match Message::from_bytes(&router_info) {
-                Some(Message::RouterInfo { router_info, .. }) => {
+            match MessageBlock::parse(&router_info) {
+                Some(MessageBlock::RouterInfo { router_info, .. }) => {
                     RouterInfo::from_bytes(router_info).ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,

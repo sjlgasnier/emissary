@@ -25,7 +25,7 @@ use crate::{
     transports::{
         ntcp2::{
             listener::Ntcp2Listener,
-            message::Message,
+            message::MessageBlock,
             session::{Ntcp2Session, SessionManager},
         },
         SubsystemHandle, Transport, TransportEvent,

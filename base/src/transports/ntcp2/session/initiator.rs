@@ -29,7 +29,7 @@ use crate::{
     },
     runtime::Runtime,
     transports::ntcp2::{
-        message::Message,
+        message::MessageBlock,
         session::{InitiatorOptions, KeyContext, ResponderOptions},
     },
     Error,
@@ -397,7 +397,7 @@ impl Initiator {
                 .finalize();
 
             // h from message 3 part 1 is used as the associated data for the AEAD in message 3 part 2
-            let mut message = Message::new_router_info(&local_info);
+            let mut message = MessageBlock::new_router_info(&local_info);
 
             let mut cipher = ChaChaPoly::with_nonce(&k, 0);
             let tag2 = cipher.encrypt_with_ad(&state, &mut message)?;

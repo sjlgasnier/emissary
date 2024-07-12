@@ -20,6 +20,14 @@
 //!
 //! https://geti2p.net/spec/ntcp2#unencrypted-data
 
+use nom::{
+    bytes::complete::take,
+    error::{make_error, ErrorKind},
+    number::complete::{be_u16, be_u32, be_u8},
+    sequence::tuple,
+    Err, IResult,
+};
+
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
@@ -28,7 +36,7 @@ const LOG_TARGET: &str = "emissary::ntcp2::message";
 
 /// Block format identifier.
 #[derive(Debug)]
-enum BlockFormat {
+enum BlockType {
     /// Date time.
     DateTime,
 
@@ -48,8 +56,8 @@ enum BlockFormat {
     Padding,
 }
 
-impl BlockFormat {
-    /// Serialize [`BlockFormat`].
+impl BlockType {
+    /// Serialize [`BlockType`].
     fn as_u8(&self) -> u8 {
         match self {
             Self::DateTime => 0,
@@ -61,7 +69,7 @@ impl BlockFormat {
         }
     }
 
-    /// Deserialize [`BlockFormat`].
+    /// Deserialize [`BlockType`].
     fn from_u8(block: u8) -> Option<Self> {
         match block {
             0 => Some(Self::DateTime),
@@ -89,8 +97,8 @@ impl BlockFormat {
     }
 }
 
-/// NTCP2 message.
-pub enum Message {
+/// NTCP2 message block.
+pub enum MessageBlock<'a> {
     /// Date time update, used for time synchronization.
     DateTime {
         /// Time since Unix epoch, in seconds.
@@ -127,24 +135,24 @@ pub enum Message {
         floodfill_request: bool,
 
         /// Router info.
-        router_info: Vec<u8>,
+        router_info: &'a [u8],
     },
 
     /// I2NP message.
     I2Np {
         /// I2NP message type.
-        msg_type: u8,
+        message_type: u8,
 
         /// Message ID.
         message_id: u32,
 
-        /// Message expiration.
+        /// Short message expiration.
         ///
         /// Time since Unix epoch, in seconds.
-        expiration: u32,
+        short_expiration: u32,
 
-        /// Message.
-        message: Vec<u8>,
+        /// I2NP message body.
+        message: &'a [u8],
     },
 
     /// Session termination.
@@ -157,11 +165,11 @@ pub enum Message {
     },
 }
 
-impl fmt::Debug for Message {
+impl<'a> fmt::Debug for MessageBlock<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Self::DateTime { timestamp } => f
-                .debug_struct("Message::DateTime")
+                .debug_struct("MessageBlock::DateTime")
                 .field("timestamp", &timestamp)
                 .finish(),
             Self::Options {
@@ -173,7 +181,7 @@ impl fmt::Debug for Message {
                 t_delay,
                 r_deay,
             } => f
-                .debug_struct("Message::Options")
+                .debug_struct("MessageBlock::Options")
                 .field("t_min", &t_min)
                 .field("t_max", &t_max)
                 .field("r_min", &r_min)
@@ -186,26 +194,26 @@ impl fmt::Debug for Message {
                 floodfill_request,
                 router_info,
             } => f
-                .debug_struct("Message::RouterInfo")
+                .debug_struct("MessageBlock::RouterInfo")
                 .field("floodfill", &floodfill_request)
                 .field("router_info_len", &router_info.len())
                 .finish(),
             Self::I2Np {
-                msg_type,
+                message_type,
                 message_id,
-                expiration,
+                short_expiration,
                 ..
             } => f
-                .debug_struct("Message::I2NP")
-                .field("msg_type", &msg_type)
+                .debug_struct("MessageBlock::I2NP")
+                .field("message_type", &message_type)
                 .field("message_id", &message_id)
-                .field("expiration", &expiration)
+                .field("short_expiration", &short_expiration)
                 .finish_non_exhaustive(),
             Self::Termination {
                 valid_frames,
                 reason,
             } => f
-                .debug_struct("Message::Termination")
+                .debug_struct("MessageBlock::Termination")
                 .field("valid_frames", &valid_frames)
                 .field("reason", &reason)
                 .finish(),
@@ -213,69 +221,116 @@ impl fmt::Debug for Message {
     }
 }
 
-impl Message {
-    /// Try to create new [`Message`] from `bytes`.
-    //
-    // TODO: use `nom`?
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        match bytes[0] {
-            0 => {
-                let ts = TryInto::<[u8; 4]>::try_into(&bytes[3..5]).ok()?;
+impl<'a> MessageBlock<'a> {
+    /// Parse [`MessageBlock::DateTime`].
+    fn parse_date_time(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        let (rest, timestamp) = be_u32(input)?;
 
-                Some(Self::DateTime {
-                    timestamp: u32::from_be_bytes(ts),
-                })
-            }
-            1 => {
-                tracing::warn!("options not supported");
-                None
-            }
-            2 => {
-                let size =
-                    u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(&bytes[1..3]).ok()?) as usize;
+        Ok((rest, MessageBlock::DateTime { timestamp }))
+    }
 
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    block_len = ?size,
-                    input_len = ?bytes.len(),
-                    floodfill = ?bytes[3] & 1 == 1,
-                    "parse router info block",
-                );
+    /// Parse [`MessageBlock::`].
+    fn parse_options(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        todo!("options not supported");
+    }
 
-                assert!(bytes[3] == 0, "floodfill");
-                assert!(size + 3 == bytes.len(), "more packets");
+    /// Parse [`MessageBlock::RouterInfo`].
+    fn parse_router_info(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, flag) = be_u8(rest)?;
 
-                (bytes.len() >= size).then(|| Self::RouterInfo {
-                    floodfill_request: bytes[3] & 1 == 1,
-                    router_info: bytes[4..size + 3].to_vec(),
-                })
-            }
-            3 => {
-                tracing::warn!("i2np messages not supported");
-                None
-            }
-            4 => {
-                tracing::warn!("termination not supported");
-                None
-            }
-            block_id => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?block_id,
-                    "unrecognized block id",
-                );
+        // TODO: fix subtract with overflow
+        let (_, (router_info, rest)) =
+            tuple((take(size - 1), take(rest.len() - (size as usize - 1))))(rest)?;
 
-                None
-            }
+        tracing::trace!(
+            target: LOG_TARGET,
+            block_len = ?size,
+            input_len = ?input.len(),
+            floodfill = ?flag & 1 == 1,
+            "parse router info block",
+        );
+        assert!(flag == 0, "floodfill");
+
+        Ok((
+            rest,
+            MessageBlock::RouterInfo {
+                floodfill_request: flag & 1 == 1,
+                router_info,
+            },
+        ))
+    }
+
+    /// Parse [`MessageBlock::I2Np`].
+    fn parse_i2np(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, message_type) = be_u8(rest)?;
+        let (rest, message_id) = be_u32(rest)?;
+        let (rest, short_expiration) = be_u32(rest)?;
+        let (_, (message, rest)) = {
+            let size = size as usize - (1 + 2 * 4);
+
+            // TODO: fix subtract with overflow
+            tuple((take(size), take(input.len() - size as usize)))(input)?
+        };
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            block_len = ?size,
+            ?message_type,
+            ?message_id,
+            ?short_expiration,
+            "parse i2np message block",
+        );
+
+        Ok((
+            rest,
+            MessageBlock::I2Np {
+                message_type,
+                message_id,
+                short_expiration,
+                message,
+            },
+        ))
+    }
+
+    /// Parse [`MessageBlock::Termination`].
+    fn parse_termination(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        todo!("termination support not implemented");
+    }
+
+    /// Parse [`MessageBlock::Padding`].
+    fn parse_padding(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        todo!("padding support not implemented");
+    }
+
+    fn parse_inner(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        let (rest, block_type) = be_u8(input)?;
+
+        match BlockType::from_u8(block_type) {
+            None => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
+            Some(BlockType::DateTime) => Self::parse_date_time(rest),
+            Some(BlockType::Options) => Self::parse_options(rest),
+            Some(BlockType::RouterInfo) => Self::parse_router_info(rest),
+            Some(BlockType::I2Np) => Self::parse_i2np(rest),
+            Some(BlockType::Termination) => Self::parse_termination(rest),
+            Some(BlockType::Padding) => Self::parse_padding(rest),
         }
+    }
+
+    /// Try to parse `input` into an NTCP message block
+    //
+    // TODO: handle multiple message blocks
+    pub fn parse(input: &'a [u8]) -> Option<MessageBlock<'a>> {
+        Some(MessageBlock::parse_inner(input).ok()?.1)
     }
 
     /// Create new NTCP2 `RouterInfo` message block.
     pub fn new_router_info(router_info: &[u8]) -> Vec<u8> {
-        let mut out = vec![0u8; router_info.len() + BlockFormat::RouterInfo.header_size()];
+        let mut out = vec![0u8; router_info.len() + BlockType::RouterInfo.header_size()];
         let block_size = router_info.len() as u16 + 1u16; // router info length + 1 byte for the flag
 
-        out[0] = BlockFormat::RouterInfo.as_u8();
+        out[0] = BlockType::RouterInfo.as_u8();
         out[1..3].copy_from_slice(&block_size.to_be_bytes().to_vec());
         out[3] = 0;
         out[4..].copy_from_slice(&router_info);

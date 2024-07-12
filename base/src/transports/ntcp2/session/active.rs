@@ -25,7 +25,7 @@ use crate::{
     primitives::RouterInfo,
     runtime::Runtime,
     transports::ntcp2::{
-        message::Message,
+        message::MessageBlock,
         session::{KeyContext, Role},
     },
 };
@@ -113,7 +113,7 @@ impl<R: Runtime> Ntcp2Session<R> {
 
             let data_block = self.recv_cipher.decrypt(test).unwrap();
 
-            match Message::from_bytes(&data_block) {
+            match MessageBlock::parse(&data_block) {
                 Some(message) => {
                     tracing::info!("message received: {message:?}");
                 }
