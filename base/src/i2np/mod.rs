@@ -20,10 +20,24 @@
 //!
 //! https://geti2p.net/spec/i2np
 
+use nom::{
+    bytes::complete::take,
+    error::{make_error, ErrorKind},
+    number::complete::{be_u32, be_u8},
+    sequence::tuple,
+    Err, IResult,
+};
+
 use alloc::vec::Vec;
 
+use crate::primitives::Date;
+
+/// Garlic certificate length.
+const GARLIC_CERTIFICATE_LEN: usize = 3usize;
+
 /// Message type.
-enum MessageType {
+#[derive(Debug, Clone)]
+pub enum MessageType {
     DatabaseStore,
     DatabaseLookup,
     DatabaseSearchReply,
@@ -60,9 +74,33 @@ impl MessageType {
             Self::OutboundTunnelBuildReply => 26,
         }
     }
+
+    pub fn from_u8(msg_type: u8) -> Option<MessageType> {
+        match msg_type {
+            1 => Some(Self::DatabaseStore),
+            2 => Some(Self::DatabaseLookup),
+            3 => Some(Self::DatabaseSearchReply),
+            10 => Some(Self::DeliveryStatus),
+            11 => Some(Self::Garlic),
+            18 => Some(Self::TunnelData),
+            19 => Some(Self::TunnelGateway),
+            20 => Some(Self::Data),
+            21 => Some(Self::TunnelBuild),
+            22 => Some(Self::TunnelBuildReply),
+            23 => Some(Self::VariableTunnelBuild),
+            24 => Some(Self::VariableTunnelBuildReply),
+            25 => Some(Self::ShortTunnelBuild),
+            26 => Some(Self::OutboundTunnelBuildReply),
+            msg_type => {
+                tracing::warn!(?msg_type, "invalid message id");
+                None
+            }
+        }
+    }
 }
 
-/// Tunnel build
+/// Tunnel build record.
+#[derive(Debug, Clone)]
 pub struct TunnelBuildRecord<'a> {
     tunnel_id: u32,
     next_tunnel_id: u32,
@@ -79,24 +117,175 @@ pub struct TunnelBuildRecord<'a> {
     rest: &'a [u8],
 }
 
+#[derive(Debug, Clone)]
 pub struct ShortTunnelBuildRecord<'a> {
-    /// Data.
-    data: &'a [u8],
+    tunnel_id: u32,
+    next_tunnel_id: u32,
+    next_router_hash: &'a [u8],
+    flags: u8,
+    reserved: &'a [u8],
+    encryption_type: u8,
+    request_time: u32,
+    request_expiration: u32,
+    next_message_id: u32,
+    // TODO: rest options
+    // bytes    56-x: tunnel build options (Mapping)
+    // bytes     x-x: other data as implied by flags or options
+    // bytes   x-153: random padding (see below)
 }
 
+#[derive(Debug, Clone)]
 pub struct OutboundTunnelBuildReply<'a> {
     /// Data.
     data: &'a [u8],
 }
 
+#[derive(Debug, Clone)]
+pub enum GarlicClove<'a> {
+    /// Clove meant for the local node
+    Local,
+
+    /// Clove meant for a `Destination`.
+    Destination {
+        /// Hash of the destination.
+        hash: &'a [u8],
+    },
+
+    /// Clove meant for a router.
+    Router {
+        /// Hash of the router.
+        hash: &'a [u8],
+    },
+
+    /// Clove meant for a tunnel.
+    Tunnel {
+        /// Hash of the tunnel.
+        hash: &'a [u8],
+
+        /// Tunnel ID, if `delivery_type` is [`DeliveryType::Router`].
+        tunnel_id: u32,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum I2NpMessageKind<'a> {
+    Tunnel(TunnelMessage<'a>),
+    NetDb(DatabaseMessage<'a>),
+    Garlic(Vec<GarlicClove<'a>>),
+    Dummy,
+}
+
+#[derive(Debug, Clone)]
+pub struct I2npMessage<'a> {
+    msg_id: u32,
+    expiration: u32,
+    kind: I2NpMessageKind<'a>,
+}
+
+impl<'a> Default for I2npMessage<'a> {
+    fn default() -> Self {
+        Self {
+            msg_id: 0u32,
+            expiration: 0u32,
+            kind: I2NpMessageKind::Dummy,
+        }
+    }
+}
+
+impl<'a> I2npMessage<'a> {
+    /// Parse [`GarlicGlove`].
+    fn parse_galic_clove(input: &'a [u8]) -> IResult<&'a [u8], GarlicClove<'a>> {
+        let (rest, flag) = be_u8(input)?;
+
+        assert!(flag >> 7 & 1 == 0, "encrypted garlic");
+        assert!(flag >> 4 & 1 == 0, "delay");
+
+        match (flag >> 5) & 0x3 {
+            0x00 => Ok((rest, GarlicClove::Local)),
+            0x01 => {
+                let (rest, hash) = take(32usize)(rest)?;
+
+                Ok((rest, GarlicClove::Destination { hash }))
+            }
+            0x02 => {
+                let (rest, hash) = take(32usize)(rest)?;
+
+                Ok((rest, GarlicClove::Router { hash }))
+            }
+            0x03 => {
+                let (rest, hash) = take(32usize)(rest)?;
+                let (rest, tunnel_id) = be_u32(rest)?;
+
+                Ok((rest, GarlicClove::Tunnel { hash, tunnel_id }))
+            }
+            _ => panic!("invalid garlic type"),
+        }
+    }
+
+    /// Parse [`I2NpMessageKind::Garlic`].
+    fn parse_garlic(input: &'a [u8]) -> IResult<&'a [u8], I2npMessage<'a>> {
+        let (rest, size) = be_u32(input)?;
+
+        // TODO: decrypt
+        let (mut rest, num_cloves) = be_u8(rest)?;
+
+        let (rest, cloves) = (0..num_cloves)
+            .try_fold(
+                (rest, Vec::<GarlicClove<'a>>::new()),
+                |(rest, mut cloves), _| {
+                    let (rest, clove) = Self::parse_galic_clove(rest).ok()?;
+                    cloves.push(clove);
+
+                    Some((rest, cloves))
+                },
+            )
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        let (rest, _certificate) = take(GARLIC_CERTIFICATE_LEN)(rest)?;
+        let (rest, message_id) = be_u32(rest)?;
+        let (rest, expiration) = Date::parse_frame(rest)?;
+
+        tracing::error!("size = {size}, input size = {}", input.len());
+
+        todo!();
+    }
+
+    fn parse_inner(
+        message_type: MessageType,
+        message_id: u32,
+        short_expiration: u32,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], I2npMessage<'a>> {
+        match message_type {
+            MessageType::Garlic => Self::parse_garlic(input),
+            message_type => todo!("unsupported message type: {message_type:?}"),
+        }
+    }
+
+    pub fn parse(message_type: MessageType, buffer: &'a [u8]) -> Option<I2npMessage<'a>> {
+        let parsed = Self::parse_inner(message_type, 1337u32, 1338u32, buffer)
+            .ok()?
+            .1;
+
+        Some(parsed)
+    }
+}
+
 // Tunneling-related message.
+#[derive(Debug, Clone)]
 pub enum TunnelMessage<'a> {
     /// Tunnel message.
-    Message {
+    Data {
         /// Tunnel ID.
         tunnel_id: u32,
 
         /// Data.
+        data: &'a [u8], // TODO: 1024
+    },
+
+    /// Garlic
+    Garlic {
+        // TODO: define
         data: &'a [u8],
     },
 
@@ -141,6 +330,7 @@ pub enum TunnelMessage<'a> {
 }
 
 /// NetDB-related message.
+#[derive(Debug, Clone)]
 pub enum DatabaseMessage<'a> {
     /// Database store request.
     Store {
