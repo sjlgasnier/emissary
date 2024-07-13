@@ -238,10 +238,7 @@ impl<'a> MessageBlock<'a> {
     fn parse_router_info(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
         let (rest, size) = be_u16(input)?;
         let (rest, flag) = be_u8(rest)?;
-
-        // TODO: fix subtract with overflow
-        let (_, (router_info, rest)) =
-            tuple((take(size - 1), take(rest.len() - (size as usize - 1))))(rest)?;
+        let (rest, router_info) = take(size - 1)(rest)?;
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -267,12 +264,7 @@ impl<'a> MessageBlock<'a> {
         let (rest, message_type) = be_u8(rest)?;
         let (rest, message_id) = be_u32(rest)?;
         let (rest, short_expiration) = be_u32(rest)?;
-        let (_, (message, rest)) = {
-            let size = size as usize - (1 + 2 * 4);
-
-            // TODO: fix subtract with overflow
-            tuple((take(size), take(input.len() - size as usize)))(input)?
-        };
+        let (rest, message) = take(size as usize - (1 + 2 * 4))(rest)?;
 
         tracing::trace!(
             target: LOG_TARGET,
