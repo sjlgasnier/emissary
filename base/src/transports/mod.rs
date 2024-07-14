@@ -285,7 +285,7 @@ impl<R: Runtime> Future for TransportManager<R> {
             let index = self.poll_index % len;
             self.poll_index += 1;
 
-            match self.transports[0].poll_next_unpin(cx) {
+            match self.transports[index].poll_next_unpin(cx) {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(event)) => {
