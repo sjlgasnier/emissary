@@ -23,20 +23,33 @@
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
-    number::complete::{be_u32, be_u8},
+    number::complete::{be_u16, be_u32, be_u8},
     sequence::tuple,
     Err, IResult,
 };
 
 use alloc::vec::Vec;
+use core::fmt;
 
-use crate::primitives::Date;
+use crate::{crypto::base64_encode, primitives::Date, transports::SubsystemKind};
 
 /// Garlic certificate length.
 const GARLIC_CERTIFICATE_LEN: usize = 3usize;
 
+// Truncated identity hash length.
+const TRUNCATED_IDENITTY_LEN: usize = 16usize;
+
+// x25519 ephemeral key length.
+const X25519_KEY_LENGTH: usize = 32usize;
+
+/// Encrypted build request length.
+const ENCRYPTED_BUILD_REQUEST_LEN: usize = 464usize;
+
+/// Poly1305 authentication tag length.
+const POLY1305_TAG_LENGTH: usize = 16usize;
+
 /// Message type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum MessageType {
     DatabaseStore,
     DatabaseLookup,
@@ -100,24 +113,49 @@ impl MessageType {
 }
 
 /// Tunnel build record.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TunnelBuildRecord<'a> {
+    /// Tunnel ID.
     tunnel_id: u32,
+
+    /// Next tunnel ID.
     next_tunnel_id: u32,
+
+    /// Next router hash.
     next_router_hash: &'a [u8],
+
+    /// Tunnel layer key (AES-256)
     tunnel_layer_key: &'a [u8],
+
+    /// Tunnel layer IV (AES-256)
     tunnel_iv_key: &'a [u8],
+
+    /// Tunnel reply key (AES-256)
     tunnel_reply_key: &'a [u8],
+
+    /// Tunnel reply IV (AES-256)
     tunnel_reply_iv: &'a [u8],
+
+    /// Flags.
     flags: u8,
+
+    /// Unused flags.
     reserved: [u8; 3],
+
+    /// Request time, in minutes since Unix epoch.
     request_time: u32,
+
+    /// Tunnel expiration, in seconds since creation.
     request_expiration: u32,
+
+    // Next message ID.
     next_message_id: u32,
+
+    /// TODO:
     rest: &'a [u8],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ShortTunnelBuildRecord<'a> {
     tunnel_id: u32,
     next_tunnel_id: u32,
@@ -134,13 +172,13 @@ pub struct ShortTunnelBuildRecord<'a> {
     // bytes   x-153: random padding (see below)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OutboundTunnelBuildReply<'a> {
     /// Data.
     data: &'a [u8],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum GarlicClove<'a> {
     /// Clove meant for the local node
     Local,
@@ -167,29 +205,18 @@ pub enum GarlicClove<'a> {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum I2NpMessageKind<'a> {
     Tunnel(TunnelMessage<'a>),
     NetDb(DatabaseMessage<'a>),
-    Garlic(Vec<GarlicClove<'a>>),
     Dummy,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct I2npMessage<'a> {
     msg_id: u32,
     expiration: u32,
     kind: I2NpMessageKind<'a>,
-}
-
-impl<'a> Default for I2npMessage<'a> {
-    fn default() -> Self {
-        Self {
-            msg_id: 0u32,
-            expiration: 0u32,
-            kind: I2NpMessageKind::Dummy,
-        }
-    }
 }
 
 impl<'a> I2npMessage<'a> {
@@ -250,6 +277,23 @@ impl<'a> I2npMessage<'a> {
         todo!();
     }
 
+    fn parse_variable_tunnel_build_request(input: &'a [u8]) -> IResult<&'a [u8], I2npMessage<'a>> {
+        let (mut rest, num_records) = be_u8(input)?;
+
+        for _ in 0..num_records {
+            let (_rest, hash) = take(TRUNCATED_IDENITTY_LEN)(rest)?;
+            let (_rest, ephemeral_key) = take(X25519_KEY_LENGTH)(_rest)?;
+            let (_rest, payload) = take(ENCRYPTED_BUILD_REQUEST_LEN)(_rest)?;
+            let (_rest, mac_tag) = take(POLY1305_TAG_LENGTH)(_rest)?;
+            rest = _rest;
+
+            tracing::error!("request contains {num_records} many records");
+            tracing::error!("truncated hash = {:?}", base64_encode(hash));
+        }
+
+        todo!();
+    }
+
     fn parse_inner(
         message_type: MessageType,
         message_id: u32,
@@ -258,6 +302,7 @@ impl<'a> I2npMessage<'a> {
     ) -> IResult<&'a [u8], I2npMessage<'a>> {
         match message_type {
             MessageType::Garlic => Self::parse_garlic(input),
+            MessageType::VariableTunnelBuild => Self::parse_variable_tunnel_build_request(input),
             message_type => todo!("unsupported message type: {message_type:?}"),
         }
     }
@@ -272,20 +317,30 @@ impl<'a> I2npMessage<'a> {
 }
 
 // Tunneling-related message.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TunnelMessage<'a> {
-    /// Tunnel message.
+    /// Data message.
+    ///
+    /// Used by garlic messages/cloves.
     Data {
-        /// Tunnel ID.
-        tunnel_id: u32,
-
         /// Data.
-        data: &'a [u8], // TODO: 1024
+        data: &'a [u8],
     },
 
     /// Garlic
     Garlic {
-        // TODO: define
+        /// Garlic cloves.
+        cloves: Vec<GarlicClove<'a>>,
+    },
+
+    /// Tunnel data.
+    TunnelData {
+        /// Tunnel ID.
+        tunnel_id: u32,
+
+        /// Data.
+        ///
+        /// Length is fixed 1024 bytes.
         data: &'a [u8],
     },
 
@@ -310,7 +365,7 @@ pub enum TunnelMessage<'a> {
         records: Vec<TunnelBuildRecord<'a>>,
     },
 
-    /// Tunne build reply.
+    /// Tunnel build reply.
     BuildReply {
         /// Reply byte (accept/reject).
         reply: u8,
@@ -330,7 +385,7 @@ pub enum TunnelMessage<'a> {
 }
 
 /// NetDB-related message.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum DatabaseMessage<'a> {
     /// Database store request.
     Store {
@@ -395,4 +450,88 @@ pub enum DatabaseMessage<'a> {
         // SHA256 of the `RouterInfo` this reply was sent from.
         from: &'a [u8],
     },
+}
+
+/// Raw, unparsed I2NP message.
+///
+/// These messages are dispatched by the enabled transports
+/// to appropriate subsystems, based on `message_type`.
+#[derive(Clone)]
+pub struct RawI2npMessage {
+    /// Message type.
+    message_type: MessageType,
+
+    /// Message ID.
+    message_id: u32,
+
+    /// Expiration.
+    expiration: u32,
+
+    /// Raw, unparsed payload.
+    payload: Vec<u8>,
+}
+
+// TODO: remove & remove thingbuf zzz
+impl Default for RawI2npMessage {
+    fn default() -> Self {
+        Self {
+            message_type: MessageType::DatabaseStore,
+            message_id: 0u32,
+            expiration: 0u32,
+            payload: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Debug for RawI2npMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawI2npMessage")
+            .field("message_type", &self.message_type)
+            .field("message_id", &self.message_id)
+            .field("expiration", &self.expiration)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RawI2npMessage {
+    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, message_type) = be_u8(rest)?;
+        let (rest, message_id) = be_u32(rest)?;
+        let (rest, expiration) = be_u32(rest)?;
+        let (rest, payload) = take(size as usize - (1 + 2 * 4))(rest)?;
+        let message_type = MessageType::from_u8(message_type)
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((
+            rest,
+            RawI2npMessage {
+                message_type,
+                message_id,
+                expiration,
+                payload: payload.to_vec(),
+            },
+        ))
+    }
+
+    pub fn parse(input: &[u8]) -> Option<RawI2npMessage> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    pub fn message_id(&self) -> u32 {
+        self.message_id
+    }
+
+    pub fn message_type(&self) -> MessageType {
+        self.message_type
+    }
+
+    pub fn destination(&self) -> SubsystemKind {
+        match self.message_type {
+            MessageType::DatabaseStore
+            | MessageType::DatabaseLookup
+            | MessageType::DatabaseSearchReply => SubsystemKind::NetDb,
+            _ => SubsystemKind::Tunnel,
+        }
+    }
 }

@@ -22,11 +22,15 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
+    i2np::{I2npMessage, MessageType},
     primitives::RouterInfo,
     runtime::Runtime,
-    transports::ntcp2::{
-        message::MessageBlock,
-        session::{KeyContext, Role},
+    transports::{
+        ntcp2::{
+            message::MessageBlock,
+            session::{KeyContext, Role},
+        },
+        SubsystemHandle,
     },
 };
 
@@ -96,7 +100,7 @@ impl<R: Runtime> Ntcp2Session<R> {
     }
 
     /// Start [`Session`] event loop.
-    pub async fn run(mut self) {
+    pub async fn run(mut self, mut subsystem_handle: SubsystemHandle) {
         tracing::debug!(target: LOG_TARGET, "start ntcp2 event loop");
 
         loop {
@@ -114,8 +118,36 @@ impl<R: Runtime> Ntcp2Session<R> {
             let data_block = self.recv_cipher.decrypt(test).unwrap();
 
             match MessageBlock::parse(&data_block) {
+                Some(MessageBlock::I2Np { message }) => {
+                    let message_id = message.message_id();
+
+                    if let Err(error) = subsystem_handle.dispatch_message(message) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?message_id,
+                            ?error,
+                            "failed to deliver message to subsystem",
+                        );
+                    }
+                }
+                // Some(MessageBlock::I2Np {
+                //     message_type,
+                //     message_id,
+                //     short_expiration,
+                //     message,
+                // }) => {
+                //     match MessageType::from_u8(message_type) {
+                //         Some(MessageType::VariableTunnelBuild) => {
+                //             tracing::info!("parse variable tunnel build");
+                //             let _ = I2npMessage::parse(MessageType::VariableTunnelBuild, message);
+                //         }
+                //         message_type => tracing::info!("i2np message = {message_type:?}",),
+                //     }
+                //     // tracing::info!("message id = {message_id}");
+                //     // tracing::info!("bytes = {message:?}");
+                // }
                 Some(message) => {
-                    tracing::info!("message received: {message:?}");
+                    tracing::debug!("message received: {message:?}");
                 }
                 None => {
                     tracing::warn!("invalid message received, ignoring");

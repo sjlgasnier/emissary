@@ -57,8 +57,6 @@ pub struct Router<R: Runtime> {
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
     pub async fn new(runtime: R, config: Config, router: Vec<u8>) -> crate::Result<Self> {
-        tracing::debug!(target: LOG_TARGET, "start emissary");
-
         // TODO: ugly
         let router = RouterInfo::from_bytes(router).unwrap();
         let now = R::time_since_epoch().as_millis() as u64;
@@ -67,12 +65,19 @@ impl<R: Runtime> Router<R> {
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
         let local_router_info = RouterInfo::new(now, config);
 
+        tracing::info!(
+            target: LOG_TARGET,
+            router_hash = ?base64_encode(local_router_info.identity().hash()),
+            truncated_router_hash = ?base64_encode(&local_router_info.identity().hash()[..16]),
+            "start emissary",
+        );
+
         // create transport manager and initialize & start enabled transports
         //
         // note: order of initialization is important
         let mut transport_manager = TransportManager::new(
             runtime.clone(),
-            local_key,
+            local_key.clone(),
             local_signing_key,
             local_router_info,
         );
@@ -88,7 +93,7 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
-            let tunnel_manager = TunnelManager::new(transport_service);
+            let tunnel_manager = TunnelManager::new(transport_service, local_key);
 
             R::spawn(tunnel_manager);
         }

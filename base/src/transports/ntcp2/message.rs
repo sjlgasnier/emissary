@@ -31,6 +31,8 @@ use nom::{
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
+use crate::i2np::RawI2npMessage;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::message";
 
@@ -140,19 +142,8 @@ pub enum MessageBlock<'a> {
 
     /// I2NP message.
     I2Np {
-        /// I2NP message type.
-        message_type: u8,
-
-        /// Message ID.
-        message_id: u32,
-
-        /// Short message expiration.
-        ///
-        /// Time since Unix epoch, in seconds.
-        short_expiration: u32,
-
-        /// I2NP message body.
-        message: &'a [u8],
+        /// Raw, unparsed I2NP message.
+        message: RawI2npMessage,
     },
 
     /// Session termination.
@@ -198,17 +189,10 @@ impl<'a> fmt::Debug for MessageBlock<'a> {
                 .field("floodfill", &floodfill_request)
                 .field("router_info_len", &router_info.len())
                 .finish(),
-            Self::I2Np {
-                message_type,
-                message_id,
-                short_expiration,
-                ..
-            } => f
+            Self::I2Np { message } => f
                 .debug_struct("MessageBlock::I2NP")
-                .field("message_type", &message_type)
-                .field("message_id", &message_id)
-                .field("short_expiration", &short_expiration)
-                .finish_non_exhaustive(),
+                .field("message", &message)
+                .finish(),
             Self::Termination {
                 valid_frames,
                 reason,
@@ -260,30 +244,9 @@ impl<'a> MessageBlock<'a> {
 
     /// Parse [`MessageBlock::I2Np`].
     fn parse_i2np(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
-        let (rest, message_type) = be_u8(rest)?;
-        let (rest, message_id) = be_u32(rest)?;
-        let (rest, short_expiration) = be_u32(rest)?;
-        let (rest, message) = take(size as usize - (1 + 2 * 4))(rest)?;
+        let (rest, message) = RawI2npMessage::parse_frame(input)?;
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            block_len = ?size,
-            ?message_type,
-            ?message_id,
-            ?short_expiration,
-            "parse i2np message block",
-        );
-
-        Ok((
-            rest,
-            MessageBlock::I2Np {
-                message_type,
-                message_id,
-                short_expiration,
-                message,
-            },
-        ))
+        Ok((rest, MessageBlock::I2Np { message }))
     }
 
     /// Parse [`MessageBlock::Termination`].

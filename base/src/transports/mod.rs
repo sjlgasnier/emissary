@@ -18,9 +18,11 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
+    i2np::RawI2npMessage,
     primitives::{RouterAddress, RouterInfo, TransportKind},
     runtime::Runtime,
     transports::ntcp2::Ntcp2Transport,
+    Error,
 };
 
 use futures::{Stream, StreamExt};
@@ -114,7 +116,7 @@ pub struct TransportService {
     cmd_tx: Sender<ProtocolCommand>,
 
     /// RX channel for receiving events from [`TransportManager`] and enabled transports.
-    event_rx: Receiver<()>,
+    event_rx: Receiver<RawI2npMessage>,
 
     /// Connected routers.
     routers: HashMap<usize, Sender<()>>,
@@ -136,16 +138,16 @@ impl TransportService {
 }
 
 impl Stream for TransportService {
-    type Item = ();
+    type Item = RawI2npMessage;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Pending
+        self.event_rx.poll_recv(cx).map(|event| event)
     }
 }
 
 #[derive(Clone)]
 struct SubsystemHandle {
-    subsystems: Vec<Sender<()>>,
+    subsystems: Vec<Sender<RawI2npMessage>>,
 }
 
 impl SubsystemHandle {
@@ -155,8 +157,23 @@ impl SubsystemHandle {
         }
     }
 
-    fn register_subsystem(&mut self, event_tx: Sender<()>) {
+    // TODO: remove?
+    fn register_subsystem(&mut self, event_tx: Sender<RawI2npMessage>) {
         self.subsystems.push(event_tx);
+    }
+
+    // TODO: fix error
+    fn dispatch_message(&mut self, message: RawI2npMessage) -> crate::Result<()> {
+        tracing::error!(destination = ?message.destination(), "dispatch message to subsystem");
+
+        match message.destination() {
+            SubsystemKind::NetDb => self.subsystems[0]
+                .try_send(message)
+                .map_err(|_| Error::NotSupported),
+            SubsystemKind::Tunnel => self.subsystems[1]
+                .try_send(message)
+                .map_err(|_| Error::NotSupported),
+        }
     }
 }
 
@@ -221,7 +238,7 @@ impl<R: Runtime> TransportManager<R> {
     ///
     /// The number of subsystems is fixed and the initialization order is important.
     pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService {
-        let (event_tx, event_rx): (Sender<()>, _) = channel(64);
+        let (event_tx, event_rx) = channel(64);
 
         tracing::debug!(
             target: LOG_TARGET,

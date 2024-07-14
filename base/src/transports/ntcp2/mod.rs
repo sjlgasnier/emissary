@@ -147,10 +147,9 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     // get router info of the connected peer, spawn the connection event loop
                     // in the background and infrom `TransportManager` of the new connection
                     let router = session.router();
+                    let handle = self.subsystem_handle.clone();
 
-                    // TODO: give event tx to `session`
-
-                    R::spawn(session.run());
+                    R::spawn(session.run(handle));
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router }));
                 }
