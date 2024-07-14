@@ -17,7 +17,6 @@
 // DEALINGS IN THE SOFTWARE.
 
 //! Active NTCP2 session.
-//!
 //1 https://geti2p.net/spec/ntcp2#data-phase
 
 use crate::{
@@ -139,8 +138,8 @@ impl<R: Runtime> Ntcp2Session<R> {
                 //     match MessageType::from_u8(message_type) {
                 //         Some(MessageType::VariableTunnelBuild) => {
                 //             tracing::info!("parse variable tunnel build");
-                //             let _ = I2npMessage::parse(MessageType::VariableTunnelBuild, message);
-                //         }
+                //             let _ = I2npMessage::parse(MessageType::VariableTunnelBuild,
+                // message);         }
                 //         message_type => tracing::info!("i2np message = {message_type:?}",),
                 //     }
                 //     // tracing::info!("message id = {message_id}");

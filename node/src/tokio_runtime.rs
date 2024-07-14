@@ -173,9 +173,7 @@ impl Runtime for TokioRuntime {
     }
 
     fn time_since_epoch() -> Duration {
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("to succeed")
+        SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("to succeed")
     }
 
     fn rng() -> impl RngCore + CryptoRng {

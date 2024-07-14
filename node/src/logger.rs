@@ -22,14 +22,12 @@ pub fn init_logger(log: Option<String>) -> anyhow::Result<()> {
                 continue;
             };
 
-            targets = log_targets
-                .into_iter()
-                .fold(targets, |targets, log_target| {
-                    targets.with_target(
-                        log_target,
-                        LevelFilter::from_str(level).expect("valid level filter"),
-                    )
-                });
+            targets = log_targets.into_iter().fold(targets, |targets, log_target| {
+                targets.with_target(
+                    log_target,
+                    LevelFilter::from_str(level).expect("valid level filter"),
+                )
+            });
             log_targets = Vec::new();
         }
     }

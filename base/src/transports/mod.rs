@@ -131,9 +131,7 @@ impl TransportService {
     /// [`TransportService::connect()`] returns an error if the channel is clogged
     /// and the caller should try again later.
     pub fn connect(&mut self, router: RouterInfo) -> Result<(), ()> {
-        self.cmd_tx
-            .try_send(ProtocolCommand::Connect { router })
-            .map_err(|_| ())
+        self.cmd_tx.try_send(ProtocolCommand::Connect { router }).map_err(|_| ())
     }
 }
 
@@ -167,12 +165,10 @@ impl SubsystemHandle {
         tracing::error!(destination = ?message.destination(), "dispatch message to subsystem");
 
         match message.destination() {
-            SubsystemKind::NetDb => self.subsystems[0]
-                .try_send(message)
-                .map_err(|_| Error::NotSupported),
-            SubsystemKind::Tunnel => self.subsystems[1]
-                .try_send(message)
-                .map_err(|_| Error::NotSupported),
+            SubsystemKind::NetDb =>
+                self.subsystems[0].try_send(message).map_err(|_| Error::NotSupported),
+            SubsystemKind::Tunnel =>
+                self.subsystems[1].try_send(message).map_err(|_| Error::NotSupported),
         }
     }
 }

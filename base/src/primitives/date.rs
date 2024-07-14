@@ -64,10 +64,8 @@ mod tests {
 
     #[test]
     fn serialize() {
-        let since_epoch = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let since_epoch =
+            SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let serialized = Date::new(since_epoch).serialize();
         let date = Date::from_bytes(&serialized).unwrap();
 

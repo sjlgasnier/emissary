@@ -45,9 +45,7 @@ async fn main() -> anyhow::Result<()> {
     match command {
         None => {
             let config: emissary::Config = config.into();
-            let mut router = Router::new(TokioRuntime::new(), config, router)
-                .await
-                .unwrap();
+            let mut router = Router::new(TokioRuntime::new(), config, router).await.unwrap();
 
             let _ = router.await;
         }

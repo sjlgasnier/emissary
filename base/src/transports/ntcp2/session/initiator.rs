@@ -71,7 +71,8 @@ enum InitiatorState {
         chaining_key: Vec<u8>,
     },
 
-    /// Responder has accepted the session request and is waiting for initiator to confirm the session
+    /// Responder has accepted the session request and is waiting for initiator to confirm the
+    /// session
     SessionCreated {
         /// State.
         state: Vec<u8>,
@@ -102,9 +103,8 @@ enum InitiatorState {
 impl fmt::Debug for InitiatorState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SessionRequested { .. } => {
-                f.debug_struct("SessionRequested").finish_non_exhaustive()
-            }
+            Self::SessionRequested { .. } =>
+                f.debug_struct("SessionRequested").finish_non_exhaustive(),
             Self::SessionCreated { .. } => f.debug_struct("SessionCreated").finish_non_exhaustive(),
             Self::Poisoned => f.debug_struct("Poisoned").finish(),
         }
@@ -147,10 +147,7 @@ impl Initiator {
         );
 
         let chaining_key = chaining_key.clone();
-        let state = Sha256::new()
-            .update(&state)
-            .update(&remote_static_key.to_vec())
-            .finalize();
+        let state = Sha256::new().update(&state).update(&remote_static_key.to_vec()).finalize();
 
         // generate ephemeral key pair and apply MixHash(epub)
         let sk = EphemeralPrivateKey::new(R::rng());
@@ -169,10 +166,7 @@ impl Initiator {
             let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
 
             // output 2
-            let local_key = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&[0x02])
-                .finalize();
+            let local_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();
@@ -215,16 +209,10 @@ impl Initiator {
         // https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-2-and-message-3-part-1
         let state = {
             // MixHash(encrypted payload)
-            let state = Sha256::new()
-                .update(&state)
-                .update(&buffer[32..64])
-                .finalize();
+            let state = Sha256::new().update(&state).update(&buffer[32..64]).finalize();
 
             // MixHash(padding)
-            Sha256::new()
-                .update(&state)
-                .update(&buffer[64..96])
-                .finalize()
+            Sha256::new().update(&state).update(&buffer[64..96]).finalize()
         };
 
         Ok((
@@ -286,10 +274,7 @@ impl Initiator {
             let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
 
             // output 2
-            let remote_key = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&[0x02])
-                .finalize();
+            let remote_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
 
             ephemeral_key.zeroize();
             shared.zeroize();
@@ -301,10 +286,7 @@ impl Initiator {
         // create new state by hashing the encrypted contents of `SessionCreated` but
         // don't save it to `self.state` as associated data for `bytes` (decrypted below)
         // refers to state before these payload bytes
-        let new_state = Sha256::new()
-            .update(&state)
-            .update(&bytes[32..64])
-            .finalize();
+        let new_state = Sha256::new().update(&state).update(&bytes[32..64]).finalize();
 
         // decrypt the chacha20poly1305 frame with generated remote key,
         // deserialize `ResponderOptions` and extract the padding length
@@ -369,11 +351,7 @@ impl Initiator {
         let tag1 = cipher.encrypt_with_ad(&state, &mut s_p_bytes)?;
 
         // MixHash(ciphertext)
-        state = Sha256::new()
-            .update(&state)
-            .update(&s_p_bytes)
-            .update(&tag1)
-            .finalize();
+        state = Sha256::new().update(&state).update(&s_p_bytes).update(&tag1).finalize();
 
         // perform diffie-hellman key exchange and derive keys for data phase
         let (key_context, message) = {
@@ -391,23 +369,17 @@ impl Initiator {
 
             // Output 2
             // Generate the cipher key k
-            let k = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&[0x02])
-                .finalize();
+            let k = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
 
-            // h from message 3 part 1 is used as the associated data for the AEAD in message 3 part 2
+            // h from message 3 part 1 is used as the associated data
+            // for the AEAD in message 3 part 2
             let mut message = MessageBlock::new_router_info(&local_info);
 
             let mut cipher = ChaChaPoly::with_nonce(&k, 0);
             let tag2 = cipher.encrypt_with_ad(&state, &mut message)?;
 
             // MixHash(ciphertext)
-            let state = Sha256::new()
-                .update(&state)
-                .update(&message)
-                .update(&tag2)
-                .finalize();
+            let state = Sha256::new().update(&state).update(&message).update(&tag2).finalize();
 
             // create `SessionConfirmed` message
             let mut total_buffer = alloc::vec![0u8; local_info.len() + 20 + 48];
@@ -421,10 +393,7 @@ impl Initiator {
             // create send and receive keys
             let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
             let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-            let receive_key = Hmac::new(&temp_key)
-                .update(&send_key)
-                .update(&[0x02])
-                .finalize();
+            let receive_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
 
             // siphash context for (de)obfuscating message sizes
             let sip = SipHash::new_initiator(&temp_key, &state);

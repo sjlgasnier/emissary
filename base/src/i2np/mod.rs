@@ -308,9 +308,7 @@ impl<'a> I2npMessage<'a> {
     }
 
     pub fn parse(message_type: MessageType, buffer: &'a [u8]) -> Option<I2npMessage<'a>> {
-        let parsed = Self::parse_inner(message_type, 1337u32, 1338u32, buffer)
-            .ok()?
-            .1;
+        let parsed = Self::parse_inner(message_type, 1337u32, 1338u32, buffer).ok()?.1;
 
         Some(parsed)
     }

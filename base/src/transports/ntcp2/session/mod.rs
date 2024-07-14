@@ -21,7 +21,6 @@
 //! https://geti2p.net/spec/ntcp2#overview
 //!
 //! Implementation refers to `ck` as `chaining_key` and to `h` as `state`.
-//!
 //1 This implementation also refers to Alice as initiator and to Bob as responder.
 //!
 //! [`SessionManager::create_session()`] and [`SessionManager::create_session()`]
@@ -160,9 +159,7 @@ impl<R: Runtime> SessionManager<R> {
         local_router_info: RouterInfo,
     ) -> Self {
         // initial state
-        let state = Sha256::new()
-            .update(&PROTOCOL_NAME.as_bytes().to_vec())
-            .finalize();
+        let state = Sha256::new().update(&PROTOCOL_NAME.as_bytes().to_vec()).finalize();
 
         // chaining key
         let chaining_key = state.clone();
@@ -207,10 +204,8 @@ impl<R: Runtime> SessionManager<R> {
 
         async move {
             let (remote_key, iv, socket_address) = {
-                let ntcp2 = router
-                    .addresses()
-                    .get(&TransportKind::Ntcp2)
-                    .ok_or(Error::NotSupported)?;
+                let ntcp2 =
+                    router.addresses().get(&TransportKind::Ntcp2).ok_or(Error::NotSupported)?;
 
                 let static_key = ntcp2
                     .options()
@@ -220,13 +215,12 @@ impl<R: Runtime> SessionManager<R> {
                         Error::InvalidData
                     })?;
 
-                let iv = ntcp2
-                    .options()
-                    .get(&Str::from_str("i").expect("to succeed"))
-                    .ok_or_else(|| {
+                let iv = ntcp2.options().get(&Str::from_str("i").expect("to succeed")).ok_or_else(
+                    || {
                         tracing::warn!(target: LOG_TARGET, "iv missing from ntcp2 info");
                         Error::InvalidData
-                    })?;
+                    },
+                )?;
 
                 // `format!()` is not available in `no_std`
                 // so socket address has to be constructed manually
@@ -255,10 +249,7 @@ impl<R: Runtime> SessionManager<R> {
                         Error::InvalidData
                     })?;
 
-                let port = core::str::from_utf8(port.string())
-                    .unwrap()
-                    .parse::<u16>()
-                    .unwrap();
+                let port = core::str::from_utf8(port.string()).unwrap().parse::<u16>().unwrap();
 
                 (
                     StaticPublicKey::from_bytes(base64_decode(static_key.string())).unwrap(),

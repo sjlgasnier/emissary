@@ -99,9 +99,7 @@ impl<R: Runtime> Router<R> {
         }
 
         // initialize and start ntcp2
-        transport_manager
-            .register_transport(TransportKind::Ntcp2)
-            .await?;
+        transport_manager.register_transport(TransportKind::Ntcp2).await?;
 
         Ok(Self {
             runtime,

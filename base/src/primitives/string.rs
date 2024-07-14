@@ -122,11 +122,8 @@ mod tests {
 
     #[test]
     fn valid_string() {
-        let mut string: VecDeque<u8> = String::from("hello, world!")
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .unwrap();
+        let mut string: VecDeque<u8> =
+            String::from("hello, world!").as_bytes().to_vec().try_into().unwrap();
         string.push_front(string.len() as u8);
         let string: Vec<u8> = string.into();
 
@@ -140,11 +137,8 @@ mod tests {
 
     #[test]
     fn valid_string_with_extra_bytes() {
-        let mut string: VecDeque<u8> = String::from("hello, world!")
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .unwrap();
+        let mut string: VecDeque<u8> =
+            String::from("hello, world!").as_bytes().to_vec().try_into().unwrap();
         string.push_front(string.len() as u8);
         string.push_back(1);
         string.push_back(2);
@@ -162,11 +156,8 @@ mod tests {
 
     #[test]
     fn extra_bytes_returned() {
-        let mut string: VecDeque<u8> = String::from("hello, world!")
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .unwrap();
+        let mut string: VecDeque<u8> =
+            String::from("hello, world!").as_bytes().to_vec().try_into().unwrap();
         string.push_front(string.len() as u8);
         string.push_back(1);
         string.push_back(2);

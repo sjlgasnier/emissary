@@ -134,9 +134,8 @@ impl StaticPrivateKey {
     /// Perform Diffie-Hellman and return the shared secret as byte vector.
     pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
         match (self, public_key) {
-            (Self::X25519(sk), StaticPublicKey::X25519(pk)) => {
-                sk.diffie_hellman(pk).to_bytes().to_vec()
-            }
+            (Self::X25519(sk), StaticPublicKey::X25519(pk)) =>
+                sk.diffie_hellman(pk).to_bytes().to_vec(),
             _ => todo!("not implemented"),
         }
     }
@@ -171,9 +170,8 @@ impl EphemeralPrivateKey {
     /// Perform Diffie-Hellman and return the shared secret as byte vector.
     pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
         match (self, public_key) {
-            (Self::X25519(sk), StaticPublicKey::X25519(pk)) => {
-                sk.diffie_hellman(pk).to_bytes().to_vec()
-            }
+            (Self::X25519(sk), StaticPublicKey::X25519(pk)) =>
+                sk.diffie_hellman(pk).to_bytes().to_vec(),
             _ => todo!("not implemented"),
         }
     }

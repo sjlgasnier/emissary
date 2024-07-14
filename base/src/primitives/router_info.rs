@@ -122,17 +122,14 @@ impl RouterInfo {
         let (rest, _) = be_u8(rest)?;
         let (rest, options) = Mapping::parse_multi_frame(rest)?;
 
-        identity
-            .signing_key()
-            .verify(input, rest)
-            .or_else(|error| {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "invalid signature for router info",
-                );
-                Err(Err::Error(make_error(input, ErrorKind::Fail)))
-            })?;
+        identity.signing_key().verify(input, rest).or_else(|error| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "invalid signature for router info",
+            );
+            Err(Err::Error(make_error(input, ErrorKind::Fail)))
+        })?;
 
         Ok((
             rest,
@@ -149,11 +146,7 @@ impl RouterInfo {
     pub fn serialize(&self, signing_key: &SigningPrivateKey) -> Vec<u8> {
         let identity = self.identity.serialize();
         let published = self.published.serialize();
-        let ntcp2 = self
-            .addresses
-            .get(&TransportKind::Ntcp2)
-            .unwrap()
-            .serialize();
+        let ntcp2 = self.addresses.get(&TransportKind::Ntcp2).unwrap().serialize();
         let options = self
             .options
             .clone()
@@ -223,11 +216,7 @@ mod tests {
 
         // ssu
         assert_eq!(
-            router_info
-                .addresses
-                .get(&TransportKind::Ssu2)
-                .unwrap()
-                .cost(),
+            router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost(),
             10
         );
         assert_eq!(
@@ -251,11 +240,7 @@ mod tests {
 
         // ntcp2
         assert_eq!(
-            router_info
-                .addresses
-                .get(&TransportKind::Ntcp2)
-                .unwrap()
-                .cost(),
+            router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost(),
             14
         );
         assert!(router_info
@@ -275,9 +260,7 @@ mod tests {
 
         // options
         assert_eq!(
-            router_info
-                .options
-                .get(&Str::from_str("router.version").unwrap()),
+            router_info.options.get(&Str::from_str("router.version").unwrap()),
             Some(&Str::from_str("0.9.42").unwrap())
         );
         assert_eq!(
@@ -299,11 +282,7 @@ mod tests {
 
         // ssu
         assert_eq!(
-            router_info
-                .addresses
-                .get(&TransportKind::Ssu2)
-                .unwrap()
-                .cost(),
+            router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost(),
             10
         );
         assert_eq!(
@@ -327,11 +306,7 @@ mod tests {
 
         // ntcp2
         assert_eq!(
-            router_info
-                .addresses
-                .get(&TransportKind::Ntcp2)
-                .unwrap()
-                .cost(),
+            router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost(),
             3
         );
         assert_eq!(
@@ -355,9 +330,7 @@ mod tests {
 
         // options
         assert_eq!(
-            router_info
-                .options
-                .get(&Str::from_str("router.version").unwrap()),
+            router_info.options.get(&Str::from_str("router.version").unwrap()),
             Some(&Str::from_str("0.9.46").unwrap())
         );
         assert_eq!(

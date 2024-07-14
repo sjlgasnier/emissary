@@ -109,10 +109,7 @@ impl Mapping {
 
     /// Convert a vector of [`Mapping`]s into a hashmap.
     pub fn into_hashmap(mappings: Vec<Mapping>) -> HashMap<Str, Str> {
-        mappings
-            .into_iter()
-            .map(|mapping| (mapping.key, mapping.value))
-            .collect()
+        mappings.into_iter().map(|mapping| (mapping.key, mapping.value)).collect()
     }
 }
 
