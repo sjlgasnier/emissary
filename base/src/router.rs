@@ -22,6 +22,7 @@ use crate::{
     primitives::{RouterInfo, TransportKind},
     runtime::Runtime,
     transports::{SubsystemKind, TransportManager},
+    tunnel::TunnelManager,
     Config,
 };
 
@@ -82,6 +83,14 @@ impl<R: Runtime> Router<R> {
             let netdb = NetDb::new(transport_service);
 
             R::spawn(netdb);
+        }
+
+        // initialize and start tunnel manager
+        {
+            let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
+            let tunnel_manager = TunnelManager::new(transport_service);
+
+            R::spawn(tunnel_manager);
         }
 
         // initialize and start ntcp2

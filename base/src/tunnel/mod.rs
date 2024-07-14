@@ -15,3 +15,46 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
+
+use crate::{primitives::RouterInfo, transports::TransportService};
+
+use futures::{FutureExt, StreamExt};
+
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel-manager";
+
+/// Tunnel manager.
+pub struct TunnelManager {
+    /// Transport service.
+    service: TransportService,
+}
+
+impl TunnelManager {
+    /// Create new [`TunnelManager`].
+    pub fn new(service: TransportService) -> Self {
+        tracing::trace!(
+            target: LOG_TARGET,
+            "starting tunnel manager",
+        );
+
+        Self { service }
+    }
+}
+
+impl Future for TunnelManager {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.service.poll_next_unpin(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(event)) => todo!("handle event"),
+            Poll::Ready(None) => return Poll::Ready(()),
+        }
+    }
+}
