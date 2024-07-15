@@ -60,6 +60,9 @@ pub struct Ntcp2Session<R: Runtime> {
 
     /// SipHasher for (deobfuscating) message lengths.
     sip: SipHash,
+
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
 }
 
 impl<R: Runtime> Ntcp2Session<R> {
@@ -70,6 +73,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         runtime: R,
         stream: R::TcpStream,
         key_context: KeyContext,
+        subsystem_handle: SubsystemHandle,
     ) -> Self {
         let KeyContext {
             send_key,
@@ -85,6 +89,7 @@ impl<R: Runtime> Ntcp2Session<R> {
             send_cipher: ChaChaPoly::new(&send_key),
             recv_cipher: ChaChaPoly::new(&recv_key),
             sip,
+            subsystem_handle,
         }
     }
 
@@ -99,7 +104,7 @@ impl<R: Runtime> Ntcp2Session<R> {
     }
 
     /// Start [`Session`] event loop.
-    pub async fn run(mut self, mut subsystem_handle: SubsystemHandle) {
+    pub async fn run(mut self) {
         tracing::debug!(target: LOG_TARGET, "start ntcp2 event loop");
 
         loop {
@@ -120,7 +125,7 @@ impl<R: Runtime> Ntcp2Session<R> {
                 Some(MessageBlock::I2Np { message }) => {
                     let message_id = message.message_id();
 
-                    if let Err(error) = subsystem_handle.dispatch_message(message) {
+                    if let Err(error) = self.subsystem_handle.dispatch_message(message) {
                         tracing::debug!(
                             target: LOG_TARGET,
                             ?message_id,

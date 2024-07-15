@@ -62,9 +62,6 @@ pub struct Ntcp2Transport<R: Runtime> {
     /// Session manager.
     session_manager: SessionManager<R>,
 
-    /// Subsystem handle.
-    subsystem_handle: SubsystemHandle,
-
     /// Waker.
     waker: Option<Waker>,
 }
@@ -80,8 +77,13 @@ impl<R: Runtime> Ntcp2Transport<R> {
     ) -> crate::Result<Self> {
         // TODO: get port and host from `local_router_info`
 
-        let session_manager =
-            SessionManager::new(runtime, local_key, local_signing_key, local_router_info);
+        let session_manager = SessionManager::new(
+            runtime,
+            local_key,
+            local_signing_key,
+            local_router_info,
+            subsystem_handle,
+        );
         let listener = Ntcp2Listener::new(String::from(""), 1337u16).await?;
 
         tracing::trace!(
@@ -93,7 +95,6 @@ impl<R: Runtime> Ntcp2Transport<R> {
             listener,
             pending_handshakes: R::join_set(),
             session_manager,
-            subsystem_handle,
             waker: None,
         })
     }
@@ -147,9 +148,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     // get router info of the connected peer, spawn the connection event loop
                     // in the background and infrom `TransportManager` of the new connection
                     let router = session.router();
-                    let handle = self.subsystem_handle.clone();
 
-                    R::spawn(session.run(handle));
+                    R::spawn(session.run());
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router }));
                 }

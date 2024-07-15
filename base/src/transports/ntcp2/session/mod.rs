@@ -37,7 +37,10 @@ use crate::{
     },
     primitives::{RouterInfo, Str, TransportKind},
     runtime::{Runtime, TcpStream},
-    transports::ntcp2::session::{initiator::Initiator, responder::Responder},
+    transports::{
+        ntcp2::session::{initiator::Initiator, responder::Responder},
+        SubsystemHandle,
+    },
     Error,
 };
 
@@ -142,6 +145,9 @@ pub struct SessionManager<R: Runtime> {
 
     /// Local router info.
     local_router_info: RouterInfo,
+
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
 }
 
 impl<R: Runtime> SessionManager<R> {
@@ -157,6 +163,7 @@ impl<R: Runtime> SessionManager<R> {
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
+        subsystem_handle: SubsystemHandle,
     ) -> Self {
         // initial state
         let state = Sha256::new().update(&PROTOCOL_NAME.as_bytes().to_vec()).finalize();
@@ -181,6 +188,7 @@ impl<R: Runtime> SessionManager<R> {
             chaining_key,
             inbound_initial_state,
             outbound_initial_state,
+            subsystem_handle,
         }
     }
 
@@ -201,6 +209,7 @@ impl<R: Runtime> SessionManager<R> {
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let runtime = self.runtime.clone();
+        let subsystem_handle = self.subsystem_handle.clone();
 
         async move {
             let (remote_key, iv, socket_address) = {
@@ -298,6 +307,7 @@ impl<R: Runtime> SessionManager<R> {
                 runtime.clone(),
                 stream,
                 key_context,
+                subsystem_handle,
             ))
         }
     }
@@ -315,6 +325,7 @@ impl<R: Runtime> SessionManager<R> {
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let runtime = self.runtime.clone();
+        let subsystem_handle = self.subsystem_handle.clone();
 
         async move {
             tracing::trace!(
@@ -356,6 +367,7 @@ impl<R: Runtime> SessionManager<R> {
                         runtime.clone(),
                         stream,
                         key_context,
+                        subsystem_handle,
                     ))
                 }
                 Err(error) => {
