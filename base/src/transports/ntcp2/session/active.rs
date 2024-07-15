@@ -17,13 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 //! Active NTCP2 session.
-//1 https://geti2p.net/spec/ntcp2#data-phase
+//!
+//! https://geti2p.net/spec/ntcp2#data-phase
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
-    i2np::{I2npMessage, MessageType},
+    i2np::MessageType,
     primitives::RouterInfo,
-    runtime::{Runtime, TcpStream},
+    runtime::{AsyncRead, Runtime, TcpStream},
     transports::{
         ntcp2::{
             message::MessageBlock,
@@ -34,8 +35,33 @@ use crate::{
     util::AsyncReadExt,
 };
 
+use alloc::{vec, vec::Vec};
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::active";
+
+/// Read state.
+enum ReadState {
+    /// Read NTCP2 frame length.
+    ReadSize {
+        /// Offset into read buffer.
+        offset: usize,
+    },
+
+    /// Read NTCP2 frame.
+    ReadFrame {
+        /// Size of the next frame.
+        size: usize,
+
+        /// Offset into read buffer.
+        offset: usize,
+    },
+}
 
 /// Active NTCP2 session.
 pub struct Ntcp2Session<R: Runtime> {
@@ -53,6 +79,12 @@ pub struct Ntcp2Session<R: Runtime> {
 
     /// Cipher for outbound messages.
     send_cipher: ChaChaPoly,
+
+    /// Read state.
+    read_state: ReadState,
+
+    /// Read buffer.
+    read_buffer: Vec<u8>,
 
     /// Cipher for inbound messages.
     recv_cipher: ChaChaPoly,
@@ -84,6 +116,8 @@ impl<R: Runtime> Ntcp2Session<R> {
             role,
             router,
             runtime,
+            read_buffer: vec![0u8; 0xffff],
+            read_state: ReadState::ReadSize { offset: 0usize },
             stream,
             send_cipher: ChaChaPoly::new(&send_key),
             recv_cipher: ChaChaPoly::new(&recv_key),
@@ -101,61 +135,111 @@ impl<R: Runtime> Ntcp2Session<R> {
     pub fn router(&self) -> RouterInfo {
         self.router.clone()
     }
+}
 
-    /// Start [`Session`] event loop.
-    pub async fn run(mut self) {
-        tracing::debug!(target: LOG_TARGET, "start ntcp2 event loop");
+impl<R: Runtime> Future for Ntcp2Session<R> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        let mut stream = Pin::new(&mut this.stream);
 
         loop {
-            let mut reply = alloc::vec![0u8; 2];
-            self.stream.read_exact(&mut reply).await.unwrap();
-            let test = u16::from_be_bytes(TryInto::<[u8; 2]>::try_into(reply).unwrap());
+            match this.read_state {
+                ReadState::ReadSize { offset } => {
+                    match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..2]) {
+                        Poll::Pending => break,
+                        Poll::Ready(Err(error)) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "socket error",
+                            );
+                            return Poll::Ready(());
+                        }
+                        Poll::Ready((Ok(nread))) => {
+                            if nread == 0 {
+                                return Poll::Ready(());
+                            }
 
-            let len = self.sip.deobfuscate(test);
+                            if offset + nread != 2 {
+                                this.read_state = ReadState::ReadSize {
+                                    offset: offset + nread,
+                                };
+                                continue;
+                            }
 
-            tracing::info!("read {len} bytes from socket");
+                            let size = (this.read_buffer[0] as u16) << 8
+                                | (this.read_buffer[1] as u16) & 0xff;
 
-            let mut test = alloc::vec![0u8; len as usize];
-            self.stream.read_exact(&mut test).await.unwrap();
-
-            let data_block = self.recv_cipher.decrypt(test).unwrap();
-
-            match MessageBlock::parse(&data_block) {
-                Some(MessageBlock::I2Np { message }) => {
-                    let message_id = message.message_id();
-
-                    if let Err(error) = self.subsystem_handle.dispatch_message(message) {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            ?message_id,
-                            ?error,
-                            "failed to deliver message to subsystem",
-                        );
+                            this.read_state = ReadState::ReadFrame {
+                                size: this.sip.deobfuscate(size) as usize,
+                                offset: 0usize,
+                            };
+                        }
                     }
                 }
-                // Some(MessageBlock::I2Np {
-                //     message_type,
-                //     message_id,
-                //     short_expiration,
-                //     message,
-                // }) => {
-                //     match MessageType::from_u8(message_type) {
-                //         Some(MessageType::VariableTunnelBuild) => {
-                //             tracing::info!("parse variable tunnel build");
-                //             let _ = I2npMessage::parse(MessageType::VariableTunnelBuild,
-                // message);         }
-                //         message_type => tracing::info!("i2np message = {message_type:?}",),
-                //     }
-                //     // tracing::info!("message id = {message_id}");
-                //     // tracing::info!("bytes = {message:?}");
-                // }
-                Some(message) => {
-                    tracing::debug!("message received: {message:?}");
-                }
-                None => {
-                    tracing::warn!("invalid message received, ignoring");
+                ReadState::ReadFrame { size, offset } => {
+                    match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..]) {
+                        Poll::Pending => break,
+                        Poll::Ready(Err(error)) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "socket error",
+                            );
+                            return Poll::Ready(());
+                        }
+                        Poll::Ready((Ok(nread))) => {
+                            if nread == 0 {
+                                tracing::debug!(target: LOG_TARGET, "socket closed");
+                                return Poll::Ready(());
+                            }
+
+                            // next frame hasn't been read completely
+                            if offset + nread < size {
+                                this.read_state = ReadState::ReadFrame {
+                                    size,
+                                    offset: offset + nread,
+                                };
+                                continue;
+                            }
+
+                            let data_block = this
+                                .recv_cipher
+                                .decrypt(this.read_buffer[..size].to_vec())
+                                .unwrap();
+
+                            match MessageBlock::parse(&data_block) {
+                                Some(MessageBlock::I2Np { message }) => {
+                                    let message_id = message.message_id;
+
+                                    if let Err(error) =
+                                        this.subsystem_handle.dispatch_message(message)
+                                    {
+                                        tracing::debug!(
+                                            target: LOG_TARGET,
+                                            ?message_id,
+                                            ?error,
+                                            "failed to deliver message to subsystem",
+                                        );
+                                    }
+                                }
+                                Some(message) => {
+                                    tracing::debug!("message received: {message:?}");
+                                }
+                                None => {
+                                    tracing::warn!("invalid message received, ignoring");
+                                }
+                            }
+
+                            this.read_state = ReadState::ReadSize { offset: 0usize };
+                        }
+                    }
                 }
             }
         }
+
+        Poll::Pending
     }
 }

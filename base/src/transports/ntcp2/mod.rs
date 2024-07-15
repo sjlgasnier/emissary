@@ -149,7 +149,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     // in the background and infrom `TransportManager` of the new connection
                     let router = session.router();
 
-                    R::spawn(session.run());
+                    R::spawn(session);
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router }));
                 }
