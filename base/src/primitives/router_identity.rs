@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{sha256::Sha256, SigningPublicKey, StaticPublicKey},
+    crypto::{base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
     Error,
 };
 
@@ -30,7 +30,20 @@ use nom::{
 };
 use zerocopy::AsBytes;
 
-use alloc::vec::Vec;
+use alloc::{string::String, sync::Arc, vec::Vec};
+use core::fmt;
+
+/// Short router identity hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RouterId {
+    hash: Arc<String>,
+}
+
+impl fmt::Display for RouterId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.hash)
+    }
+}
 
 // TODO: doc
 #[derive(Debug, AsBytes)]
@@ -159,6 +172,13 @@ impl RouterIdentity {
     /// Router identity hash as bytes.
     pub fn hash(&self) -> &[u8] {
         self.identity_hash.as_ref()
+    }
+
+    /// Get [`RouterId`].
+    pub fn id(&self) -> RouterId {
+        RouterId {
+            hash: Arc::new(base64_encode(&self.identity_hash[..16])),
+        }
     }
 }
 
