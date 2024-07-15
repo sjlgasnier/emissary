@@ -288,6 +288,16 @@ impl<'a> MessageBlock<'a> {
 
         out
     }
+
+    // TODO: zzz
+    pub fn new_i2np_message(message: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; message.len() + 1];
+
+        out[0] = BlockType::I2Np.as_u8();
+        out[1..].copy_from_slice(&message);
+
+        out
+    }
 }
 
 // TODO: tests

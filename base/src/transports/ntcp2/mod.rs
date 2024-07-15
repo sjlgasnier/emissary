@@ -131,7 +131,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                     %router,
                     "ntcp2 session accepted, starting event loop",
                 );
-                R::spawn(session);
+                R::spawn(session.run());
             }
             None => {
                 tracing::warn!(

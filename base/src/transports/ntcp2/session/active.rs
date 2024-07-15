@@ -24,7 +24,7 @@ use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
     i2np::MessageType,
     primitives::{RouterId, RouterInfo},
-    runtime::{AsyncRead, Runtime, TcpStream},
+    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     subsystem::SubsystemCommand,
     transports::{
         ntcp2::{
@@ -41,6 +41,7 @@ use thingbuf::mpsc::{channel, Receiver, Sender};
 use alloc::{vec, vec::Vec};
 use core::{
     future::Future,
+    mem,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -66,46 +67,79 @@ enum ReadState {
     },
 }
 
+/// Write state
+enum WriteState {
+    /// Read next message from `cmd_rx`.
+    GetMessage,
+
+    /// Send message size.
+    SendSize {
+        /// Write offset.
+        offset: usize,
+
+        /// Obfuscated message size as a byte vector.
+        size: Vec<u8>,
+
+        /// I2NP message.
+        message: Vec<u8>,
+    },
+
+    /// Send message.
+    SendMessage {
+        /// Write offset.
+        offset: usize,
+
+        /// I2NP message, potentially partially written.
+        message: Vec<u8>,
+    },
+
+    /// [`WriteState`] has been poisoned due to a bug.
+    Poisoned,
+}
+
 /// Active NTCP2 session.
 pub struct Ntcp2Session<R: Runtime> {
-    /// Role of the session.
-    role: Role,
-
-    /// `RouterInfo` of the remote peer.
-    router_info: RouterInfo,
-
-    /// Router ID.
-    router: RouterId,
-
-    /// Runtime.
-    runtime: R,
-
-    /// TCP stream.
-    stream: R::TcpStream,
-
-    /// Cipher for outbound messages.
-    send_cipher: ChaChaPoly,
-
-    /// Read state.
-    read_state: ReadState,
-
-    /// Read buffer.
-    read_buffer: Vec<u8>,
-
-    /// Cipher for inbound messages.
-    recv_cipher: ChaChaPoly,
-
-    /// SipHasher for (deobfuscating) message lengths.
-    sip: SipHash,
-
-    /// Subsystem handle.
-    subsystem_handle: SubsystemHandle,
-
     /// RX channel for receiving messages from subsystems.
     cmd_rx: Receiver<SubsystemCommand>,
 
     /// TX channel for sending commands for this connection.
     cmd_tx: Sender<SubsystemCommand>,
+
+    /// Read buffer.
+    read_buffer: Vec<u8>,
+
+    /// Read state.
+    read_state: ReadState,
+
+    /// Cipher for inbound messages.
+    recv_cipher: ChaChaPoly,
+
+    /// Role of the session.
+    role: Role,
+
+    /// Router ID.
+    router: RouterId,
+
+    /// `RouterInfo` of the remote peer.
+    router_info: RouterInfo,
+
+    /// Runtime.
+    runtime: R,
+
+    /// Cipher for outbound messages.
+    send_cipher: ChaChaPoly,
+
+    /// SipHasher for (de)obfuscating message lengths.
+    sip: SipHash,
+
+    /// TCP stream.
+    stream: R::TcpStream,
+
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
+
+    /// Write state.
+    write_state: WriteState,
 }
 
 impl<R: Runtime> Ntcp2Session<R> {
@@ -128,19 +162,20 @@ impl<R: Runtime> Ntcp2Session<R> {
         let (cmd_tx, cmd_rx) = channel(128);
 
         Self {
+            cmd_rx,
+            cmd_tx,
+            read_buffer: vec![0u8; 0xffff],
+            read_state: ReadState::ReadSize { offset: 0usize },
+            recv_cipher: ChaChaPoly::new(&recv_key),
             role,
             router: router_info.identity().id(),
             router_info,
             runtime,
-            read_buffer: vec![0u8; 0xffff],
-            read_state: ReadState::ReadSize { offset: 0usize },
-            stream,
             send_cipher: ChaChaPoly::new(&send_key),
-            recv_cipher: ChaChaPoly::new(&recv_key),
             sip,
+            stream,
             subsystem_handle,
-            cmd_rx,
-            cmd_tx,
+            write_state: WriteState::GetMessage,
         }
     }
 
@@ -158,7 +193,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         tracing::trace!(
             target: LOG_TARGET,
             router = %self.router,
-            "start event ntcp2 event loop",
+            "start ntcp2 event loop",
         );
 
         self.subsystem_handle
@@ -244,7 +279,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
 
                             match MessageBlock::parse(&data_block) {
                                 Some(MessageBlock::I2Np { message }) => {
-                                    let message_id = message.message_id();
+                                    let message_id = message.message_id;
 
                                     if let Err(error) =
                                         this.subsystem_handle.dispatch_message(message)
@@ -268,6 +303,125 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                             this.read_state = ReadState::ReadSize { offset: 0usize };
                         }
                     }
+                }
+            }
+        }
+
+        loop {
+            match mem::replace(&mut this.write_state, WriteState::Poisoned) {
+                WriteState::GetMessage => match this.cmd_rx.poll_recv(cx) {
+                    Poll::Pending => {
+                        this.write_state = WriteState::GetMessage;
+                        break;
+                    }
+                    Poll::Ready(None) => return Poll::Ready(()),
+                    Poll::Ready(Some(SubsystemCommand::Dummy)) => unreachable!(),
+                    Poll::Ready(Some(SubsystemCommand::SendMessage { message })) => {
+                        assert!(message.len() as u16 <= u16::MAX, "too large message");
+
+                        // TODO: in-place?
+                        let test = MessageBlock::new_i2np_message(&message);
+                        let data_block = this.send_cipher.encrypt(&test).unwrap();
+                        let size = this.sip.obfuscate(data_block.len() as u16);
+
+                        tracing::error!(
+                            "sending {} (with poly tag {}) (obfuscated {size}) bytes to remote",
+                            message.len(),
+                            data_block.len()
+                        );
+
+                        this.write_state = WriteState::SendSize {
+                            size: size.to_be_bytes().to_vec(),
+                            offset: 0usize,
+                            message: data_block,
+                        };
+                    }
+                },
+                WriteState::SendSize {
+                    offset,
+                    size,
+                    message,
+                } => match stream.as_mut().poll_write(cx, &size[offset..]) {
+                    Poll::Pending => {
+                        this.write_state = WriteState::SendSize {
+                            offset,
+                            size,
+                            message,
+                        };
+                        break;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "socket error",
+                        );
+                        return Poll::Ready(());
+                    }
+                    Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            "wrote 0 bytes to socket",
+                        );
+                        return Poll::Ready(());
+                    }
+                    Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
+                        true => {
+                            this.write_state = WriteState::SendMessage {
+                                offset: 0usize,
+                                message,
+                            };
+                        }
+                        false => {
+                            this.write_state = WriteState::SendSize {
+                                size,
+                                offset: offset + nwritten,
+                                message,
+                            };
+                        }
+                    },
+                },
+                WriteState::SendMessage { offset, message } =>
+                    match stream.as_mut().poll_write(cx, &message[offset..]) {
+                        Poll::Pending => {
+                            this.write_state = WriteState::SendMessage { offset, message };
+                            break;
+                        }
+                        Poll::Ready(Err(error)) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "socket error",
+                            );
+                            return Poll::Ready(());
+                        }
+                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                "wrote 0 bytes to socket",
+                            );
+                            return Poll::Ready(());
+                        }
+                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
+                            true => {
+                                this.write_state = WriteState::GetMessage;
+                            }
+                            false => {
+                                this.write_state = WriteState::SendMessage {
+                                    offset: offset + nwritten,
+                                    message,
+                                };
+                            }
+                        },
+                    },
+                WriteState::Poisoned => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        router = %this.router,
+                        "write state is poisoned",
+                    );
+                    debug_assert!(false);
+                    return Poll::Ready(());
                 }
             }
         }

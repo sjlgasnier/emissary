@@ -133,6 +133,15 @@ impl TransportService {
     pub fn connect(&mut self, router: RouterInfo) -> Result<(), ()> {
         self.cmd_tx.try_send(ProtocolCommand::Connect { router }).map_err(|_| ())
     }
+
+    /// Send I2NP `message` to `router`.
+    pub fn send(&mut self, router: &RouterId, message: Vec<u8>) {
+        self.routers
+            .get_mut(router)
+            .unwrap()
+            .try_send(SubsystemCommand::SendMessage { message })
+            .unwrap();
+    }
 }
 
 impl Stream for TransportService {

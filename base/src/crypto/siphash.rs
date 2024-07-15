@@ -128,11 +128,20 @@ impl SipHash {
         }
     }
 
-    /// Deobfuscate `length`.
+    /// Deobfuscate `size`.
     pub fn deobfuscate(&mut self, size: u16) -> u16 {
         let hasher = SipHasher24::new_with_keys(self.receiver.sip_key1, self.receiver.sip_key2);
         let hash: u64 = hasher.hash(&self.receiver.sip_iv);
         self.receiver.sip_iv = hash.to_le_bytes().to_vec();
+
+        size ^ ((hash & 0xffff) as u16)
+    }
+
+    /// Obfuscate `size`.
+    pub fn obfuscate(&mut self, size: u16) -> u16 {
+        let hasher = SipHasher24::new_with_keys(self.sender.sip_key1, self.sender.sip_key2);
+        let hash: u64 = hasher.hash(&self.sender.sip_iv);
+        self.sender.sip_iv = hash.to_le_bytes().to_vec();
 
         size ^ ((hash & 0xffff) as u16)
     }
