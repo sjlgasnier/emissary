@@ -19,8 +19,11 @@
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
     i2np::RawI2npMessage,
-    primitives::{RouterAddress, RouterInfo, TransportKind},
+    primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
     runtime::Runtime,
+    subsystem::{
+        InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
+    },
     transports::ntcp2::Ntcp2Transport,
     Error,
 };
@@ -44,15 +47,6 @@ const LOG_TARGET: &str = "emissary::transport-manager";
 
 // TODO: introduce `Endpoint`?
 
-#[derive(Debug, Hash, PartialEq, Eq)]
-pub enum SubsystemKind {
-    /// NetDB subsystem.
-    NetDb,
-
-    /// Tunneling subsystem.
-    Tunnel,
-}
-
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
     /// Connection successfully established to remote peer.
@@ -72,7 +66,7 @@ pub enum TransportEvent {
     /// Connection successfully established to remote peer.
     ConnectionEstablished {
         /// `RouterInfo` for the connected peer.
-        router: RouterInfo,
+        router_info: RouterInfo,
     },
     ConnectionClosed {},
     ConnectionFailure {},
@@ -85,6 +79,12 @@ pub trait Transport: Stream + Unpin {
     //
     // TODO: how to signal preference for transport?
     fn connect(&mut self, router: RouterInfo) -> crate::Result<()>;
+
+    /// Accept connection and start its event loop.
+    fn accept(&mut self, router: &RouterId);
+
+    /// Reject connection.
+    fn reject(&mut self, router: &RouterId);
 }
 
 #[derive(Debug, Clone)]
@@ -115,11 +115,11 @@ pub struct TransportService {
     /// TX channel for sending commands to [`TransportManager`].
     cmd_tx: Sender<ProtocolCommand>,
 
-    /// RX channel for receiving events from [`TransportManager`] and enabled transports.
-    event_rx: Receiver<RawI2npMessage>,
+    /// RX channel for receiving events from enabled transports.
+    event_rx: Receiver<InnerSubsystemEvent>,
 
     /// Connected routers.
-    routers: HashMap<usize, Sender<()>>,
+    routers: HashMap<RouterId, Sender<SubsystemCommand>>,
 }
 
 impl TransportService {
@@ -136,39 +136,25 @@ impl TransportService {
 }
 
 impl Stream for TransportService {
-    type Item = RawI2npMessage;
+    type Item = SubsystemEvent;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.event_rx.poll_recv(cx).map(|event| event)
-    }
-}
-
-#[derive(Clone)]
-struct SubsystemHandle {
-    subsystems: Vec<Sender<RawI2npMessage>>,
-}
-
-impl SubsystemHandle {
-    fn new() -> Self {
-        Self {
-            subsystems: Vec::new(),
-        }
-    }
-
-    // TODO: remove?
-    fn register_subsystem(&mut self, event_tx: Sender<RawI2npMessage>) {
-        self.subsystems.push(event_tx);
-    }
-
-    // TODO: fix error
-    fn dispatch_message(&mut self, message: RawI2npMessage) -> crate::Result<()> {
-        tracing::error!(destination = ?message.destination(), "dispatch message to subsystem");
-
-        match message.destination() {
-            SubsystemKind::NetDb =>
-                self.subsystems[0].try_send(message).map_err(|_| Error::NotSupported),
-            SubsystemKind::Tunnel =>
-                self.subsystems[1].try_send(message).map_err(|_| Error::NotSupported),
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match futures::ready!(self.event_rx.poll_recv(cx)) {
+                None => return Poll::Ready(None),
+                Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => {
+                    self.routers.insert(router.clone(), tx);
+                    return Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router }));
+                }
+                Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
+                    self.routers.remove(&router);
+                    return Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }));
+                }
+                Some(InnerSubsystemEvent::I2Np { message }) => {
+                    return Poll::Ready(Some(SubsystemEvent::I2Np { message }));
+                }
+                Some(InnerSubsystemEvent::Dummy) => unreachable!(),
+            }
         }
     }
 }
@@ -178,7 +164,7 @@ impl SubsystemHandle {
 /// Transport manager is responsible for connecting the higher-level subsystems
 /// together with enabled, lower-level transports and polling for polling those
 /// transports so that they can make progress.
-pub struct TransportManager<R: Runtime> {
+pub struct TransportManager<R> {
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
@@ -288,8 +274,16 @@ impl<R: Runtime> Future for TransportManager<R> {
             match self.transports[index].poll_next_unpin(cx) {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        router = %router_info.identity().id(),
+                        "connection established",
+                    );
+                    self.transports[index].accept(&router_info.identity().id());
+                }
                 Poll::Ready(Some(event)) => {
-                    tracing::error!("todo: handle established connection");
+                    tracing::warn!("unhandled event: {event:?}");
                 }
             }
 

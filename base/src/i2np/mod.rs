@@ -20,6 +20,12 @@
 //!
 //! https://geti2p.net/spec/i2np
 
+use crate::{
+    crypto::base64_encode,
+    primitives::{Date, Mapping},
+    subsystem::SubsystemKind,
+};
+
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -28,10 +34,11 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::fmt;
 
-use crate::{crypto::base64_encode, primitives::Date, transports::SubsystemKind};
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::i2np";
 
 /// Garlic certificate length.
 const GARLIC_CERTIFICATE_LEN: usize = 3usize;

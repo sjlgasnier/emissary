@@ -63,10 +63,16 @@ impl Future for NetDb {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.service.poll_next_unpin(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Some(event)) => todo!("handle event"),
-            Poll::Ready(None) => return Poll::Ready(()),
+        loop {
+            match self.service.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(event)) => tracing::warn!(
+                    target: LOG_TARGET,
+                    ?event,
+                    "unhandled event",
+                ),
+                Poll::Ready(None) => return Poll::Ready(()),
+            }
         }
     }
 }

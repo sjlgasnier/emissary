@@ -23,8 +23,9 @@
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
     i2np::MessageType,
-    primitives::RouterInfo,
+    primitives::{RouterId, RouterInfo},
     runtime::{AsyncRead, Runtime, TcpStream},
+    subsystem::SubsystemCommand,
     transports::{
         ntcp2::{
             message::MessageBlock,
@@ -34,6 +35,8 @@ use crate::{
     },
     util::AsyncReadExt,
 };
+
+use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{vec, vec::Vec};
 use core::{
@@ -69,7 +72,10 @@ pub struct Ntcp2Session<R: Runtime> {
     role: Role,
 
     /// `RouterInfo` of the remote peer.
-    router: RouterInfo,
+    router_info: RouterInfo,
+
+    /// Router ID.
+    router: RouterId,
 
     /// Runtime.
     runtime: R,
@@ -94,27 +100,37 @@ pub struct Ntcp2Session<R: Runtime> {
 
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
+
+    /// RX channel for receiving messages from subsystems.
+    cmd_rx: Receiver<SubsystemCommand>,
+
+    /// TX channel for sending commands for this connection.
+    cmd_tx: Sender<SubsystemCommand>,
 }
 
 impl<R: Runtime> Ntcp2Session<R> {
     /// Create new active NTCP2 [`Session`].
     pub fn new(
         role: Role,
-        router: RouterInfo,
+        router_info: RouterInfo,
         runtime: R,
         stream: R::TcpStream,
         key_context: KeyContext,
-        subsystem_handle: SubsystemHandle,
+        mut subsystem_handle: SubsystemHandle,
     ) -> Self {
+        let router = router_info.identity().id();
         let KeyContext {
             send_key,
             recv_key,
             sip,
         } = key_context;
 
+        let (cmd_tx, cmd_rx) = channel(128);
+
         Self {
             role,
-            router,
+            router: router_info.identity().id(),
+            router_info,
             runtime,
             read_buffer: vec![0u8; 0xffff],
             read_state: ReadState::ReadSize { offset: 0usize },
@@ -123,6 +139,8 @@ impl<R: Runtime> Ntcp2Session<R> {
             recv_cipher: ChaChaPoly::new(&recv_key),
             sip,
             subsystem_handle,
+            cmd_rx,
+            cmd_tx,
         }
     }
 
@@ -133,7 +151,21 @@ impl<R: Runtime> Ntcp2Session<R> {
 
     /// Get `RouterInfo` of the remote peer.
     pub fn router(&self) -> RouterInfo {
-        self.router.clone()
+        self.router_info.clone()
+    }
+
+    pub async fn run(mut self) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            router = %self.router,
+            "start event ntcp2 event loop",
+        );
+
+        self.subsystem_handle
+            .report_connection_established(self.router.clone(), self.cmd_tx.clone())
+            .await;
+
+        self.await
     }
 }
 
@@ -212,7 +244,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
 
                             match MessageBlock::parse(&data_block) {
                                 Some(MessageBlock::I2Np { message }) => {
-                                    let message_id = message.message_id;
+                                    let message_id = message.message_id();
 
                                     if let Err(error) =
                                         this.subsystem_handle.dispatch_message(message)

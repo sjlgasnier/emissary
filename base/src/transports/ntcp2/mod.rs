@@ -20,15 +20,16 @@ use crate::{
     crypto::{
         base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
-    primitives::{RouterAddress, RouterInfo, Str},
+    primitives::{RouterAddress, RouterId, RouterInfo, Str},
     runtime::{JoinSet, Runtime, TcpListener, TcpStream},
+    subsystem::SubsystemHandle,
     transports::{
         ntcp2::{
             listener::Ntcp2Listener,
             message::MessageBlock,
             session::{Ntcp2Session, SessionManager},
         },
-        SubsystemHandle, Transport, TransportEvent,
+        Transport, TransportEvent,
     },
 };
 
@@ -58,6 +59,12 @@ pub struct Ntcp2Transport<R: Runtime> {
 
     /// Pending connections.
     pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
+
+    /// Pending connections.
+    ///
+    /// Connections which have been established successfully
+    /// but are waiting approval/rejection from the `TransportManager`.
+    pending_connections: HashMap<RouterId, Ntcp2Session<R>>,
 
     /// Session manager.
     session_manager: SessionManager<R>,
@@ -94,6 +101,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         Ok(Ntcp2Transport {
             listener,
             pending_handshakes: R::join_set(),
+            pending_connections: HashMap::new(),
             session_manager,
             waker: None,
         })
@@ -113,6 +121,48 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
         self.waker.take().map(|waker| waker.wake());
 
         Ok(())
+    }
+
+    fn accept(&mut self, router: &RouterId) {
+        match self.pending_connections.remove(router) {
+            Some(session) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router,
+                    "ntcp2 session accepted, starting event loop",
+                );
+                R::spawn(session);
+            }
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router,
+                    "cannot accept non-existent ntcp2 session",
+                );
+                debug_assert!(false);
+            }
+        }
+    }
+
+    fn reject(&mut self, router: &RouterId) {
+        match self.pending_connections.remove(router) {
+            Some(_) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router,
+                    "ntcp2 session rejected, closing connection",
+                );
+                // TODO: call `session.close()`?
+            }
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router,
+                    "cannot reject non-existent ntcp2 session",
+                );
+                debug_assert!(false);
+            }
+        }
     }
 }
 
@@ -142,16 +192,23 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     tracing::debug!(
                         target: LOG_TARGET,
                         role = ?session.role(),
-                        "new ntcp2 session opened",
+                        router = %session.router().identity().id(),
+                        "ntcp2 connection opened",
                     );
 
-                    // get router info of the connected peer, spawn the connection event loop
-                    // in the background and infrom `TransportManager` of the new connection
-                    let router = session.router();
+                    // get router info from the session, store the session itself into
+                    // `pending_connections` and inform `TransportManager` that new ntcp2 connection
+                    // with `router` has been opened
+                    //
+                    // `TransportManager` will either accept or reject the session
+                    let router_info = session.router();
+                    let router = router_info.identity().id();
 
-                    R::spawn(session);
+                    self.pending_connections.insert(router, session);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
+                        router_info,
+                    }));
                 }
                 Some(Err(error)) => todo!(),
                 None => return Poll::Ready(None),
