@@ -247,7 +247,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     }
                 }
                 ReadState::ReadFrame { size, offset } => {
-                    match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..]) {
+                    match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..size]) {
                         Poll::Pending => break,
                         Poll::Ready(Err(error)) => {
                             tracing::debug!(
