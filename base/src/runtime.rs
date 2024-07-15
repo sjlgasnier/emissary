@@ -16,15 +16,37 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use futures::{AsyncRead, AsyncWrite, Future, Stream};
+// TODO: documentation
+
+use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
+use alloc::string::String;
 use core::{
+    future::Future,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
+
+pub trait AsyncRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<crate::Result<usize>>;
+}
+
+pub trait AsyncWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<crate::Result<usize>>;
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>>;
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>>;
+}
 
 pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sized + 'static {
     /// Establish connection to remote peer at `address`.

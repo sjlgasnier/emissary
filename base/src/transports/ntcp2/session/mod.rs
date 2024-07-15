@@ -36,15 +36,15 @@ use crate::{
         StaticPublicKey,
     },
     primitives::{RouterInfo, Str, TransportKind},
-    runtime::{Runtime, TcpStream},
+    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     transports::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
         SubsystemHandle,
     },
+    util::{AsyncReadExt, AsyncWriteExt},
     Error,
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use alloc::{vec, vec::Vec};
@@ -376,7 +376,7 @@ impl<R: Runtime> SessionManager<R> {
                         ?error,
                         "failed to accept session",
                     );
-                    let _ = AsyncWriteExt::close(&mut stream).await;
+                    let _ = stream.close().await;
 
                     Err(error)
                 }

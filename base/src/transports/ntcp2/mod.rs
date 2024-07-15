@@ -32,7 +32,7 @@ use crate::{
     },
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use thingbuf::mpsc::Sender;
 

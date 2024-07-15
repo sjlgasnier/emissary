@@ -23,7 +23,7 @@ use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
     i2np::{I2npMessage, MessageType},
     primitives::RouterInfo,
-    runtime::Runtime,
+    runtime::{Runtime, TcpStream},
     transports::{
         ntcp2::{
             message::MessageBlock,
@@ -31,9 +31,8 @@ use crate::{
         },
         SubsystemHandle,
     },
+    util::AsyncReadExt,
 };
-
-use futures::AsyncReadExt;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::active";

@@ -35,6 +35,7 @@ mod netdb;
 mod primitives;
 mod transports;
 mod tunnel;
+mod util;
 
 pub mod router;
 pub mod runtime;

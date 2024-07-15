@@ -16,13 +16,14 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use alloc::string::String;
 use core::fmt;
 
 #[derive(Debug)]
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
     Chacha20Poly1305(chacha20poly1305::Error),
-    IoError(futures::io::Error),
+    IoError(String),
     Socket,
     InvalidData,
     InvalidState,
@@ -54,11 +55,5 @@ impl From<ed25519_dalek::ed25519::Error> for Error {
 impl From<chacha20poly1305::Error> for Error {
     fn from(value: chacha20poly1305::Error) -> Self {
         Error::Chacha20Poly1305(value)
-    }
-}
-
-impl From<futures::io::Error> for Error {
-    fn from(value: futures::io::Error) -> Self {
-        Error::IoError(value)
     }
 }
