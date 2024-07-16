@@ -16,50 +16,140 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{crypto::StaticPrivateKey, primitives::RouterInfo, transports::TransportService};
+use crate::{
+    crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
+    i2np::{I2NpMessage, MessageType, RawI2npMessage, TunnelMessage},
+    primitives::{RouterId, RouterInfo},
+    runtime::Runtime,
+    subsystem::SubsystemEvent,
+    transports::TransportService,
+    tunnel::noise::Noise,
+};
 
 use futures::{FutureExt, StreamExt};
 
+use alloc::{string::String, vec::Vec};
 use core::{
     future::Future,
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
+use hashbrown::HashSet;
+
+mod noise;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel-manager";
 
 /// Tunnel manager.
-pub struct TunnelManager {
+pub struct TunnelManager<R: Runtime> {
     /// Transport service.
     service: TransportService,
 
-    /// Local static key.
-    local_key: StaticPrivateKey,
+    /// Noise key context.
+    noise: Noise,
+
+    /// Truncated router hash.
+    truncated_hash: Vec<u8>,
+
+    /// Connected routers.
+    routers: HashSet<RouterId>,
+
+    /// Marker for `Runtime`
+    _marker: PhantomData<R>,
 }
 
-impl TunnelManager {
+impl<R: Runtime> TunnelManager<R> {
     /// Create new [`TunnelManager`].
-    pub fn new(service: TransportService, local_key: StaticPrivateKey) -> Self {
+    pub fn new(
+        service: TransportService,
+        local_key: StaticPrivateKey,
+        truncated_hash: Vec<u8>,
+    ) -> Self {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",
         );
 
-        // TODO: derive keys
+        Self {
+            service,
+            truncated_hash,
+            noise: Noise::new(local_key),
+            routers: HashSet::new(),
+            _marker: Default::default(),
+        }
+    }
 
-        Self { service, local_key }
+    fn on_connection_established(&mut self, router: RouterId) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            %router,
+            "connection established",
+        );
+        self.routers.insert(router);
+    }
+
+    fn on_connection_closed(&mut self, router: RouterId) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            %router,
+            "connection closed",
+        );
+        self.routers.remove(&router);
+    }
+
+    fn on_message(&mut self, message: RawI2npMessage) {
+        let RawI2npMessage {
+            message_type,
+            message_id,
+            expiration,
+            payload,
+        } = message;
+
+        match message_type {
+            MessageType::VariableTunnelBuild => {
+                // TODO: this should return destination?
+                let (payload, hop, message_id) =
+                    self.noise.create_tunnel_hop(&self.truncated_hash, payload).unwrap();
+
+                let msg = RawI2npMessage {
+                    message_type: MessageType::VariableTunnelBuildReply,
+                    message_id,
+                    expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
+                        as u32,
+                    payload,
+                }
+                .serialize();
+
+                tracing::info!(target: LOG_TARGET, router = %hop, "send message to router");
+
+                // TODO: this should return error
+                self.service.send(&hop, msg);
+            }
+            message => tracing::warn!(
+                target: LOG_TARGET,
+                ?message,
+                "unhandled message",
+            ),
+        }
     }
 }
 
-impl Future for TunnelManager {
+impl<R: Runtime> Future for TunnelManager<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(event)) => tracing::error!("handle tunnel message: {event:?}"),
+                Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
+                    self.on_connection_established(router),
+                Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
+                    self.on_connection_closed(router),
+                Poll::Ready(Some(SubsystemEvent::I2Np { message })) => self.on_message(message),
+                Poll::Ready(Some(SubsystemEvent::Dummy)) => unreachable!(),
                 Poll::Ready(None) => return Poll::Ready(()),
             }
         }

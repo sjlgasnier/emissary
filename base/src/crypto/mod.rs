@@ -197,6 +197,12 @@ impl EphemeralPublicKey {
         Some(Self::X25519(x25519_dalek::PublicKey::from(key)))
     }
 
+    pub fn to_vec(&self) -> Vec<u8> {
+        match self {
+            Self::X25519(key) => key.as_bytes().to_vec(),
+        }
+    }
+
     /// Zeroize private key.
     pub fn zeroize(self) {
         match self {

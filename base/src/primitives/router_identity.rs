@@ -45,6 +45,14 @@ impl fmt::Display for RouterId {
     }
 }
 
+impl From<String> for RouterId {
+    fn from(value: String) -> Self {
+        RouterId {
+            hash: Arc::new(value),
+        }
+    }
+}
+
 // TODO: doc
 #[derive(Debug, AsBytes)]
 #[repr(C)]

@@ -55,6 +55,9 @@ const ENCRYPTED_BUILD_REQUEST_LEN: usize = 464usize;
 /// Poly1305 authentication tag length.
 const POLY1305_TAG_LENGTH: usize = 16usize;
 
+/// Poly1305 authentication tag length.
+const ROUTER_HASH_LEN: usize = 32usize;
+
 /// Message type.
 #[derive(Debug, Clone, Copy)]
 pub enum MessageType {
@@ -119,6 +122,67 @@ impl MessageType {
     }
 }
 
+/// Encrypted tunnel build request.
+#[derive(Debug)]
+pub struct EncryptedTunnelBuildRequestRecord<'a> {
+    /// Truncated router identity hash.
+    truncated_hash: &'a [u8],
+
+    /// Remote's ephemeral key.
+    ephemeral_key: &'a [u8],
+
+    /// Chacha20-encrypted payload + Poly1305 authentication tag.
+    ciphertext: &'a [u8],
+}
+
+impl<'a> EncryptedTunnelBuildRequestRecord<'a> {
+    /// Get reference to truncated router hash.
+    pub fn truncated_hash(&self) -> &'a [u8] {
+        self.truncated_hash
+    }
+
+    /// Get reference to ephemeral key.
+    pub fn ephemeral_key(&self) -> &'a [u8] {
+        self.ephemeral_key
+    }
+
+    /// Get reference to ciphertext.
+    pub fn ciphertext(&self) -> &'a [u8] {
+        self.ciphertext
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HopRole {
+    /// Router acts as the inbound endpoint.
+    InboundGateway,
+
+    /// Router acts as the outbound endpoint.
+    OutboundEndpoint,
+
+    /// Router acts as an intermediary participant.
+    Intermediary,
+}
+
+impl HopRole {
+    fn from_u8(role: u8) -> Option<HopRole> {
+        match role {
+            0x80 => Some(HopRole::InboundGateway),
+            0x40 => Some(HopRole::OutboundEndpoint),
+            0x00 => Some(HopRole::Intermediary),
+            role => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?role,
+                    "unrecognized flag"
+                );
+                debug_assert!(false);
+                None
+            }
+        }
+    }
+}
+
 /// Tunnel build record.
 #[derive(Debug)]
 pub struct TunnelBuildRecord<'a> {
@@ -144,10 +208,10 @@ pub struct TunnelBuildRecord<'a> {
     tunnel_reply_iv: &'a [u8],
 
     /// Flags.
-    flags: u8,
+    role: HopRole,
 
-    /// Unused flags.
-    reserved: [u8; 3],
+    /// Unused flags, size is always 3 bytes.
+    reserved: &'a [u8],
 
     /// Request time, in minutes since Unix epoch.
     request_time: u32,
@@ -155,11 +219,96 @@ pub struct TunnelBuildRecord<'a> {
     /// Tunnel expiration, in seconds since creation.
     request_expiration: u32,
 
-    // Next message ID.
+    /// Next message ID.
+    ///
+    /// Used as reply message's message ID.
     next_message_id: u32,
 
-    /// TODO:
-    rest: &'a [u8],
+    /// Options.
+    options: Mapping, // TODO: `MappingRef`?,
+
+    /// Padding.
+    padding: &'a [u8],
+}
+
+impl<'a> TunnelBuildRecord<'a> {
+    pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], TunnelBuildRecord<'a>> {
+        let (rest, tunnel_id) = be_u32(input)?;
+        let (rest, next_tunnel_id) = be_u32(rest)?;
+        // TODO: skip unneedes stuff?
+        let (rest, next_router_hash) = take(ROUTER_HASH_LEN)(rest)?;
+        let (rest, tunnel_layer_key) = take(32usize)(rest)?;
+        let (rest, tunnel_iv_key) = take(32usize)(rest)?;
+        let (rest, tunnel_reply_key) = take(32usize)(rest)?;
+        let (rest, tunnel_reply_iv) = take(16usize)(rest)?;
+        let (rest, flags) = be_u8(rest)?;
+        let (rest, reserved) = take(3usize)(rest)?;
+        let (rest, request_time) = be_u32(rest)?;
+        let (rest, request_expiration) = be_u32(rest)?;
+        let (rest, next_message_id) = be_u32(rest)?;
+        let (rest, options) = Mapping::parse_frame(rest)?;
+        let (rest, padding) = take(input.len() - rest.len())(rest)?; // TODO: correct?
+        let role = HopRole::from_u8(flags).ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((
+            rest,
+            TunnelBuildRecord {
+                tunnel_id,
+                next_tunnel_id,
+                next_router_hash,
+                tunnel_layer_key,
+                tunnel_iv_key,
+                tunnel_reply_key,
+                tunnel_reply_iv,
+                role,
+                reserved,
+                request_time,
+                request_expiration,
+                next_message_id,
+                options,
+                padding,
+            },
+        ))
+    }
+
+    pub fn parse(input: &'a [u8]) -> Option<TunnelBuildRecord<'a>> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    /// Get tunnel ID.
+    pub fn tunnel_id(&self) -> u32 {
+        self.tunnel_id
+    }
+
+    /// Get next tunnel ID.
+    pub fn next_tunnel_id(&self) -> u32 {
+        self.next_tunnel_id
+    }
+
+    /// Get next router hash.
+    pub fn next_router_hash(&self) -> &'a [u8] {
+        self.next_router_hash
+    }
+
+    /// Get hop role.
+    pub fn role(&self) -> HopRole {
+        self.role
+    }
+
+    /// Get request time, in minutes since Unix epoch.
+    pub fn request_time(&self) -> u32 {
+        self.request_time
+    }
+
+    /// Get tunnel expiration, in seconds since creation.
+    pub fn request_expiration(&self) -> u32 {
+        self.request_expiration
+    }
+
+    /// Get next message ID.
+    pub fn next_message_id(&self) -> u32 {
+        self.next_message_id
+    }
 }
 
 #[derive(Debug)]
@@ -213,20 +362,12 @@ pub enum GarlicClove<'a> {
 }
 
 #[derive(Debug)]
-pub enum I2NpMessageKind<'a> {
+pub enum I2NpMessage<'a> {
     Tunnel(TunnelMessage<'a>),
     NetDb(DatabaseMessage<'a>),
-    Dummy,
 }
 
-#[derive(Debug)]
-pub struct I2npMessage<'a> {
-    msg_id: u32,
-    expiration: u32,
-    kind: I2NpMessageKind<'a>,
-}
-
-impl<'a> I2npMessage<'a> {
+impl<'a> I2NpMessage<'a> {
     /// Parse [`GarlicGlove`].
     fn parse_galic_clove(input: &'a [u8]) -> IResult<&'a [u8], GarlicClove<'a>> {
         let (rest, flag) = be_u8(input)?;
@@ -257,7 +398,7 @@ impl<'a> I2npMessage<'a> {
     }
 
     /// Parse [`I2NpMessageKind::Garlic`].
-    fn parse_garlic(input: &'a [u8]) -> IResult<&'a [u8], I2npMessage<'a>> {
+    fn parse_garlic(input: &'a [u8]) -> IResult<&'a [u8], I2NpMessage<'a>> {
         let (rest, size) = be_u32(input)?;
 
         // TODO: decrypt
@@ -284,21 +425,37 @@ impl<'a> I2npMessage<'a> {
         todo!();
     }
 
-    fn parse_variable_tunnel_build_request(input: &'a [u8]) -> IResult<&'a [u8], I2npMessage<'a>> {
-        let (mut rest, num_records) = be_u8(input)?;
+    fn parse_variable_tunnel_build_request(input: &'a [u8]) -> IResult<&'a [u8], I2NpMessage<'a>> {
+        let (rest, num_records) = be_u8(input)?;
 
-        for _ in 0..num_records {
-            let (_rest, hash) = take(TRUNCATED_IDENITTY_LEN)(rest)?;
-            let (_rest, ephemeral_key) = take(X25519_KEY_LENGTH)(_rest)?;
-            let (_rest, payload) = take(ENCRYPTED_BUILD_REQUEST_LEN)(_rest)?;
-            let (_rest, mac_tag) = take(POLY1305_TAG_LENGTH)(_rest)?;
-            rest = _rest;
+        let (rest, records) = (0..num_records)
+            .try_fold(
+                (rest, Vec::<EncryptedTunnelBuildRequestRecord<'a>>::new()),
+                |(rest, mut records), _| {
+                    let (rest, truncated_hash) =
+                        take::<usize, &[u8], ()>(TRUNCATED_IDENITTY_LEN)(rest).ok()?;
+                    let (rest, ephemeral_key) =
+                        take::<usize, &[u8], ()>(X25519_KEY_LENGTH)(rest).ok()?;
+                    let (rest, ciphertext) = take::<usize, &[u8], ()>(
+                        ENCRYPTED_BUILD_REQUEST_LEN + POLY1305_TAG_LENGTH,
+                    )(rest)
+                    .ok()?;
 
-            tracing::error!("request contains {num_records} many records");
-            tracing::error!("truncated hash = {:?}", base64_encode(hash));
-        }
+                    records.push(EncryptedTunnelBuildRequestRecord {
+                        truncated_hash,
+                        ephemeral_key,
+                        ciphertext,
+                    });
 
-        todo!();
+                    Some((rest, records))
+                },
+            )
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((
+            rest,
+            I2NpMessage::Tunnel(TunnelMessage::VariableBuildRequest { records }),
+        ))
     }
 
     fn parse_inner(
@@ -306,7 +463,7 @@ impl<'a> I2npMessage<'a> {
         message_id: u32,
         short_expiration: u32,
         input: &'a [u8],
-    ) -> IResult<&'a [u8], I2npMessage<'a>> {
+    ) -> IResult<&'a [u8], I2NpMessage<'a>> {
         match message_type {
             MessageType::Garlic => Self::parse_garlic(input),
             MessageType::VariableTunnelBuild => Self::parse_variable_tunnel_build_request(input),
@@ -314,7 +471,7 @@ impl<'a> I2npMessage<'a> {
         }
     }
 
-    pub fn parse(message_type: MessageType, buffer: &'a [u8]) -> Option<I2npMessage<'a>> {
+    pub fn parse(message_type: MessageType, buffer: &'a [u8]) -> Option<I2NpMessage<'a>> {
         let parsed = Self::parse_inner(message_type, 1337u32, 1338u32, buffer).ok()?.1;
 
         Some(parsed)
@@ -367,7 +524,7 @@ pub enum TunnelMessage<'a> {
     /// Variable tunnel build message.
     VariableBuildRequest {
         /// Build records.
-        records: Vec<TunnelBuildRecord<'a>>,
+        records: Vec<EncryptedTunnelBuildRequestRecord<'a>>,
     },
 
     /// Tunnel build reply.
@@ -464,16 +621,16 @@ pub enum DatabaseMessage<'a> {
 #[derive(Clone)]
 pub struct RawI2npMessage {
     /// Message type.
-    message_type: MessageType,
+    pub message_type: MessageType,
 
     /// Message ID.
-    message_id: u32,
+    pub message_id: u32,
 
     /// Expiration.
-    expiration: u32,
+    pub expiration: u32,
 
     /// Raw, unparsed payload.
-    payload: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 // TODO: remove & remove thingbuf zzz
@@ -523,14 +680,6 @@ impl RawI2npMessage {
         Some(Self::parse_frame(input).ok()?.1)
     }
 
-    pub fn message_id(&self) -> u32 {
-        self.message_id
-    }
-
-    pub fn message_type(&self) -> MessageType {
-        self.message_type
-    }
-
     pub fn destination(&self) -> SubsystemKind {
         match self.message_type {
             MessageType::DatabaseStore
@@ -538,5 +687,18 @@ impl RawI2npMessage {
             | MessageType::DatabaseSearchReply => SubsystemKind::NetDb,
             _ => SubsystemKind::Tunnel,
         }
+    }
+
+    // TODO: use `zerocopy`
+    pub fn serialize(self) -> Vec<u8> {
+        let mut out = vec![0u8; self.payload.len() + 2 + 1 + 2 * 4];
+
+        out[..2].copy_from_slice(&((self.payload.len() + 1 + 2 * 4) as u16).to_be_bytes());
+        out[2] = MessageType::VariableTunnelBuildReply.serialize();
+        out[3..7].copy_from_slice(&self.message_id.to_be_bytes());
+        out[7..11].copy_from_slice(&self.expiration.to_be_bytes());
+        out[11..].copy_from_slice(&self.payload);
+
+        out
     }
 }

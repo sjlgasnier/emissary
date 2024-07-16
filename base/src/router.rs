@@ -21,7 +21,8 @@ use crate::{
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
     runtime::Runtime,
-    transports::{SubsystemKind, TransportManager},
+    subsystem::SubsystemKind,
+    transports::TransportManager,
     tunnel::TunnelManager,
     Config,
 };
@@ -57,7 +58,7 @@ pub struct Router<R: Runtime> {
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
     pub async fn new(runtime: R, config: Config, router: Vec<u8>) -> crate::Result<Self> {
-        // TODO: ugly
+        // TODO: figure out how to initialize router properly
         let router = RouterInfo::from_bytes(router).unwrap();
         let now = R::time_since_epoch().as_millis() as u64;
         let local_key = StaticPrivateKey::from(config.static_key.clone());
@@ -67,8 +68,8 @@ impl<R: Runtime> Router<R> {
 
         tracing::info!(
             target: LOG_TARGET,
-            router_hash = ?base64_encode(local_router_info.identity().hash()),
-            truncated_router_hash = ?base64_encode(&local_router_info.identity().hash()[..16]),
+            local_router_hash = ?base64_encode(local_router_info.identity().hash()),
+            remote_router_hash = ?base64_encode(router.identity().hash()),
             "start emissary",
         );
 
@@ -79,7 +80,7 @@ impl<R: Runtime> Router<R> {
             runtime.clone(),
             local_key.clone(),
             local_signing_key,
-            local_router_info,
+            local_router_info.clone(), // TODO: zzz
         );
 
         // initialize and start netdb
@@ -93,7 +94,11 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
-            let tunnel_manager = TunnelManager::new(transport_service, local_key);
+            let tunnel_manager = TunnelManager::<R>::new(
+                transport_service,
+                local_key,
+                local_router_info.identity().hash()[..16].to_vec(),
+            );
 
             R::spawn(tunnel_manager);
         }
