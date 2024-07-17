@@ -24,7 +24,7 @@
 
 use crate::{
     crypto::{
-        aes::Aes, base64_encode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
+        aes::cbc::Aes, base64_encode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
         siphash::SipHash, EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     runtime::Runtime,

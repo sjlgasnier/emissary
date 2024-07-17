@@ -73,14 +73,15 @@ impl Aes {
     /// Encrypt `plaintext` using AES-CBC-256.
     ///
     /// Length of `plaintext` must be a multiple of 16
-    pub fn encrypt(&mut self, plaintext: Vec<u8>) -> Vec<u8> {
-        assert!(plaintext.len() % 16 == 0, "invalid plaintext");
+    pub fn encrypt<T: AsRef<[u8]>>(&mut self, plaintext: T) -> Vec<u8> {
+        assert!(plaintext.as_ref().len() % 16 == 0, "invalid plaintext");
 
         let AesKind::Encryptor { aes } = &mut self.kind else {
             panic!("tried to call `encrypt()` for an aes decryptor");
         };
 
         let mut blocks = plaintext
+            .as_ref()
             .chunks(16)
             .into_iter()
             .map(|chunk| {
@@ -101,14 +102,15 @@ impl Aes {
     /// Dencrypt `ciphertext` using AES-CBC-256.
     ///
     /// Length of `ciphertext` must be a multiple of 16
-    pub fn decrypt(&mut self, ciphertext: Vec<u8>) -> Vec<u8> {
-        assert!(ciphertext.len() % 16 == 0, "invalid ciphertext");
+    pub fn decrypt<T: AsRef<[u8]>>(&mut self, ciphertext: T) -> Vec<u8> {
+        assert!(ciphertext.as_ref().len() % 16 == 0, "invalid ciphertext");
 
         let AesKind::Decryptor { aes } = &mut self.kind else {
             panic!("tried to call `decrypt()` for an aes encryptor");
         };
 
         let mut blocks = ciphertext
+            .as_ref()
             .chunks(16)
             .into_iter()
             .map(|chunk| {

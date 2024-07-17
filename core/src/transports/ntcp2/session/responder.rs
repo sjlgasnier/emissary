@@ -24,7 +24,7 @@
 
 use crate::{
     crypto::{
-        aes::Aes, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, siphash::SipHash,
+        aes::cbc::Aes, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, siphash::SipHash,
         EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     primitives::RouterInfo,

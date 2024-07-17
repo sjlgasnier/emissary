@@ -429,6 +429,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecb"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a8bfa975b1aec2145850fcaa1c6fe269a16578c44705a532ae3edc92b8881c7"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -461,6 +470,7 @@ dependencies = [
  "cbc",
  "chacha20poly1305",
  "data-encoding",
+ "ecb",
  "ed25519-dalek",
  "futures",
  "hashbrown",
