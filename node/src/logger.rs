@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use tracing::Level;
 use tracing_subscriber::{
     filter::{LevelFilter, Targets},
+    fmt::time::ChronoLocal,
     prelude::*,
 };
 
@@ -33,7 +34,10 @@ pub fn init_logger(log: Option<String>) -> anyhow::Result<()> {
     }
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_timer(ChronoLocal::new(String::from("%H:%M:%S%.3f"))),
+        )
         .with(targets)
         .try_init()
         .map_err(From::from)
