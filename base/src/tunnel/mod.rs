@@ -100,6 +100,7 @@ impl<R: Runtime> TunnelManager<R> {
         self.routers.remove(&router);
     }
 
+    // TODO: no unwraps
     fn on_message(&mut self, message: RawI2npMessage) {
         let RawI2npMessage {
             message_type,
@@ -111,11 +112,11 @@ impl<R: Runtime> TunnelManager<R> {
         match message_type {
             MessageType::VariableTunnelBuild => {
                 // TODO: this should return destination?
-                let (payload, hop, message_id) =
+                let (payload, hop, message_id, message_type) =
                     self.noise.create_tunnel_hop(&self.truncated_hash, payload).unwrap();
 
                 let msg = RawI2npMessage {
-                    message_type: MessageType::VariableTunnelBuildReply,
+                    message_type,
                     message_id,
                     expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
                         as u32,
@@ -123,7 +124,27 @@ impl<R: Runtime> TunnelManager<R> {
                 }
                 .serialize();
 
-                tracing::info!(target: LOG_TARGET, router = %hop, "send message to router");
+                // tracing::info!(target: LOG_TARGET, router = %hop, "send message to router");
+
+                // TODO: this should return error
+                self.service.send(&hop, msg);
+            }
+            MessageType::ShortTunnelBuild => {
+                let (payload, hop, message_id, message_type) =
+                    self.noise.create_short_tunnel_hop(&self.truncated_hash, payload).unwrap();
+
+                // tracing::info!("message id = {message_id}, next message id {_message_id}");
+
+                let msg = RawI2npMessage {
+                    message_type,
+                    message_id,
+                    expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
+                        as u32,
+                    payload,
+                }
+                .serialize();
+
+                // tracing::info!(target: LOG_TARGET, router = %hop, "send message to router");
 
                 // TODO: this should return error
                 self.service.send(&hop, msg);

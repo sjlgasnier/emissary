@@ -27,12 +27,16 @@ use crate::{
         base64_encode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, EphemeralPublicKey,
         StaticPrivateKey, StaticPublicKey,
     },
-    i2np::{EncryptedTunnelBuildRequestRecord, MessageType, RawI2npMessage, TunnelBuildRecord},
+    i2np::{
+        EncryptedTunnelBuildRequestRecord, MessageType, RawI2npMessage, ShortTunnelBuildRecord,
+        TunnelBuildRecord,
+    },
     primitives::RouterId,
     tunnel::LOG_TARGET,
 };
 
 use alloc::{vec, vec::Vec};
+use zeroize::Zeroize;
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
@@ -76,7 +80,22 @@ impl Noise {
         }
     }
 
+    // MixKey(DH())
+    fn derive_keys(&self, ephemeral_key: StaticPublicKey) -> (Vec<u8>, Vec<u8>) {
+        let mut shared_secret = self.local_key.diffie_hellman(&ephemeral_key);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+
+        (chaining_key, aead_key)
+    }
+
     /// TODO: explain
+    ///
+    /// TODO: return `TunnelHop`?
     ///
     /// TODO: lot of refactoring needed
     ///
@@ -85,23 +104,16 @@ impl Noise {
         &mut self,
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
-    ) -> Option<(Vec<u8>, RouterId, u32)> {
+    ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
+        tracing::error!("payload size = {}", payload.len());
+
         // TODO: better abstraction
         let mut record = payload[1..].chunks_mut(528).find(|chunk| &chunk[..16] == truncated)?;
 
         // TODO: no unwraps
-        let ephemeral_key = StaticPublicKey::from_bytes(record[16..48].to_vec()).unwrap();
-        let shared_secret = self.local_key.diffie_hellman(&ephemeral_key);
         let state = Sha256::new().update(&self.inbound_state).update(&record[16..48]).finalize();
-
-        // MixKey(DH())
-        let (chaining_key, aead_key) = {
-            let temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-            let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-            let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
-
-            (chaining_key, aead_key)
-        };
+        let (chaining_key, aead_key) =
+            self.derive_keys(StaticPublicKey::from_bytes(record[16..48].to_vec()).unwrap());
         let new_state = Sha256::new().update(&state).update(&record[48..]).finalize();
 
         let mut test = record[48..528].to_vec();
@@ -113,6 +125,7 @@ impl Noise {
             tracing::info!(
                 target: LOG_TARGET,
                 role = ?record.role(),
+                next_message_id = record.next_message_id(),
                 next_router_hash = ?base64_encode(record.next_router_hash()),
                 "record info",
             );
@@ -127,11 +140,124 @@ impl Noise {
         record[49] = 0x00;
         record[511] = 0x00; // accept
 
+        // TODO: needs to encrypt with aes?
+
         let tag = ChaChaPoly::new(&chaining_key)
             .encrypt_with_ad(&new_state, &mut record[0..512])
             .unwrap();
         record[512..528].copy_from_slice(&tag);
 
-        Some((payload, next_router, message_id))
+        Some((
+            payload,
+            next_router,
+            message_id,
+            MessageType::VariableTunnelBuildReply,
+        ))
+    }
+
+    /// TODO: explain
+    pub fn create_short_tunnel_hop(
+        &mut self,
+        truncated: &Vec<u8>,
+        mut payload: Vec<u8>,
+    ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
+        // TODO: better abstraction
+        let (index, mut record) = payload[1..]
+            .chunks_mut(218)
+            .enumerate()
+            .find(|(i, chunk)| &chunk[..16] == truncated)?;
+
+        let state = Sha256::new().update(&self.inbound_state).update(&record[16..48]).finalize();
+        let (chaining_key, aead_key) =
+            self.derive_keys(StaticPublicKey::from_bytes(record[16..48].to_vec()).unwrap());
+
+        let new_state = Sha256::new().update(&state).update(&record[48..]).finalize();
+
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        let else_key = ck.clone();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+        let iv_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"TunnelLayerIVKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+        let garlic_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"RGarlicKeyAndTag")
+            .update(&[0x02])
+            .finalize();
+        // TODO: garlic tag
+
+        let mut test = record[48..].to_vec();
+        ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
+
+        let (next_router, message_id, message_type) = {
+            let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
+
+            tracing::info!(
+                target: LOG_TARGET,
+                role = ?record.role(),
+                // next_router_hash = ?base64_encode(record.next_router_hash()),
+                tunnel_id = record.tunnel_id(),
+                next_tunnel_id = record.next_tunnel_id(),
+                next_message_id = record.next_message_id(),
+                "record info",
+            );
+
+            ((
+                RouterId::from(base64_encode(&record.next_router_hash()[..16])),
+                record.next_message_id(),
+                // TODO: fix
+                match record.role() {
+                    crate::i2np::HopRole::Intermediary => MessageType::ShortTunnelBuild,
+                    _ => MessageType::OutboundTunnelBuildReply,
+                },
+            ))
+        };
+
+        record[48] = 0x00; // no options
+        record[49] = 0x00;
+        record[201] = 0x00; // accept
+
+        tracing::info!("encrypt with = {reply_key:?}, nonce {index}");
+
+        let tag = ChaChaPoly::with_nonce(&reply_key, index as u64)
+            .encrypt_with_ad(&new_state, &mut record[0..202])
+            .unwrap();
+        record[202..218].copy_from_slice(&tag);
+
+        // TODO: fix
+        for (index_new, record) in payload[1..].chunks_mut(218).enumerate() {
+            if index_new == index {
+                continue;
+            }
+
+            let encrypted = ChaChaPoly::with_nonce(&reply_key, index_new as u64)
+                .encrypt(&mut record[0..218])
+                .unwrap();
+            record[..218].copy_from_slice(&encrypted[..218]);
+        }
+
+        Some((payload, next_router, message_id, message_type))
     }
 }

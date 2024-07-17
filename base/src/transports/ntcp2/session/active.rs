@@ -324,12 +324,6 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         let data_block = this.send_cipher.encrypt(&test).unwrap();
                         let size = this.sip.obfuscate(data_block.len() as u16);
 
-                        tracing::error!(
-                            "sending {} (with poly tag {}) (obfuscated {size}) bytes to remote",
-                            message.len(),
-                            data_block.len()
-                        );
-
                         this.write_state = WriteState::SendSize {
                             size: size.to_be_bytes().to_vec(),
                             offset: 0usize,

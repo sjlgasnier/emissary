@@ -147,8 +147,6 @@ impl SubsystemHandle {
 
     // TODO: fix error
     pub fn dispatch_message(&mut self, message: RawI2npMessage) -> crate::Result<()> {
-        tracing::error!(destination = ?message.destination(), "dispatch message to subsystem");
-
         match message.destination() {
             SubsystemKind::NetDb => self.subsystems[0]
                 .try_send(InnerSubsystemEvent::I2Np { message })

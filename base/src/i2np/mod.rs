@@ -316,16 +316,87 @@ pub struct ShortTunnelBuildRecord<'a> {
     tunnel_id: u32,
     next_tunnel_id: u32,
     next_router_hash: &'a [u8],
-    flags: u8,
+    role: HopRole,
     reserved: &'a [u8],
     encryption_type: u8,
     request_time: u32,
     request_expiration: u32,
     next_message_id: u32,
-    // TODO: rest options
-    // bytes    56-x: tunnel build options (Mapping)
-    // bytes     x-x: other data as implied by flags or options
-    // bytes   x-153: random padding (see below)
+    options: Mapping,
+    padding: &'a [u8],
+}
+
+impl<'a> ShortTunnelBuildRecord<'a> {
+    pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        let (rest, tunnel_id) = be_u32(input)?;
+        let (rest, next_tunnel_id) = be_u32(rest)?;
+        let (rest, next_router_hash) = take(ROUTER_HASH_LEN)(rest)?;
+        let (rest, flags) = be_u8(rest)?;
+        let (rest, reserved) = take(2usize)(rest)?;
+        let (rest, encryption_type) = be_u8(rest)?;
+        let (rest, request_time) = be_u32(rest)?;
+        let (rest, request_expiration) = be_u32(rest)?;
+        let (rest, next_message_id) = be_u32(rest)?;
+        let (rest, options) = Mapping::parse_frame(rest)?;
+        let (rest, padding) = take(input.len() - rest.len())(rest)?; // TODO: correct?
+        let role = HopRole::from_u8(flags).ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((
+            rest,
+            ShortTunnelBuildRecord {
+                tunnel_id,
+                next_tunnel_id,
+                next_router_hash,
+                encryption_type,
+                role,
+                reserved,
+                request_time,
+                request_expiration,
+                next_message_id,
+                options,
+                padding,
+            },
+        ))
+    }
+
+    pub fn parse(input: &'a [u8]) -> Option<Self> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    /// Get tunnel ID.
+    pub fn tunnel_id(&self) -> u32 {
+        self.tunnel_id
+    }
+
+    /// Get next tunnel ID.
+    pub fn next_tunnel_id(&self) -> u32 {
+        self.next_tunnel_id
+    }
+
+    /// Get next router hash.
+    pub fn next_router_hash(&self) -> &'a [u8] {
+        self.next_router_hash
+    }
+
+    /// Get hop role.
+    pub fn role(&self) -> HopRole {
+        self.role
+    }
+
+    /// Get request time, in minutes since Unix epoch.
+    pub fn request_time(&self) -> u32 {
+        self.request_time
+    }
+
+    /// Get tunnel expiration, in seconds since creation.
+    pub fn request_expiration(&self) -> u32 {
+        self.request_expiration
+    }
+
+    /// Get next message ID.
+    pub fn next_message_id(&self) -> u32 {
+        self.next_message_id
+    }
 }
 
 #[derive(Debug)]
@@ -694,7 +765,7 @@ impl RawI2npMessage {
         let mut out = vec![0u8; self.payload.len() + 2 + 1 + 2 * 4];
 
         out[..2].copy_from_slice(&((self.payload.len() + 1 + 2 * 4) as u16).to_be_bytes());
-        out[2] = MessageType::VariableTunnelBuildReply.serialize();
+        out[2] = self.message_type.serialize();
         out[3..7].copy_from_slice(&self.message_id.to_be_bytes());
         out[7..11].copy_from_slice(&self.expiration.to_be_bytes());
         out[11..].copy_from_slice(&self.payload);
