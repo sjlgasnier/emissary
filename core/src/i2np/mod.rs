@@ -152,7 +152,7 @@ impl<'a> EncryptedTunnelBuildRequestRecord<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HopRole {
     /// Router acts as the inbound endpoint.
     InboundGateway,

@@ -28,8 +28,8 @@ use crate::{
         StaticPrivateKey, StaticPublicKey,
     },
     i2np::{
-        EncryptedTunnelBuildRequestRecord, MessageType, RawI2npMessage, ShortTunnelBuildRecord,
-        TunnelBuildRecord,
+        EncryptedTunnelBuildRequestRecord, HopRole, MessageType, RawI2npMessage,
+        ShortTunnelBuildRecord, TunnelBuildRecord,
     },
     primitives::RouterId,
     tunnel::LOG_TARGET,
@@ -119,7 +119,7 @@ impl Noise {
         let mut test = record[48..528].to_vec();
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
 
-        let (next_router, message_id) = {
+        let (next_router, message_id, message_type) = {
             let record = TunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
             tracing::info!(
@@ -133,6 +133,10 @@ impl Noise {
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 record.next_message_id(),
+                match record.role() {
+                    HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
+                    _ => MessageType::VariableTunnelBuild,
+                },
             ))
         };
 
@@ -147,12 +151,7 @@ impl Noise {
             .unwrap();
         record[512..528].copy_from_slice(&tag);
 
-        Some((
-            payload,
-            next_router,
-            message_id,
-            MessageType::VariableTunnelBuildReply,
-        ))
+        Some((payload, next_router, message_id, message_type))
     }
 
     /// TODO: explain
