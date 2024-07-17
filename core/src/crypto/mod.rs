@@ -20,11 +20,11 @@ use crate::Error;
 
 use data_encoding::{Encoding, Specification};
 use lazy_static::lazy_static;
+use rand_core::{CryptoRng, RngCore};
+use zeroize::Zeroize;
 
 use alloc::{string::String, vec::Vec};
 use core::convert::TryInto;
-use rand_core::{CryptoRng, RngCore};
-use zeroize::Zeroize;
 
 pub mod aes;
 pub mod chachapoly;

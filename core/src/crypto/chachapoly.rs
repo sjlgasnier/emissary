@@ -20,7 +20,7 @@ use crate::Error;
 
 use aes::cipher::generic_array::GenericArray;
 use chacha20poly1305::{
-    aead::{Aead, AeadInPlace, KeyInit},
+    aead::{Aead, AeadInPlace, AeadMutInPlace, KeyInit},
     consts::U12,
     ChaCha20Poly1305,
 };

@@ -24,22 +24,57 @@
 
 use crate::{
     crypto::{
-        base64_encode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, EphemeralPublicKey,
-        StaticPrivateKey, StaticPublicKey,
+        aes::{cbc, ecb},
+        base64_encode,
+        chachapoly::ChaChaPoly,
+        hmac::Hmac,
+        sha256::Sha256,
+        EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
     i2np::{
-        EncryptedTunnelBuildRequestRecord, HopRole, MessageType, RawI2npMessage,
-        ShortTunnelBuildRecord, TunnelBuildRecord,
+        DeliveryInstruction, EncryptedTunnelBuildRequestRecord, EncryptedTunnelData, HopRole,
+        MessageKind, MessageType, RawI2npMessage, ShortTunnelBuildRecord, TunnelBuildRecord,
+        TunnelData,
     },
     primitives::RouterId,
     tunnel::LOG_TARGET,
 };
 
-use alloc::{vec, vec::Vec};
+use hashbrown::HashMap;
 use zeroize::Zeroize;
+
+use alloc::{vec, vec::Vec};
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
+
+struct TunnelHop {
+    /// Tunnel hop kind.
+    role: HopRole,
+
+    /// Tunnel ID.
+    ///
+    /// Assigned by the tunnel creator to us.
+    tunnel_id: u32,
+
+    /// Next tunnel ID.
+    ///
+    /// Assigned by the tunnel creator to the next hop.
+    next_tunnel_id: u32,
+
+    /// Next router ID.
+    next_router_id: RouterId,
+
+    /// Layer key.
+    ///
+    /// TODO: docs
+    layer_key: Vec<u8>,
+
+    /// IV key.
+    ///
+    /// TODO: docs
+    iv_key: Vec<u8>,
+}
 
 /// Noise key context.
 pub struct Noise {
@@ -54,6 +89,9 @@ pub struct Noise {
 
     /// Outbound state.
     outbound_state: Vec<u8>,
+
+    /// Tunnel hops.
+    tunnels: HashMap<u32, TunnelHop>,
 }
 
 impl Noise {
@@ -77,6 +115,7 @@ impl Noise {
             inbound_state,
             local_key,
             outbound_state,
+            tunnels: HashMap::new(),
         }
     }
 
@@ -105,8 +144,6 @@ impl Noise {
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
     ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
-        tracing::error!("payload size = {}", payload.len());
-
         // TODO: better abstraction
         let mut record = payload[1..].chunks_mut(528).find(|chunk| &chunk[..16] == truncated)?;
 
@@ -122,13 +159,26 @@ impl Noise {
         let (next_router, message_id, message_type) = {
             let record = TunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
-            tracing::info!(
+            let layer_key = record.tunnel_layer_key().to_vec();
+            let iv_key = record.tunnel_iv_key().to_vec();
+
+            tracing::trace!(
                 target: LOG_TARGET,
                 role = ?record.role(),
                 next_message_id = record.next_message_id(),
                 next_router_hash = ?base64_encode(record.next_router_hash()),
                 "record info",
             );
+
+            let hop = TunnelHop {
+                role: record.role(),
+                tunnel_id: record.tunnel_id(),
+                next_tunnel_id: record.next_tunnel_id(),
+                next_router_id: RouterId::from(base64_encode(&record.next_router_hash()[..16])),
+                layer_key,
+                iv_key,
+            };
+            self.tunnels.insert(record.tunnel_id(), hop);
 
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
@@ -155,6 +205,7 @@ impl Noise {
     }
 
     /// TODO: explain
+    // TODO: verify source of this message is the same as last message
     pub fn create_short_tunnel_hop(
         &mut self,
         truncated: &Vec<u8>,
@@ -198,6 +249,8 @@ impl Noise {
             .update(&[0x02])
             .finalize();
 
+        // TODO: garlic tag
+        // TODO: save garlic key somewhere
         let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
         let ck = Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
         let garlic_key = Hmac::new(&temp_key)
@@ -205,7 +258,6 @@ impl Noise {
             .update(&b"RGarlicKeyAndTag")
             .update(&[0x02])
             .finalize();
-        // TODO: garlic tag
 
         let mut test = record[48..].to_vec();
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
@@ -213,15 +265,24 @@ impl Noise {
         let (next_router, message_id, message_type) = {
             let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
-            tracing::info!(
+            tracing::trace!(
                 target: LOG_TARGET,
                 role = ?record.role(),
-                // next_router_hash = ?base64_encode(record.next_router_hash()),
                 tunnel_id = record.tunnel_id(),
                 next_tunnel_id = record.next_tunnel_id(),
                 next_message_id = record.next_message_id(),
                 "record info",
             );
+
+            let hop = TunnelHop {
+                role: record.role(),
+                tunnel_id: record.tunnel_id(),
+                next_tunnel_id: record.next_tunnel_id(),
+                next_router_id: RouterId::from(base64_encode(&record.next_router_hash()[..16])),
+                layer_key,
+                iv_key,
+            };
+            self.tunnels.insert(record.tunnel_id(), hop);
 
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
@@ -238,14 +299,13 @@ impl Noise {
         record[49] = 0x00;
         record[201] = 0x00; // accept
 
-        tracing::info!("encrypt with = {reply_key:?}, nonce {index}");
-
         let tag = ChaChaPoly::with_nonce(&reply_key, index as u64)
             .encrypt_with_ad(&new_state, &mut record[0..202])
             .unwrap();
         record[202..218].copy_from_slice(&tag);
 
         // TODO: fix
+        // TODO: fix what?
         for (index_new, record) in payload[1..].chunks_mut(218).enumerate() {
             if index_new == index {
                 continue;
@@ -258,5 +318,98 @@ impl Noise {
         }
 
         Some((payload, next_router, message_id, message_type))
+    }
+
+    pub fn handle_tunnel_data(&mut self, mut payload: Vec<u8>) -> (RouterId, Vec<u8>) {
+        // TODO: no unwraps
+        let tunnel_data = EncryptedTunnelData::parse(&payload).unwrap();
+        let hop = self.tunnels.get(&tunnel_data.tunnel_id()).unwrap();
+
+        tracing::info!(
+            target: LOG_TARGET,
+            tunnel_id = ?hop.tunnel_id,
+            next_tunnel_id = ?hop.next_tunnel_id,
+            next_router_id = ?hop.next_router_id,
+            payload_len = ?tunnel_data.ciphertext().len(),
+            "tunnel data",
+        );
+
+        match hop.role {
+            HopRole::InboundGateway => todo!("inbound gateway not supported"),
+            HopRole::Intermediary => {
+                let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
+                let iv = aes.encrypt(tunnel_data.iv());
+
+                let mut aes = cbc::Aes::new_encryptor(&hop.layer_key, &iv);
+                let ciphertext = aes.encrypt(tunnel_data.ciphertext());
+
+                let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
+                let iv = aes.encrypt(iv);
+
+                let mut out = vec![0u8; 4 + 16 + tunnel_data.ciphertext().len()];
+
+                out[..4].copy_from_slice(&hop.next_tunnel_id.to_be_bytes().to_vec());
+                out[4..20].copy_from_slice(&iv);
+                out[20..].copy_from_slice(&tunnel_data.ciphertext());
+
+                return (hop.next_router_id.clone(), out);
+            }
+            HopRole::OutboundEndpoint => {
+                let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
+                let iv = aes.encrypt(tunnel_data.iv());
+
+                let mut aes = cbc::Aes::new_encryptor(&hop.layer_key, &iv);
+                let ciphertext = aes.encrypt(tunnel_data.ciphertext());
+
+                let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
+                let iv = aes.encrypt(iv);
+
+                let res =
+                    ciphertext[4..].iter().enumerate().find(|(_, byte)| byte == &&0x0).unwrap();
+
+                let checksum =
+                    Sha256::new().update(&ciphertext[4 + res.0 + 1..]).update(&iv).finalize();
+
+                if ciphertext[..4] != checksum[..4] {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        payload_checksum = ?ciphertext[..4],
+                        calculated = ?checksum[..4],
+                        "tunnel data checksum mismatch",
+                    );
+                    panic!("not handled");
+                }
+
+                let message = TunnelData::parse(&ciphertext[4 + res.0 + 1..]).unwrap();
+
+                for message in &message.messages {
+                    match message.message_kind {
+                        MessageKind::Unfragmented {
+                            ref delivery_instructions,
+                        } => match delivery_instructions {
+                            DeliveryInstruction::Local => tracing::error!("todo: local delivery"),
+                            DeliveryInstruction::Router { hash } => {
+                                tracing::debug!(hash = ?base64_encode(hash), "router delivery");
+
+                                return (
+                                    RouterId::from(base64_encode(&hash[..16])),
+                                    message.message.to_vec(),
+                                );
+                            }
+                            DeliveryInstruction::Tunnel { hash, tunnel_id } => tracing::debug!(
+                                ?tunnel_id,
+                                hash = ?base64_encode(hash),
+                                "todo: tunnel delivery"
+                            ),
+                        },
+                        ref message_kind => {
+                            tracing::error!("todo: handle {message_kind:?}");
+                        }
+                    }
+                }
+            }
+        }
+
+        todo!();
     }
 }

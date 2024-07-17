@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
-    i2np::{I2NpMessage, MessageType, RawI2npMessage, TunnelMessage},
+    i2np::{HopRole, I2NpMessage, MessageType, RawI2npMessage, TunnelMessage},
     primitives::{RouterId, RouterInfo},
     runtime::Runtime,
     subsystem::SubsystemEvent,
@@ -124,8 +124,6 @@ impl<R: Runtime> TunnelManager<R> {
                 }
                 .serialize();
 
-                // tracing::info!(target: LOG_TARGET, router = %hop, "send message to router");
-
                 // TODO: this should return error
                 self.service.send(&hop, msg);
             }
@@ -144,10 +142,11 @@ impl<R: Runtime> TunnelManager<R> {
                 }
                 .serialize();
 
-                // tracing::info!(target: LOG_TARGET, router = %hop, "send message to router");
-
                 // TODO: this should return error
                 self.service.send(&hop, msg);
+            }
+            MessageType::TunnelData => {
+                self.noise.handle_tunnel_data(payload);
             }
             message => tracing::warn!(
                 target: LOG_TARGET,

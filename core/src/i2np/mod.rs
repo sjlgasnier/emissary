@@ -47,16 +47,22 @@ const GARLIC_CERTIFICATE_LEN: usize = 3usize;
 const TRUNCATED_IDENITTY_LEN: usize = 16usize;
 
 // x25519 ephemeral key length.
-const X25519_KEY_LENGTH: usize = 32usize;
+const X25519_KEY_LEN: usize = 32usize;
 
 /// Encrypted build request length.
 const ENCRYPTED_BUILD_REQUEST_LEN: usize = 464usize;
 
 /// Poly1305 authentication tag length.
-const POLY1305_TAG_LENGTH: usize = 16usize;
+const POLY1305_TAG_LEN: usize = 16usize;
 
 /// Poly1305 authentication tag length.
 const ROUTER_HASH_LEN: usize = 32usize;
+
+/// AES key length.
+const AES256_KEY_LEN: usize = 32usize;
+
+/// AES IV length.
+const AES256_IV_LEN: usize = 16usize;
 
 /// Message type.
 #[derive(Debug, Clone, Copy)]
@@ -237,10 +243,10 @@ impl<'a> TunnelBuildRecord<'a> {
         let (rest, next_tunnel_id) = be_u32(rest)?;
         // TODO: skip unneedes stuff?
         let (rest, next_router_hash) = take(ROUTER_HASH_LEN)(rest)?;
-        let (rest, tunnel_layer_key) = take(32usize)(rest)?;
-        let (rest, tunnel_iv_key) = take(32usize)(rest)?;
-        let (rest, tunnel_reply_key) = take(32usize)(rest)?;
-        let (rest, tunnel_reply_iv) = take(16usize)(rest)?;
+        let (rest, tunnel_layer_key) = take(AES256_KEY_LEN)(rest)?;
+        let (rest, tunnel_iv_key) = take(AES256_KEY_LEN)(rest)?;
+        let (rest, tunnel_reply_key) = take(AES256_KEY_LEN)(rest)?;
+        let (rest, tunnel_reply_iv) = take(AES256_IV_LEN)(rest)?;
         let (rest, flags) = be_u8(rest)?;
         let (rest, reserved) = take(3usize)(rest)?;
         let (rest, request_time) = be_u32(rest)?;
@@ -308,6 +314,14 @@ impl<'a> TunnelBuildRecord<'a> {
     /// Get next message ID.
     pub fn next_message_id(&self) -> u32 {
         self.next_message_id
+    }
+
+    pub fn tunnel_layer_key(&self) -> &[u8] {
+        self.tunnel_layer_key
+    }
+
+    pub fn tunnel_iv_key(&self) -> &[u8] {
+        self.tunnel_iv_key
     }
 }
 
@@ -506,9 +520,9 @@ impl<'a> I2NpMessage<'a> {
                     let (rest, truncated_hash) =
                         take::<usize, &[u8], ()>(TRUNCATED_IDENITTY_LEN)(rest).ok()?;
                     let (rest, ephemeral_key) =
-                        take::<usize, &[u8], ()>(X25519_KEY_LENGTH)(rest).ok()?;
+                        take::<usize, &[u8], ()>(X25519_KEY_LEN)(rest).ok()?;
                     let (rest, ciphertext) = take::<usize, &[u8], ()>(
-                        ENCRYPTED_BUILD_REQUEST_LEN + POLY1305_TAG_LENGTH,
+                        ENCRYPTED_BUILD_REQUEST_LEN + POLY1305_TAG_LEN,
                     )(rest)
                     .ok()?;
 
