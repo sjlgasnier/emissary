@@ -454,7 +454,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "emissary-base"
+name = "emissary-core"
 version = "0.1.0"
 dependencies = [
  "aes",
@@ -484,7 +484,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ed25519-dalek",
- "emissary-base",
+ "emissary-core",
  "futures",
  "home",
  "nom 6.1.2",
