@@ -427,7 +427,7 @@ pub enum GarlicClove<'a> {
         /// Hash of the tunnel.
         hash: &'a [u8],
 
-        /// Tunnel ID, if `delivery_type` is [`DeliveryType::Router`].
+        /// Tunnel ID.
         tunnel_id: u32,
     },
 }
@@ -771,5 +771,208 @@ impl RawI2npMessage {
         out[11..].copy_from_slice(&self.payload);
 
         out
+    }
+}
+
+pub struct EncryptedTunnelData<'a> {
+    tunnel_id: u32,
+    iv: &'a [u8],
+    ciphertext: &'a [u8],
+}
+
+impl<'a> EncryptedTunnelData<'a> {
+    pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], EncryptedTunnelData<'a>> {
+        let (rest, tunnel_id) = be_u32(input)?;
+        let (rest, iv) = take(AES256_IV_LEN)(rest)?;
+        let (rest, ciphertext) = take(rest.len())(rest)?;
+
+        Ok((
+            rest,
+            EncryptedTunnelData {
+                tunnel_id,
+                iv,
+                ciphertext,
+            },
+        ))
+    }
+
+    pub fn parse(input: &'a [u8]) -> Option<Self> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    pub fn tunnel_id(&self) -> u32 {
+        self.tunnel_id
+    }
+
+    pub fn iv(&self) -> &[u8] {
+        self.iv
+    }
+
+    pub fn ciphertext(&self) -> &[u8] {
+        self.ciphertext
+    }
+}
+
+#[derive(Debug)]
+pub enum DeliveryInstruction<'a> {
+    /// Fragment meant for the local node
+    Local,
+
+    /// Fragment meant for a router.
+    Router {
+        /// Hash of the router.
+        hash: &'a [u8],
+    },
+
+    /// Fragment meant for a tunnel.
+    Tunnel {
+        /// Hash of the tunnel.
+        hash: &'a [u8],
+
+        /// Tunnel ID.
+        tunnel_id: u32,
+    },
+}
+
+#[derive(Debug)]
+pub enum MessageKind<'a> {
+    Unfragmented {
+        delivery_instructions: DeliveryInstruction<'a>,
+    },
+    FirstFragment {
+        message_id: u32,
+        delivery_instructions: DeliveryInstruction<'a>,
+    },
+    MiddleFragment {
+        message_id: u32,
+        sequence_number: usize,
+    },
+    LastFragment {
+        message_id: u32,
+        sequence_number: usize,
+    },
+}
+
+pub struct TunnelDataMessage<'a> {
+    pub message_kind: MessageKind<'a>,
+    pub message: &'a [u8],
+}
+
+impl<'a> fmt::Debug for TunnelDataMessage<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelDataMessage")
+            .field("message_kind", &self.message_kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct TunnelData<'a> {
+    pub messages: Vec<TunnelDataMessage<'a>>,
+}
+
+impl<'a> TunnelData<'a> {
+    /// Parse first fragment delivery instructions.
+    ///
+    /// https://geti2p.net/spec/tunnel-message#first-fragment-delivery-instructions
+    fn parse_frame(mut input: &'a [u8]) -> IResult<&'a [u8], TunnelDataMessage<'a>> {
+        let (rest, flag) = be_u8(input)?;
+
+        match flag >> 7 {
+            0x01 => {
+                let sequence_number = ((flag >> 1) & 0x3f) as usize;
+                let (rest, message_id) = be_u32(rest)?;
+                let (rest, size) = be_u16(rest)?;
+                let (rest, message) = take(size as usize)(rest)?;
+
+                let (rest, message_kind) = match flag & 0x01 {
+                    0x00 => (
+                        rest,
+                        MessageKind::MiddleFragment {
+                            message_id,
+                            sequence_number,
+                        },
+                    ),
+                    0x01 => (
+                        rest,
+                        MessageKind::LastFragment {
+                            message_id,
+                            sequence_number,
+                        },
+                    ),
+                    _ => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
+                };
+
+                return Ok((
+                    rest,
+                    TunnelDataMessage {
+                        message_kind,
+                        message,
+                    },
+                ));
+            }
+            0x00 => {}
+            _ => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
+        }
+
+        let (rest, delivery_instructions) = match (flag >> 5) & 0x03 {
+            0x00 => (rest, DeliveryInstruction::Local),
+            0x01 => {
+                let (rest, tunnel_id) = be_u32(rest)?;
+                let (rest, hash) = take(ROUTER_HASH_LEN)(rest)?;
+
+                (rest, DeliveryInstruction::Tunnel { hash, tunnel_id })
+            }
+            0x02 => {
+                let (rest, hash) = take(ROUTER_HASH_LEN)(rest)?;
+
+                (rest, DeliveryInstruction::Router { hash })
+            }
+            _ => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
+        };
+
+        let (rest, message_kind) = match (flag >> 3) & 0x01 {
+            0x00 => (
+                rest,
+                MessageKind::Unfragmented {
+                    delivery_instructions,
+                },
+            ),
+            0x01 => {
+                let (rest, message_id) = be_u32(rest)?;
+
+                (
+                    rest,
+                    MessageKind::FirstFragment {
+                        delivery_instructions,
+                        message_id,
+                    },
+                )
+            }
+            _ => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
+        };
+
+        let (rest, size) = be_u16(rest)?;
+        let (rest, message) = take(size as usize)(rest)?;
+
+        Ok((
+            rest,
+            TunnelDataMessage {
+                message_kind,
+                message,
+            },
+        ))
+    }
+
+    pub fn parse(mut input: &'a [u8]) -> Option<Self> {
+        let mut messages = Vec::<TunnelDataMessage>::new();
+
+        while !input.is_empty() {
+            let (rest, message) = Self::parse_frame(input).ok()?;
+            messages.push(message);
+            input = rest;
+        }
+
+        Some(Self { messages })
     }
 }
