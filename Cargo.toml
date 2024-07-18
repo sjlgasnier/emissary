@@ -11,7 +11,7 @@ categories = []
 resolver = "2"
 
 members = [
-  "base",
+  "core",
   "node",
 ]
 

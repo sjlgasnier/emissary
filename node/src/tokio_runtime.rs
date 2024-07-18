@@ -16,8 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use emissary::runtime::{JoinSet, Runtime, TcpListener, TcpStream};
-use futures::{AsyncRead, AsyncWrite, Stream};
+use emissary::runtime::{AsyncRead, AsyncWrite, JoinSet, Runtime, TcpListener, TcpStream};
+use futures::{AsyncRead as _, AsyncWrite as _, Stream};
 use rand_core::{CryptoRng, RngCore};
 use tokio::{io::AsyncWriteExt, net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -55,18 +55,13 @@ impl AsyncRead for TokioTcpStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
+    ) -> Poll<emissary::Result<usize>> {
         let pinned = pin!(&mut self.0);
-        pinned.poll_read(cx, buf)
-    }
 
-    fn poll_read_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &mut [std::io::IoSliceMut<'_>],
-    ) -> Poll<std::io::Result<usize>> {
-        let pinned = pin!(&mut self.0);
-        pinned.poll_read_vectored(cx, bufs)
+        match futures::ready!(pinned.poll_read(cx, buf)) {
+            Ok(nread) => Poll::Ready(Ok(nread)),
+            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+        }
     }
 }
 
@@ -75,28 +70,31 @@ impl AsyncWrite for TokioTcpStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
+    ) -> Poll<emissary::Result<usize>> {
         let pinned = pin!(&mut self.0);
-        pinned.poll_write(cx, buf)
+
+        match futures::ready!(pinned.poll_write(cx, buf)) {
+            Ok(nwritten) => Poll::Ready(Ok(nwritten)),
+            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+        }
     }
 
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> Poll<std::io::Result<usize>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<emissary::Result<()>> {
         let pinned = pin!(&mut self.0);
-        pinned.poll_write_vectored(cx, bufs)
+
+        match futures::ready!(pinned.poll_flush(cx)) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+        }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<emissary::Result<()>> {
         let pinned = pin!(&mut self.0);
-        pinned.poll_flush(cx)
-    }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let pinned = pin!(&mut self.0);
-        pinned.poll_close(cx)
+        match futures::ready!(pinned.poll_close(cx)) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+        }
     }
 }
 
@@ -173,9 +171,7 @@ impl Runtime for TokioRuntime {
     }
 
     fn time_since_epoch() -> Duration {
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("to succeed")
+        SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("to succeed")
     }
 
     fn rng() -> impl RngCore + CryptoRng {
