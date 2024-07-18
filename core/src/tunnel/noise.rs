@@ -165,9 +165,11 @@ impl Noise {
             tracing::trace!(
                 target: LOG_TARGET,
                 role = ?record.role(),
-                next_message_id = record.next_message_id(),
-                next_router_hash = ?base64_encode(record.next_router_hash()),
-                "record info",
+                tunnel_id = ?record.tunnel_id(),
+                next_tunnel_id = ?record.next_tunnel_id(),
+                // next_message_id = record.next_message_id(),
+                // next_router_hash = ?base64_encode(record.next_router_hash()),
+                "VARIABLE TUNNEL BUILT",
             );
 
             let hop = TunnelHop {
@@ -265,13 +267,22 @@ impl Noise {
         let (next_router, message_id, message_type) = {
             let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
+            // tracing::trace!(
+            //     target: LOG_TARGET,
+            //     role = ?record.role(),
+            //     tunnel_id = record.tunnel_id(),
+            //     next_tunnel_id = record.next_tunnel_id(),
+            //     next_message_id = record.next_message_id(),
+            //     "record info",
+            // );
             tracing::trace!(
                 target: LOG_TARGET,
                 role = ?record.role(),
-                tunnel_id = record.tunnel_id(),
-                next_tunnel_id = record.next_tunnel_id(),
-                next_message_id = record.next_message_id(),
-                "record info",
+                tunnel_id = ?record.tunnel_id(),
+                next_tunnel_id = ?record.next_tunnel_id(),
+                // next_message_id = record.next_message_id(),
+                // next_router_hash = ?base64_encode(record.next_router_hash()),
+                "SHORT TUNNEL BUILT",
             );
 
             let hop = TunnelHop {
@@ -280,7 +291,10 @@ impl Noise {
                 next_tunnel_id: record.next_tunnel_id(),
                 next_router_id: RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 layer_key,
-                iv_key,
+                iv_key: match record.role() {
+                    HopRole::OutboundEndpoint => iv_key,
+                    _ => else_key,
+                },
             };
             self.tunnels.insert(record.tunnel_id(), hop);
 
@@ -320,7 +334,7 @@ impl Noise {
         Some((payload, next_router, message_id, message_type))
     }
 
-    pub fn handle_tunnel_data(&mut self, mut payload: Vec<u8>) -> (RouterId, Vec<u8>) {
+    pub fn handle_tunnel_data(&mut self, mut payload: Vec<u8>) -> Option<(Vec<u8>, RouterId)> {
         // TODO: no unwraps
         let tunnel_data = EncryptedTunnelData::parse(&payload).unwrap();
         let hop = self.tunnels.get(&tunnel_data.tunnel_id()).unwrap();
@@ -329,7 +343,7 @@ impl Noise {
             target: LOG_TARGET,
             tunnel_id = ?hop.tunnel_id,
             next_tunnel_id = ?hop.next_tunnel_id,
-            next_router_id = ?hop.next_router_id,
+            next_router_id = %hop.next_router_id,
             payload_len = ?tunnel_data.ciphertext().len(),
             "tunnel data",
         );
@@ -350,11 +364,14 @@ impl Noise {
 
                 out[..4].copy_from_slice(&hop.next_tunnel_id.to_be_bytes().to_vec());
                 out[4..20].copy_from_slice(&iv);
-                out[20..].copy_from_slice(&tunnel_data.ciphertext());
+                out[20..].copy_from_slice(&ciphertext);
 
-                return (hop.next_router_id.clone(), out);
+                // TODO: copy
+                return Some((out, hop.next_router_id.clone()));
             }
             HopRole::OutboundEndpoint => {
+                tracing::error!("handle outbound endpoint");
+
                 let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
                 let iv = aes.encrypt(tunnel_data.iv());
 
@@ -377,7 +394,8 @@ impl Noise {
                         calculated = ?checksum[..4],
                         "tunnel data checksum mismatch",
                     );
-                    panic!("not handled");
+                    panic!("zzz");
+                    return None;
                 }
 
                 let message = TunnelData::parse(&ciphertext[4 + res.0 + 1..]).unwrap();
@@ -391,12 +409,12 @@ impl Noise {
                             DeliveryInstruction::Router { hash } => {
                                 tracing::debug!(hash = ?base64_encode(hash), "router delivery");
 
-                                return (
-                                    RouterId::from(base64_encode(&hash[..16])),
+                                return Some((
                                     message.message.to_vec(),
-                                );
+                                    RouterId::from(base64_encode(&hash[..16])),
+                                ));
                             }
-                            DeliveryInstruction::Tunnel { hash, tunnel_id } => tracing::debug!(
+                            DeliveryInstruction::Tunnel { hash, tunnel_id } => tracing::warn!(
                                 ?tunnel_id,
                                 hash = ?base64_encode(hash),
                                 "todo: tunnel delivery"
@@ -410,6 +428,7 @@ impl Noise {
             }
         }
 
-        todo!();
+        None
+        // todo!();
     }
 }

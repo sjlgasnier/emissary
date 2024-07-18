@@ -124,8 +124,14 @@ impl<R: Runtime> TunnelManager<R> {
                 }
                 .serialize();
 
-                // TODO: this should return error
-                self.service.send(&hop, msg);
+                if self.routers.contains(&hop) {
+                    self.service.send(&hop, msg);
+                } else {
+                    tracing::warn!(target: LOG_TARGET, "router message to self");
+
+                    // let message = RawI2npMessage::parse(&msg).unwrap();
+                    // self.on_message(message);
+                }
             }
             MessageType::ShortTunnelBuild => {
                 let (payload, hop, message_id, message_type) =
@@ -142,11 +148,38 @@ impl<R: Runtime> TunnelManager<R> {
                 }
                 .serialize();
 
-                // TODO: this should return error
-                self.service.send(&hop, msg);
+                if self.routers.contains(&hop) {
+                    self.service.send(&hop, msg);
+                } else {
+                    tracing::warn!(target: LOG_TARGET, "router message to self");
+
+                    // let message = RawI2npMessage::parse(&msg).unwrap();
+                    // self.on_message(message);
+                }
             }
             MessageType::TunnelData => {
-                self.noise.handle_tunnel_data(payload);
+                let Some((data, hop)) = self.noise.handle_tunnel_data(payload) else {
+                    return;
+                };
+                // let (data, hop) = self.noise.handle_tunnel_data(payload);
+
+                let msg = RawI2npMessage {
+                    message_type,
+                    message_id,
+                    expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
+                        as u32,
+                    payload: data,
+                }
+                .serialize();
+
+                if self.routers.contains(&hop) {
+                    self.service.send(&hop, msg);
+                } else {
+                    tracing::warn!(target: LOG_TARGET, "router message to self");
+
+                    // let message = RawI2npMessage::parse(&msg).unwrap();
+                    // self.on_message(message);
+                }
             }
             message => tracing::warn!(
                 target: LOG_TARGET,

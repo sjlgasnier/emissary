@@ -788,13 +788,20 @@ impl RawI2npMessage {
     }
 }
 
+/// Encrypted tunnel data.
 pub struct EncryptedTunnelData<'a> {
+    /// Tunnel ID.
     tunnel_id: u32,
+
+    /// AES-256-ECB IV.
     iv: &'a [u8],
+
+    /// Encrypted [`TunnelData`].
     ciphertext: &'a [u8],
 }
 
 impl<'a> EncryptedTunnelData<'a> {
+    /// Parse `input` into [`EncryptedTunnelData`].
     pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], EncryptedTunnelData<'a>> {
         let (rest, tunnel_id) = be_u32(input)?;
         let (rest, iv) = take(AES256_IV_LEN)(rest)?;
@@ -810,26 +817,31 @@ impl<'a> EncryptedTunnelData<'a> {
         ))
     }
 
+    /// Parse `input` into [`EncryptedTunnelData`].
     pub fn parse(input: &'a [u8]) -> Option<Self> {
         Some(Self::parse_frame(input).ok()?.1)
     }
 
+    /// Get tunnel ID of the message.
     pub fn tunnel_id(&self) -> u32 {
         self.tunnel_id
     }
 
+    /// Get reference to AES-256-ECB IV.
     pub fn iv(&self) -> &[u8] {
         self.iv
     }
 
+    /// Get reference to ciphertext ([`TunnelData`]).
     pub fn ciphertext(&self) -> &[u8] {
         self.ciphertext
     }
 }
 
+/// I2NP message delivery instructions.
 #[derive(Debug)]
 pub enum DeliveryInstruction<'a> {
-    /// Fragment meant for the local node
+    /// Fragment meant for the local router.
     Local,
 
     /// Fragment meant for a router.
@@ -840,35 +852,68 @@ pub enum DeliveryInstruction<'a> {
 
     /// Fragment meant for a tunnel.
     Tunnel {
-        /// Hash of the tunnel.
-        hash: &'a [u8],
-
         /// Tunnel ID.
         tunnel_id: u32,
+
+        /// Hash of the tunnel.
+        hash: &'a [u8],
     },
 }
 
+/// I2NP message kind.
+///
+/// [`MessageKind::MiddleFragment`] and [`MessageKind::LastFragment`] do not have explicit
+/// delivery instructions as they're delivered to the same destination as the first fragment.
 #[derive(Debug)]
 pub enum MessageKind<'a> {
+    /// Unfragmented I2NP message.
     Unfragmented {
+        /// Delivery instructions,
         delivery_instructions: DeliveryInstruction<'a>,
     },
+
+    /// First fragment of a fragmented I2NP message.
     FirstFragment {
+        /// Message ID.
+        ///
+        /// Rest of the fragments will use the same message ID.
         message_id: u32,
+
+        /// Delivery instructions,
         delivery_instructions: DeliveryInstruction<'a>,
     },
+
+    /// Middle fragment of a fragmented I2NP message.
     MiddleFragment {
+        /// Message ID.
+        ///
+        /// Same as the first fragment's message ID.
         message_id: u32,
+
+        /// Sequence number.
         sequence_number: usize,
     },
+
+    /// Last fragment of a fragmented I2NP message.
     LastFragment {
+        /// Message ID.
+        ///
+        /// Same as the first fragment's message ID.
         message_id: u32,
+
+        /// Sequence number.
         sequence_number: usize,
     },
 }
 
+/// Parsed `TunnelData` message.
 pub struct TunnelDataMessage<'a> {
+    /// Message kind.
+    ///
+    /// Defines the fragmentation (if any) of the message and its delivery instructions.
     pub message_kind: MessageKind<'a>,
+
+    /// I2NP message (fragment).
     pub message: &'a [u8],
 }
 
@@ -880,20 +925,27 @@ impl<'a> fmt::Debug for TunnelDataMessage<'a> {
     }
 }
 
+/// Decrypted `TunnelData` message.
 #[derive(Debug)]
 pub struct TunnelData<'a> {
+    /// Parsed messages.
     pub messages: Vec<TunnelDataMessage<'a>>,
 }
 
 impl<'a> TunnelData<'a> {
-    /// Parse first fragment delivery instructions.
-    ///
-    /// https://geti2p.net/spec/tunnel-message#first-fragment-delivery-instructions
+    /// Attempt to parse `input` into first or follow-on delivery instructions + payload.
     fn parse_frame(mut input: &'a [u8]) -> IResult<&'a [u8], TunnelDataMessage<'a>> {
         let (rest, flag) = be_u8(input)?;
 
+        // parse follow-on fragment delivery instructions
+        //
+        // https://geti2p.net/spec/tunnel-message#follow-on-fragment-delivery-instructions
         match flag >> 7 {
             0x01 => {
+                // format: 1nnnnnnd
+                //  - msb set for a middle fragment
+                //  - middle bits make up the sequence number
+                //  - lsb specifies whether this is the last fragment
                 let sequence_number = ((flag >> 1) & 0x3f) as usize;
                 let (rest, message_id) = be_u32(rest)?;
                 let (rest, size) = be_u16(rest)?;
@@ -929,6 +981,9 @@ impl<'a> TunnelData<'a> {
             _ => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
         }
 
+        // parse first fragment delivery instructions.
+        //
+        // https://geti2p.net/spec/tunnel-message#first-fragment-delivery-instructions
         let (rest, delivery_instructions) = match (flag >> 5) & 0x03 {
             0x00 => (rest, DeliveryInstruction::Local),
             0x01 => {
@@ -978,15 +1033,24 @@ impl<'a> TunnelData<'a> {
         ))
     }
 
-    pub fn parse(mut input: &'a [u8]) -> Option<Self> {
-        let mut messages = Vec::<TunnelDataMessage>::new();
+    /// Recursively parse `input` into a vector of [`TunnelDataMessage`]s
+    fn parse_inner(
+        input: &'a [u8],
+        mut messages: Vec<TunnelDataMessage<'a>>,
+    ) -> Option<(Vec<TunnelDataMessage<'a>>)> {
+        let (rest, message) = Self::parse_frame(input).ok()?;
+        messages.push(message);
 
-        while !input.is_empty() {
-            let (rest, message) = Self::parse_frame(input).ok()?;
-            messages.push(message);
-            input = rest;
+        match rest.is_empty() {
+            true => Some(messages),
+            false => Self::parse_inner(rest, messages),
         }
+    }
 
-        Some(Self { messages })
+    /// Attempt to parse `input` into [`TunnelData`].
+    pub fn parse(input: &'a [u8]) -> Option<Self> {
+        Some(Self {
+            messages: Self::parse_inner(input, Vec::new())?,
+        })
     }
 }
