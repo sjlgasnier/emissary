@@ -154,6 +154,12 @@ pub enum MessageBlock<'a> {
         /// Reason for termination.
         reason: u8,
     },
+
+    /// Padding
+    Padding {
+        /// Padding bytes.
+        padding: &'a [u8],
+    },
 }
 
 impl<'a> fmt::Debug for MessageBlock<'a> {
@@ -196,6 +202,10 @@ impl<'a> fmt::Debug for MessageBlock<'a> {
                 .debug_struct("MessageBlock::Termination")
                 .field("valid_frames", &valid_frames)
                 .field("reason", &reason)
+                .finish(),
+            Self::Padding { padding } => f
+                .debug_struct("MessageBlock::Padding")
+                .field("padding_len", &padding.len())
                 .finish(),
         }
     }
@@ -252,7 +262,10 @@ impl<'a> MessageBlock<'a> {
 
     /// Parse [`MessageBlock::Padding`].
     fn parse_padding(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        todo!("padding support not implemented");
+        let (rest, size) = be_u16(input)?;
+        let (rest, padding) = take(size)(rest)?;
+
+        Ok((rest, MessageBlock::Padding { padding }))
     }
 
     fn parse_inner(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
@@ -269,11 +282,37 @@ impl<'a> MessageBlock<'a> {
         }
     }
 
+    fn parse_multiple_inner(
+        input: &'a [u8],
+        mut messages: Vec<MessageBlock<'a>>,
+    ) -> Option<Vec<MessageBlock<'a>>> {
+        let (rest, message) = Self::parse_inner(input).ok()?;
+        messages.push(message);
+
+        match rest.is_empty() {
+            true => Some(messages),
+            false => Self::parse_multiple_inner(rest, messages),
+        }
+    }
+
     /// Try to parse `input` into an NTCP message block
-    //
-    // TODO: handle multiple message blocks
+    pub fn parse_multiple(input: &'a [u8]) -> Option<Vec<MessageBlock<'a>>> {
+        MessageBlock::parse_multiple_inner(input, Vec::new())
+    }
+
+    /// Try to parse `input` into an NTCP message block
     pub fn parse(input: &'a [u8]) -> Option<MessageBlock<'a>> {
-        Some(MessageBlock::parse_inner(input).ok()?.1)
+        let (rest, parsed) = MessageBlock::parse_inner(input).ok()?;
+
+        if !rest.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                bytes_left = ?rest.len(),
+                "more bytes left in ntcp2 message",
+            );
+        }
+
+        Some(parsed)
     }
 
     /// Create new NTCP2 `RouterInfo` message block.

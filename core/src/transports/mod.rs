@@ -159,8 +159,8 @@ impl Stream for TransportService {
                     self.routers.remove(&router);
                     return Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }));
                 }
-                Some(InnerSubsystemEvent::I2Np { message }) => {
-                    return Poll::Ready(Some(SubsystemEvent::I2Np { message }));
+                Some(InnerSubsystemEvent::I2Np { messages }) => {
+                    return Poll::Ready(Some(SubsystemEvent::I2Np { messages }));
                 }
                 Some(InnerSubsystemEvent::Dummy) => unreachable!(),
             }

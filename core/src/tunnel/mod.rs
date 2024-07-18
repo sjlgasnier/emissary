@@ -168,7 +168,8 @@ impl<R: Runtime> Future for TunnelManager<R> {
                     self.on_connection_established(router),
                 Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
                     self.on_connection_closed(router),
-                Poll::Ready(Some(SubsystemEvent::I2Np { message })) => self.on_message(message),
+                Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
+                    messages.into_iter().for_each(|message| self.on_message(message)),
                 Poll::Ready(Some(SubsystemEvent::Dummy)) => unreachable!(),
                 Poll::Ready(None) => return Poll::Ready(()),
             }

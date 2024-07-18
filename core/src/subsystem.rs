@@ -22,6 +22,9 @@ use thingbuf::mpsc::{Receiver, Sender};
 
 use alloc::vec::Vec;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::subsystem";
+
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub enum SubsystemKind {
     /// NetDB subsystem.
@@ -68,8 +71,8 @@ pub enum InnerSubsystemEvent {
 
     /// I2NP message.
     I2Np {
-        /// Raw, unparsed I2NP message.
-        message: RawI2npMessage,
+        /// Raw, unparsed I2NP messages
+        messages: Vec<RawI2npMessage>,
     },
 
     Dummy,
@@ -98,8 +101,8 @@ pub enum SubsystemEvent {
 
     /// I2NP message.
     I2Np {
-        /// Raw, unparsed I2NP message.
-        message: RawI2npMessage,
+        /// Raw, unparsed I2NP messages
+        messages: Vec<RawI2npMessage>,
     },
 
     Dummy,
@@ -146,14 +149,43 @@ impl SubsystemHandle {
     }
 
     // TODO: fix error
-    pub fn dispatch_message(&mut self, message: RawI2npMessage) -> crate::Result<()> {
-        match message.destination() {
-            SubsystemKind::NetDb => self.subsystems[0]
-                .try_send(InnerSubsystemEvent::I2Np { message })
-                .map_err(|_| Error::NotSupported),
-            SubsystemKind::Tunnel => self.subsystems[1]
-                .try_send(InnerSubsystemEvent::I2Np { message })
-                .map_err(|_| Error::NotSupported),
+    pub fn dispatch_messages(&mut self, messages: Vec<RawI2npMessage>) -> crate::Result<()> {
+        let (tunnel_messages, netdb_messages): (Vec<_>, Vec<_>) = messages
+            .into_iter()
+            .map(|message| match message.destination() {
+                SubsystemKind::NetDb => (None, Some(message)),
+                SubsystemKind::Tunnel => (Some(message), None),
+            })
+            .unzip();
+
+        let tunnel_messages = tunnel_messages.into_iter().flatten().collect::<Vec<_>>();
+        let netdb_messages = netdb_messages.into_iter().flatten().collect::<Vec<_>>();
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            num_tunnel_messages = ?tunnel_messages.len(),
+            num_netdb_messages = ?netdb_messages.len(),
+            "dispatch messages to subsystems",
+        );
+
+        if !tunnel_messages.is_empty() {
+            self.subsystems[1]
+                .try_send(InnerSubsystemEvent::I2Np {
+                    messages: tunnel_messages,
+                })
+                .map_err(|_| Error::NotSupported)
+                .unwrap();
         }
+
+        if !netdb_messages.is_empty() {
+            self.subsystems[0]
+                .try_send(InnerSubsystemEvent::I2Np {
+                    messages: netdb_messages,
+                })
+                .map_err(|_| Error::NotSupported)
+                .unwrap();
+        }
+
+        Ok(())
     }
 }

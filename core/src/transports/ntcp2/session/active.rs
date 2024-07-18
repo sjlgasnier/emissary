@@ -277,29 +277,34 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 .decrypt(this.read_buffer[..size].to_vec())
                                 .unwrap();
 
-                            match MessageBlock::parse(&data_block) {
-                                Some(MessageBlock::I2Np { message }) => {
-                                    let message_id = message.message_id;
+                            let Some(messages) = MessageBlock::parse_multiple(&data_block) else {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    router_id = %this.router,
+                                    "failed to parse message(s)",
+                                );
+                                continue;
+                            };
 
-                                    if let Err(error) =
-                                        this.subsystem_handle.dispatch_message(message)
-                                    {
-                                        tracing::debug!(
+                            let messages = messages
+                                .into_iter()
+                                .filter_map(|message| match message {
+                                    MessageBlock::I2Np { message } => Some(message),
+                                    MessageBlock::Padding { .. } => None,
+                                    message => {
+                                        tracing::warn!(
                                             target: LOG_TARGET,
-                                            ?message_id,
-                                            ?error,
-                                            "failed to deliver message to subsystem",
+                                            router_id = %this.router,
+                                            ?message,
+                                            "ignoring message",
                                         );
+                                        None
                                     }
-                                }
-                                Some(message) => {
-                                    tracing::debug!("message received: {message:?}");
-                                }
-                                None => {
-                                    tracing::warn!("invalid message received, ignoring");
-                                }
-                            }
+                                })
+                                .collect::<Vec<_>>();
 
+                            // TODO: no unwraps
+                            this.subsystem_handle.dispatch_messages(messages).unwrap();
                             this.read_state = ReadState::ReadSize { offset: 0usize };
                         }
                     }
@@ -309,6 +314,8 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
 
         loop {
             match mem::replace(&mut this.write_state, WriteState::Poisoned) {
+                // TODO: poll messages until `Poll::Pending` is returned
+                // or there's enough messages to fill one ntcp2 message?
                 WriteState::GetMessage => match this.cmd_rx.poll_recv(cx) {
                     Poll::Pending => {
                         this.write_state = WriteState::GetMessage;
