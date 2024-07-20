@@ -371,8 +371,6 @@ impl Noise {
                 return Some((out, hop.next_router_id.clone()));
             }
             HopRole::OutboundEndpoint => {
-                tracing::error!("handle outbound endpoint");
-
                 let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
                 let iv = aes.encrypt(tunnel_data.iv());
 
@@ -431,6 +429,59 @@ impl Noise {
 
         None
         // todo!();
+    }
+
+    pub fn on_garlic_message(
+        &mut self,
+        truncated: &Vec<u8>,
+        message_id: u32,
+        payload: Vec<u8>,
+    ) -> Vec<(Vec<u8>, RouterId, u32, MessageType)> {
+        tracing::warn!(
+            target: LOG_TARGET,
+            ?message_id,
+            payload_len = ?payload.len(),
+            "handle garlic message",
+        );
+
+        let size = u32::from_be_bytes(TryInto::<[u8; 4]>::try_into(&payload[..4]).unwrap());
+
+        let state = Sha256::new().update(&self.inbound_state).update(&payload[4..36]).finalize();
+        let (chaining_key, aead_key) =
+            self.derive_keys(StaticPublicKey::from_bytes(payload[4..36].to_vec()).unwrap());
+
+        let mut test = payload[36..].to_vec();
+        ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
+
+        let message = GarlicMessage::parse(&test).unwrap();
+        let mut outputs: Vec<(Vec<u8>, RouterId, u32, MessageType)> = Vec::new();
+
+        for message in message.blocks {
+            match message {
+                GarlicMessageBlock::DateTime { timestamp } =>
+                    tracing::trace!(target: LOG_TARGET, ?timestamp, "ignore datetime"),
+                GarlicMessageBlock::Padding { .. } =>
+                    tracing::trace!(target: LOG_TARGET, "ignore padding"),
+                GarlicMessageBlock::GarlicClove {
+                    message_type,
+                    message_id,
+                    expiration,
+                    delivery_instructions,
+                    message_body,
+                } => match (message_type, delivery_instructions) {
+                    (MessageType::ShortTunnelBuild, DeliveryInstructions::Local) => {
+                        let output =
+                            self.create_short_tunnel_hop(truncated, message_body.to_vec()).unwrap();
+
+                        outputs.push(output);
+                    }
+                    _ => todo!("not handled"),
+                },
+                _ => todo!("zzz"),
+            }
+        }
+
+        outputs
     }
 }
 

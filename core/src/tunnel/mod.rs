@@ -41,7 +41,7 @@ use hashbrown::HashSet;
 mod noise;
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::tunnel-manager";
+const LOG_TARGET: &str = "emissary::tunnel";
 
 /// Tunnel manager.
 pub struct TunnelManager<R: Runtime> {
@@ -179,6 +179,30 @@ impl<R: Runtime> TunnelManager<R> {
 
                     // let message = RawI2npMessage::parse(&msg).unwrap();
                     // self.on_message(message);
+                }
+            }
+            MessageType::Garlic => {
+                let messages =
+                    self.noise.on_garlic_message(&self.truncated_hash, message_id, payload);
+
+                for (payload, hop, message_id, message_type) in messages {
+                    let msg = RawI2npMessage {
+                        message_type,
+                        message_id,
+                        expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
+                            as u32,
+                        payload,
+                    }
+                    .serialize();
+
+                    if self.routers.contains(&hop) {
+                        self.service.send(&hop, msg);
+                    } else {
+                        tracing::warn!(target: LOG_TARGET, "router message to self");
+
+                        // let message = RawI2npMessage::parse(&msg).unwrap();
+                        // self.on_message(message);
+                    }
                 }
             }
             message => tracing::warn!(
