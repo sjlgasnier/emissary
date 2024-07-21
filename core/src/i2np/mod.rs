@@ -875,6 +875,9 @@ pub struct RawI2npMessage {
     pub payload: Vec<u8>,
 }
 
+pub const I2NP_STANDARD: bool = false;
+pub const I2NP_SHORT: bool = true;
+
 // TODO: remove & remove thingbuf zzz
 impl Default for RawI2npMessage {
     fn default() -> Self {
@@ -898,12 +901,33 @@ impl fmt::Debug for RawI2npMessage {
 }
 
 impl RawI2npMessage {
-    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+    pub fn parse_short(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
         let (rest, size) = be_u16(input)?;
         let (rest, message_type) = be_u8(rest)?;
         let (rest, message_id) = be_u32(rest)?;
         let (rest, expiration) = be_u32(rest)?;
         let (rest, payload) = take(size as usize - (1 + 2 * 4))(rest)?;
+        let message_type = MessageType::from_u8(message_type)
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((
+            rest,
+            RawI2npMessage {
+                message_type,
+                message_id,
+                expiration: expiration as u64,
+                payload: payload.to_vec(),
+            },
+        ))
+    }
+
+    pub fn parse_standard(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+        let (rest, message_type) = be_u8(input)?;
+        let (rest, message_id) = be_u32(rest)?;
+        let (rest, expiration) = be_u64(rest)?;
+        let (rest, size) = be_u16(rest)?;
+        let (rest, _checksum) = be_u8(rest)?;
+        let (rest, payload) = take(size as usize)(rest)?;
         let message_type = MessageType::from_u8(message_type)
             .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
 
@@ -918,8 +942,11 @@ impl RawI2npMessage {
         ))
     }
 
-    pub fn parse(input: &[u8]) -> Option<RawI2npMessage> {
-        Some(Self::parse_frame(input).ok()?.1)
+    pub fn parse<const SHORT: bool>(input: &[u8]) -> Option<RawI2npMessage> {
+        match SHORT {
+            true => Some(Self::parse_short(input).ok()?.1),
+            false => Some(Self::parse_standard(input).ok()?.1),
+        }
     }
 
     pub fn destination(&self) -> SubsystemKind {
@@ -1001,6 +1028,43 @@ pub enum DeliveryInstruction<'a> {
 
         /// Hash of the tunnel.
         hash: &'a [u8],
+    },
+}
+
+impl<'a> DeliveryInstruction<'a> {
+    pub fn to_owned(&self) -> OwnedDeliveryInstruction {
+        match self {
+            Self::Local => OwnedDeliveryInstruction::Local,
+            Self::Router { hash } => OwnedDeliveryInstruction::Router {
+                hash: hash.to_vec(),
+            },
+            Self::Tunnel { tunnel_id, hash } => OwnedDeliveryInstruction::Tunnel {
+                tunnel_id: *tunnel_id,
+                hash: hash.to_vec(),
+            },
+        }
+    }
+}
+
+/// Owned I2NP message delivery instructions.
+#[derive(Debug, Clone)]
+pub enum OwnedDeliveryInstruction {
+    /// Fragment meant for the local router.
+    Local,
+
+    /// Fragment meant for a router.
+    Router {
+        /// Hash of the router.
+        hash: Vec<u8>,
+    },
+
+    /// Fragment meant for a tunnel.
+    Tunnel {
+        /// Tunnel ID.
+        tunnel_id: u32,
+
+        /// Hash of the tunnel.
+        hash: Vec<u8>,
     },
 }
 

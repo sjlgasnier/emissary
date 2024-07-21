@@ -210,7 +210,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         router_info,
                     }));
                 }
-                Some(Err(error)) => todo!(),
+                Some(Err(error)) => todo!("handshake failed = {error:?}"),
                 None => return Poll::Ready(None),
             }
         }

@@ -33,8 +33,8 @@ use crate::{
     },
     i2np::{
         DeliveryInstruction, EncryptedTunnelBuildRequestRecord, EncryptedTunnelData, HopRole,
-        MessageKind, MessageType, RawI2npMessage, ShortTunnelBuildRecord, TunnelBuildRecord,
-        TunnelData,
+        MessageKind, MessageType, OwnedDeliveryInstruction, RawI2npMessage, ShortTunnelBuildRecord,
+        TunnelBuildRecord, TunnelData, I2NP_STANDARD,
     },
     primitives::RouterId,
     tunnel::LOG_TARGET,
@@ -43,7 +43,7 @@ use crate::{
 use hashbrown::HashMap;
 use zeroize::Zeroize;
 
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::fmt;
 
 /// Noise protocol name;.
@@ -75,6 +75,18 @@ struct TunnelHop {
     ///
     /// TODO: docs
     iv_key: Vec<u8>,
+
+    /// I2NP message fragments.
+    //
+    // TODO: easily dossable, add expiration
+    fragments: HashMap<u32, FragmentedMessage>,
+}
+
+struct FragmentedMessage {
+    first_fragment: Vec<u8>,
+    delivery_instructions: OwnedDeliveryInstruction,
+    middle_fragments: BTreeMap<usize, Vec<u8>>,
+    last_fragment: Option<Vec<u8>>,
 }
 
 /// Noise key context.
@@ -145,6 +157,17 @@ impl Noise {
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
     ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
+        tracing::error!(
+            "payload len = {}, num records = {}",
+            payload.len(),
+            payload[0]
+        );
+
+        assert!(
+            payload[1..].len() % 528 == 0,
+            "invalid variable tunnel build message"
+        );
+
         // TODO: better abstraction
         let mut record = payload[1..].chunks_mut(528).find(|chunk| &chunk[..16] == truncated)?;
 
@@ -180,6 +203,7 @@ impl Noise {
                 next_router_id: RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 layer_key,
                 iv_key,
+                fragments: HashMap::new(),
             };
             self.tunnels.insert(record.tunnel_id(), hop);
 
@@ -292,6 +316,7 @@ impl Noise {
                 next_tunnel_id: record.next_tunnel_id(),
                 next_router_id: RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 layer_key,
+                fragments: HashMap::new(),
                 iv_key: match record.role() {
                     HopRole::OutboundEndpoint => iv_key,
                     _ => else_key,
@@ -335,17 +360,20 @@ impl Noise {
         Some((payload, next_router, message_id, message_type))
     }
 
-    pub fn handle_tunnel_data(&mut self, mut payload: Vec<u8>) -> Option<(Vec<u8>, RouterId)> {
+    pub fn handle_tunnel_data(
+        &mut self,
+        truncated: &Vec<u8>,
+        mut payload: Vec<u8>,
+    ) -> Option<(Vec<u8>, RouterId)> {
         // TODO: no unwraps
         let tunnel_data = EncryptedTunnelData::parse(&payload).unwrap();
-        let hop = self.tunnels.get(&tunnel_data.tunnel_id()).unwrap();
+        let hop = self.tunnels.get_mut(&tunnel_data.tunnel_id()).unwrap();
 
-        tracing::info!(
+        tracing::trace!(
             target: LOG_TARGET,
             tunnel_id = ?hop.tunnel_id,
             next_tunnel_id = ?hop.next_tunnel_id,
             next_router_id = %hop.next_router_id,
-            payload_len = ?tunnel_data.ciphertext().len(),
             "tunnel data",
         );
 
@@ -397,7 +425,8 @@ impl Noise {
                     return None;
                 }
 
-                let message = TunnelData::parse(&ciphertext[4 + res.0 + 1..]).unwrap();
+                let our_message = ciphertext[4 + res.0 + 1..].to_vec();
+                let message = TunnelData::parse(&our_message).unwrap();
 
                 for message in &message.messages {
                     match message.message_kind {
@@ -419,8 +448,120 @@ impl Noise {
                                 "todo: tunnel delivery"
                             ),
                         },
-                        ref message_kind => {
-                            tracing::error!("todo: handle {message_kind:?}");
+                        MessageKind::FirstFragment {
+                            message_id,
+                            ref delivery_instructions,
+                        } => {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                tunnel_id = ?hop.tunnel_id,
+                                ?message_id,
+                                ?delivery_instructions,
+                                "first fragment",
+                            );
+
+                            tracing::error!("first fragment size = {}", message.message.len());
+
+                            hop.fragments.insert(
+                                message_id,
+                                FragmentedMessage {
+                                    first_fragment: message.message.to_vec(),
+                                    delivery_instructions: delivery_instructions.to_owned(),
+                                    middle_fragments: BTreeMap::new(),
+                                    last_fragment: None,
+                                },
+                            );
+                        }
+                        MessageKind::MiddleFragment {
+                            message_id,
+                            sequence_number,
+                        } => {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                tunnel_id = ?hop.tunnel_id,
+                                ?message_id,
+                                ?sequence_number,
+                                "middle fragment",
+                            );
+
+                            let Some(fragmented_message) = hop.fragments.get_mut(&message_id)
+                            else {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    tunnel_id = ?hop.tunnel_id,
+                                    ?message_id,
+                                    "fragmented message doesn't exist",
+                                );
+                                debug_assert!(false);
+                                continue;
+                            };
+
+                            tracing::error!("second fragment size = {}", message.message.len());
+
+                            fragmented_message
+                                .middle_fragments
+                                .insert(sequence_number, message.message.to_vec());
+                        }
+                        MessageKind::LastFragment {
+                            message_id,
+                            sequence_number,
+                        } => {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                tunnel_id = ?hop.tunnel_id,
+                                ?message_id,
+                                ?sequence_number,
+                                "last fragment",
+                            );
+
+                            let Some(fragmented_message) = hop.fragments.remove(&message_id) else {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    tunnel_id = ?hop.tunnel_id,
+                                    ?message_id,
+                                    "fragmented message doesn't exist",
+                                );
+                                debug_assert!(false);
+                                continue;
+                            };
+
+                            tracing::error!("second fragment size = {}", message.message.len());
+
+                            let size = fragmented_message.first_fragment.len()
+                                + message.message.len()
+                                + fragmented_message
+                                    .middle_fragments
+                                    .iter()
+                                    .fold(0usize, |acc, (_, message)| acc + message.len());
+
+                            tracing::error!("combined message size = {size}");
+
+                            let mut combined = vec![0u8; size];
+                            let mut offset = 0usize;
+
+                            combined[offset..offset + fragmented_message.first_fragment.len()]
+                                .copy_from_slice(&fragmented_message.first_fragment);
+
+                            offset += fragmented_message.first_fragment.len();
+
+                            for (_seq_nro, message) in &fragmented_message.middle_fragments {
+                                combined[offset..offset + message.len()].copy_from_slice(&message);
+                                offset += message.len();
+                            }
+
+                            combined[offset..offset + message.message.len()]
+                                .copy_from_slice(message.message);
+
+                            tracing::error!("combined bytes = {combined:?}");
+
+                            let test = combined[combined.len() - 2113..].to_vec();
+
+                            let msg = RawI2npMessage::parse::<I2NP_STANDARD>(&combined)
+                                .expect("valid message");
+
+                            // TODO: handle message
+
+                            // let _ = self.create_tunnel_hop(truncated, msg.payload);
                         }
                     }
                 }
@@ -431,7 +572,7 @@ impl Noise {
         // todo!();
     }
 
-    pub fn on_garlic_message(
+    pub fn handle_garlic_message(
         &mut self,
         truncated: &Vec<u8>,
         message_id: u32,
@@ -477,7 +618,7 @@ impl Noise {
                     }
                     _ => todo!("not handled"),
                 },
-                _ => todo!("zzz"),
+                _ => todo!("not handled"),
             }
         }
 
