@@ -319,7 +319,7 @@ impl Config {
         let router_path = {
             let mut path = self.base_path.clone();
             path.push("routers");
-            fs::create_dir_all(path.clone());
+            let _ = fs::create_dir_all(path.clone());
 
             path
         };

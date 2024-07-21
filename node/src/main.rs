@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use crate::{
     cli::{Arguments, Command},
     config::Config,
@@ -10,7 +8,6 @@ use crate::{
 
 use clap::Parser;
 use emissary::router::Router;
-use futures::StreamExt;
 
 mod cli;
 mod config;
@@ -45,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     match command {
         None => {
             let config: emissary::Config = config.into();
-            let mut router = Router::new(TokioRuntime::new(), config, router).await.unwrap();
+            let router = Router::new(TokioRuntime::new(), config, router).await.unwrap();
 
             let _ = router.await;
         }

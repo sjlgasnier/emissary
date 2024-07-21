@@ -3,7 +3,7 @@ use crate::error::Error;
 use nom::{
     do_parse, named,
     number::streaming::{be_u16, be_u64, be_u8},
-    switch, tag, take, value, AsBytes,
+    switch, tag, take, value,
 };
 
 /// SU3 magic.
