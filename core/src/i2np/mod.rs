@@ -29,7 +29,7 @@ use crate::{
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u32, be_u8},
+    number::complete::{be_u16, be_u32, be_u64, be_u8},
     sequence::tuple,
     Err, IResult,
 };
@@ -699,6 +699,163 @@ pub enum DatabaseMessage<'a> {
     },
 }
 
+#[derive(Debug)]
+pub enum RawI2NpMessageBuilder {
+    /// Standard I2NP header (TunnelData).
+    Standard {
+        /// Message type.
+        message_type: Option<MessageType>,
+
+        /// Message ID.
+        message_id: Option<u32>,
+
+        /// Expiration.
+        expiration: Option<u64>,
+
+        /// Raw, unparsed payload.
+        payload: Option<Vec<u8>>,
+    },
+
+    /// Short I2NP header (NTCP2/SSU2).
+    Short {
+        /// Message type.
+        message_type: Option<MessageType>,
+
+        /// Message ID.
+        message_id: Option<u32>,
+
+        /// Expiration.
+        expiration: Option<u64>,
+
+        /// Raw, unparsed payload.
+        payload: Option<Vec<u8>>,
+    },
+}
+
+impl RawI2NpMessageBuilder {
+    pub fn short() -> Self {
+        Self::Short {
+            message_type: None,
+            message_id: None,
+            expiration: None,
+            payload: None,
+        }
+    }
+
+    pub fn standard() -> Self {
+        Self::Standard {
+            message_type: None,
+            message_id: None,
+            expiration: None,
+            payload: None,
+        }
+    }
+
+    pub fn with_expiration<T: Into<u64>>(mut self, message_expiration: T) -> Self {
+        match self {
+            Self::Standard {
+                expiration: ref mut exp,
+                ..
+            }
+            | Self::Short {
+                expiration: ref mut exp,
+                ..
+            } => *exp = Some(message_expiration.into()),
+        }
+
+        self
+    }
+
+    pub fn with_message_type(mut self, message_type: MessageType) -> Self {
+        match self {
+            Self::Standard {
+                message_type: ref mut msg_type,
+                ..
+            }
+            | Self::Short {
+                message_type: ref mut msg_type,
+                ..
+            } => *msg_type = Some(message_type),
+        }
+
+        self
+    }
+
+    pub fn with_message_id(mut self, message_id: u32) -> Self {
+        match self {
+            Self::Standard {
+                message_id: ref mut msg_id,
+                ..
+            }
+            | Self::Short {
+                message_id: ref mut msg_id,
+                ..
+            } => *msg_id = Some(message_id),
+        }
+
+        self
+    }
+
+    pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
+        match self {
+            Self::Standard {
+                payload: ref mut msg_payload,
+                ..
+            }
+            | Self::Short {
+                payload: ref mut msg_payload,
+                ..
+            } => core::mem::swap(msg_payload, &mut Some(payload)),
+        }
+
+        self
+    }
+
+    pub fn serialize(mut self) -> Vec<u8> {
+        match self {
+            Self::Standard {
+                message_type,
+                message_id,
+                mut expiration,
+                mut payload,
+            } => {
+                let payload = payload.take().expect("to exist");
+                let expiration = expiration.take().expect("to exist") as u32;
+
+                let mut out = vec![0u8; payload.len() + 16];
+
+                out[0] = message_type.expect("to exist").serialize();
+                out[1..5].copy_from_slice(&message_id.expect("to exist").to_be_bytes());
+                out[5..13].copy_from_slice(&expiration.to_be_bytes());
+                out[13..15].copy_from_slice(&payload.len().to_be_bytes());
+                out[15] = 0x00; // TODO: correct checksum
+                out[16..].copy_from_slice(&payload);
+
+                out
+            }
+            Self::Short {
+                message_type,
+                message_id,
+                mut expiration,
+                mut payload,
+            } => {
+                let payload = payload.take().expect("to exist");
+                let expiration = expiration.take().expect("to exist") as u32;
+
+                let mut out = vec![0u8; payload.len() + 2 + 1 + 2 * 4];
+
+                out[..2].copy_from_slice(&((payload.len() + 1 + 2 * 4) as u16).to_be_bytes());
+                out[2] = message_type.expect("to exist").serialize();
+                out[3..7].copy_from_slice(&message_id.expect("to exist").to_be_bytes());
+                out[7..11].copy_from_slice(&expiration.to_be_bytes());
+                out[11..].copy_from_slice(&payload);
+
+                out
+            }
+        }
+    }
+}
+
 /// Raw, unparsed I2NP message.
 ///
 /// These messages are dispatched by the enabled transports
@@ -712,11 +869,14 @@ pub struct RawI2npMessage {
     pub message_id: u32,
 
     /// Expiration.
-    pub expiration: u32,
+    pub expiration: u64,
 
     /// Raw, unparsed payload.
     pub payload: Vec<u8>,
 }
+
+pub const I2NP_STANDARD: bool = false;
+pub const I2NP_SHORT: bool = true;
 
 // TODO: remove & remove thingbuf zzz
 impl Default for RawI2npMessage {
@@ -724,7 +884,7 @@ impl Default for RawI2npMessage {
         Self {
             message_type: MessageType::DatabaseStore,
             message_id: 0u32,
-            expiration: 0u32,
+            expiration: 0u64,
             payload: Vec::new(),
         }
     }
@@ -741,12 +901,33 @@ impl fmt::Debug for RawI2npMessage {
 }
 
 impl RawI2npMessage {
-    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+    pub fn parse_short(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
         let (rest, size) = be_u16(input)?;
         let (rest, message_type) = be_u8(rest)?;
         let (rest, message_id) = be_u32(rest)?;
         let (rest, expiration) = be_u32(rest)?;
         let (rest, payload) = take(size as usize - (1 + 2 * 4))(rest)?;
+        let message_type = MessageType::from_u8(message_type)
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((
+            rest,
+            RawI2npMessage {
+                message_type,
+                message_id,
+                expiration: expiration as u64,
+                payload: payload.to_vec(),
+            },
+        ))
+    }
+
+    pub fn parse_standard(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+        let (rest, message_type) = be_u8(input)?;
+        let (rest, message_id) = be_u32(rest)?;
+        let (rest, expiration) = be_u64(rest)?;
+        let (rest, size) = be_u16(rest)?;
+        let (rest, _checksum) = be_u8(rest)?;
+        let (rest, payload) = take(size as usize)(rest)?;
         let message_type = MessageType::from_u8(message_type)
             .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
 
@@ -761,8 +942,11 @@ impl RawI2npMessage {
         ))
     }
 
-    pub fn parse(input: &[u8]) -> Option<RawI2npMessage> {
-        Some(Self::parse_frame(input).ok()?.1)
+    pub fn parse<const SHORT: bool>(input: &[u8]) -> Option<RawI2npMessage> {
+        match SHORT {
+            true => Some(Self::parse_short(input).ok()?.1),
+            false => Some(Self::parse_standard(input).ok()?.1),
+        }
     }
 
     pub fn destination(&self) -> SubsystemKind {
@@ -772,19 +956,6 @@ impl RawI2npMessage {
             | MessageType::DatabaseSearchReply => SubsystemKind::NetDb,
             _ => SubsystemKind::Tunnel,
         }
-    }
-
-    // TODO: use `zerocopy`
-    pub fn serialize(self) -> Vec<u8> {
-        let mut out = vec![0u8; self.payload.len() + 2 + 1 + 2 * 4];
-
-        out[..2].copy_from_slice(&((self.payload.len() + 1 + 2 * 4) as u16).to_be_bytes());
-        out[2] = self.message_type.serialize();
-        out[3..7].copy_from_slice(&self.message_id.to_be_bytes());
-        out[7..11].copy_from_slice(&self.expiration.to_be_bytes());
-        out[11..].copy_from_slice(&self.payload);
-
-        out
     }
 }
 
@@ -857,6 +1028,43 @@ pub enum DeliveryInstruction<'a> {
 
         /// Hash of the tunnel.
         hash: &'a [u8],
+    },
+}
+
+impl<'a> DeliveryInstruction<'a> {
+    pub fn to_owned(&self) -> OwnedDeliveryInstruction {
+        match self {
+            Self::Local => OwnedDeliveryInstruction::Local,
+            Self::Router { hash } => OwnedDeliveryInstruction::Router {
+                hash: hash.to_vec(),
+            },
+            Self::Tunnel { tunnel_id, hash } => OwnedDeliveryInstruction::Tunnel {
+                tunnel_id: *tunnel_id,
+                hash: hash.to_vec(),
+            },
+        }
+    }
+}
+
+/// Owned I2NP message delivery instructions.
+#[derive(Debug, Clone)]
+pub enum OwnedDeliveryInstruction {
+    /// Fragment meant for the local router.
+    Local,
+
+    /// Fragment meant for a router.
+    Router {
+        /// Hash of the router.
+        hash: Vec<u8>,
+    },
+
+    /// Fragment meant for a tunnel.
+    Tunnel {
+        /// Tunnel ID.
+        tunnel_id: u32,
+
+        /// Hash of the tunnel.
+        hash: Vec<u8>,
     },
 }
 

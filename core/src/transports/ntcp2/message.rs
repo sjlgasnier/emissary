@@ -250,7 +250,7 @@ impl<'a> MessageBlock<'a> {
 
     /// Parse [`MessageBlock::I2Np`].
     fn parse_i2np(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        let (rest, message) = RawI2npMessage::parse_frame(input)?;
+        let (rest, message) = RawI2npMessage::parse_short(input)?;
 
         Ok((rest, MessageBlock::I2Np { message }))
     }

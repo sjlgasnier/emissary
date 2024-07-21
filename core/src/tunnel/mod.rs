@@ -18,7 +18,9 @@
 
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
-    i2np::{HopRole, I2NpMessage, MessageType, RawI2npMessage, TunnelMessage},
+    i2np::{
+        HopRole, I2NpMessage, MessageType, RawI2NpMessageBuilder, RawI2npMessage, TunnelMessage,
+    },
     primitives::{RouterId, RouterInfo},
     runtime::Runtime,
     subsystem::SubsystemEvent,
@@ -41,7 +43,7 @@ use hashbrown::HashSet;
 mod noise;
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::tunnel-manager";
+const LOG_TARGET: &str = "emissary::tunnel";
 
 /// Tunnel manager.
 pub struct TunnelManager<R: Runtime> {
@@ -115,19 +117,19 @@ impl<R: Runtime> TunnelManager<R> {
                 let (payload, hop, message_id, message_type) =
                     self.noise.create_tunnel_hop(&self.truncated_hash, payload).unwrap();
 
-                let msg = RawI2npMessage {
-                    message_type,
-                    message_id,
-                    expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
-                        as u32,
-                    payload,
-                }
-                .serialize();
+                let msg = RawI2NpMessageBuilder::short()
+                    .with_message_type(message_type)
+                    .with_message_id(message_id)
+                    .with_expiration(
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                    )
+                    .with_payload(payload)
+                    .serialize();
 
                 if self.routers.contains(&hop) {
                     self.service.send(&hop, msg);
                 } else {
-                    tracing::warn!(target: LOG_TARGET, "router message to self");
+                    // tracing::warn!(target: LOG_TARGET, "router message to self");
 
                     // let message = RawI2npMessage::parse(&msg).unwrap();
                     // self.on_message(message);
@@ -139,46 +141,72 @@ impl<R: Runtime> TunnelManager<R> {
 
                 // tracing::info!("message id = {message_id}, next message id {_message_id}");
 
-                let msg = RawI2npMessage {
-                    message_type,
-                    message_id,
-                    expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
-                        as u32,
-                    payload,
-                }
-                .serialize();
+                let msg = RawI2NpMessageBuilder::short()
+                    .with_message_type(message_type)
+                    .with_message_id(message_id)
+                    .with_expiration(
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                    )
+                    .with_payload(payload)
+                    .serialize();
 
                 if self.routers.contains(&hop) {
                     self.service.send(&hop, msg);
                 } else {
-                    tracing::warn!(target: LOG_TARGET, "router message to self");
+                    // tracing::warn!(target: LOG_TARGET, "router message to self");
 
                     // let message = RawI2npMessage::parse(&msg).unwrap();
                     // self.on_message(message);
                 }
             }
             MessageType::TunnelData => {
-                let Some((data, hop)) = self.noise.handle_tunnel_data(payload) else {
+                let Some((data, hop)) =
+                    self.noise.handle_tunnel_data(&self.truncated_hash, payload)
+                else {
                     return;
                 };
                 // let (data, hop) = self.noise.handle_tunnel_data(payload);
 
-                let msg = RawI2npMessage {
-                    message_type,
-                    message_id,
-                    expiration: (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()
-                        as u32,
-                    payload: data,
-                }
-                .serialize();
+                let msg = RawI2NpMessageBuilder::short()
+                    .with_message_type(message_type)
+                    .with_message_id(message_id)
+                    .with_expiration(
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                    )
+                    .with_payload(data)
+                    .serialize();
 
                 if self.routers.contains(&hop) {
                     self.service.send(&hop, msg);
                 } else {
-                    tracing::warn!(target: LOG_TARGET, "router message to self");
+                    // tracing::warn!(target: LOG_TARGET, "router message to self");
 
                     // let message = RawI2npMessage::parse(&msg).unwrap();
                     // self.on_message(message);
+                }
+            }
+            MessageType::Garlic => {
+                let messages =
+                    self.noise.handle_garlic_message(&self.truncated_hash, message_id, payload);
+
+                for (payload, hop, message_id, message_type) in messages {
+                    let msg = RawI2NpMessageBuilder::short()
+                        .with_message_type(message_type)
+                        .with_message_id(message_id)
+                        .with_expiration(
+                            (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                        )
+                        .with_payload(payload)
+                        .serialize();
+
+                    if self.routers.contains(&hop) {
+                        self.service.send(&hop, msg);
+                    } else {
+                        tracing::warn!(target: LOG_TARGET, "router message to self");
+
+                        // let message = RawI2npMessage::parse(&msg).unwrap();
+                        // self.on_message(message);
+                    }
                 }
             }
             message => tracing::warn!(
