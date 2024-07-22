@@ -53,18 +53,32 @@ pub struct Router<R: Runtime> {
     ///
     /// Polls both NTCP2 and SSU2 transports.
     transport_manager: TransportManager<R>,
+
+    /// Local router info.
+    local_router_info: RouterInfo,
 }
 
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
-    pub async fn new(runtime: R, config: Config, router: Vec<u8>) -> crate::Result<Self> {
+    pub async fn new(
+        runtime: R,
+        config: Config,
+        router: Vec<u8>,
+    ) -> crate::Result<(Self, Vec<u8>)> {
         // TODO: figure out how to initialize router properly
         let router = RouterInfo::from_bytes(router).unwrap();
         let now = R::time_since_epoch().as_millis() as u64;
         let local_key = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
+        let ntcp2_config = config.ntcp2_config.clone();
         let local_router_info = RouterInfo::new(now, config);
+        let serialized_router_info = local_router_info.serialize(&local_signing_key);
+
+        let local_test = local_key.public().to_vec();
+        let ntcp_test = StaticPrivateKey::from(ntcp2_config.as_ref().unwrap().key.clone())
+            .public()
+            .to_vec();
 
         tracing::info!(
             target: LOG_TARGET,
@@ -104,12 +118,18 @@ impl<R: Runtime> Router<R> {
         }
 
         // initialize and start ntcp2
-        transport_manager.register_transport(TransportKind::Ntcp2).await?;
+        transport_manager
+            .register_transport(TransportKind::Ntcp2, ntcp2_config.expect("to exist"))
+            .await?;
 
-        Ok(Self {
-            runtime,
-            transport_manager,
-        })
+        Ok((
+            Self {
+                runtime,
+                local_router_info,
+                transport_manager,
+            },
+            serialized_router_info,
+        ))
     }
 }
 

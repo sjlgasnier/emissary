@@ -24,13 +24,16 @@ pub enum Transport {
 }
 
 /// NTCP2 configuration.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ntcp2Config {
     /// NTCP2 port.
     pub port: u16,
 
     /// NTCP2 listen address.
     pub host: String,
+
+    /// NTCP2 key.
+    pub key: Vec<u8>,
 
     /// NTCP2 IV.
     pub iv: [u8; 16],

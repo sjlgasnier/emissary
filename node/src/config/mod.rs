@@ -47,7 +47,7 @@ struct EmissaryConfig {
 /// Router configuration.
 pub struct Config {
     /// Base path.
-    base_path: PathBuf,
+    pub base_path: PathBuf,
 
     /// Router info.
     routers: Vec<Vec<u8>>,
@@ -129,8 +129,8 @@ impl TryFrom<Option<PathBuf>> for Config {
             }
         };
 
-        let ntcp2_iv = match Self::load_ntcp2_iv(path.clone()) {
-            Ok(iv) => iv,
+        let (ntcp2_key, ntcp2_iv) = match Self::load_ntcp2_keys(path.clone()) {
+            Ok((key, iv)) => (key, iv),
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -138,11 +138,12 @@ impl TryFrom<Option<PathBuf>> for Config {
                     "failed to load ntcp2 iv, regenerating",
                 );
 
-                Self::create_ntcp2_iv(path.clone())?
+                Self::create_ntcp2_keys(path.clone())?
             }
         };
 
-        let mut config = Config::from_keys(path.clone(), static_key, signing_key, ntcp2_iv)?;
+        let mut config =
+            Config::from_keys(path.clone(), static_key, signing_key, ntcp2_key, ntcp2_iv)?;
 
         // let config_path = {
         //     let mut path = path.clone();
@@ -225,48 +226,60 @@ impl Config {
         Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes().to_vec())
     }
 
-    /// Create NTCP2 IV and store it on disk before returning.
-    fn create_ntcp2_iv(mut path: PathBuf) -> crate::Result<[u8; 16]> {
-        let mut iv = [0u8; 16];
-        rand_core::OsRng.fill_bytes(&mut iv);
+    /// Create NTCP2 key and store it on disk.
+    fn create_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
+        let key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
+        let iv = {
+            let mut iv = [0u8; 16];
+            rand_core::OsRng.fill_bytes(&mut iv);
 
-        path.push(format!("ntcp2.keys"));
-        let mut file = fs::File::create(path)?;
-        file.write_all(iv.as_ref())?;
+            iv
+        };
 
-        Ok(iv)
+        // append iv to key and write it to disk
+        {
+            let mut combined = vec![0u8; 32 + 16];
+            combined[..32].copy_from_slice(&key);
+            combined[32..].copy_from_slice(&iv);
+
+            let mut file = fs::File::create(path.join("ntcp2.keys"))?;
+            file.write_all(combined.as_ref())?;
+        }
+
+        Ok((key, iv))
     }
 
     /// Save key to disk.
-    fn save_key<K: AsRef<[u8]>>(mut path: PathBuf, key_type: &str, key: &K) -> crate::Result<()> {
-        path.push(format!("{key_type}.key"));
-
-        let mut file = fs::File::create(path)?;
+    fn save_key<K: AsRef<[u8]>>(path: PathBuf, key_type: &str, key: &K) -> crate::Result<()> {
+        let mut file = fs::File::create(path.join(format!("{key_type}.key")))?;
         file.write_all(key.as_ref())?;
 
         Ok(())
     }
 
     /// Load key from disk.
-    fn load_key(mut path: PathBuf, key_type: &str) -> crate::Result<[u8; 32]> {
-        path.push(format!("{key_type}.key"));
-
-        let mut file = fs::File::open(&path)?;
+    fn load_key(path: PathBuf, key_type: &str) -> crate::Result<[u8; 32]> {
+        let mut file = fs::File::open(&path.join(format!("{key_type}.key")))?;
         let mut key_bytes = [0u8; 32];
         file.read_exact(&mut key_bytes)?;
 
         Ok(key_bytes)
     }
 
-    /// Load NTCP2 IV from disk.
-    fn load_ntcp2_iv(mut path: PathBuf) -> crate::Result<[u8; 16]> {
-        path.push(format!("ntcp2.keys"));
+    /// Load NTCP2 key and IV from disk.
+    fn load_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
+        let key_bytes = {
+            let mut file = fs::File::open(&path.join("ntcp2.keys"))?;
+            let mut key_bytes = [0u8; 32 + 16];
+            file.read_exact(&mut key_bytes)?;
 
-        let mut file = fs::File::open(&path)?;
-        let mut iv_bytes = [0u8; 16];
-        file.read_exact(&mut iv_bytes)?;
+            key_bytes
+        };
 
-        Ok(iv_bytes)
+        Ok((
+            key_bytes[..32].to_vec(),
+            TryInto::<[u8; 16]>::try_into(&key_bytes[32..]).expect("to succeed"),
+        ))
     }
 
     /// Create empty config.
@@ -275,7 +288,7 @@ impl Config {
     fn new_empty(base_path: PathBuf) -> crate::Result<Self> {
         let static_key = Self::create_static_key(base_path.clone())?;
         let signing_key = Self::create_signing_key(base_path.clone())?;
-        let ntcp2_iv = Self::create_ntcp2_iv(base_path.clone())?;
+        let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
 
         let config = EmissaryConfig {
             ntcp2: Ntcp2Config {
@@ -302,6 +315,7 @@ impl Config {
             ntcp2_config: Some(emissary::Ntcp2Config {
                 port: 8888u16,
                 host: String::from("127.0.0.1"),
+                key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
             static_key,
@@ -314,6 +328,7 @@ impl Config {
         base_path: PathBuf,
         static_key: Vec<u8>,
         signing_key: Vec<u8>,
+        ntcp2_key: Vec<u8>,
         ntcp2_iv: [u8; 16],
     ) -> crate::Result<Self> {
         let config = EmissaryConfig {
@@ -335,6 +350,7 @@ impl Config {
             ntcp2_config: Some(emissary::Ntcp2Config {
                 port: 8888u16,
                 host: String::from("127.0.0.1"),
+                key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
             static_key,
@@ -433,6 +449,14 @@ impl Config {
 
         Ok(num_routers)
     }
+
+    /// Write local `RouterInfo` to disk.
+    pub fn update_router_info(&self, router_info: Vec<u8>) -> crate::Result<()> {
+        let mut file = fs::File::create(self.base_path.join("routerInfo.dat"))?;
+        file.write_all(&router_info)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -440,7 +464,6 @@ mod tests {
     use super::*;
     use std::fs::File;
     use tempfile::tempdir;
-    // use tracing_subscriber::prelude::*;
 
     #[test]
     fn fresh_boot_directory_created() {
@@ -456,16 +479,21 @@ mod tests {
             String::from("127.0.0.1")
         );
 
-        let iv = {
+        let (key, iv) = {
             let mut path = dir.path().to_owned();
             path.push("ntcp2.keys");
             let mut file = File::open(&path).unwrap();
 
-            let mut contents = [0u8; 16];
+            let mut contents = [0u8; 48];
             file.read_exact(&mut contents).unwrap();
 
-            contents
+            (
+                contents[..32].to_vec(),
+                TryInto::<[u8; 16]>::try_into(&contents[32..]).expect("to succeed"),
+            )
         };
+
+        assert_eq!(config.ntcp2_config.as_ref().unwrap().key, key);
         assert_eq!(config.ntcp2_config.as_ref().unwrap().iv, iv);
     }
 
@@ -488,6 +516,10 @@ mod tests {
         assert_eq!(
             config.ntcp2_config.as_ref().unwrap().host,
             ntcp2_config.as_ref().unwrap().host
+        );
+        assert_eq!(
+            config.ntcp2_config.as_ref().unwrap().key,
+            ntcp2_config.as_ref().unwrap().key
         );
         assert_eq!(
             config.ntcp2_config.as_ref().unwrap().iv,

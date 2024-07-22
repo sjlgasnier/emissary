@@ -137,8 +137,11 @@ pub struct SessionManager<R: Runtime> {
     // TODO: `bytes::Bytes`?
     chaining_key: Vec<u8>,
 
-    /// Local static key.
+    /// Local NTCP2 static key.
     local_key: StaticPrivateKey,
+
+    /// Local NTCP2 IV.
+    local_iv: Vec<u8>,
 
     /// Local signing key.
     local_signing_key: SigningPrivateKey,
@@ -160,11 +163,14 @@ impl<R: Runtime> SessionManager<R> {
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
     pub fn new(
         runtime: R,
-        local_key: StaticPrivateKey,
+        local_key: Vec<u8>,
+        local_iv: Vec<u8>,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
-    ) -> Self {
+    ) -> crate::Result<Self> {
+        let local_key = StaticPrivateKey::from(local_key);
+
         // initial state
         let state = Sha256::new().update(&PROTOCOL_NAME.as_bytes().to_vec()).finalize();
 
@@ -180,16 +186,17 @@ impl<R: Runtime> SessionManager<R> {
             .update(&local_key.public().to_vec())
             .finalize();
 
-        Self {
+        Ok(Self {
             runtime,
             local_key,
+            local_iv,
             local_signing_key,
             local_router_info,
             chaining_key,
             inbound_initial_state,
             outbound_initial_state,
             subsystem_handle,
-        }
+        })
     }
 
     /// Create new [`Handshaker`] for initiator (Alice).
@@ -317,15 +324,14 @@ impl<R: Runtime> SessionManager<R> {
         &self,
         mut stream: R::TcpStream,
     ) -> impl Future<Output = crate::Result<(Ntcp2Session<R>)>> {
-        // TODO: correct iv
-        let iv = alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
         let local_router_hash = self.local_router_info.identity().hash().to_vec();
-        let local_key = self.local_key.clone();
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let runtime = self.runtime.clone();
         let subsystem_handle = self.subsystem_handle.clone();
+        let local_key = self.local_key.clone();
+        let iv = self.local_iv.clone();
 
         async move {
             tracing::trace!(

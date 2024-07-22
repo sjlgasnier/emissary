@@ -31,6 +31,7 @@ use crate::{
         },
         Transport, TransportEvent,
     },
+    Ntcp2Config,
 };
 
 use futures::{Stream, StreamExt};
@@ -76,21 +77,22 @@ pub struct Ntcp2Transport<R: Runtime> {
 impl<R: Runtime> Ntcp2Transport<R> {
     /// Create new [`Ntcp2Transport`].
     pub async fn new(
+        config: Ntcp2Config,
         runtime: R,
-        local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
     ) -> crate::Result<Self> {
-        // TODO: get port and host from `local_router_info`
-
         let session_manager = SessionManager::new(
             runtime,
-            local_key,
+            config.key,
+            config.iv.to_vec(),
             local_signing_key,
             local_router_info,
             subsystem_handle,
-        );
+        )?;
+
+        // TODO: get port and host from `local_router_info`
         let listener = Ntcp2Listener::new(String::from(""), 1337u16).await?;
 
         tracing::trace!(

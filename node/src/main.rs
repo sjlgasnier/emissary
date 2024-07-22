@@ -27,6 +27,8 @@ use crate::{
 use clap::Parser;
 use emissary::router::Router;
 
+use std::{fs::File, io::Write};
+
 mod cli;
 mod config;
 mod error;
@@ -59,8 +61,14 @@ async fn main() -> anyhow::Result<()> {
 
     match command {
         None => {
+            let path = config.base_path.clone();
             let config: emissary::Config = config.into();
-            let router = Router::new(TokioRuntime::new(), config, router).await.unwrap();
+            let (router, local_router_info) =
+                Router::new(TokioRuntime::new(), config, router).await.unwrap();
+
+            // TODO: ugly
+            let mut file = File::create(path.join("routerInfo.dat"))?;
+            file.write_all(&local_router_info)?;
 
             let _ = router.await;
         }
