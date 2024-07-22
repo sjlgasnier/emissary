@@ -148,6 +148,16 @@ impl SubsystemHandle {
         }
     }
 
+    pub async fn report_connection_closed(&mut self, router: RouterId) {
+        for subsystem in &mut self.subsystems {
+            let _ = subsystem
+                .send(InnerSubsystemEvent::ConnectionClosed {
+                    router: router.clone(),
+                })
+                .await;
+        }
+    }
+
     // TODO: fix error
     pub fn dispatch_messages(&mut self, messages: Vec<RawI2npMessage>) -> crate::Result<()> {
         let (tunnel_messages, netdb_messages): (Vec<_>, Vec<_>) = messages
