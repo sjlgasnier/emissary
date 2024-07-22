@@ -451,6 +451,7 @@ impl Config {
     }
 
     /// Write local `RouterInfo` to disk.
+    #[allow(unused)]
     pub fn update_router_info(&self, router_info: Vec<u8>) -> crate::Result<()> {
         let mut file = fs::File::create(self.base_path.join("routerInfo.dat"))?;
         file.write_all(&router_info)?;

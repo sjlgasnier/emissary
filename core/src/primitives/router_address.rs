@@ -28,8 +28,16 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::{vec, vec::Vec};
-use core::{fmt, str::FromStr};
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use core::{
+    fmt,
+    net::{IpAddr, SocketAddr},
+    str::{self, FromStr},
+};
 
 /// Transport kind.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -90,6 +98,9 @@ pub struct RouterAddress {
 
     /// Options.
     options: HashMap<Str, Str>,
+
+    /// Router's socket address.
+    socket_address: Option<SocketAddr>,
 }
 
 impl fmt::Display for RouterAddress {
@@ -125,17 +136,15 @@ impl RouterAddress {
             cost: 10,
             expires: Date::new(0),
             transport: TransportKind::Ntcp2,
+            socket_address: None,
             options,
         }
     }
 
     /// Create new unpublished [`RouterAddress`].
-    pub fn new_published(
-        key: Vec<u8>,
-        iv: [u8; 16],
-        _port: u16,
-        host: alloc::string::String,
-    ) -> Self {
+    //
+    // TODO: no unwraps
+    pub fn new_published(key: Vec<u8>, iv: [u8; 16], port: u16, host: String) -> Self {
         let static_key = StaticPublicKey::from_private_x25519(&key).unwrap();
 
         let mut options = HashMap::<Str, Str>::new();
@@ -150,7 +159,7 @@ impl RouterAddress {
         );
         options.insert(
             Str::from_str("port").unwrap(),
-            Str::from_str("8888").unwrap(),
+            Str::from_str(port.to_string().as_str()).unwrap(),
         );
         options.insert(
             Str::from_str("i").unwrap(),
@@ -162,6 +171,10 @@ impl RouterAddress {
             expires: Date::new(0),
             transport: TransportKind::Ntcp2,
             options,
+            socket_address: Some(SocketAddr::new(
+                host.parse::<IpAddr>().expect("valid address"),
+                port,
+            )),
         }
     }
 
@@ -171,6 +184,40 @@ impl RouterAddress {
         let (rest, expires) = Date::parse_frame(rest)?;
         let (rest, transport) = Str::parse_frame(rest)?;
         let (rest, options) = Mapping::parse_multi_frame(rest)?;
+        let options = Mapping::into_hashmap(options);
+        let socket_address: Option<SocketAddr> = {
+            let maybe_host = options.get(&Str::from_str("host").expect("to succeed"));
+            let maybe_port = options.get(&Str::from_str("port").expect("to succeed"));
+
+            match (maybe_host, maybe_port) {
+                (Some(host), Some(port)) => {
+                    let port =
+                        str::from_utf8(port.string()).ok().map(|port| port.parse::<u16>().ok());
+                    let host =
+                        str::from_utf8(host.string()).ok().map(|host| host.parse::<IpAddr>().ok());
+
+                    match (host.flatten(), port.flatten()) {
+                        (Some(host), Some(port)) => Some(SocketAddr::new(host, port)),
+                        (host, port) => {
+                            tracing::warn!(
+                                ?host,
+                                ?port,
+                                "failed to parse address into `SocketAddr`",
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        ?maybe_host,
+                        ?maybe_port,
+                        "ntcp2 host/port info not available",
+                    );
+                    None
+                }
+            }
+        };
 
         Ok((
             rest,
@@ -179,7 +226,8 @@ impl RouterAddress {
                 expires,
                 transport: TransportKind::try_from(transport)
                     .map_err(|_| Err::Error(make_error(input, ErrorKind::Fail)))?,
-                options: Mapping::into_hashmap(options),
+                options,
+                socket_address,
             },
         ))
     }
@@ -226,5 +274,10 @@ impl RouterAddress {
     /// Get address options.
     pub fn options(&self) -> &HashMap<Str, Str> {
         &self.options
+    }
+
+    /// Get transport's socket address if it exists.
+    pub fn socket_address(&self) -> Option<SocketAddr> {
+        self.socket_address
     }
 }

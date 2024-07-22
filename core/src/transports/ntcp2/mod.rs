@@ -20,7 +20,7 @@ use crate::{
     crypto::{
         base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
-    primitives::{RouterAddress, RouterId, RouterInfo, Str},
+    primitives::{RouterAddress, RouterId, RouterInfo, Str, TransportKind},
     runtime::{JoinSet, Runtime, TcpListener, TcpStream},
     subsystem::SubsystemHandle,
     transports::{
@@ -83,6 +83,15 @@ impl<R: Runtime> Ntcp2Transport<R> {
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
     ) -> crate::Result<Self> {
+        // TODO: handle the case when user doesn't want to enable ntcp2 listener
+        let socket_address = local_router_info
+            .addresses()
+            .get(&TransportKind::Ntcp2)
+            .expect("to exist")
+            .socket_address()
+            .expect("to exist");
+        let listener = Ntcp2Listener::new(socket_address).await?;
+
         let session_manager = SessionManager::new(
             runtime,
             config.key,
@@ -91,9 +100,6 @@ impl<R: Runtime> Ntcp2Transport<R> {
             local_router_info,
             subsystem_handle,
         )?;
-
-        // TODO: get port and host from `local_router_info`
-        let listener = Ntcp2Listener::new(String::from(""), 1337u16).await?;
 
         tracing::trace!(
             target: LOG_TARGET,

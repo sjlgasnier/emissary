@@ -238,39 +238,15 @@ impl<R: Runtime> SessionManager<R> {
                     },
                 )?;
 
-                // `format!()` is not available in `no_std`
-                // so socket address has to be constructed manually
-                //
-                // TODO: the `primitives` apis need a lot of work lol
-                // TODO: maybe add common getters for `RouterAddress`
-                let host = ntcp2
-                    .options()
-                    .get(&Str::from_str("host").expect("to succeed"))
-                    .ok_or_else(|| {
-                        tracing::warn!(target: LOG_TARGET, "host missing from ntcp2 info");
-                        Error::InvalidData
-                    })?;
-
-                // let host = core::str::from_utf8(host.string())
-                //     .unwrap()
-                //     .parse::<core::net::IpAddr>()
-                //     .unwrap();
-                let host = "127.0.0.1".parse::<core::net::IpAddr>().unwrap();
-
-                let port = ntcp2
-                    .options()
-                    .get(&Str::from_str("port").expect("to succeed"))
-                    .ok_or_else(|| {
-                        tracing::warn!(target: LOG_TARGET, "port missing from ntcp2 info");
-                        Error::InvalidData
-                    })?;
-
-                let port = core::str::from_utf8(port.string()).unwrap().parse::<u16>().unwrap();
+                let socket_address = ntcp2.socket_address().ok_or_else(|| {
+                    tracing::debug!(target: LOG_TARGET, "router doesn't have socket address");
+                    Error::InvalidData
+                })?;
 
                 (
                     StaticPublicKey::from_bytes(base64_decode(static_key.string())).unwrap(),
                     base64_decode(iv.string()),
-                    core::net::SocketAddr::new(host, port),
+                    socket_address,
                 )
             };
 
