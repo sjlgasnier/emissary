@@ -5,7 +5,7 @@ use crate::{
 };
 
 use home::home_dir;
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Ntcp2Config {
+    enabled: bool,
     port: u16,
     host: Option<String>,
 }
@@ -33,8 +34,8 @@ pub struct Config {
     /// Router info.
     routers: Vec<Vec<u8>>,
 
-    ntcp2_host: Option<String>,
-    ntcp2_port: u16,
+    /// NTCP2 config.
+    ntcp2_config: Option<emissary::Ntcp2Config>,
 
     /// Static key.
     static_key: Vec<u8>,
@@ -48,8 +49,7 @@ impl Into<emissary::Config> for Config {
         emissary::Config {
             static_key: self.static_key,
             signing_key: self.signing_key,
-            ntcp2_port: self.ntcp2_port,
-            ntc2p_host: self.ntcp2_host,
+            ntcp2_config: self.ntcp2_config,
             routers: self.routers,
         }
     }
@@ -90,7 +90,7 @@ impl TryFrom<Option<PathBuf>> for Config {
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?error,
+                    error = %error.to_string(),
                     "failed to load static key, regenerating",
                 );
 
@@ -103,7 +103,7 @@ impl TryFrom<Option<PathBuf>> for Config {
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?error,
+                    error = %error.to_string(),
                     "failed to load signing key, regenerating",
                 );
 
@@ -111,7 +111,20 @@ impl TryFrom<Option<PathBuf>> for Config {
             }
         };
 
-        let mut config = Config::from_keys(path.clone(), static_key, signing_key)?;
+        let ntcp2_iv = match Self::load_ntcp2_iv(path.clone()) {
+            Ok(iv) => iv,
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    error = %error.to_string(),
+                    "failed to load ntcp2 iv, regenerating",
+                );
+
+                Self::create_ntcp2_iv(path.clone())?
+            }
+        };
+
+        let mut config = Config::from_keys(path.clone(), static_key, signing_key, ntcp2_iv)?;
 
         // let config_path = {
         //     let mut path = path.clone();
@@ -194,6 +207,18 @@ impl Config {
         Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes().to_vec())
     }
 
+    /// Create NTCP2 IV and store it on disk before returning.
+    fn create_ntcp2_iv(mut path: PathBuf) -> crate::Result<[u8; 16]> {
+        let mut iv = [0u8; 16];
+        rand_core::OsRng.fill_bytes(&mut iv);
+
+        path.push(format!("ntcp2.keys"));
+        let mut file = fs::File::create(path)?;
+        file.write_all(iv.as_ref())?;
+
+        Ok(iv)
+    }
+
     /// Save key to disk.
     fn save_key<K: AsRef<[u8]>>(mut path: PathBuf, key_type: &str, key: &K) -> crate::Result<()> {
         path.push(format!("{key_type}.key"));
@@ -215,13 +240,28 @@ impl Config {
         Ok(key_bytes)
     }
 
+    /// Load NTCP2 IV from disk.
+    fn load_ntcp2_iv(mut path: PathBuf) -> crate::Result<[u8; 16]> {
+        path.push(format!("ntcp2.keys"));
+
+        let mut file = fs::File::open(&path)?;
+        let mut iv_bytes = [0u8; 16];
+        file.read_exact(&mut iv_bytes)?;
+
+        Ok(iv_bytes)
+    }
+
     /// Create empty config.
+    ///
+    /// Creates a default config with NTCP2 enabled.
     fn new_empty(base_path: PathBuf) -> crate::Result<Self> {
         let static_key = Self::create_static_key(base_path.clone())?;
         let signing_key = Self::create_signing_key(base_path.clone())?;
+        let ntcp2_iv = Self::create_ntcp2_iv(base_path.clone())?;
 
         let config = EmissaryConfig {
             ntcp2: Ntcp2Config {
+                enabled: true,
                 port: 8888u16,
                 host: None,
             },
@@ -241,8 +281,11 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
-            ntcp2_host: Some(String::from("127.0.0.1")),
-            ntcp2_port: 8888u16,
+            ntcp2_config: Some(emissary::Ntcp2Config {
+                port: 8888u16,
+                host: String::from("127.0.0.1"),
+                iv: ntcp2_iv,
+            }),
             static_key,
             signing_key,
         })
@@ -253,9 +296,11 @@ impl Config {
         base_path: PathBuf,
         static_key: Vec<u8>,
         signing_key: Vec<u8>,
+        ntcp2_iv: [u8; 16],
     ) -> crate::Result<Self> {
         let config = EmissaryConfig {
             ntcp2: Ntcp2Config {
+                enabled: true,
                 port: 8888u16,
                 host: None,
             },
@@ -269,8 +314,11 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
-            ntcp2_host: Some(String::from("127.0.0.1")),
-            ntcp2_port: 8888u16,
+            ntcp2_config: Some(emissary::Ntcp2Config {
+                port: 8888u16,
+                host: String::from("127.0.0.1"),
+                iv: ntcp2_iv,
+            }),
             static_key,
             signing_key,
         })
@@ -366,5 +414,66 @@ impl Config {
         fs::remove_file("/tmp/routers.zip")?;
 
         Ok(num_routers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+    // use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn fresh_boot_directory_created() {
+        let dir = tempdir().unwrap();
+        let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+
+        assert!(config.routers.is_empty());
+        assert_eq!(config.static_key.len(), 32);
+        assert_eq!(config.signing_key.len(), 32);
+        assert_eq!(config.ntcp2_config.as_ref().unwrap().port, 8888);
+        assert_eq!(
+            config.ntcp2_config.as_ref().unwrap().host,
+            String::from("127.0.0.1")
+        );
+
+        let iv = {
+            let mut path = dir.path().to_owned();
+            path.push("ntcp2.keys");
+            let mut file = File::open(&path).unwrap();
+
+            let mut contents = [0u8; 16];
+            file.read_exact(&mut contents).unwrap();
+
+            contents
+        };
+        assert_eq!(config.ntcp2_config.as_ref().unwrap().iv, iv);
+    }
+
+    #[test]
+    fn load_configs_correctly() {
+        let dir = tempdir().unwrap();
+
+        let (static_key, signing_key, ntcp2_config) = {
+            let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+            (config.static_key, config.signing_key, config.ntcp2_config)
+        };
+
+        let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+        assert_eq!(config.static_key, static_key);
+        assert_eq!(config.signing_key, signing_key);
+        assert_eq!(
+            config.ntcp2_config.as_ref().unwrap().port,
+            ntcp2_config.as_ref().unwrap().port
+        );
+        assert_eq!(
+            config.ntcp2_config.as_ref().unwrap().host,
+            ntcp2_config.as_ref().unwrap().host
+        );
+        assert_eq!(
+            config.ntcp2_config.as_ref().unwrap().iv,
+            ntcp2_config.as_ref().unwrap().iv
+        );
     }
 }
