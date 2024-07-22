@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, StaticPublicKey},
+    crypto::{base64_decode, base64_encode, StaticPublicKey},
     primitives::{Date, Mapping, Str},
 };
 
@@ -130,16 +130,20 @@ impl RouterAddress {
     }
 
     /// Create new unpublished [`RouterAddress`].
-    pub fn new_published(static_key: Vec<u8>, _port: u16, host: alloc::string::String) -> Self {
-        let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
-        let key = base64_encode(&static_key.to_vec());
-
-        // TODO: zzz
-        let iv = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    pub fn new_published(
+        key: Vec<u8>,
+        iv: [u8; 16],
+        _port: u16,
+        host: alloc::string::String,
+    ) -> Self {
+        let static_key = StaticPublicKey::from_private_x25519(&key).unwrap();
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
-        options.insert(Str::from_str("s").unwrap(), Str::from_str(&key).unwrap());
+        options.insert(
+            Str::from_str("s").unwrap(),
+            Str::from_str(&base64_encode(&static_key.to_vec())).unwrap(),
+        );
         options.insert(
             Str::from_str("host").unwrap(),
             Str::from_str(&host).unwrap(),

@@ -23,6 +23,22 @@ pub enum Transport {
     Disabled,
 }
 
+/// NTCP2 configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Ntcp2Config {
+    /// NTCP2 port.
+    pub port: u16,
+
+    /// NTCP2 listen address.
+    pub host: String,
+
+    /// NTCP2 key.
+    pub key: Vec<u8>,
+
+    /// NTCP2 IV.
+    pub iv: [u8; 16],
+}
+
 /// Router configuration.
 pub struct Config {
     /// Router static key.
@@ -31,9 +47,8 @@ pub struct Config {
     /// Router signing key.
     pub signing_key: Vec<u8>,
 
-    // TODO: zzz
-    pub ntcp2_port: u16,
-    pub ntc2p_host: Option<String>,
+    /// NTCP2 config
+    pub ntcp2_config: Option<Ntcp2Config>,
 
     /// Known routers.
     pub routers: Vec<Vec<u8>>,

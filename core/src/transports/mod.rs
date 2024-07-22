@@ -25,7 +25,7 @@ use crate::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
     transports::ntcp2::Ntcp2Transport,
-    Error,
+    Error, Ntcp2Config,
 };
 
 use futures::{Stream, StreamExt};
@@ -249,15 +249,21 @@ impl<R: Runtime> TransportManager<R> {
     /// Register enabled transport
     ///
     /// The number of transports is fixed and the initialization order is important.
-    pub async fn register_transport(&mut self, kind: TransportKind) -> crate::Result<()> {
+    //
+    // TODO: this is not correct, fix when ssu2 is implemented
+    pub async fn register_transport(
+        &mut self,
+        kind: TransportKind,
+        config: Ntcp2Config,
+    ) -> crate::Result<()> {
         let TransportKind::Ntcp2 = kind else {
             panic!("only ntcp2 is supported");
         };
 
         self.transports.push(Box::new(
             Ntcp2Transport::new(
+                config,
                 self.runtime.clone(),
-                self.local_key.clone(),
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),

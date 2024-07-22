@@ -19,7 +19,7 @@
 use emissary::runtime::{AsyncRead, AsyncWrite, JoinSet, Runtime, TcpListener, TcpStream};
 use futures::{AsyncRead as _, AsyncWrite as _, Stream};
 use rand_core::{CryptoRng, RngCore};
-use tokio::{io::AsyncWriteExt, net, task};
+use tokio::{net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
@@ -27,7 +27,7 @@ use std::{
     net::SocketAddr,
     pin::{pin, Pin},
     task::{Context, Poll},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 #[derive(Clone)]
