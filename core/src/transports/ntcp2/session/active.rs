@@ -206,28 +206,16 @@ impl<R: Runtime> Ntcp2Session<R> {
         // the peer has disconnected or an error was encoutered
         //
         // inform other subsystems of the disconnection
-        loop {
-            futures::select! {
-                result = &mut self => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        router = ?self.router,
-                        ?result,
-                        "connnection closed",
-                    );
+        let result = (&mut self).await;
 
-                    break;
-                }
-            }
-        }
+        tracing::debug!(
+            target: LOG_TARGET,
+            router = ?self.router,
+            ?result,
+            "connnection closed",
+        );
 
-        self.subsystem_handle.report_connection_closed(self.router).await;
-    }
-}
-
-impl<R: Runtime> FusedFuture for Ntcp2Session<R> {
-    fn is_terminated(&self) -> bool {
-        false
+        self.subsystem_handle.report_connection_closed(self.router.clone()).await;
     }
 }
 
