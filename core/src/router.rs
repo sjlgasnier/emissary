@@ -20,6 +20,7 @@ use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
+    router_storage::RouterStorage,
     runtime::Runtime,
     subsystem::SubsystemKind,
     transports::TransportManager,
@@ -60,20 +61,16 @@ pub struct Router<R: Runtime> {
 
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
-    pub async fn new(
-        runtime: R,
-        config: Config,
-        router: Vec<u8>,
-    ) -> crate::Result<(Self, Vec<u8>)> {
-        // TODO: figure out how to initialize router properly
-        let router = RouterInfo::from_bytes(router).unwrap();
+    pub async fn new(runtime: R, config: Config) -> crate::Result<(Self, Vec<u8>)> {
         let now = R::time_since_epoch().as_millis() as u64;
         let local_key = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
         let ntcp2_config = config.ntcp2_config.clone();
+        let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
+        let local_router_id = local_router_info.identity().id();
 
         let local_test = local_key.public().to_vec();
         let ntcp_test = StaticPrivateKey::from(ntcp2_config.as_ref().unwrap().key.clone())
@@ -83,7 +80,6 @@ impl<R: Runtime> Router<R> {
         tracing::info!(
             target: LOG_TARGET,
             local_router_hash = ?base64_encode(local_router_info.identity().hash()),
-            remote_router_hash = ?base64_encode(router.identity().hash()),
             "start emissary",
         );
 
@@ -95,6 +91,7 @@ impl<R: Runtime> Router<R> {
             local_key.clone(),
             local_signing_key,
             local_router_info.clone(), // TODO: zzz
+            router_storage,
         );
 
         // initialize and start netdb
@@ -112,6 +109,7 @@ impl<R: Runtime> Router<R> {
                 transport_service,
                 local_key,
                 local_router_info.identity().hash()[..16].to_vec(),
+                local_router_id,
             );
 
             R::spawn(tunnel_manager);

@@ -57,14 +57,12 @@ async fn main() -> anyhow::Result<()> {
     // TODO: this should also take any cli params
     let mut config = Config::try_from(base_path)?;
 
-    let router = include_bytes!("/home/altonen/.i2pd/router.info").to_vec();
-
     match command {
         None => {
             let path = config.base_path.clone();
             let config: emissary::Config = config.into();
             let (router, local_router_info) =
-                Router::new(TokioRuntime::new(), config, router).await.unwrap();
+                Router::new(TokioRuntime::new(), config).await.unwrap();
 
             // TODO: ugly
             let mut file = File::create(path.join("routerInfo.dat"))?;

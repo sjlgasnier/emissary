@@ -142,45 +142,24 @@ impl TryFrom<Option<PathBuf>> for Config {
             }
         };
 
-        let mut config =
-            Config::from_keys(path.clone(), static_key, signing_key, ntcp2_key, ntcp2_iv)?;
+        // try to find `router.toml` and parse it into `EmissaryConfig`
+        let router_config = Self::load_router_config(path.clone()).ok();
 
-        // let config_path = {
-        //     let mut path = path.clone();
-        //     path.push("router.toml");
-        //     path
-        // };
-        // TODO: parse configuration if it exists
-        // // parse configuration, if it exists
-        // let mut config = match fs::File::open(&config_path) {
-        //     Err(error) => {
-        //         tracing::debug!(
-        //             target: LOG_TARGET,
-        //             ?config_path,
-        //             %error,
-        //             "router config missing",
-        //         );
+        let mut config = Config::new(
+            path.clone(),
+            static_key,
+            signing_key,
+            ntcp2_key,
+            ntcp2_iv,
+            router_config,
+        )?;
 
-        //         Config::new_empty(path.clone())?
-        //     }
-        //     Ok(router) => {
-        //         todo!();
-        //     }
-        // };
-
-        // parse router info
-        let router_path = {
-            let mut path = path.clone();
-            path.push("routers");
-            path
-        };
-
-        let router_dir = match fs::read_dir(&router_path) {
+        // fetch known routers
+        let router_dir = match fs::read_dir(&path.join("routers")) {
             Ok(router_dir) => router_dir,
             Err(error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    ?router_path,
                     ?error,
                     "failed to open router directory, try reseeding",
                 );
@@ -282,6 +261,23 @@ impl Config {
         ))
     }
 
+    fn load_router_config(path: PathBuf) -> crate::Result<EmissaryConfig> {
+        // parse configuration, if it exists
+        let mut file = fs::File::open(&path.join("router.toml"))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+
+        toml::from_str::<EmissaryConfig>(&contents).map_err(|error| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to parser router config",
+            );
+
+            Error::InvalidData
+        })
+    }
+
     /// Create empty config.
     ///
     /// Creates a default config with NTCP2 enabled.
@@ -298,9 +294,7 @@ impl Config {
             },
         };
         let config = toml::to_string(&config).expect("to succeed");
-        let mut path = base_path.clone();
-        path.push("router.toml");
-        let mut file = fs::File::create(path)?;
+        let mut file = fs::File::create(base_path.join("router.toml"))?;
         file.write_all(&config.as_bytes())?;
 
         tracing::info!(
@@ -323,32 +317,39 @@ impl Config {
         })
     }
 
-    /// Create new empty config from static & signing keys.
-    fn from_keys(
+    /// Create new [`Config`].
+    fn new(
         base_path: PathBuf,
         static_key: Vec<u8>,
         signing_key: Vec<u8>,
         ntcp2_key: Vec<u8>,
         ntcp2_iv: [u8; 16],
+        config: Option<EmissaryConfig>,
     ) -> crate::Result<Self> {
-        let config = EmissaryConfig {
-            ntcp2: Ntcp2Config {
-                enabled: true,
-                port: 8888u16,
-                host: None,
-            },
+        let config = match config {
+            Some(config) => config,
+            None => {
+                let config = EmissaryConfig {
+                    ntcp2: Ntcp2Config {
+                        enabled: true,
+                        port: 8888u16,
+                        host: None,
+                    },
+                };
+
+                let toml_config = toml::to_string(&config).expect("to succeed");
+                let mut file = fs::File::create(base_path.join("router.toml"))?;
+                file.write_all(&toml_config.as_bytes())?;
+
+                config
+            }
         };
-        let config = toml::to_string(&config).expect("to succeed");
-        let mut path = base_path.clone();
-        path.push("router.toml");
-        let mut file = fs::File::create(path)?;
-        file.write_all(&config.as_bytes())?;
 
         Ok(Self {
             base_path,
             routers: Vec::new(),
             ntcp2_config: Some(emissary::Ntcp2Config {
-                port: 8888u16,
+                port: config.ntcp2.port,
                 host: String::from("127.0.0.1"),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
@@ -451,6 +452,7 @@ impl Config {
     }
 
     /// Write local `RouterInfo` to disk.
+    #[allow(unused)]
     pub fn update_router_info(&self, router_info: Vec<u8>) -> crate::Result<()> {
         let mut file = fs::File::create(self.base_path.join("routerInfo.dat"))?;
         file.write_all(&router_info)?;
@@ -525,5 +527,42 @@ mod tests {
             config.ntcp2_config.as_ref().unwrap().iv,
             ntcp2_config.as_ref().unwrap().iv
         );
+    }
+
+    #[test]
+    fn config_update_works() {
+        let dir = tempdir().unwrap();
+
+        // create default config, verify the default ntcp2 port is 8888
+        let (ntcp2_key, ntcp2_iv) = {
+            let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+            let ntcp2_config = config.ntcp2_config.unwrap();
+
+            assert_eq!(ntcp2_config.port, 8888u16);
+
+            (ntcp2_config.key, ntcp2_config.iv)
+        };
+
+        // create new ntcp2 config where the port is different
+        let config = EmissaryConfig {
+            ntcp2: Ntcp2Config {
+                enabled: true,
+                port: 1337u16,
+                host: None,
+            },
+        };
+        let config = toml::to_string(&config).expect("to succeed");
+        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
+        file.write_all(&config.as_bytes()).unwrap();
+
+        // load the new config
+        //
+        // verify that ntcp2 key & iv are the same but port is new
+        let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+        let ntcp2_config = config.ntcp2_config.unwrap();
+
+        assert_eq!(ntcp2_config.port, 1337u16);
+        assert_eq!(ntcp2_config.key, ntcp2_key);
+        assert_eq!(ntcp2_config.iv, ntcp2_iv);
     }
 }

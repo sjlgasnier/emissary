@@ -26,6 +26,7 @@ use futures::{Future, FutureExt, Stream};
 
 use alloc::{string::String, vec::Vec};
 use core::{
+    net::SocketAddr,
     pin::{pin, Pin},
     task::{Context, Poll},
 };
@@ -41,8 +42,8 @@ pub struct Ntcp2Listener<R: Runtime> {
 
 impl<R: Runtime> Ntcp2Listener<R> {
     /// Create new [`Ntcp2Listener`].
-    pub async fn new(address: String, port: u16) -> crate::Result<Self> {
-        let mut listener = R::TcpListener::bind("127.0.0.1:8888").await.unwrap();
+    pub async fn new(address: SocketAddr) -> crate::Result<Self> {
+        let mut listener = R::TcpListener::bind(address).await.unwrap();
 
         tracing::trace!(
             target: LOG_TARGET,

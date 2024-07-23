@@ -33,12 +33,14 @@ use crate::{
         },
         SubsystemHandle,
     },
-    util::AsyncReadExt,
+    util::{AsyncReadExt, AsyncWriteExt},
+    Error,
 };
 
+use futures::{future::FusedFuture, FutureExt};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::{
     future::Future,
     mem,
@@ -200,12 +202,25 @@ impl<R: Runtime> Ntcp2Session<R> {
             .report_connection_established(self.router.clone(), self.cmd_tx.clone())
             .await;
 
-        self.await
+        // run the event loop until it returns which happens only when
+        // the peer has disconnected or an error was encoutered
+        //
+        // inform other subsystems of the disconnection
+        let result = (&mut self).await;
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            router = ?self.router,
+            ?result,
+            "connnection closed",
+        );
+
+        self.subsystem_handle.report_connection_closed(self.router.clone()).await;
     }
 }
 
 impl<R: Runtime> Future for Ntcp2Session<R> {
-    type Output = ();
+    type Output = crate::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -222,11 +237,13 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 ?error,
                                 "socket error",
                             );
-                            return Poll::Ready(());
+                            return Poll::Ready(Err(error));
                         }
                         Poll::Ready((Ok(nread))) => {
                             if nread == 0 {
-                                return Poll::Ready(());
+                                return Poll::Ready(Err(Error::IoError(String::from(
+                                    "socket closed",
+                                ))));
                             }
 
                             if offset + nread != 2 {
@@ -249,18 +266,12 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                 ReadState::ReadFrame { size, offset } => {
                     match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..size]) {
                         Poll::Pending => break,
-                        Poll::Ready(Err(error)) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "socket error",
-                            );
-                            return Poll::Ready(());
-                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready((Ok(nread))) => {
                             if nread == 0 {
-                                tracing::debug!(target: LOG_TARGET, "socket closed");
-                                return Poll::Ready(());
+                                return Poll::Ready(Err(Error::IoError(String::from(
+                                    "socket closed",
+                                ))));
                             }
 
                             // next frame hasn't been read completely
@@ -272,10 +283,11 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 continue;
                             }
 
-                            let data_block = this
-                                .recv_cipher
-                                .decrypt(this.read_buffer[..size].to_vec())
-                                .unwrap();
+                            let data_block =
+                                match this.recv_cipher.decrypt(this.read_buffer[..size].to_vec()) {
+                                    Ok(data_block) => data_block,
+                                    Err(error) => return Poll::Ready(Err(error)),
+                                };
 
                             let Some(messages) = MessageBlock::parse_multiple(&data_block) else {
                                 tracing::warn!(
@@ -321,7 +333,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         this.write_state = WriteState::GetMessage;
                         break;
                     }
-                    Poll::Ready(None) => return Poll::Ready(()),
+                    Poll::Ready(None) => return Poll::Ready(Err(Error::EssentialTaskClosed)),
                     Poll::Ready(Some(SubsystemCommand::Dummy)) => unreachable!(),
                     Poll::Ready(Some(SubsystemCommand::SendMessage { message })) => {
                         assert!(message.len() as u16 <= u16::MAX, "too large message");
@@ -351,21 +363,9 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         };
                         break;
                     }
-                    Poll::Ready(Err(error)) => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "socket error",
-                        );
-                        return Poll::Ready(());
-                    }
-                    Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            "wrote 0 bytes to socket",
-                        );
-                        return Poll::Ready(());
-                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                        return Poll::Ready(Err(Error::IoError(String::from("socket closed")))),
                     Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
                         true => {
                             this.write_state = WriteState::SendMessage {
@@ -388,21 +388,9 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                             this.write_state = WriteState::SendMessage { offset, message };
                             break;
                         }
-                        Poll::Ready(Err(error)) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "socket error",
-                            );
-                            return Poll::Ready(());
-                        }
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                "wrote 0 bytes to socket",
-                            );
-                            return Poll::Ready(());
-                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                            return Poll::Ready(Err(Error::IoError(String::from("socket closed")))),
                         Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
                             true => {
                                 this.write_state = WriteState::GetMessage;
@@ -422,7 +410,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         "write state is poisoned",
                     );
                     debug_assert!(false);
-                    return Poll::Ready(());
+                    return Poll::Ready(Err(Error::InvalidState));
                 }
             }
         }

@@ -115,7 +115,7 @@ pub struct TokioTcpListener(net::TcpListener);
 
 impl TcpListener<TokioTcpStream> for TokioTcpListener {
     // TODO: can be made sync with `socket2`
-    async fn bind(address: &str) -> Option<Self> {
+    async fn bind(address: SocketAddr) -> Option<Self> {
         net::TcpListener::bind(&address)
             .await
             .ok()
