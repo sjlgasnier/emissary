@@ -212,11 +212,12 @@ impl<R: Runtime> SessionManager<R> {
     ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
         let local_router_hash = self.local_router_info.identity().hash().to_vec();
+        let router_id = router.identity().id();
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let runtime = self.runtime.clone();
-        let subsystem_handle = self.subsystem_handle.clone();
+        let mut subsystem_handle = self.subsystem_handle.clone();
 
         async move {
             let (remote_key, iv, socket_address) = {
@@ -256,7 +257,18 @@ impl<R: Runtime> SessionManager<R> {
                 "start dialing remote peer",
             );
 
-            let mut stream = R::TcpStream::connect(socket_address).await.unwrap();
+            let mut stream = match R::TcpStream::connect(socket_address).await {
+                Some(stream) => stream,
+                None => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        router = ?router_id,
+                        "failed to dial router",
+                    );
+                    subsystem_handle.report_connection_failure(router_id).await;
+                    return Err(Error::DialFailure);
+                }
+            };
             let router_hash = router.identity().hash().to_vec();
 
             // create `SessionRequest` message and send it remote peer

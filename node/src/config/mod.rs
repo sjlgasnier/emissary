@@ -154,19 +154,12 @@ impl TryFrom<Option<PathBuf>> for Config {
             router_config,
         )?;
 
-        // parse router info
-        let router_path = {
-            let mut path = path.clone();
-            path.push("routers");
-            path
-        };
-
-        let router_dir = match fs::read_dir(&router_path) {
+        // fetch known routers
+        let router_dir = match fs::read_dir(&path.join("routers")) {
             Ok(router_dir) => router_dir,
             Err(error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    ?router_path,
                     ?error,
                     "failed to open router directory, try reseeding",
                 );

@@ -20,6 +20,7 @@ use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
     i2np::RawI2npMessage,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
+    router_storage::RouterStorage,
     runtime::Runtime,
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
@@ -32,7 +33,7 @@ use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -69,6 +70,11 @@ pub enum TransportEvent {
         router_info: RouterInfo,
     },
     ConnectionClosed {},
+
+    /// Failed to dial peer.
+    ///
+    /// The connection is considered failed if we failed to reach the router
+    /// or if there was an error during handshaking.
     ConnectionFailure {},
 }
 
@@ -78,7 +84,7 @@ pub trait Transport: Stream + Unpin {
     /// Connect to `router`.
     //
     // TODO: how to signal preference for transport?
-    fn connect(&mut self, router: RouterInfo) -> crate::Result<()>;
+    fn connect(&mut self, router: RouterInfo);
 
     /// Accept connection and start its event loop.
     fn accept(&mut self, router: &RouterId);
@@ -118,6 +124,12 @@ pub struct TransportService {
     /// RX channel for receiving events from enabled transports.
     event_rx: Receiver<InnerSubsystemEvent>,
 
+    /// Pending events.
+    pending_events: VecDeque<InnerSubsystemEvent>,
+
+    /// Router storage.
+    router_storage: RouterStorage,
+
     /// Connected routers.
     routers: HashMap<RouterId, Sender<SubsystemCommand>>,
 }
@@ -130,11 +142,34 @@ impl TransportService {
     ///
     /// [`TransportService::connect()`] returns an error if the channel is clogged
     /// and the caller should try again later.
-    pub fn connect(&mut self, router: RouterInfo) -> Result<(), ()> {
-        self.cmd_tx.try_send(ProtocolCommand::Connect { router }).map_err(|_| ())
+    ///
+    /// If `router` is not reachable or the handshake fails, the error is reported
+    /// via [`TransportService::poll_next()`].
+    pub fn connect(&mut self, router: &RouterId) -> Result<(), ()> {
+        match self.router_storage.get(router) {
+            Some(router_info) => self
+                .cmd_tx
+                .try_send(ProtocolCommand::Connect {
+                    router: router_info,
+                })
+                .map_err(|_| ()),
+            None => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?router,
+                    "failed to dial router, router doesn't exist",
+                );
+                self.pending_events.push_back(InnerSubsystemEvent::ConnectionFailure {
+                    router: router.clone(),
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Send I2NP `message` to `router`.
+    //
+    // TODO: return error
     pub fn send(&mut self, router: &RouterId, message: Vec<u8>) {
         self.routers
             .get_mut(router)
@@ -158,6 +193,9 @@ impl Stream for TransportService {
                 Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
                     self.routers.remove(&router);
                     return Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }));
+                }
+                Some(InnerSubsystemEvent::ConnectionFailure { router }) => {
+                    return Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router }));
                 }
                 Some(InnerSubsystemEvent::I2Np { messages }) => {
                     return Poll::Ready(Some(SubsystemEvent::I2Np { messages }));
@@ -192,6 +230,9 @@ pub struct TransportManager<R> {
     /// Poll index for transports.
     poll_index: usize,
 
+    /// Router storage.
+    router_storage: RouterStorage,
+
     // Runtime.
     runtime: R,
 
@@ -209,6 +250,7 @@ impl<R: Runtime> TransportManager<R> {
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
+        router_storage: RouterStorage,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
 
@@ -219,6 +261,7 @@ impl<R: Runtime> TransportManager<R> {
             local_router_info,
             local_signing_key,
             poll_index: 0usize,
+            router_storage,
             runtime,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
@@ -240,9 +283,11 @@ impl<R: Runtime> TransportManager<R> {
         self.subsystem_handle.register_subsystem(event_tx);
 
         TransportService {
-            event_rx,
             cmd_tx: self.cmd_tx.clone(),
+            event_rx,
+            pending_events: VecDeque::new(),
             routers: HashMap::new(),
+            router_storage: self.router_storage.clone(),
         }
     }
 

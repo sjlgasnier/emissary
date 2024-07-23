@@ -367,7 +367,14 @@ impl Noise {
     ) -> Option<(Vec<u8>, RouterId)> {
         // TODO: no unwraps
         let tunnel_data = EncryptedTunnelData::parse(&payload).unwrap();
-        let hop = self.tunnels.get_mut(&tunnel_data.tunnel_id()).unwrap();
+        let Some(hop) = self.tunnels.get_mut(&tunnel_data.tunnel_id()) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                tunnel_id = ?tunnel_data.tunnel_id(),
+                "tunnel doesn't exist",
+            );
+            return None;
+        };
 
         tracing::trace!(
             target: LOG_TARGET,

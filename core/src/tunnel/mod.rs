@@ -29,8 +29,9 @@ use crate::{
 };
 
 use futures::{FutureExt, StreamExt};
+use hashbrown::HashMap;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,
@@ -38,26 +39,41 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
-use hashbrown::HashSet;
 
 mod noise;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
 
+/// Router state.
+#[derive(Debug)]
+pub enum RouterState {
+    /// Router is connected.
+    Connected,
+
+    /// Router is being dialed.
+    Dialing {
+        /// Pending messages.
+        pending_messages: Vec<Vec<u8>>,
+    },
+}
+
 /// Tunnel manager.
 pub struct TunnelManager<R: Runtime> {
-    /// Transport service.
-    service: TransportService,
+    /// Local router ID.
+    local_router_id: RouterId,
 
     /// Noise key context.
     noise: Noise,
 
+    /// Connected routers.
+    routers: HashMap<RouterId, RouterState>,
+
+    /// Transport service.
+    service: TransportService,
+
     /// Truncated router hash.
     truncated_hash: Vec<u8>,
-
-    /// Connected routers.
-    routers: HashSet<RouterId>,
 
     /// Marker for `Runtime`
     _marker: PhantomData<R>,
@@ -69,6 +85,7 @@ impl<R: Runtime> TunnelManager<R> {
         service: TransportService,
         local_key: StaticPrivateKey,
         truncated_hash: Vec<u8>,
+        local_router_id: RouterId,
     ) -> Self {
         tracing::trace!(
             target: LOG_TARGET,
@@ -76,10 +93,11 @@ impl<R: Runtime> TunnelManager<R> {
         );
 
         Self {
+            local_router_id,
+            noise: Noise::new(local_key),
+            routers: HashMap::new(),
             service,
             truncated_hash,
-            noise: Noise::new(local_key),
-            routers: HashSet::new(),
             _marker: Default::default(),
         }
     }
@@ -90,16 +108,96 @@ impl<R: Runtime> TunnelManager<R> {
             %router,
             "connection established",
         );
-        self.routers.insert(router);
+
+        match self.routers.remove(&router) {
+            Some(RouterState::Dialing { pending_messages }) if !pending_messages.is_empty() => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?router,
+                    "router with pending messages connected",
+                );
+
+                for message in pending_messages {
+                    self.service.send(&router, message);
+                }
+            }
+            Some(RouterState::Dialing { .. }) | None => {}
+            state => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?router,
+                    ?state,
+                    "invalid state for connected router",
+                );
+                debug_assert!(false);
+            }
+        }
+
+        self.routers.insert(router.clone(), RouterState::Connected);
     }
 
-    fn on_connection_closed(&mut self, router: RouterId) {
+    fn on_connection_closed(&mut self, router: &RouterId) {
         tracing::debug!(
             target: LOG_TARGET,
             %router,
             "connection closed",
         );
-        self.routers.remove(&router);
+        self.routers.remove(router);
+    }
+
+    fn on_connection_failure(&mut self, router: &RouterId) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            %router,
+            "failed to open connection to router",
+        );
+
+        if self.routers.remove(router).is_none() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "connection failure for unknown router",
+            );
+            debug_assert!(false);
+        }
+    }
+
+    fn send_message(&mut self, router: &RouterId, message: Vec<u8>) {
+        match self.routers.get_mut(router) {
+            Some(RouterState::Connected) => self.service.send(&router, message),
+            Some(RouterState::Dialing {
+                ref mut pending_messages,
+            }) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?router,
+                    "router is being dialed, buffer message",
+                );
+                pending_messages.push(message);
+            }
+            None => match router == &self.local_router_id {
+                true => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "router message to self",
+                    );
+                }
+                false => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?router,
+                        "start dialing router",
+                    );
+
+                    self.service.connect(&router);
+                    self.routers.insert(
+                        router.clone(),
+                        RouterState::Dialing {
+                            pending_messages: vec![message],
+                        },
+                    );
+                }
+            },
+        }
     }
 
     // TODO: no unwraps
@@ -121,43 +219,27 @@ impl<R: Runtime> TunnelManager<R> {
                     .with_message_type(message_type)
                     .with_message_id(message_id)
                     .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
                     )
                     .with_payload(payload)
                     .serialize();
 
-                if self.routers.contains(&hop) {
-                    self.service.send(&hop, msg);
-                } else {
-                    // tracing::warn!(target: LOG_TARGET, "router message to self");
-
-                    // let message = RawI2npMessage::parse(&msg).unwrap();
-                    // self.on_message(message);
-                }
+                self.send_message(&hop, msg);
             }
             MessageType::ShortTunnelBuild => {
                 let (payload, hop, message_id, message_type) =
                     self.noise.create_short_tunnel_hop(&self.truncated_hash, payload).unwrap();
 
-                // tracing::info!("message id = {message_id}, next message id {_message_id}");
-
                 let msg = RawI2NpMessageBuilder::short()
                     .with_message_type(message_type)
                     .with_message_id(message_id)
                     .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
                     )
                     .with_payload(payload)
                     .serialize();
 
-                if self.routers.contains(&hop) {
-                    self.service.send(&hop, msg);
-                } else {
-                    // tracing::warn!(target: LOG_TARGET, "router message to self");
-
-                    // let message = RawI2npMessage::parse(&msg).unwrap();
-                    // self.on_message(message);
-                }
+                self.send_message(&hop, msg);
             }
             MessageType::TunnelData => {
                 let Some((data, hop)) =
@@ -165,25 +247,17 @@ impl<R: Runtime> TunnelManager<R> {
                 else {
                     return;
                 };
-                // let (data, hop) = self.noise.handle_tunnel_data(payload);
 
                 let msg = RawI2NpMessageBuilder::short()
                     .with_message_type(message_type)
                     .with_message_id(message_id)
                     .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
                     )
                     .with_payload(data)
                     .serialize();
 
-                if self.routers.contains(&hop) {
-                    self.service.send(&hop, msg);
-                } else {
-                    // tracing::warn!(target: LOG_TARGET, "router message to self");
-
-                    // let message = RawI2npMessage::parse(&msg).unwrap();
-                    // self.on_message(message);
-                }
+                self.send_message(&hop, msg);
             }
             MessageType::Garlic => {
                 let messages =
@@ -194,19 +268,12 @@ impl<R: Runtime> TunnelManager<R> {
                         .with_message_type(message_type)
                         .with_message_id(message_id)
                         .with_expiration(
-                            (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs() as u32,
+                            (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
                         )
                         .with_payload(payload)
                         .serialize();
 
-                    if self.routers.contains(&hop) {
-                        self.service.send(&hop, msg);
-                    } else {
-                        tracing::warn!(target: LOG_TARGET, "router message to self");
-
-                        // let message = RawI2npMessage::parse(&msg).unwrap();
-                        // self.on_message(message);
-                    }
+                    self.send_message(&hop, msg);
                 }
             }
             message => tracing::warn!(
@@ -228,9 +295,11 @@ impl<R: Runtime> Future for TunnelManager<R> {
                 Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
                     self.on_connection_established(router),
                 Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
-                    self.on_connection_closed(router),
+                    self.on_connection_closed(&router),
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| self.on_message(message)),
+                Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
+                    self.on_connection_failure(&router),
                 Poll::Ready(Some(SubsystemEvent::Dummy)) => unreachable!(),
                 Poll::Ready(None) => return Poll::Ready(()),
             }

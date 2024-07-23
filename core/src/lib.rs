@@ -33,6 +33,7 @@ mod error;
 mod i2np;
 mod netdb;
 mod primitives;
+mod router_storage;
 mod subsystem;
 mod transports;
 mod tunnel;

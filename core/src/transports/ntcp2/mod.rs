@@ -103,6 +103,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
         tracing::trace!(
             target: LOG_TARGET,
+            listen_address = ?socket_address,
             "starting ntcp2 transport",
         );
 
@@ -117,7 +118,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
 }
 
 impl<R: Runtime> Transport for Ntcp2Transport<R> {
-    fn connect(&mut self, router: RouterInfo) -> crate::Result<()> {
+    fn connect(&mut self, router: RouterInfo) {
         tracing::info!(
             target: LOG_TARGET,
             router = ?router.identity().hash(),
@@ -127,8 +128,6 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
         self.waker.take().map(|waker| waker.wake());
-
-        Ok(())
     }
 
     fn accept(&mut self, router: &RouterId) {
@@ -218,7 +217,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         router_info,
                     }));
                 }
-                Some(Err(error)) => todo!("handshake failed = {error:?}"),
+                Some(Err(error)) => return Poll::Ready(Some(TransportEvent::ConnectionFailure {})),
                 None => return Poll::Ready(None),
             }
         }

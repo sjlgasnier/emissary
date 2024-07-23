@@ -69,6 +69,12 @@ pub enum InnerSubsystemEvent {
         router: RouterId,
     },
 
+    /// Connection failure.
+    ConnectionFailure {
+        /// Router ID.
+        router: RouterId,
+    },
+
     /// I2NP message.
     I2Np {
         /// Raw, unparsed I2NP messages
@@ -95,6 +101,12 @@ pub enum SubsystemEvent {
 
     /// Connection closed.
     ConnectionClosed {
+        /// Router ID.
+        router: RouterId,
+    },
+
+    /// Connection failure.
+    ConnectionFailure {
         /// Router ID.
         router: RouterId,
     },
@@ -143,6 +155,16 @@ impl SubsystemHandle {
                 .send(InnerSubsystemEvent::ConnectionEstablished {
                     router: router.clone(),
                     tx: tx.clone(),
+                })
+                .await;
+        }
+    }
+
+    pub async fn report_connection_failure(&mut self, router: RouterId) {
+        for subsystem in &mut self.subsystems {
+            let _ = subsystem
+                .send(InnerSubsystemEvent::ConnectionFailure {
+                    router: router.clone(),
                 })
                 .await;
         }

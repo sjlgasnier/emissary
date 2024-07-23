@@ -181,6 +181,8 @@ impl RouterInfo {
     }
 
     /// Try to parse router information from `bytes`.
+    //
+    // TODO: rename to `parse()`
     pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }

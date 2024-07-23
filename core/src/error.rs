@@ -30,6 +30,8 @@ pub enum Error {
     NonceOverflow,
     NotSupported,
     EssentialTaskClosed,
+    RouterDoesntExist,
+    DialFailure,
 }
 
 impl fmt::Display for Error {
@@ -44,6 +46,8 @@ impl fmt::Display for Error {
             Self::IoError(error) => write!(f, "i/o error: {error:?}"),
             Self::NotSupported => write!(f, "protocol or operation not supported"),
             Self::EssentialTaskClosed => write!(f, "essential task closed"),
+            Self::RouterDoesntExist => write!(f, "router doesn't exist"),
+            Self::DialFailure => write!(f, "dial failure"),
         }
     }
 }
