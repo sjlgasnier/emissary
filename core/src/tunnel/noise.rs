@@ -327,10 +327,9 @@ impl Noise {
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 record.next_message_id(),
-                // TODO: fix
                 match record.role() {
-                    crate::i2np::HopRole::Intermediary => MessageType::ShortTunnelBuild,
-                    _ => MessageType::OutboundTunnelBuildReply,
+                    HopRole::OutboundEndpoint => MessageType::OutboundTunnelBuildReply,
+                    _ => MessageType::ShortTunnelBuild,
                 },
             ))
         };
