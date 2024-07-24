@@ -177,13 +177,14 @@ impl<R: Runtime> TunnelManager<R> {
             }
             None => match router == &self.local_router_id {
                 true => {
-                    tracing::warn!(
+                    tracing::debug!(
                         target: LOG_TARGET,
+                        message_type = ?MessageType::from_u8(message[2]),
+                        message_len = ?message.len(),
                         "router message to self",
                     );
-                    // todo!();
-                    // let message = RawI2npMessage::parse::<I2NP_STANDARD>(&message).unwrap();
-                    // self.on_message(message);
+                    let message = RawI2npMessage::parse::<I2NP_SHORT>(&message).unwrap();
+                    self.on_message(message);
                 }
                 false => {
                     tracing::debug!(
@@ -229,17 +230,7 @@ impl<R: Runtime> TunnelManager<R> {
                     .with_payload(payload)
                     .serialize();
 
-                // if hop == self.local_router_id {
-                //     tracing::warn!(
-                //         target: LOG_TARGET,
-                //         "router message to self",
-                //     );
-
-                //     let message = RawI2npMessage::parse::<I2NP_SHORT>(&msg).unwrap();
-                //     self.on_message(message);
-                // } else {
                 self.send_message(&hop, msg);
-                // }
             }
             MessageType::ShortTunnelBuild => {
                 let (payload, hop, message_id, message_type) =
@@ -254,17 +245,7 @@ impl<R: Runtime> TunnelManager<R> {
                     .with_payload(payload)
                     .serialize();
 
-                // if hop == self.local_router_id {
-                //     tracing::warn!(
-                //         target: LOG_TARGET,
-                //         "router message to self",
-                //     );
-
-                //     let message = RawI2npMessage::parse::<I2NP_SHORT>(&msg).unwrap();
-                //     self.on_message(message);
-                // } else {
                 self.send_message(&hop, msg);
-                // }
             }
             MessageType::TunnelData => {
                 let Some((message, hop)) = self.noise.handle_tunnel_data(
@@ -275,17 +256,7 @@ impl<R: Runtime> TunnelManager<R> {
                     return;
                 };
 
-                // if hop == self.local_router_id {
-                //     tracing::warn!(
-                //         target: LOG_TARGET,
-                //         "router message to self",
-                //     );
-
-                //     let message = RawI2npMessage::parse::<I2NP_SHORT>(&msg).unwrap();
-                //     self.on_message(message);
-                // } else {
                 self.send_message(&hop, message);
-                // }
             }
             MessageType::Garlic => {
                 let messages =

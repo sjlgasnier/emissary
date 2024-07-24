@@ -467,18 +467,7 @@ impl Noise {
                                     .with_payload(payload)
                                     .serialize();
 
-                                // tracing::error!(
-                                //     "send message to router = {msg:?}, message len = {}",
-                                //     message.message.len()
-                                // );
-                                // todo!();
-                                // let message = message.message.to_vec();
-
-                                return Some((
-                                    message,
-                                    // message.message.to_vec(),
-                                    RouterId::from(base64_encode(&hash[..16])),
-                                ));
+                                return Some((message, RouterId::from(base64_encode(&hash[..16]))));
                             }
                             DeliveryInstruction::Tunnel { hash, tunnel_id } => tracing::warn!(
                                 ?tunnel_id,
