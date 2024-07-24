@@ -33,8 +33,8 @@ use crate::{
     },
     i2np::{
         DeliveryInstruction, EncryptedTunnelBuildRequestRecord, EncryptedTunnelData, HopRole,
-        MessageKind, MessageType, OwnedDeliveryInstruction, RawI2npMessage, ShortTunnelBuildRecord,
-        TunnelBuildRecord, TunnelData, I2NP_STANDARD,
+        MessageKind, MessageType, OwnedDeliveryInstruction, RawI2NpMessageBuilder, RawI2npMessage,
+        ShortTunnelBuildRecord, TunnelBuildRecord, TunnelData, I2NP_SHORT, I2NP_STANDARD,
     },
     primitives::RouterId,
     tunnel::LOG_TARGET,
@@ -191,7 +191,7 @@ impl Noise {
                 role = ?record.role(),
                 tunnel_id = ?record.tunnel_id(),
                 next_tunnel_id = ?record.next_tunnel_id(),
-                // next_message_id = record.next_message_id(),
+                next_message_id = record.next_message_id(),
                 // next_router_hash = ?base64_encode(record.next_router_hash()),
                 "VARIABLE TUNNEL BUILT",
             );
@@ -212,7 +212,7 @@ impl Noise {
                 record.next_message_id(),
                 match record.role() {
                     HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
-                    _ => MessageType::VariableTunnelBuild,
+                    _ => todo!(),
                 },
             ))
         };
@@ -305,7 +305,7 @@ impl Noise {
                 role = ?record.role(),
                 tunnel_id = ?record.tunnel_id(),
                 next_tunnel_id = ?record.next_tunnel_id(),
-                // next_message_id = record.next_message_id(),
+                next_message_id = ?record.next_message_id(),
                 // next_router_hash = ?base64_encode(record.next_router_hash()),
                 "SHORT TUNNEL BUILT",
             );
@@ -362,6 +362,7 @@ impl Noise {
     pub fn handle_tunnel_data(
         &mut self,
         truncated: &Vec<u8>,
+        expiration: u64,
         mut payload: Vec<u8>,
     ) -> Option<(Vec<u8>, RouterId)> {
         // TODO: no unwraps
@@ -401,8 +402,15 @@ impl Noise {
                 out[4..20].copy_from_slice(&iv);
                 out[20..].copy_from_slice(&ciphertext);
 
-                // TODO: copy
-                return Some((out, hop.next_router_id.clone()));
+                // TODO: fix
+                let msg = RawI2NpMessageBuilder::short()
+                    .with_message_type(MessageType::TunnelData)
+                    .with_message_id(13371338u32)
+                    .with_expiration(expiration + 5 * 60)
+                    .with_payload(out)
+                    .serialize();
+
+                return Some((msg, hop.next_router_id.clone()));
             }
             HopRole::OutboundEndpoint => {
                 let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
@@ -434,6 +442,7 @@ impl Noise {
                 let our_message = ciphertext[4 + res.0 + 1..].to_vec();
                 let message = TunnelData::parse(&our_message).unwrap();
 
+                // TODO: handle all messages
                 for message in &message.messages {
                     match message.message_kind {
                         MessageKind::Unfragmented {
@@ -443,15 +452,38 @@ impl Noise {
                             DeliveryInstruction::Router { hash } => {
                                 tracing::debug!(hash = ?base64_encode(hash), "router delivery");
 
+                                let RawI2npMessage {
+                                    message_type,
+                                    message_id,
+                                    expiration,
+                                    payload,
+                                } = RawI2npMessage::parse::<I2NP_STANDARD>(&message.message)
+                                    .unwrap();
+
+                                let message = RawI2NpMessageBuilder::short()
+                                    .with_message_type(message_type)
+                                    .with_message_id(message_id)
+                                    .with_expiration(expiration)
+                                    .with_payload(payload)
+                                    .serialize();
+
+                                // tracing::error!(
+                                //     "send message to router = {msg:?}, message len = {}",
+                                //     message.message.len()
+                                // );
+                                // todo!();
+                                // let message = message.message.to_vec();
+
                                 return Some((
-                                    message.message.to_vec(),
+                                    message,
+                                    // message.message.to_vec(),
                                     RouterId::from(base64_encode(&hash[..16])),
                                 ));
                             }
                             DeliveryInstruction::Tunnel { hash, tunnel_id } => tracing::warn!(
                                 ?tunnel_id,
                                 hash = ?base64_encode(hash),
-                                "todo: tunnel delivery"
+                                "todo: tunnel delivery zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
                             ),
                         },
                         MessageKind::FirstFragment {
@@ -540,7 +572,7 @@ impl Noise {
                                     .iter()
                                     .fold(0usize, |acc, (_, message)| acc + message.len());
 
-                            tracing::error!("combined message size = {size}");
+                            // tracing::error!("combined message size = {size}");
 
                             let mut combined = vec![0u8; size];
                             let mut offset = 0usize;
@@ -558,7 +590,7 @@ impl Noise {
                             combined[offset..offset + message.message.len()]
                                 .copy_from_slice(message.message);
 
-                            tracing::error!("combined bytes = {combined:?}");
+                            // tracing::error!("combined bytes = {combined:?}");
 
                             let test = combined[combined.len() - 2113..].to_vec();
 

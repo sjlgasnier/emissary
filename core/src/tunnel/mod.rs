@@ -20,6 +20,7 @@ use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
     i2np::{
         HopRole, I2NpMessage, MessageType, RawI2NpMessageBuilder, RawI2npMessage, TunnelMessage,
+        I2NP_SHORT, I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo},
     runtime::Runtime,
@@ -180,6 +181,9 @@ impl<R: Runtime> TunnelManager<R> {
                         target: LOG_TARGET,
                         "router message to self",
                     );
+                    // todo!();
+                    // let message = RawI2npMessage::parse::<I2NP_STANDARD>(&message).unwrap();
+                    // self.on_message(message);
                 }
                 false => {
                     tracing::debug!(
@@ -187,14 +191,15 @@ impl<R: Runtime> TunnelManager<R> {
                         ?router,
                         "start dialing router",
                     );
+                    // todo!();
 
-                    self.service.connect(&router);
-                    self.routers.insert(
-                        router.clone(),
-                        RouterState::Dialing {
-                            pending_messages: vec![message],
-                        },
-                    );
+                    // self.service.connect(&router);
+                    // self.routers.insert(
+                    //     router.clone(),
+                    //     RouterState::Dialing {
+                    //         pending_messages: vec![message],
+                    //     },
+                    // );
                 }
             },
         }
@@ -224,7 +229,17 @@ impl<R: Runtime> TunnelManager<R> {
                     .with_payload(payload)
                     .serialize();
 
+                // if hop == self.local_router_id {
+                //     tracing::warn!(
+                //         target: LOG_TARGET,
+                //         "router message to self",
+                //     );
+
+                //     let message = RawI2npMessage::parse::<I2NP_SHORT>(&msg).unwrap();
+                //     self.on_message(message);
+                // } else {
                 self.send_message(&hop, msg);
+                // }
             }
             MessageType::ShortTunnelBuild => {
                 let (payload, hop, message_id, message_type) =
@@ -239,25 +254,38 @@ impl<R: Runtime> TunnelManager<R> {
                     .with_payload(payload)
                     .serialize();
 
+                // if hop == self.local_router_id {
+                //     tracing::warn!(
+                //         target: LOG_TARGET,
+                //         "router message to self",
+                //     );
+
+                //     let message = RawI2npMessage::parse::<I2NP_SHORT>(&msg).unwrap();
+                //     self.on_message(message);
+                // } else {
                 self.send_message(&hop, msg);
+                // }
             }
             MessageType::TunnelData => {
-                let Some((data, hop)) =
-                    self.noise.handle_tunnel_data(&self.truncated_hash, payload)
-                else {
+                let Some((message, hop)) = self.noise.handle_tunnel_data(
+                    &self.truncated_hash,
+                    message.expiration,
+                    payload,
+                ) else {
                     return;
                 };
 
-                let msg = RawI2NpMessageBuilder::short()
-                    .with_message_type(message_type)
-                    .with_message_id(message_id)
-                    .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                    )
-                    .with_payload(data)
-                    .serialize();
+                // if hop == self.local_router_id {
+                //     tracing::warn!(
+                //         target: LOG_TARGET,
+                //         "router message to self",
+                //     );
 
-                self.send_message(&hop, msg);
+                //     let message = RawI2npMessage::parse::<I2NP_SHORT>(&msg).unwrap();
+                //     self.on_message(message);
+                // } else {
+                self.send_message(&hop, message);
+                // }
             }
             MessageType::Garlic => {
                 let messages =
