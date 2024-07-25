@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
+    error::ChannelError,
     i2np::RawI2npMessage,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
     router_storage::RouterStorage,
@@ -31,7 +32,7 @@ use crate::{
 
 use futures::{Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
-use thingbuf::mpsc::{channel, Receiver, Sender};
+use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
@@ -186,14 +187,35 @@ impl TransportService {
     }
 
     /// Send I2NP `message` to `router`.
-    //
-    // TODO: return error
-    pub fn send(&mut self, router: &RouterId, message: Vec<u8>) {
-        self.routers
-            .get_mut(router)
-            .unwrap()
-            .try_send(SubsystemCommand::SendMessage { message })
-            .unwrap();
+    ///
+    /// If the router doesn't exist, `ChannelError::DoesntExist` is returned.
+    /// If the channel is closed, `ChannelError::Closed` is returned.
+    /// If the channel is full, `ChannelError::Full` is returned.
+    ///
+    /// In all error cases, `message` is returned together with error
+    pub fn send(
+        &mut self,
+        router: &RouterId,
+        message: Vec<u8>,
+    ) -> Result<(), (ChannelError, Vec<u8>)> {
+        let Some(channel) = self.routers.get(router) else {
+            return Err((ChannelError::DoesntExist, message));
+        };
+
+        channel.try_send(SubsystemCommand::SendMessage { message }).map_err(|error| {
+            let (error, message) = match error {
+                TrySendError::Full(message) => (ChannelError::Full, message),
+                TrySendError::Closed(message) => (ChannelError::Closed, message),
+                _ => unimplemented!(),
+            };
+
+            let inner = match message {
+                SubsystemCommand::SendMessage { message } => message,
+                _ => unreachable!(),
+            };
+
+            (error, inner)
+        })
     }
 }
 

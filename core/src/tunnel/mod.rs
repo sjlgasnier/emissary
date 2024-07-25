@@ -164,7 +164,16 @@ impl<R: Runtime> TunnelManager<R> {
 
     fn send_message(&mut self, router: &RouterId, message: Vec<u8>) {
         match self.routers.get_mut(router) {
-            Some(RouterState::Connected) => self.service.send(&router, message),
+            Some(RouterState::Connected) => {
+                if let Err(error) = self.service.send(&router, message) {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        ?router,
+                        ?error,
+                        "failed to send message to router",
+                    );
+                }
+            }
             Some(RouterState::Dialing {
                 ref mut pending_messages,
             }) => {
