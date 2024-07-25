@@ -192,15 +192,14 @@ impl<R: Runtime> TunnelManager<R> {
                         ?router,
                         "start dialing router",
                     );
-                    // todo!();
 
-                    // self.service.connect(&router);
-                    // self.routers.insert(
-                    //     router.clone(),
-                    //     RouterState::Dialing {
-                    //         pending_messages: vec![message],
-                    //     },
-                    // );
+                    self.service.connect(&router);
+                    self.routers.insert(
+                        router.clone(),
+                        RouterState::Dialing {
+                            pending_messages: vec![message],
+                        },
+                    );
                 }
             },
         }
@@ -233,17 +232,8 @@ impl<R: Runtime> TunnelManager<R> {
                 self.send_message(&hop, msg);
             }
             MessageType::ShortTunnelBuild => {
-                let (payload, hop, message_id, message_type) =
-                    self.noise.create_short_tunnel_hop(&self.truncated_hash, payload).unwrap();
-
-                let msg = RawI2NpMessageBuilder::short()
-                    .with_message_type(message_type)
-                    .with_message_id(message_id)
-                    .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                    )
-                    .with_payload(payload)
-                    .serialize();
+                let (msg, hop) =
+                    self.noise.create_short_tunnel_hop::<R>(&self.truncated_hash, payload).unwrap();
 
                 self.send_message(&hop, msg);
             }
@@ -260,19 +250,13 @@ impl<R: Runtime> TunnelManager<R> {
                 self.send_message(&hop, message);
             }
             MessageType::Garlic => {
-                let messages =
-                    self.noise.handle_garlic_message(&self.truncated_hash, message_id, payload);
+                let messages = self.noise.handle_garlic_message::<R>(
+                    &self.truncated_hash,
+                    message_id,
+                    payload,
+                );
 
-                for (payload, hop, message_id, message_type) in messages {
-                    let msg = RawI2NpMessageBuilder::short()
-                        .with_message_type(message_type)
-                        .with_message_id(message_id)
-                        .with_expiration(
-                            (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                        )
-                        .with_payload(payload)
-                        .serialize();
-
+                for (msg, hop) in messages {
                     self.send_message(&hop, msg);
                 }
             }
@@ -292,6 +276,7 @@ impl<R: Runtime> TunnelManager<R> {
                     ),
                 }
             }
+            MessageType::OutboundTunnelBuildReply => todo!("zzz"),
             message => tracing::warn!(
                 target: LOG_TARGET,
                 ?message,

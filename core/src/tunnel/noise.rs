@@ -49,7 +49,7 @@ use rand_core::RngCore;
 use zeroize::Zeroize;
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::fmt;
+use core::{fmt, time::Duration};
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
@@ -269,11 +269,11 @@ impl Noise {
 
     /// TODO: explain
     // TODO: verify source of this message is the same as last message
-    pub fn create_short_tunnel_hop(
+    pub fn create_short_tunnel_hop<R: Runtime>(
         &mut self,
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
-    ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
+    ) -> Option<(Vec<u8>, RouterId)> {
         // TODO: better abstraction
         let (index, mut record) = payload[1..]
             .chunks_mut(218)
@@ -325,24 +325,16 @@ impl Noise {
         let mut test = record[48..].to_vec();
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
 
-        let (next_router, message_id, message_type) = {
+        let (next_router, message_id, (message_type, tunnel_gateway), next_tunnel_id) = {
             let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
-            // tracing::trace!(
-            //     target: LOG_TARGET,
-            //     role = ?record.role(),
-            //     tunnel_id = record.tunnel_id(),
-            //     next_tunnel_id = record.next_tunnel_id(),
-            //     next_message_id = record.next_message_id(),
-            //     "record info",
-            // );
             tracing::trace!(
                 target: LOG_TARGET,
                 role = ?record.role(),
                 tunnel_id = ?record.tunnel_id(),
                 next_tunnel_id = ?record.next_tunnel_id(),
                 next_message_id = ?record.next_message_id(),
-                // next_router_hash = ?base64_encode(record.next_router_hash()),
+                next_router_hash = ?base64_encode(record.next_router_hash()),
                 "SHORT TUNNEL BUILT",
             );
 
@@ -364,9 +356,24 @@ impl Noise {
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 record.next_message_id(),
                 match record.role() {
-                    HopRole::OutboundEndpoint => MessageType::OutboundTunnelBuildReply,
-                    _ => MessageType::ShortTunnelBuild,
+                    HopRole::OutboundEndpoint => {
+                        if RouterId::from(base64_encode(&record.next_router_hash()[..16]))
+                            == RouterId::from(base64_encode(&truncated))
+                        {
+                            tracing::error!(
+                                "next hop role = {:?}",
+                                self.tunnels.get(&record.next_tunnel_id()).unwrap().role
+                            );
+                            todo!("outbound reply to self");
+                        }
+
+                        // TODO: garlic encrypt
+
+                        (MessageType::OutboundTunnelBuildReply, true)
+                    }
+                    _ => (MessageType::ShortTunnelBuild, false),
                 },
+                record.next_tunnel_id(),
             ))
         };
 
@@ -392,7 +399,41 @@ impl Noise {
             record[..218].copy_from_slice(&encrypted[..218]);
         }
 
-        Some((payload, next_router, message_id, message_type))
+        if tunnel_gateway {
+            tracing::error!("send tunnel gateway message = {next_tunnel_id}");
+
+            let msg = RawI2NpMessageBuilder::standard()
+                .with_message_type(message_type)
+                .with_message_id(message_id)
+                .with_expiration((R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()) // TODO: fix
+                .with_payload(payload)
+                .serialize();
+
+            // TODO: garlic encrypt?
+            let payload = TunnelGatewayMessage {
+                tunnel_id: next_tunnel_id,
+                payload: &msg,
+            }
+            .serialize();
+
+            let message = RawI2NpMessageBuilder::short()
+                .with_message_type(MessageType::TunnelGateway)
+                .with_message_id(22222222u32) // TODO: fix
+                .with_expiration(11111111u32) // TODO: fix
+                .with_payload(payload)
+                .serialize();
+
+            Some((message, next_router))
+        } else {
+            let msg = RawI2NpMessageBuilder::short()
+                .with_message_type(message_type)
+                .with_message_id(message_id)
+                .with_expiration((R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()) // TODO: fix
+                .with_payload(payload)
+                .serialize();
+
+            Some((msg, next_router))
+        }
     }
 
     pub fn handle_tunnel_data(
@@ -653,13 +694,13 @@ impl Noise {
         // todo!();
     }
 
-    pub fn handle_garlic_message(
+    pub fn handle_garlic_message<R: Runtime>(
         &mut self,
         truncated: &Vec<u8>,
         message_id: u32,
         payload: Vec<u8>,
-    ) -> Vec<(Vec<u8>, RouterId, u32, MessageType)> {
-        tracing::warn!(
+    ) -> Vec<(Vec<u8>, RouterId)> {
+        tracing::trace!(
             target: LOG_TARGET,
             ?message_id,
             payload_len = ?payload.len(),
@@ -676,7 +717,7 @@ impl Noise {
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
 
         let message = GarlicMessage::parse(&test).unwrap();
-        let mut outputs: Vec<(Vec<u8>, RouterId, u32, MessageType)> = Vec::new();
+        let mut outputs: Vec<(Vec<u8>, RouterId)> = Vec::new();
 
         for message in message.blocks {
             match message {
@@ -691,8 +732,9 @@ impl Noise {
                     message_body,
                 } => match (message_type, delivery_instructions) {
                     (MessageType::ShortTunnelBuild, DeliveryInstructions::Local) => {
-                        let output =
-                            self.create_short_tunnel_hop(truncated, message_body.to_vec()).unwrap();
+                        let output = self
+                            .create_short_tunnel_hop::<R>(truncated, message_body.to_vec())
+                            .unwrap();
 
                         outputs.push(output);
                     }
