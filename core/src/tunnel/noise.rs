@@ -31,20 +31,25 @@ use crate::{
         sha256::Sha256,
         EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
+    error::TunnelError,
     i2np::{
         DeliveryInstruction, EncryptedTunnelBuildRequestRecord, EncryptedTunnelData, HopRole,
-        MessageKind, MessageType, OwnedDeliveryInstruction, RawI2npMessage, ShortTunnelBuildRecord,
-        TunnelBuildRecord, TunnelData, I2NP_STANDARD,
+        MessageKind, MessageType, OwnedDeliveryInstruction, RawI2NpMessageBuilder, RawI2npMessage,
+        ShortTunnelBuildRecord, TunnelBuildRecord, TunnelData, TunnelGatewayMessage, I2NP_SHORT,
+        I2NP_STANDARD,
     },
     primitives::RouterId,
+    runtime::Runtime,
     tunnel::LOG_TARGET,
+    Error,
 };
 
 use hashbrown::HashMap;
+use rand_core::RngCore;
 use zeroize::Zeroize;
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::fmt;
+use core::{fmt, time::Duration};
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
@@ -82,6 +87,17 @@ struct TunnelHop {
     fragments: HashMap<u32, FragmentedMessage>,
 }
 
+impl fmt::Debug for TunnelHop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelHop")
+            .field("role", &self.role)
+            .field("tunnel_id", &self.tunnel_id)
+            .field("next_tunnel_id", &self.next_tunnel_id)
+            .field("next_router_id", &self.next_router_id)
+            .finish_non_exhaustive()
+    }
+}
+
 struct FragmentedMessage {
     first_fragment: Vec<u8>,
     delivery_instructions: OwnedDeliveryInstruction,
@@ -105,13 +121,16 @@ pub struct Noise {
 
     /// Tunnel hops.
     tunnels: HashMap<u32, TunnelHop>,
+
+    /// Random bytes used for tunnel data padding.
+    padding_bytes: [u8; 1028],
 }
 
 impl Noise {
     /// Create new [`Noise`].
     ///
     /// https://geti2p.net/spec/tunnel-creation-ecies#kdf-for-initial-ck-and-h
-    pub fn new(local_key: StaticPrivateKey) -> Self {
+    pub fn new<R: Runtime>(local_key: StaticPrivateKey) -> Self {
         let chaining_key = {
             let mut chaining_key = PROTOCOL_NAME.as_bytes().to_vec();
             chaining_key.append(&mut vec![0u8]);
@@ -123,12 +142,29 @@ impl Noise {
             .update(local_key.public().to_bytes())
             .finalize();
 
+        // generate random padding bytes used in `TunnelData` messages
+        let padding_bytes = {
+            let mut padding_bytes = [0u8; 1028];
+            R::rng().fill_bytes(&mut padding_bytes);
+
+            padding_bytes = TryInto::<[u8; 1028]>::try_into(
+                padding_bytes
+                    .into_iter()
+                    .map(|byte| if byte == 0 { 1u8 } else { byte })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("to succeed");
+
+            padding_bytes
+        };
+
         Self {
             chaining_key,
             inbound_state,
             local_key,
             outbound_state,
             tunnels: HashMap::new(),
+            padding_bytes,
         }
     }
 
@@ -157,7 +193,7 @@ impl Noise {
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
     ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
-        tracing::error!(
+        tracing::trace!(
             "payload len = {}, num records = {}",
             payload.len(),
             payload[0]
@@ -191,8 +227,7 @@ impl Noise {
                 role = ?record.role(),
                 tunnel_id = ?record.tunnel_id(),
                 next_tunnel_id = ?record.next_tunnel_id(),
-                // next_message_id = record.next_message_id(),
-                // next_router_hash = ?base64_encode(record.next_router_hash()),
+                next_message_id = record.next_message_id(),
                 "VARIABLE TUNNEL BUILT",
             );
 
@@ -212,7 +247,7 @@ impl Noise {
                 record.next_message_id(),
                 match record.role() {
                     HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
-                    _ => MessageType::VariableTunnelBuild,
+                    _ => todo!(),
                 },
             ))
         };
@@ -233,11 +268,11 @@ impl Noise {
 
     /// TODO: explain
     // TODO: verify source of this message is the same as last message
-    pub fn create_short_tunnel_hop(
+    pub fn create_short_tunnel_hop<R: Runtime>(
         &mut self,
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
-    ) -> Option<(Vec<u8>, RouterId, u32, MessageType)> {
+    ) -> Option<(Vec<u8>, RouterId, Option<u32>)> {
         // TODO: better abstraction
         let (index, mut record) = payload[1..]
             .chunks_mut(218)
@@ -289,24 +324,16 @@ impl Noise {
         let mut test = record[48..].to_vec();
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
 
-        let (next_router, message_id, message_type) = {
+        let (next_router, message_id, (message_type, tunnel_gateway), next_tunnel_id) = {
             let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
-            // tracing::trace!(
-            //     target: LOG_TARGET,
-            //     role = ?record.role(),
-            //     tunnel_id = record.tunnel_id(),
-            //     next_tunnel_id = record.next_tunnel_id(),
-            //     next_message_id = record.next_message_id(),
-            //     "record info",
-            // );
             tracing::trace!(
                 target: LOG_TARGET,
                 role = ?record.role(),
                 tunnel_id = ?record.tunnel_id(),
                 next_tunnel_id = ?record.next_tunnel_id(),
-                // next_message_id = record.next_message_id(),
-                // next_router_hash = ?base64_encode(record.next_router_hash()),
+                next_message_id = ?record.next_message_id(),
+                next_router_hash = ?base64_encode(record.next_router_hash()),
                 "SHORT TUNNEL BUILT",
             );
 
@@ -327,11 +354,19 @@ impl Noise {
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
                 record.next_message_id(),
-                // TODO: fix
                 match record.role() {
-                    crate::i2np::HopRole::Intermediary => MessageType::ShortTunnelBuild,
-                    _ => MessageType::OutboundTunnelBuildReply,
+                    HopRole::OutboundEndpoint => {
+                        if RouterId::from(base64_encode(&record.next_router_hash()[..16]))
+                            == RouterId::from(base64_encode(&truncated))
+                        {
+                            (MessageType::OutboundTunnelBuildReply, false)
+                        } else {
+                            (MessageType::OutboundTunnelBuildReply, true)
+                        }
+                    }
+                    _ => (MessageType::ShortTunnelBuild, false),
                 },
+                record.next_tunnel_id(),
             ))
         };
 
@@ -357,12 +392,63 @@ impl Noise {
             record[..218].copy_from_slice(&encrypted[..218]);
         }
 
-        Some((payload, next_router, message_id, message_type))
+        if tunnel_gateway {
+            let msg = RawI2NpMessageBuilder::standard()
+                .with_message_type(message_type)
+                .with_message_id(message_id)
+                .with_expiration((R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()) // TODO: fix
+                .with_payload(payload)
+                .serialize();
+
+            // TODO: garlic encrypt?
+            let payload = TunnelGatewayMessage {
+                tunnel_id: next_tunnel_id,
+                payload: &msg,
+            }
+            .serialize();
+
+            let message = RawI2NpMessageBuilder::short()
+                .with_message_type(MessageType::TunnelGateway)
+                .with_message_id(22222222u32) // TODO: fix
+                .with_expiration(11111111u32) // TODO: fix
+                .with_payload(payload)
+                .serialize();
+
+            Some((message, next_router, None))
+        } else {
+            // i2np message delivery for local inbound gateway
+            if message_type == MessageType::OutboundTunnelBuildReply {
+                tracing::error!("local delivery, no i2np wrapping applied");
+
+                let msg = RawI2NpMessageBuilder::standard()
+                    .with_message_type(message_type)
+                    .with_message_id(message_id)
+                    .with_expiration(
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
+                    ) // TODO: fix
+                    .with_payload(payload)
+                    .serialize();
+
+                Some((msg, next_router, Some(next_tunnel_id)))
+            } else {
+                let msg = RawI2NpMessageBuilder::short()
+                    .with_message_type(message_type)
+                    .with_message_id(message_id)
+                    .with_expiration(
+                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
+                    ) // TODO: fix
+                    .with_payload(payload)
+                    .serialize();
+
+                Some((msg, next_router, None))
+            }
+        }
     }
 
     pub fn handle_tunnel_data(
         &mut self,
         truncated: &Vec<u8>,
+        expiration: u64,
         mut payload: Vec<u8>,
     ) -> Option<(Vec<u8>, RouterId)> {
         // TODO: no unwraps
@@ -402,8 +488,15 @@ impl Noise {
                 out[4..20].copy_from_slice(&iv);
                 out[20..].copy_from_slice(&ciphertext);
 
-                // TODO: copy
-                return Some((out, hop.next_router_id.clone()));
+                // TODO: fix
+                let msg = RawI2NpMessageBuilder::short()
+                    .with_message_type(MessageType::TunnelData)
+                    .with_message_id(13371338u32)
+                    .with_expiration(expiration + 5 * 60)
+                    .with_payload(out)
+                    .serialize();
+
+                return Some((msg, hop.next_router_id.clone()));
             }
             HopRole::OutboundEndpoint => {
                 let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
@@ -435,6 +528,7 @@ impl Noise {
                 let our_message = ciphertext[4 + res.0 + 1..].to_vec();
                 let message = TunnelData::parse(&our_message).unwrap();
 
+                // TODO: handle all messages
                 for message in &message.messages {
                     match message.message_kind {
                         MessageKind::Unfragmented {
@@ -444,16 +538,46 @@ impl Noise {
                             DeliveryInstruction::Router { hash } => {
                                 tracing::debug!(hash = ?base64_encode(hash), "router delivery");
 
-                                return Some((
-                                    message.message.to_vec(),
-                                    RouterId::from(base64_encode(&hash[..16])),
-                                ));
+                                let RawI2npMessage {
+                                    message_type,
+                                    message_id,
+                                    expiration,
+                                    payload,
+                                } = RawI2npMessage::parse::<I2NP_STANDARD>(&message.message)
+                                    .unwrap();
+
+                                let message = RawI2NpMessageBuilder::short()
+                                    .with_message_type(message_type)
+                                    .with_message_id(message_id)
+                                    .with_expiration(expiration)
+                                    .with_payload(payload)
+                                    .serialize();
+
+                                return Some((message, RouterId::from(base64_encode(&hash[..16]))));
                             }
-                            DeliveryInstruction::Tunnel { hash, tunnel_id } => tracing::warn!(
-                                ?tunnel_id,
-                                hash = ?base64_encode(hash),
-                                "todo: tunnel delivery"
-                            ),
+                            DeliveryInstruction::Tunnel { hash, tunnel_id } => {
+                                tracing::trace!(
+                                    ?tunnel_id,
+                                    msg_len = ?payload.len(),
+                                    hash = ?base64_encode(hash),
+                                    "tunnel gateway delivery"
+                                );
+
+                                let payload = TunnelGatewayMessage {
+                                    tunnel_id: *tunnel_id,
+                                    payload: &message.message,
+                                }
+                                .serialize();
+
+                                let message = RawI2NpMessageBuilder::short()
+                                    .with_message_type(MessageType::TunnelGateway)
+                                    .with_message_id(13371338u32) // TODO: fix
+                                    .with_expiration(expiration)
+                                    .with_payload(payload)
+                                    .serialize();
+
+                                return Some((message, RouterId::from(base64_encode(&hash[..16]))));
+                            }
                         },
                         MessageKind::FirstFragment {
                             message_id,
@@ -541,7 +665,7 @@ impl Noise {
                                     .iter()
                                     .fold(0usize, |acc, (_, message)| acc + message.len());
 
-                            tracing::error!("combined message size = {size}");
+                            // tracing::error!("combined message size = {size}");
 
                             let mut combined = vec![0u8; size];
                             let mut offset = 0usize;
@@ -559,7 +683,7 @@ impl Noise {
                             combined[offset..offset + message.message.len()]
                                 .copy_from_slice(message.message);
 
-                            tracing::error!("combined bytes = {combined:?}");
+                            // tracing::error!("combined bytes = {combined:?}");
 
                             let test = combined[combined.len() - 2113..].to_vec();
 
@@ -579,13 +703,13 @@ impl Noise {
         // todo!();
     }
 
-    pub fn handle_garlic_message(
+    pub fn handle_garlic_message<R: Runtime>(
         &mut self,
         truncated: &Vec<u8>,
         message_id: u32,
         payload: Vec<u8>,
-    ) -> Vec<(Vec<u8>, RouterId, u32, MessageType)> {
-        tracing::warn!(
+    ) -> Vec<(Vec<u8>, RouterId)> {
+        tracing::trace!(
             target: LOG_TARGET,
             ?message_id,
             payload_len = ?payload.len(),
@@ -602,14 +726,13 @@ impl Noise {
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
 
         let message = GarlicMessage::parse(&test).unwrap();
-        let mut outputs: Vec<(Vec<u8>, RouterId, u32, MessageType)> = Vec::new();
+        let mut outputs: Vec<(Vec<u8>, RouterId)> = Vec::new();
 
         for message in message.blocks {
             match message {
                 GarlicMessageBlock::DateTime { timestamp } =>
                     tracing::trace!(target: LOG_TARGET, ?timestamp, "ignore datetime"),
-                GarlicMessageBlock::Padding { .. } =>
-                    tracing::trace!(target: LOG_TARGET, "ignore padding"),
+                GarlicMessageBlock::Padding { .. } => {}
                 GarlicMessageBlock::GarlicClove {
                     message_type,
                     message_id,
@@ -618,10 +741,12 @@ impl Noise {
                     message_body,
                 } => match (message_type, delivery_instructions) {
                     (MessageType::ShortTunnelBuild, DeliveryInstructions::Local) => {
-                        let output =
-                            self.create_short_tunnel_hop(truncated, message_body.to_vec()).unwrap();
+                        let (msg, hop, maybe_tunnel_delivery) = self
+                            .create_short_tunnel_hop::<R>(truncated, message_body.to_vec())
+                            .unwrap();
+                        assert!(maybe_tunnel_delivery.is_none(), "not handled");
 
-                        outputs.push(output);
+                        outputs.push((msg, hop));
                     }
                     _ => todo!("not handled"),
                 },
@@ -630,6 +755,196 @@ impl Noise {
         }
 
         outputs
+    }
+
+    pub fn handle_tunnel_gateway<R: Runtime>(
+        &mut self,
+        truncated: &Vec<u8>,
+        message_id: u32,
+        expiration: u64,
+        payload: Vec<u8>,
+    ) -> crate::Result<(Vec<u8>, RouterId)> {
+        let TunnelGatewayMessage { tunnel_id, payload } =
+            TunnelGatewayMessage::parse(&payload).ok_or(Error::InvalidData)?;
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            ?message_id,
+            ?tunnel_id,
+            message_type = ?MessageType::from_u8(payload[0]),
+            payload_len = ?payload.len(),
+            "tunnel gateway",
+        );
+
+        let TunnelHop {
+            role: HopRole::InboundGateway,
+            next_tunnel_id,
+            next_router_id,
+            layer_key,
+            iv_key,
+            ..
+        } = self
+            .tunnels
+            .get(&tunnel_id)
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+        else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?tunnel_id,
+                "tunnel gateway message received to non-gateway",
+            );
+            debug_assert!(false);
+            return Err(Error::Tunnel(TunnelError::InvalidHop));
+        };
+
+        // TODO: implement fragment support
+        assert!(
+            payload.len() < 1028 - 16 - 4 - 1 - 4 - 3,
+            "fragment not implemented"
+        );
+
+        // construct `TunnelData` message
+        //
+        // generate random aes iv, fill in next tunnel id, create delivery instructions for local
+        // delivery, calculate checksum for the message and fill in random bytes as padding
+        let mut out = vec![0u8; 1028];
+
+        // total message size - tunnel id - aes iv - checksum - flag - delivery instructions -
+        // payload
+        let padding_size = 1028 - 4 - 16 - 4 - 1 - 3 - payload.len();
+        let offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
+
+        R::rng().fill_bytes(&mut out[4..20]);
+
+        // TODO: move this elsewhere, it doesn't belong here
+        out[..4].copy_from_slice(&next_tunnel_id.to_be_bytes());
+        out[24..24 + padding_size]
+            .copy_from_slice(&self.padding_bytes[offset..offset + padding_size]);
+        out[24 + padding_size] = 0x00; // zero byte
+        out[25 + padding_size] = 0x00; // local delivery
+        out[26 + padding_size..28 + padding_size]
+            .copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        out[28 + padding_size..].copy_from_slice(payload);
+
+        let checksum =
+            Sha256::new().update(&out[25 + padding_size..]).update(&out[4..20]).finalize();
+
+        out[20..24].copy_from_slice(&checksum[..4]);
+
+        let res = out[24..].iter().enumerate().find(|(_, byte)| byte == &&0x0).unwrap();
+
+        let checksum2 = Sha256::new().update(&out[24 + res.0 + 1..]).update(&out[4..20]).finalize();
+
+        assert_eq!(checksum, checksum2);
+
+        let mut aes = ecb::Aes::new_encryptor(&iv_key);
+        let iv = aes.encrypt(&out[4..20]);
+
+        let mut aes = cbc::Aes::new_encryptor(&layer_key, &iv);
+        let ciphertext = aes.encrypt(&out[20..]);
+
+        let mut aes = ecb::Aes::new_encryptor(&iv_key);
+        let iv = aes.encrypt(iv);
+
+        out[4..20].copy_from_slice(&iv);
+        out[20..].copy_from_slice(&ciphertext);
+
+        let message = RawI2NpMessageBuilder::short()
+            .with_message_type(MessageType::TunnelData)
+            .with_message_id(13351336)
+            .with_expiration(expiration)
+            .with_payload(out)
+            .serialize();
+
+        Ok((message, next_router_id.clone()))
+    }
+
+    pub fn handle_outbound_tunnel_build_reply<R: Runtime>(
+        &mut self,
+        tunnel_id: u32,
+        mut payload: Vec<u8>,
+    ) -> crate::Result<(Vec<u8>, RouterId)> {
+        let TunnelHop {
+            role: HopRole::InboundGateway,
+            next_tunnel_id,
+            next_router_id,
+            layer_key,
+            iv_key,
+            ..
+        } = self
+            .tunnels
+            .get(&tunnel_id)
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+        else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?tunnel_id,
+                "tunnel gateway message received to non-gateway",
+            );
+            debug_assert!(false);
+            return Err(Error::Tunnel(TunnelError::InvalidHop));
+        };
+
+        // TODO: implement fragment support
+        assert!(
+            payload.len() < 1028 - 16 - 4 - 1 - 4 - 3,
+            "fragmentation not implemented"
+        );
+
+        // construct `TunnelData` message
+        //
+        // generate random aes iv, fill in next tunnel id, create delivery instructions for local
+        // delivery, calculate checksum for the message and fill in random bytes as padding
+        let mut out = vec![0u8; 1028];
+
+        // total message size - tunnel id - aes iv - checksum - flag - delivery instructions -
+        // payload
+        let padding_size = 1028 - 4 - 16 - 4 - 1 - 3 - payload.len();
+        let offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
+
+        R::rng().fill_bytes(&mut out[4..20]);
+
+        // TODO: move this elsewhere, it doesn't belong here
+        out[..4].copy_from_slice(&next_tunnel_id.to_be_bytes());
+        out[24..24 + padding_size]
+            .copy_from_slice(&self.padding_bytes[offset..offset + padding_size]);
+        out[24 + padding_size] = 0x00; // zero byte
+        out[25 + padding_size] = 0x00; // local delivery
+        out[26 + padding_size..28 + padding_size]
+            .copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        out[28 + padding_size..].copy_from_slice(&payload);
+
+        let checksum =
+            Sha256::new().update(&out[25 + padding_size..]).update(&out[4..20]).finalize();
+
+        out[20..24].copy_from_slice(&checksum[..4]);
+
+        let res = out[24..].iter().enumerate().find(|(_, byte)| byte == &&0x0).unwrap();
+
+        let checksum2 = Sha256::new().update(&out[24 + res.0 + 1..]).update(&out[4..20]).finalize();
+
+        assert_eq!(checksum, checksum2);
+
+        let mut aes = ecb::Aes::new_encryptor(&iv_key);
+        let iv = aes.encrypt(&out[4..20]);
+
+        let mut aes = cbc::Aes::new_encryptor(&layer_key, &iv);
+        let ciphertext = aes.encrypt(&out[20..]);
+
+        let mut aes = ecb::Aes::new_encryptor(&iv_key);
+        let iv = aes.encrypt(iv);
+
+        out[4..20].copy_from_slice(&iv);
+        out[20..].copy_from_slice(&ciphertext);
+
+        let message = RawI2NpMessageBuilder::short()
+            .with_message_type(MessageType::TunnelData)
+            .with_message_id(13351336)
+            .with_expiration((R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()) // TODO: fix
+            .with_payload(out)
+            .serialize();
+
+        Ok((message, next_router_id.clone()))
     }
 }
 

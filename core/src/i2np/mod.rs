@@ -65,7 +65,7 @@ const AES256_KEY_LEN: usize = 32usize;
 const AES256_IV_LEN: usize = 16usize;
 
 /// Message type.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
     DatabaseStore,
     DatabaseLookup,
@@ -820,14 +820,14 @@ impl RawI2NpMessageBuilder {
                 mut payload,
             } => {
                 let payload = payload.take().expect("to exist");
-                let expiration = expiration.take().expect("to exist") as u32;
+                let expiration = expiration.take().expect("to exist");
 
                 let mut out = vec![0u8; payload.len() + 16];
 
                 out[0] = message_type.expect("to exist").serialize();
                 out[1..5].copy_from_slice(&message_id.expect("to exist").to_be_bytes());
                 out[5..13].copy_from_slice(&expiration.to_be_bytes());
-                out[13..15].copy_from_slice(&payload.len().to_be_bytes());
+                out[13..15].copy_from_slice(&(payload.len() as u16).to_be_bytes());
                 out[15] = 0x00; // TODO: correct checksum
                 out[16..].copy_from_slice(&payload);
 
@@ -1260,5 +1260,37 @@ impl<'a> TunnelData<'a> {
         Some(Self {
             messages: Self::parse_inner(input, Vec::new())?,
         })
+    }
+}
+
+pub struct TunnelGatewayMessage<'a> {
+    /// Tunnel ID.
+    pub tunnel_id: u32,
+
+    /// Payload.
+    pub payload: &'a [u8],
+}
+
+impl<'a> TunnelGatewayMessage<'a> {
+    fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], TunnelGatewayMessage<'a>> {
+        let (rest, tunnel_id) = be_u32(input)?;
+        let (rest, size) = be_u16(rest)?;
+        let (rest, payload) = take(size as usize)(rest)?;
+
+        Ok((rest, TunnelGatewayMessage { tunnel_id, payload }))
+    }
+
+    pub fn parse(input: &'a [u8]) -> Option<TunnelGatewayMessage<'a>> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    pub fn serialize(mut self) -> Vec<u8> {
+        let mut out = vec![0u8; self.payload.len() + 2 + 4];
+
+        out[..4].copy_from_slice(&self.tunnel_id.to_be_bytes());
+        out[4..6].copy_from_slice(&(self.payload.len() as u16).to_be_bytes());
+        out[6..].copy_from_slice(self.payload);
+
+        out
     }
 }

@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
+    error::ChannelError,
     i2np::RawI2npMessage,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
     router_storage::RouterStorage,
@@ -30,8 +31,8 @@ use crate::{
 };
 
 use futures::{Stream, StreamExt};
-use hashbrown::HashMap;
-use thingbuf::mpsc::{channel, Receiver, Sender};
+use hashbrown::{HashMap, HashSet};
+use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
@@ -60,16 +61,20 @@ pub enum NetworkEvent {
     Message {},
 }
 
-// TODO: remove
 /// Transport event.
 #[derive(Debug)]
 pub enum TransportEvent {
-    /// Connection successfully established to remote peer.
+    /// Connection successfully established to router.
     ConnectionEstablished {
         /// `RouterInfo` for the connected peer.
         router_info: RouterInfo,
     },
-    ConnectionClosed {},
+
+    /// Connection closed to router.
+    ConnectionClosed {
+        /// Router ID.
+        router: RouterId,
+    },
 
     /// Failed to dial peer.
     ///
@@ -146,6 +151,20 @@ impl TransportService {
     /// If `router` is not reachable or the handshake fails, the error is reported
     /// via [`TransportService::poll_next()`].
     pub fn connect(&mut self, router: &RouterId) -> Result<(), ()> {
+        if self.routers.contains_key(router) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?router,
+                "tried to dial an already-connected router",
+            );
+            debug_assert!(false);
+
+            self.pending_events.push_back(InnerSubsystemEvent::ConnectionFailure {
+                router: router.clone(),
+            });
+            return Ok(());
+        }
+
         match self.router_storage.get(router) {
             Some(router_info) => self
                 .cmd_tx
@@ -168,14 +187,35 @@ impl TransportService {
     }
 
     /// Send I2NP `message` to `router`.
-    //
-    // TODO: return error
-    pub fn send(&mut self, router: &RouterId, message: Vec<u8>) {
-        self.routers
-            .get_mut(router)
-            .unwrap()
-            .try_send(SubsystemCommand::SendMessage { message })
-            .unwrap();
+    ///
+    /// If the router doesn't exist, `ChannelError::DoesntExist` is returned.
+    /// If the channel is closed, `ChannelError::Closed` is returned.
+    /// If the channel is full, `ChannelError::Full` is returned.
+    ///
+    /// In all error cases, `message` is returned together with error
+    pub fn send(
+        &mut self,
+        router: &RouterId,
+        message: Vec<u8>,
+    ) -> Result<(), (ChannelError, Vec<u8>)> {
+        let Some(channel) = self.routers.get(router) else {
+            return Err((ChannelError::DoesntExist, message));
+        };
+
+        channel.try_send(SubsystemCommand::SendMessage { message }).map_err(|error| {
+            let (error, message) = match error {
+                TrySendError::Full(message) => (ChannelError::Full, message),
+                TrySendError::Closed(message) => (ChannelError::Closed, message),
+                _ => unimplemented!(),
+            };
+
+            let inner = match message {
+                SubsystemCommand::SendMessage { message } => message,
+                _ => unreachable!(),
+            };
+
+            (error, inner)
+        })
     }
 }
 
@@ -233,6 +273,9 @@ pub struct TransportManager<R> {
     /// Router storage.
     router_storage: RouterStorage,
 
+    /// Connected routers.
+    routers: HashSet<RouterId>,
+
     // Runtime.
     runtime: R,
 
@@ -261,6 +304,7 @@ impl<R: Runtime> TransportManager<R> {
             local_router_info,
             local_signing_key,
             poll_index: 0usize,
+            routers: HashSet::new(),
             router_storage,
             runtime,
             subsystem_handle: SubsystemHandle::new(),
@@ -335,12 +379,34 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
+                    let router = router_info.identity().id();
+
                     tracing::debug!(
                         target: LOG_TARGET,
-                        router = %router_info.identity().id(),
+                        ?router,
                         "connection established",
                     );
-                    self.transports[index].accept(&router_info.identity().id());
+
+                    match self.routers.insert(router.clone()) {
+                        true => self.transports[index].accept(&router),
+                        false => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?router,
+                                "router already connected, rejecting",
+                            );
+                            self.transports[index].reject(&router);
+                        }
+                    }
+                }
+                Poll::Ready(Some(TransportEvent::ConnectionClosed { router })) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?router,
+                        "connection closed",
+                    );
+
+                    self.routers.remove(&router);
                 }
                 Poll::Ready(Some(event)) => {
                     tracing::warn!("unhandled event: {event:?}");

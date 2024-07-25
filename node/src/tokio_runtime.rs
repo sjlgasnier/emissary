@@ -151,6 +151,7 @@ impl<T: Send + 'static> Stream for TokioJoinSet<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match futures::ready!(self.0.poll_join_next(cx)) {
+            // TODO: this is not correct, `None` can be returned if set is empty
             None | Some(Err(_)) => Poll::Ready(None),
             Some(Ok(value)) => Poll::Ready(Some(value)),
         }

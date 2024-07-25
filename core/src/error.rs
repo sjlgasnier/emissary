@@ -19,6 +19,48 @@
 use alloc::string::String;
 use core::fmt;
 
+/// Channel error.
+#[derive(Debug)]
+pub enum ChannelError {
+    /// Channel is full.
+    Full,
+
+    /// Channel is closed.
+    Closed,
+
+    /// Channel doesn't exist.
+    DoesntExist,
+}
+
+impl fmt::Display for ChannelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full => write!(f, "channel full"),
+            Self::Closed => write!(f, "channel closed"),
+            Self::DoesntExist => write!(f, "channel doesn't exist"),
+        }
+    }
+}
+
+/// Tunnel error.
+#[derive(Debug)]
+pub enum TunnelError {
+    /// Tunnel doesn't exist.
+    TunnelDoesntExist(u32),
+
+    /// Invalid hop role for an operation.
+    InvalidHop,
+}
+
+impl fmt::Display for TunnelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TunnelDoesntExist(tunnel_id) => write!(f, "tunnel ({tunnel_id}) does't exist"),
+            Self::InvalidHop => write!(f, "invalid hop role for operation"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
@@ -32,6 +74,8 @@ pub enum Error {
     EssentialTaskClosed,
     RouterDoesntExist,
     DialFailure,
+    Tunnel(TunnelError),
+    Channel(ChannelError),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +92,8 @@ impl fmt::Display for Error {
             Self::EssentialTaskClosed => write!(f, "essential task closed"),
             Self::RouterDoesntExist => write!(f, "router doesn't exist"),
             Self::DialFailure => write!(f, "dial failure"),
+            Self::Tunnel(error) => write!(f, "tunnel error: {error}"),
+            Self::Channel(error) => write!(f, "channel error: {error}"),
         }
     }
 }

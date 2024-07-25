@@ -35,21 +35,17 @@ use core::fmt;
 
 /// Short router identity hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RouterId {
-    hash: Arc<String>,
-}
+pub struct RouterId(Arc<String>);
 
 impl fmt::Display for RouterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.hash)
+        write!(f, "{}", self.0)
     }
 }
 
 impl From<String> for RouterId {
     fn from(value: String) -> Self {
-        RouterId {
-            hash: Arc::new(value),
-        }
+        RouterId(Arc::new(value))
     }
 }
 
@@ -184,9 +180,7 @@ impl RouterIdentity {
 
     /// Get [`RouterId`].
     pub fn id(&self) -> RouterId {
-        RouterId {
-            hash: Arc::new(base64_encode(&self.identity_hash[..16])),
-        }
+        RouterId(Arc::new(base64_encode(&self.identity_hash[..16])))
     }
 }
 

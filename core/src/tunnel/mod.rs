@@ -20,6 +20,7 @@ use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
     i2np::{
         HopRole, I2NpMessage, MessageType, RawI2NpMessageBuilder, RawI2npMessage, TunnelMessage,
+        I2NP_SHORT, I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo},
     runtime::Runtime,
@@ -94,7 +95,7 @@ impl<R: Runtime> TunnelManager<R> {
 
         Self {
             local_router_id,
-            noise: Noise::new(local_key),
+            noise: Noise::new::<R>(local_key),
             routers: HashMap::new(),
             service,
             truncated_hash,
@@ -163,7 +164,16 @@ impl<R: Runtime> TunnelManager<R> {
 
     fn send_message(&mut self, router: &RouterId, message: Vec<u8>) {
         match self.routers.get_mut(router) {
-            Some(RouterState::Connected) => self.service.send(&router, message),
+            Some(RouterState::Connected) => {
+                if let Err(error) = self.service.send(&router, message) {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        ?router,
+                        ?error,
+                        "failed to send message to router",
+                    );
+                }
+            }
             Some(RouterState::Dialing {
                 ref mut pending_messages,
             }) => {
@@ -176,10 +186,14 @@ impl<R: Runtime> TunnelManager<R> {
             }
             None => match router == &self.local_router_id {
                 true => {
-                    tracing::warn!(
+                    tracing::debug!(
                         target: LOG_TARGET,
+                        message_type = ?MessageType::from_u8(message[2]),
+                        message_len = ?message.len(),
                         "router message to self",
                     );
+                    let message = RawI2npMessage::parse::<I2NP_SHORT>(&message).unwrap();
+                    self.on_message(message);
                 }
                 false => {
                     tracing::debug!(
@@ -227,55 +241,59 @@ impl<R: Runtime> TunnelManager<R> {
                 self.send_message(&hop, msg);
             }
             MessageType::ShortTunnelBuild => {
-                let (payload, hop, message_id, message_type) =
-                    self.noise.create_short_tunnel_hop(&self.truncated_hash, payload).unwrap();
+                let (msg, hop, maybe_local_delivery) =
+                    self.noise.create_short_tunnel_hop::<R>(&self.truncated_hash, payload).unwrap();
 
-                let msg = RawI2NpMessageBuilder::short()
-                    .with_message_type(message_type)
-                    .with_message_id(message_id)
-                    .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                    )
-                    .with_payload(payload)
-                    .serialize();
-
-                self.send_message(&hop, msg);
+                match maybe_local_delivery {
+                    Some(tunnel_id) =>
+                        match self.noise.handle_outbound_tunnel_build_reply::<R>(tunnel_id, msg) {
+                            Ok((msg, hop)) => self.send_message(&hop, msg),
+                            Err(error) =>
+                                tracing::error!(target: LOG_TARGET, "failed to handle outbound tunnel build reply"),
+                        },
+                    None => self.send_message(&hop, msg),
+                }
             }
             MessageType::TunnelData => {
-                let Some((data, hop)) =
-                    self.noise.handle_tunnel_data(&self.truncated_hash, payload)
-                else {
+                let Some((message, hop)) = self.noise.handle_tunnel_data(
+                    &self.truncated_hash,
+                    message.expiration,
+                    payload,
+                ) else {
+                    tracing::warn!(target: LOG_TARGET, "failed to handle tunnel data message");
                     return;
                 };
 
-                let msg = RawI2NpMessageBuilder::short()
-                    .with_message_type(message_type)
-                    .with_message_id(message_id)
-                    .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                    )
-                    .with_payload(data)
-                    .serialize();
-
-                self.send_message(&hop, msg);
+                self.send_message(&hop, message);
             }
             MessageType::Garlic => {
-                let messages =
-                    self.noise.handle_garlic_message(&self.truncated_hash, message_id, payload);
+                let messages = self.noise.handle_garlic_message::<R>(
+                    &self.truncated_hash,
+                    message_id,
+                    payload,
+                );
 
-                for (payload, hop, message_id, message_type) in messages {
-                    let msg = RawI2NpMessageBuilder::short()
-                        .with_message_type(message_type)
-                        .with_message_id(message_id)
-                        .with_expiration(
-                            (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                        )
-                        .with_payload(payload)
-                        .serialize();
-
+                for (msg, hop) in messages {
                     self.send_message(&hop, msg);
                 }
             }
+            MessageType::TunnelGateway => {
+                match self.noise.handle_tunnel_gateway::<R>(
+                    &self.truncated_hash,
+                    message_id,
+                    expiration,
+                    payload,
+                ) {
+                    Ok((message, hop)) => self.send_message(&hop, message),
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        ?message_id,
+                        ?error,
+                        "failed to handle tunnel gateway message",
+                    ),
+                }
+            }
+            MessageType::OutboundTunnelBuildReply => unreachable!(),
             message => tracing::warn!(
                 target: LOG_TARGET,
                 ?message,

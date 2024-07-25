@@ -191,7 +191,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         self.router_info.clone()
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> RouterId {
         tracing::trace!(
             target: LOG_TARGET,
             router = %self.router,
@@ -216,6 +216,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         );
 
         self.subsystem_handle.report_connection_closed(self.router.clone()).await;
+        self.router
     }
 }
 
