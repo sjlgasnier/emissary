@@ -20,6 +20,21 @@ use alloc::string::String;
 use core::fmt;
 
 #[derive(Debug)]
+pub enum TunnelError {
+    TunnelDoesntExist(u32),
+    InvalidHop,
+}
+
+impl fmt::Display for TunnelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TunnelDoesntExist(tunnel_id) => write!(f, "tunnel ({tunnel_id}) does't exist"),
+            Self::InvalidHop => write!(f, "invalid hop role for operation"),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
     Chacha20Poly1305(chacha20poly1305::Error),
@@ -32,6 +47,7 @@ pub enum Error {
     EssentialTaskClosed,
     RouterDoesntExist,
     DialFailure,
+    Tunnel(TunnelError),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +64,7 @@ impl fmt::Display for Error {
             Self::EssentialTaskClosed => write!(f, "essential task closed"),
             Self::RouterDoesntExist => write!(f, "router doesn't exist"),
             Self::DialFailure => write!(f, "dial failure"),
+            Self::Tunnel(error) => write!(f, "tunnel error: {error}"),
         }
     }
 }

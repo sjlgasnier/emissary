@@ -95,7 +95,7 @@ impl<R: Runtime> TunnelManager<R> {
 
         Self {
             local_router_id,
-            noise: Noise::new(local_key),
+            noise: Noise::new::<R>(local_key),
             routers: HashMap::new(),
             service,
             truncated_hash,
@@ -253,6 +253,7 @@ impl<R: Runtime> TunnelManager<R> {
                     message.expiration,
                     payload,
                 ) else {
+                    tracing::warn!(target: LOG_TARGET, "failed to handle tunnel data message");
                     return;
                 };
 
@@ -273,6 +274,22 @@ impl<R: Runtime> TunnelManager<R> {
                         .serialize();
 
                     self.send_message(&hop, msg);
+                }
+            }
+            MessageType::TunnelGateway => {
+                match self.noise.handle_tunnel_gateway::<R>(
+                    &self.truncated_hash,
+                    message_id,
+                    expiration,
+                    payload,
+                ) {
+                    Ok((message, hop)) => self.send_message(&hop, message),
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        ?message_id,
+                        ?error,
+                        "failed to handle tunnel gateway message",
+                    ),
                 }
             }
             message => tracing::warn!(
