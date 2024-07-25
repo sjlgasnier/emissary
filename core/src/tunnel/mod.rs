@@ -241,10 +241,18 @@ impl<R: Runtime> TunnelManager<R> {
                 self.send_message(&hop, msg);
             }
             MessageType::ShortTunnelBuild => {
-                let (msg, hop) =
+                let (msg, hop, maybe_local_delivery) =
                     self.noise.create_short_tunnel_hop::<R>(&self.truncated_hash, payload).unwrap();
 
-                self.send_message(&hop, msg);
+                match maybe_local_delivery {
+                    Some(tunnel_id) =>
+                        match self.noise.handle_outbound_tunnel_build_reply::<R>(tunnel_id, msg) {
+                            Ok((msg, hop)) => self.send_message(&hop, msg),
+                            Err(error) =>
+                                tracing::error!(target: LOG_TARGET, "failed to handle outbound tunnel build reply"),
+                        },
+                    None => self.send_message(&hop, msg),
+                }
             }
             MessageType::TunnelData => {
                 let Some((message, hop)) = self.noise.handle_tunnel_data(
@@ -285,7 +293,7 @@ impl<R: Runtime> TunnelManager<R> {
                     ),
                 }
             }
-            MessageType::OutboundTunnelBuildReply => todo!("zzz"),
+            MessageType::OutboundTunnelBuildReply => unreachable!(),
             message => tracing::warn!(
                 target: LOG_TARGET,
                 ?message,

@@ -65,7 +65,7 @@ const AES256_KEY_LEN: usize = 32usize;
 const AES256_IV_LEN: usize = 16usize;
 
 /// Message type.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
     DatabaseStore,
     DatabaseLookup,
