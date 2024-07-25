@@ -58,14 +58,17 @@ pub struct Ntcp2Transport<R: Runtime> {
     /// NTCP2 connection listener.
     listener: Ntcp2Listener<R>,
 
-    /// Pending connections.
-    pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
+    /// Open connections.
+    open_connections: R::JoinSet<RouterId>,
 
     /// Pending connections.
     ///
     /// Connections which have been established successfully
     /// but are waiting approval/rejection from the `TransportManager`.
     pending_connections: HashMap<RouterId, Ntcp2Session<R>>,
+
+    /// Pending connections.
+    pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
 
     /// Session manager.
     session_manager: SessionManager<R>,
@@ -109,8 +112,9 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
         Ok(Ntcp2Transport {
             listener,
-            pending_handshakes: R::join_set(),
+            open_connections: R::join_set(),
             pending_connections: HashMap::new(),
+            pending_handshakes: R::join_set(),
             session_manager,
             waker: None,
         })
@@ -138,7 +142,9 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                     %router,
                     "ntcp2 session accepted, starting event loop",
                 );
-                R::spawn(session.run());
+
+                self.open_connections.push(session.run());
+                self.waker.take().map(|waker| waker.wake_by_ref());
             }
             None => {
                 tracing::warn!(
@@ -153,13 +159,13 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
 
     fn reject(&mut self, router: &RouterId) {
         match self.pending_connections.remove(router) {
-            Some(_) => {
+            Some(connection) => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     %router,
                     "ntcp2 session rejected, closing connection",
                 );
-                // TODO: call `session.close()`?
+                drop(connection);
             }
             None => {
                 tracing::warn!(
@@ -178,6 +184,15 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.waker = Some(cx.waker().clone());
+
+        if !self.open_connections.is_empty() {
+            match self.open_connections.poll_next_unpin(cx) {
+                Poll::Pending => {}
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(router)) =>
+                    return Poll::Ready(Some(TransportEvent::ConnectionClosed { router })),
+            }
+        }
 
         match self.listener.poll_next_unpin(cx) {
             Poll::Pending => {}

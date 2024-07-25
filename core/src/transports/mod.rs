@@ -30,7 +30,7 @@ use crate::{
 };
 
 use futures::{Stream, StreamExt};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -60,16 +60,20 @@ pub enum NetworkEvent {
     Message {},
 }
 
-// TODO: remove
 /// Transport event.
 #[derive(Debug)]
 pub enum TransportEvent {
-    /// Connection successfully established to remote peer.
+    /// Connection successfully established to router.
     ConnectionEstablished {
         /// `RouterInfo` for the connected peer.
         router_info: RouterInfo,
     },
-    ConnectionClosed {},
+
+    /// Connection closed to router.
+    ConnectionClosed {
+        /// Router ID.
+        router: RouterId,
+    },
 
     /// Failed to dial peer.
     ///
@@ -146,6 +150,20 @@ impl TransportService {
     /// If `router` is not reachable or the handshake fails, the error is reported
     /// via [`TransportService::poll_next()`].
     pub fn connect(&mut self, router: &RouterId) -> Result<(), ()> {
+        if self.routers.contains_key(router) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?router,
+                "tried to dial an already-connected router",
+            );
+            debug_assert!(false);
+
+            self.pending_events.push_back(InnerSubsystemEvent::ConnectionFailure {
+                router: router.clone(),
+            });
+            return Ok(());
+        }
+
         match self.router_storage.get(router) {
             Some(router_info) => self
                 .cmd_tx
@@ -233,6 +251,9 @@ pub struct TransportManager<R> {
     /// Router storage.
     router_storage: RouterStorage,
 
+    /// Connected routers.
+    routers: HashSet<RouterId>,
+
     // Runtime.
     runtime: R,
 
@@ -261,6 +282,7 @@ impl<R: Runtime> TransportManager<R> {
             local_router_info,
             local_signing_key,
             poll_index: 0usize,
+            routers: HashSet::new(),
             router_storage,
             runtime,
             subsystem_handle: SubsystemHandle::new(),
@@ -335,12 +357,34 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
+                    let router = router_info.identity().id();
+
                     tracing::debug!(
                         target: LOG_TARGET,
-                        router = %router_info.identity().id(),
+                        ?router,
                         "connection established",
                     );
-                    self.transports[index].accept(&router_info.identity().id());
+
+                    match self.routers.insert(router.clone()) {
+                        true => self.transports[index].accept(&router),
+                        false => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?router,
+                                "router already connected, rejecting",
+                            );
+                            self.transports[index].reject(&router);
+                        }
+                    }
+                }
+                Poll::Ready(Some(TransportEvent::ConnectionClosed { router })) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?router,
+                        "connection closed",
+                    );
+
+                    self.routers.remove(&router);
                 }
                 Poll::Ready(Some(event)) => {
                     tracing::warn!("unhandled event: {event:?}");
