@@ -820,14 +820,14 @@ impl RawI2NpMessageBuilder {
                 mut payload,
             } => {
                 let payload = payload.take().expect("to exist");
-                let expiration = expiration.take().expect("to exist") as u32;
+                let expiration = expiration.take().expect("to exist");
 
                 let mut out = vec![0u8; payload.len() + 16];
 
                 out[0] = message_type.expect("to exist").serialize();
                 out[1..5].copy_from_slice(&message_id.expect("to exist").to_be_bytes());
                 out[5..13].copy_from_slice(&expiration.to_be_bytes());
-                out[13..15].copy_from_slice(&payload.len().to_be_bytes());
+                out[13..15].copy_from_slice(&(payload.len() as u16).to_be_bytes());
                 out[15] = 0x00; // TODO: correct checksum
                 out[16..].copy_from_slice(&payload);
 
