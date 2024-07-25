@@ -520,7 +520,7 @@ dependencies = [
  "data-encoding",
  "ecb",
  "ed25519-dalek",
- "futures",
+ "futures-util",
  "hashbrown",
  "hmac",
  "lazy_static",
