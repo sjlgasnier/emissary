@@ -22,7 +22,7 @@ use crate::{
     i2np::RawI2npMessage,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
     router_storage::RouterStorage,
-    runtime::Runtime,
+    runtime::{MetricType, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
@@ -251,7 +251,7 @@ impl Stream for TransportService {
 /// Transport manager is responsible for connecting the higher-level subsystems
 /// together with enabled, lower-level transports and polling for polling those
 /// transports so that they can make progress.
-pub struct TransportManager<R> {
+pub struct TransportManager<R: Runtime> {
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
@@ -266,6 +266,9 @@ pub struct TransportManager<R> {
 
     /// Local signing key.
     local_signing_key: SigningPrivateKey,
+
+    /// Metrics handle.
+    metrics_handle: R::MetricsHandle,
 
     /// Poll index for transports.
     poll_index: usize,
@@ -294,6 +297,7 @@ impl<R: Runtime> TransportManager<R> {
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         router_storage: RouterStorage,
+        metrics_handle: R::MetricsHandle,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
 
@@ -303,6 +307,7 @@ impl<R: Runtime> TransportManager<R> {
             local_key,
             local_router_info,
             local_signing_key,
+            metrics_handle,
             poll_index: 0usize,
             routers: HashSet::new(),
             router_storage,
@@ -310,6 +315,13 @@ impl<R: Runtime> TransportManager<R> {
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
         }
+    }
+
+    /// Collect `TransportManager`-related metric counters, gauges and histograms.
+    pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
+        let metrics = Ntcp2Transport::<R>::metrics(metrics);
+
+        metrics
     }
 
     /// Register new subsystem to [`TransportManager`].

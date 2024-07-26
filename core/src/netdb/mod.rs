@@ -16,10 +16,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{primitives::RouterInfo, transports::TransportService};
+use crate::{
+    primitives::RouterInfo,
+    runtime::{MetricType, Runtime},
+    transports::TransportService,
+};
 
 use futures::{FutureExt, StreamExt};
 
+use alloc::vec::Vec;
 use core::{
     future::Future,
     pin::Pin,
@@ -30,20 +35,31 @@ use core::{
 const LOG_TARGET: &str = "emissary::netdb";
 
 /// Network database (NetDB).
-pub struct NetDb {
+pub struct NetDb<R: Runtime> {
     /// Transport service.
     service: TransportService,
+
+    /// Metrics handle.
+    metrics_handle: R::MetricsHandle,
 }
 
-impl NetDb {
+impl<R: Runtime> NetDb<R> {
     /// Create new [`NetDb`].
-    pub fn new(service: TransportService) -> Self {
+    pub fn new(service: TransportService, metrics_handle: R::MetricsHandle) -> Self {
         tracing::trace!(
             target: LOG_TARGET,
             "starting netdb",
         );
 
-        Self { service }
+        Self {
+            service,
+            metrics_handle,
+        }
+    }
+
+    /// Collect `NetDb`-related metric counters, gauges and histograms.
+    pub fn metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
+        metrics
     }
 
     fn on_connection_established(&mut self) -> crate::Result<()> {
@@ -59,7 +75,7 @@ impl NetDb {
     }
 }
 
-impl Future for NetDb {
+impl<R: Runtime> Future for NetDb<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

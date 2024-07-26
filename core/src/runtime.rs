@@ -82,7 +82,7 @@ pub trait Histogram {
     fn record(&mut self, record: f64);
 }
 
-pub trait MetricsHandle: Clone + Send + Sync {
+pub trait MetricsHandle: Clone + Send + Sync + Unpin {
     fn counter(&self, name: &'static str) -> impl Counter;
     fn gauge(&self, name: &'static str) -> impl Gauge;
     fn histogram(&self, name: &'static str) -> impl Histogram;
