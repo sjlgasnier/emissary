@@ -21,7 +21,7 @@
 use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 use core::{
     future::Future,
     net::SocketAddr,
@@ -69,10 +69,63 @@ pub trait JoinSet<T>: Stream<Item = T> + Unpin {
         F::Output: Send;
 }
 
+pub trait Counter {
+    fn increment(&mut self, value: usize);
+}
+
+pub trait Gauge {
+    fn increment(&mut self, value: usize);
+    fn decrement(&mut self, value: usize);
+}
+
+pub trait Histogram {
+    fn record(&mut self, record: f64);
+}
+
+pub trait MetricsHandle: Clone + Send + Sync + Unpin {
+    fn counter(&self, name: &'static str) -> impl Counter;
+    fn gauge(&self, name: &'static str) -> impl Gauge;
+    fn histogram(&self, name: &'static str) -> impl Histogram;
+}
+
+/// Metric type.
+pub enum MetricType {
+    /// Counter.
+    Counter {
+        /// Counter name.
+        name: &'static str,
+
+        /// Counter description.
+        description: &'static str,
+    },
+
+    /// Gauge.
+    Gauge {
+        /// Gauge name.
+        name: &'static str,
+
+        /// Gauge description.
+        description: &'static str,
+    },
+
+    /// Histogram
+    Histogram {
+        /// Histogram name.
+        name: &'static str,
+
+        /// Histogram description.
+        description: &'static str,
+
+        /// Buckets.
+        buckets: Vec<f64>,
+    },
+}
+
 pub trait Runtime: Clone + Unpin + Send + 'static {
     type TcpStream: TcpStream;
     type TcpListener: TcpListener<Self::TcpStream>;
     type JoinSet<T: Send + 'static>: JoinSet<T>;
+    type MetricsHandle: MetricsHandle;
 
     /// Spawn `future` in the background.
     fn spawn<F>(future: F)
@@ -92,4 +145,7 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     /// For `tokio` this would be `tokio::task::join_set::JoinSet` and
     /// for `futures` this would be `future::stream::FuturesUnordered`
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T>;
+
+    /// Register `metrics` and return handle for registering metrics.
+    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle;
 }

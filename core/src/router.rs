@@ -21,7 +21,7 @@ use crate::{
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
     router_storage::RouterStorage,
-    runtime::Runtime,
+    runtime::{MetricType, Runtime},
     subsystem::SubsystemKind,
     transports::TransportManager,
     tunnel::TunnelManager,
@@ -83,6 +83,15 @@ impl<R: Runtime> Router<R> {
             "start emissary",
         );
 
+        // collect metrics from all subsystems, register them and acquire metrics handle
+        let metrics_handle = {
+            let metrics = TransportManager::<R>::metrics(Vec::new());
+            let metrics = TunnelManager::<R>::metrics(metrics);
+            let metrics = NetDb::<R>::metrics(metrics);
+
+            R::register_metrics(metrics)
+        };
+
         // create transport manager and initialize & start enabled transports
         //
         // note: order of initialization is important
@@ -92,12 +101,13 @@ impl<R: Runtime> Router<R> {
             local_signing_key,
             local_router_info.clone(), // TODO: zzz
             router_storage,
+            metrics_handle.clone(),
         );
 
         // initialize and start netdb
         {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
-            let netdb = NetDb::new(transport_service);
+            let netdb = NetDb::<R>::new(transport_service, metrics_handle.clone());
 
             R::spawn(netdb);
         }
@@ -110,6 +120,7 @@ impl<R: Runtime> Router<R> {
                 local_key,
                 local_router_info.identity().hash()[..16].to_vec(),
                 local_router_id,
+                metrics_handle,
             );
 
             R::spawn(tunnel_manager);

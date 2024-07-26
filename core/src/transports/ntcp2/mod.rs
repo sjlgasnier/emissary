@@ -21,7 +21,7 @@ use crate::{
         base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     primitives::{RouterAddress, RouterId, RouterInfo, Str, TransportKind},
-    runtime::{JoinSet, Runtime, TcpListener, TcpStream},
+    runtime::{JoinSet, MetricType, Runtime, TcpListener, TcpStream},
     subsystem::SubsystemHandle,
     transports::{
         ntcp2::{
@@ -118,6 +118,11 @@ impl<R: Runtime> Ntcp2Transport<R> {
             session_manager,
             waker: None,
         })
+    }
+
+    /// Collect `Ntcp2Transport`-related metric counters, gauges and histograms.
+    pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
+        metrics
     }
 }
 

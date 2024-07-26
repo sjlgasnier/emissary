@@ -23,7 +23,7 @@ use crate::{
         I2NP_SHORT, I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo},
-    runtime::Runtime,
+    runtime::{MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::noise::Noise,
@@ -64,6 +64,9 @@ pub struct TunnelManager<R: Runtime> {
     /// Local router ID.
     local_router_id: RouterId,
 
+    /// Metrics handle.
+    metrics_handle: R::MetricsHandle,
+
     /// Noise key context.
     noise: Noise,
 
@@ -87,6 +90,7 @@ impl<R: Runtime> TunnelManager<R> {
         local_key: StaticPrivateKey,
         truncated_hash: Vec<u8>,
         local_router_id: RouterId,
+        metrics_handle: R::MetricsHandle,
     ) -> Self {
         tracing::trace!(
             target: LOG_TARGET,
@@ -99,8 +103,14 @@ impl<R: Runtime> TunnelManager<R> {
             routers: HashMap::new(),
             service,
             truncated_hash,
+            metrics_handle,
             _marker: Default::default(),
         }
+    }
+
+    /// Collect tunnel-related metric counters, gauges and histograms.
+    pub fn metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
+        metrics
     }
 
     fn on_connection_established(&mut self, router: RouterId) {
