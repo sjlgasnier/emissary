@@ -16,8 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use emissary::runtime::{AsyncRead, AsyncWrite, JoinSet, Runtime, TcpListener, TcpStream};
+use emissary::runtime::{
+    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, JoinSet, MetricType, MetricsHandle, Runtime,
+    TcpListener, TcpStream,
+};
 use futures::{AsyncRead as _, AsyncWrite as _, Stream};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use rand_core::{CryptoRng, RngCore};
 use tokio::{net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -158,10 +163,59 @@ impl<T: Send + 'static> Stream for TokioJoinSet<T> {
     }
 }
 
+#[derive(Clone)]
+struct TokioMetricsCounter(&'static str);
+
+impl Counter for TokioMetricsCounter {
+    fn increment(&mut self, value: usize) {
+        counter!(self.0).increment(value as u64);
+    }
+}
+
+#[derive(Clone)]
+struct TokioMetricsGauge(&'static str);
+
+impl Gauge for TokioMetricsGauge {
+    fn increment(&mut self, value: usize) {
+        gauge!(self.0).increment(value as f64);
+    }
+
+    fn decrement(&mut self, value: usize) {
+        gauge!(self.0).decrement(value as f64);
+    }
+}
+
+#[derive(Clone)]
+struct TokioMetricsHistogram(&'static str);
+
+impl Histogram for TokioMetricsHistogram {
+    fn record(&mut self, record: f64) {
+        histogram!(self.0).record(record);
+    }
+}
+
+#[derive(Clone)]
+pub struct TokioMetricsHandle;
+
+impl MetricsHandle for TokioMetricsHandle {
+    fn counter(&self, name: &'static str) -> impl Counter {
+        TokioMetricsCounter(name)
+    }
+
+    fn gauge(&self, name: &'static str) -> impl Gauge {
+        TokioMetricsGauge(name)
+    }
+
+    fn histogram(&self, name: &'static str) -> impl Histogram {
+        TokioMetricsHistogram(name)
+    }
+}
+
 impl Runtime for TokioRuntime {
     type TcpStream = TokioTcpStream;
     type TcpListener = TokioTcpListener;
     type JoinSet<T: Send + 'static> = TokioJoinSet<T>;
+    type MetricsHandle = TokioMetricsHandle;
 
     fn spawn<F>(future: F)
     where
@@ -181,5 +235,37 @@ impl Runtime for TokioRuntime {
 
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T> {
         TokioJoinSet(task::JoinSet::<T>::new())
+    }
+
+    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
+        let builder = PrometheusBuilder::new()
+            .with_http_listener("127.0.0.1:12842".parse::<SocketAddr>().expect(""));
+
+        metrics
+            .into_iter()
+            .fold(builder, |builder, metric| match metric {
+                MetricType::Counter { name, description } => {
+                    describe_counter!(name, description);
+                    builder
+                }
+                MetricType::Gauge { name, description } => {
+                    describe_gauge!(name, description);
+                    builder
+                }
+                MetricType::Histogram {
+                    name,
+                    description,
+                    buckets,
+                } => {
+                    describe_histogram!(name, description);
+                    builder
+                        .set_buckets_for_metric(Matcher::Full(name.to_string()), &buckets)
+                        .expect("to succeed")
+                }
+            })
+            .install()
+            .expect("to succeed");
+
+        TokioMetricsHandle {}
     }
 }
