@@ -31,7 +31,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::{pin, Pin},
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::{Duration, SystemTime},
 };
 
@@ -135,7 +135,7 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
     }
 }
 
-pub struct TokioJoinSet<T>(task::JoinSet<T>);
+pub struct TokioJoinSet<T>(task::JoinSet<T>, Option<Waker>);
 
 impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
     fn is_empty(&self) -> bool {
@@ -148,6 +148,7 @@ impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
         F::Output: Send,
     {
         let _ = self.0.spawn(future);
+        self.1.as_mut().map(|waker| waker.wake_by_ref());
     }
 }
 
@@ -155,10 +156,13 @@ impl<T: Send + 'static> Stream for TokioJoinSet<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match futures::ready!(self.0.poll_join_next(cx)) {
-            // TODO: this is not correct, `None` can be returned if set is empty
-            None | Some(Err(_)) => Poll::Ready(None),
-            Some(Ok(value)) => Poll::Ready(Some(value)),
+        match self.0.poll_join_next(cx) {
+            Poll::Pending | Poll::Ready(None) => {
+                self.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Poll::Ready(Some(Err(_))) => Poll::Ready(None),
+            Poll::Ready(Some(Ok(value))) => Poll::Ready(Some(value)),
         }
     }
 }
@@ -234,7 +238,7 @@ impl Runtime for TokioRuntime {
     }
 
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T> {
-        TokioJoinSet(task::JoinSet::<T>::new())
+        TokioJoinSet(task::JoinSet::<T>::new(), None)
     }
 
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
