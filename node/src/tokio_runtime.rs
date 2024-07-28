@@ -20,7 +20,7 @@ use emissary::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, JoinSet, MetricType, MetricsHandle, Runtime,
     TcpListener, TcpStream,
 };
-use futures::{AsyncRead as _, AsyncWrite as _, Stream};
+use futures::{future::BoxFuture, AsyncRead as _, AsyncWrite as _, Stream};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use rand_core::{CryptoRng, RngCore};
@@ -271,5 +271,9 @@ impl Runtime for TokioRuntime {
             .expect("to succeed");
 
         TokioMetricsHandle {}
+    }
+
+    fn delay(duration: Duration) -> BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(duration))
     }
 }
