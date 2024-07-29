@@ -43,7 +43,7 @@ use core::{
     marker::PhantomData,
     pin::Pin,
     str::FromStr,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 mod listener;
@@ -72,6 +72,9 @@ pub struct Ntcp2Transport<R: Runtime> {
 
     /// Session manager.
     session_manager: SessionManager<R>,
+
+    /// Waker.
+    waker: Option<Waker>,
 }
 
 impl<R: Runtime> Ntcp2Transport<R> {
@@ -113,6 +116,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
             pending_connections: HashMap::new(),
             pending_handshakes: R::join_set(),
             session_manager,
+            waker: None,
         })
     }
 
@@ -132,6 +136,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
 
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
+        self.waker.as_mut().map(|waker| waker.wake_by_ref());
     }
 
     fn accept(&mut self, router: &RouterId) {
@@ -182,6 +187,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
     type Item = TransportEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.waker = Some(cx.waker().clone());
+
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
