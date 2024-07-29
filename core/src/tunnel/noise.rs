@@ -26,7 +26,7 @@ use crate::{
     crypto::{
         aes::{cbc, ecb},
         base64_encode,
-        chachapoly::ChaChaPoly,
+        chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
         sha256::Sha256,
         EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
@@ -374,6 +374,7 @@ impl Noise {
         record[49] = 0x00;
         record[201] = 0x00; // accept
 
+        // TODO: use the loop below for this
         let tag = ChaChaPoly::with_nonce(&reply_key, index as u64)
             .encrypt_with_ad(&new_state, &mut record[0..202])
             .unwrap();
@@ -386,10 +387,7 @@ impl Noise {
                 continue;
             }
 
-            let encrypted = ChaChaPoly::with_nonce(&reply_key, index_new as u64)
-                .encrypt(&mut record[0..218])
-                .unwrap();
-            record[..218].copy_from_slice(&encrypted[..218]);
+            ChaCha::with_nonce(&reply_key, index_new as u64).encrypt(&mut record[..218]);
         }
 
         if tunnel_gateway {
