@@ -149,6 +149,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                 );
 
                 self.open_connections.push(session.run());
+                self.waker.as_mut().map(|waker| waker.wake_by_ref());
             }
             None => {
                 tracing::warn!(
