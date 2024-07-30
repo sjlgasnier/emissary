@@ -136,7 +136,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
 
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
-        self.waker.take().map(|waker| waker.wake());
+        self.waker.as_mut().map(|waker| waker.wake_by_ref());
     }
 
     fn accept(&mut self, router: &RouterId) {
@@ -149,7 +149,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                 );
 
                 self.open_connections.push(session.run());
-                self.waker.take().map(|waker| waker.wake_by_ref());
+                self.waker.as_mut().map(|waker| waker.wake_by_ref());
             }
             None => {
                 tracing::warn!(
@@ -190,13 +190,11 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.waker = Some(cx.waker().clone());
 
-        if !self.open_connections.is_empty() {
-            match self.open_connections.poll_next_unpin(cx) {
-                Poll::Pending => {}
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(router)) =>
-                    return Poll::Ready(Some(TransportEvent::ConnectionClosed { router })),
-            }
+        match self.open_connections.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some(router)) =>
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router })),
         }
 
         match self.listener.poll_next_unpin(cx) {

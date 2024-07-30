@@ -19,8 +19,12 @@
 use crate::Error;
 
 use aes::cipher::generic_array::GenericArray;
+use chacha20::{
+    cipher::{StreamCipher, StreamCipherSeek},
+    ChaCha20,
+};
 use chacha20poly1305::{
-    aead::{Aead, AeadInPlace, AeadMutInPlace, KeyInit},
+    aead::{Aead, AeadInPlace, AeadMutInPlace},
     consts::U12,
     ChaCha20Poly1305,
 };
@@ -78,7 +82,10 @@ impl ChaChaPoly {
         let key = GenericArray::from(key);
 
         Self {
-            cipher: ChaCha20Poly1305::new(&key),
+            cipher: {
+                use chacha20poly1305::aead::KeyInit;
+                ChaCha20Poly1305::new(&key)
+            },
             nonce: Nonce::new(0u64),
         }
     }
@@ -89,7 +96,10 @@ impl ChaChaPoly {
         let key = GenericArray::from(key);
 
         Self {
-            cipher: ChaCha20Poly1305::new(&key),
+            cipher: {
+                use chacha20poly1305::aead::KeyInit;
+                ChaCha20Poly1305::new(&key)
+            },
             nonce: Nonce::new(nonce),
         }
     }
@@ -131,6 +141,8 @@ impl ChaChaPoly {
     /// Decrypt `ciphertext` in place, passing in associated data for authentication.
     ///
     /// Return authentication tag on sucess.
+    //
+    // TODO: change `ciphertext` type to something more convenient
     pub fn decrypt_with_ad(
         &mut self,
         associated_data: &[u8],
@@ -143,6 +155,45 @@ impl ChaChaPoly {
                 ciphertext,
             )
             .map_err(From::from)
+    }
+}
+
+pub struct ChaCha {
+    /// Nonce.
+    nonce: Nonce,
+
+    /// Internal cipher.
+    cipher: ChaCha20,
+}
+
+impl ChaCha {
+    /// Create new [`ChachaPoly`] instance with a custom `nonce`.
+    pub fn with_nonce(key: &[u8], nonce: u64) -> Self {
+        let key: [u8; 32] = key.try_into().expect("valid chacha key");
+        let key = GenericArray::from(key);
+        let mut nonce = Nonce::new(nonce);
+        let next_nonce = nonce.next().expect("to succeed");
+
+        Self {
+            cipher: {
+                use chacha20::cipher::KeyIvInit;
+
+                let mut cipher = ChaCha20::new(&key, &next_nonce);
+                cipher.seek(64);
+                cipher
+            },
+            nonce,
+        }
+    }
+
+    /// Encrypt `plaintext` in place.
+    pub fn encrypt(&mut self, plaintext: &mut [u8]) {
+        self.cipher.apply_keystream(plaintext);
+    }
+
+    /// Dencrypt `ciphertext` in place.
+    pub fn decrypt(&mut self, ciphertext: &mut [u8]) {
+        self.cipher.apply_keystream(ciphertext)
     }
 }
 
@@ -174,5 +225,17 @@ mod tests {
 
         assert_eq!(nonce.next(), Some(GenericArray::from(array)));
         assert_eq!(nonce.next(), None);
+    }
+
+    #[test]
+    fn test_chacha20_and_chacha20poly1305() {
+        let key = [0xaa; 32];
+        let mut plaintext = [0xbb; 64];
+
+        let ciphertext = ChaChaPoly::with_nonce(&key, 1337).encrypt(&plaintext).unwrap();
+
+        ChaCha::with_nonce(&key, 1337u64).encrypt(&mut plaintext);
+
+        assert_eq!(ciphertext[..ciphertext.len() - 16], plaintext);
     }
 }

@@ -18,7 +18,7 @@
 
 // TODO: documentation
 
-use futures::Stream;
+use futures::{future::BoxFuture, Stream};
 use rand_core::{CryptoRng, RngCore};
 
 use alloc::{string::String, vec::Vec};
@@ -148,4 +148,7 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
 
     /// Register `metrics` and return handle for registering metrics.
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle;
+
+    /// Return future which blocks for `duration` before returning.
+    fn delay(duration: Duration) -> BoxFuture<'static, ()>;
 }

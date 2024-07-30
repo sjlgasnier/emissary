@@ -100,7 +100,7 @@ impl<R: Runtime> Router<R> {
             local_key.clone(),
             local_signing_key,
             local_router_info.clone(), // TODO: zzz
-            router_storage,
+            router_storage.clone(),
             metrics_handle.clone(),
         );
 
@@ -119,8 +119,10 @@ impl<R: Runtime> Router<R> {
                 transport_service,
                 local_key,
                 local_router_info.identity().hash()[..16].to_vec(),
+                local_router_info.identity().hash().to_vec(),
                 local_router_id,
                 metrics_handle,
+                router_storage,
             );
 
             R::spawn(tunnel_manager);

@@ -317,6 +317,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 .collect::<Vec<_>>();
 
                             // TODO: no unwraps
+                            // TODO: if call fails, cache the message and break out of the loop
                             this.subsystem_handle.dispatch_messages(messages).unwrap();
                             this.read_state = ReadState::ReadSize { offset: 0usize };
                         }
