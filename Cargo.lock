@@ -632,6 +632,7 @@ name = "emissary-core"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "bytes",
  "cbc",
  "chacha20",
  "chacha20poly1305",

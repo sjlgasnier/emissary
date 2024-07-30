@@ -59,4 +59,18 @@ impl RouterStorage {
     pub fn get(&self, router: &RouterId) -> Option<RouterInfo> {
         self.routers.read().get(router).map(|router_info| router_info.clone())
     }
+
+    // TODO: zzz
+    pub fn get_routers(
+        &self,
+        num_routers: usize,
+        filter: impl Fn(&RouterId, &RouterInfo) -> bool,
+    ) -> Vec<RouterInfo> {
+        let this = self.routers.read();
+
+        this.iter()
+            .filter_map(|(router, info)| filter(router, info).then_some(info.clone()))
+            .take(num_routers)
+            .collect()
+    }
 }

@@ -26,6 +26,7 @@ use crate::{
     subsystem::SubsystemKind,
 };
 
+use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -187,6 +188,14 @@ impl HopRole {
             }
         }
     }
+
+    fn into_u8(self) -> u8 {
+        match self {
+            HopRole::InboundGateway => 0x80,
+            HopRole::OutboundEndpoint => 0x40,
+            HopRole::Intermediary => 0x00,
+        }
+    }
 }
 
 /// Tunnel build record.
@@ -325,6 +334,149 @@ impl<'a> TunnelBuildRecord<'a> {
     }
 }
 
+#[derive(Default)]
+pub struct ShortTunnelBuildRequestBuilder {
+    records: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    // TODO: ...
+    full_record: Option<Vec<u8>>,
+}
+
+impl ShortTunnelBuildRequestBuilder {
+    pub fn with_record(
+        mut self,
+        truncated_hash: Vec<u8>,
+        public_key: Vec<u8>,
+        record: Vec<u8>,
+    ) -> Self {
+        self.records.push((truncated_hash, public_key, record));
+        self
+    }
+
+    pub fn with_full_record(mut self, record: Vec<u8>) -> Self {
+        self.full_record = Some(record);
+        self
+    }
+
+    pub fn serialize(mut self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(218 * (1 + self.records.len()));
+
+        out.put_u8((1 + self.records.len()) as u8);
+
+        for (hash, public_key, record) in self.records {
+            out.put_slice(&hash);
+            out.put_slice(&public_key);
+            out.put_slice(&record);
+        }
+
+        if let Some(record) = self.full_record.take() {
+            out.put_slice(&record);
+        }
+
+        out.freeze().to_vec()
+    }
+}
+
+#[derive(Default)]
+pub struct ShortTunnelBuildRecordBuilder {
+    tunnel_id: Option<u32>,
+    next_tunnel_id: Option<u32>,
+    next_router_hash: Option<Vec<u8>>,
+    role: Option<HopRole>,
+    request_time: Option<u32>,
+    request_expiration: Option<u32>,
+    next_message_id: Option<u32>,
+}
+
+impl ShortTunnelBuildRecordBuilder {
+    pub fn with_tunnel_id(mut self, tunnel_id: u32) -> Self {
+        self.tunnel_id = Some(tunnel_id);
+        self
+    }
+
+    pub fn with_next_tunnel_id(mut self, next_tunnel_id: u32) -> Self {
+        self.next_tunnel_id = Some(next_tunnel_id);
+        self
+    }
+
+    pub fn with_next_router_hash(mut self, next_router_hash: Vec<u8>) -> Self {
+        self.next_router_hash = Some(next_router_hash);
+        self
+    }
+
+    pub fn with_role(mut self, role: HopRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    pub fn with_request_time(mut self, request_time: u32) -> Self {
+        self.request_time = Some(request_time);
+        self
+    }
+
+    pub fn with_request_expiration(mut self, request_expiration: u32) -> Self {
+        self.request_expiration = Some(request_expiration);
+        self
+    }
+
+    pub fn with_next_message_id(mut self, next_message_id: u32) -> Self {
+        self.next_message_id = Some(next_message_id);
+        self
+    }
+
+    pub fn serialize(self) -> Vec<u8> {
+        let mut out = vec![0u8; 154];
+        let mut offset = 0;
+
+        out[offset..offset + 4].copy_from_slice(&self.tunnel_id.expect("to exist").to_be_bytes());
+        offset += 4;
+
+        out[offset..offset + 4]
+            .copy_from_slice(&self.next_tunnel_id.expect("to exist").to_be_bytes());
+        offset += 4;
+
+        out[offset..offset + ROUTER_HASH_LEN]
+            .copy_from_slice(&self.next_router_hash.expect("to exist"));
+        offset += ROUTER_HASH_LEN;
+
+        // flag
+        out[offset] = self.role.expect("to exist").into_u8();
+        offset += 1;
+
+        // reserved
+        out[offset] = 0u8;
+        offset += 1;
+
+        out[offset] = 0u8;
+        offset += 1;
+
+        // encryption type
+        out[offset] = 0u8;
+        offset += 1;
+
+        out[offset..offset + 4]
+            .copy_from_slice(&self.request_time.expect("to exist").to_be_bytes());
+        offset += 4;
+
+        out[offset..offset + 4]
+            .copy_from_slice(&self.request_expiration.expect("to exist").to_be_bytes());
+        offset += 4;
+
+        out[offset..offset + 4]
+            .copy_from_slice(&self.next_message_id.expect("to exist").to_be_bytes());
+        offset += 4;
+
+        // options
+        out[offset..offset + 2].copy_from_slice(&0u16.to_le_bytes());
+        offset += 2;
+
+        let len = out.len();
+        out[offset..len].fill(3u8); // TODO: correct padding
+        offset += len - offset;
+
+        out
+    }
+}
+
 #[derive(Debug)]
 pub struct ShortTunnelBuildRecord<'a> {
     tunnel_id: u32,
@@ -336,7 +488,7 @@ pub struct ShortTunnelBuildRecord<'a> {
     request_time: u32,
     request_expiration: u32,
     next_message_id: u32,
-    options: Mapping,
+    options: Vec<Mapping>,
     padding: &'a [u8],
 }
 
@@ -351,7 +503,7 @@ impl<'a> ShortTunnelBuildRecord<'a> {
         let (rest, request_time) = be_u32(rest)?;
         let (rest, request_expiration) = be_u32(rest)?;
         let (rest, next_message_id) = be_u32(rest)?;
-        let (rest, options) = Mapping::parse_frame(rest)?;
+        let (rest, options) = Mapping::parse_multi_frame(rest)?;
         let (rest, padding) = take(input.len() - rest.len())(rest)?; // TODO: correct?
         let role = HopRole::from_u8(flags).ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
@@ -414,9 +566,61 @@ impl<'a> ShortTunnelBuildRecord<'a> {
 }
 
 #[derive(Debug)]
+pub struct TunnelBuildReplyRecord<'a> {
+    pub truncated_hash: &'a [u8],
+    pub status: u8,
+}
+
+impl<'a> TunnelBuildReplyRecord<'a> {
+    fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        let (rest, truncated_hash) = take(16usize)(input)?;
+        let (rest, _ignore) = take(185usize)(rest)?;
+        let (rest, status) = be_u8(rest)?;
+
+        assert!(rest.is_empty());
+
+        Ok((
+            rest,
+            Self {
+                truncated_hash,
+                status,
+            },
+        ))
+    }
+
+    pub fn parse(input: &'a [u8]) -> Option<Self> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+}
+
+#[derive(Debug)]
 pub struct OutboundTunnelBuildReply<'a> {
-    /// Data.
-    data: &'a [u8],
+    pub records: Vec<TunnelBuildReplyRecord<'a>>,
+}
+
+impl<'a> OutboundTunnelBuildReply<'a> {
+    pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        assert!(input.len() % 218 == 0);
+
+        let records = input
+            .chunks(218)
+            .try_fold(
+                Vec::<TunnelBuildReplyRecord<'a>>::new(),
+                |mut records, record| {
+                    let record = TunnelBuildReplyRecord::parse_frame(record).ok()?.1;
+                    records.push(record);
+
+                    Some(records)
+                },
+            )
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((&[], Self { records }))
+    }
+
+    pub fn parse(input: &'a [u8]) -> Option<Self> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
 }
 
 #[derive(Debug)]

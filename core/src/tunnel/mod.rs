@@ -23,6 +23,7 @@ use crate::{
         I2NP_SHORT, I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo},
+    router_storage::RouterStorage,
     runtime::{MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
@@ -40,8 +41,10 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use pool::TunnelPoolManager;
 
 mod noise;
+mod pool;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
@@ -79,6 +82,8 @@ pub struct TunnelManager<R: Runtime> {
     /// Truncated router hash.
     truncated_hash: Vec<u8>,
 
+    record: Option<(u32, RouterId, Vec<u8>)>,
+
     /// Marker for `Runtime`
     _marker: PhantomData<R>,
 }
@@ -89,17 +94,23 @@ impl<R: Runtime> TunnelManager<R> {
         service: TransportService,
         local_key: StaticPrivateKey,
         truncated_hash: Vec<u8>,
+        hash: Vec<u8>,
         local_router_id: RouterId,
         metrics_handle: R::MetricsHandle,
+        routers: RouterStorage,
     ) -> Self {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",
         );
 
+        let mut noise = Noise::new::<R>(local_key);
+        let hops = routers.get_routers(2, |_, _| true);
+
         Self {
+            record: Some(noise.create_short_tunnel_build_request_outbound::<R>(hops, hash)),
             local_router_id,
-            noise: Noise::new::<R>(local_key),
+            noise,
             routers: HashMap::new(),
             service,
             truncated_hash,
@@ -317,6 +328,11 @@ impl<R: Runtime> Future for TunnelManager<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some((tunnel, router, message)) = self.record.take() {
+            tracing::error!("sending record");
+            self.send_message(&router, message);
+        }
+
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,

@@ -141,6 +141,8 @@ impl ChaChaPoly {
     /// Decrypt `ciphertext` in place, passing in associated data for authentication.
     ///
     /// Return authentication tag on sucess.
+    //
+    // TODO: change `ciphertext` type to something more convenient
     pub fn decrypt_with_ad(
         &mut self,
         associated_data: &[u8],
