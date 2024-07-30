@@ -30,6 +30,9 @@ use core::{
     time::Duration,
 };
 
+#[cfg(test)]
+pub mod mock;
+
 pub trait AsyncRead {
     fn poll_read(
         self: Pin<&mut Self>,
