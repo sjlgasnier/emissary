@@ -147,6 +147,7 @@ pub struct Noise {
     tunnels: HashMap<u32, TunnelHop>,
 
     pending_tunnels: HashMap<u32, PendingTunnel>,
+    pending_messages: HashMap<u32, u32>,
 
     /// Random bytes used for tunnel data padding.
     padding_bytes: [u8; 1028],
@@ -192,6 +193,7 @@ impl Noise {
             tunnels: HashMap::new(),
             pending_tunnels: HashMap::new(),
             padding_bytes,
+            pending_messages: HashMap::new(),
         }
     }
 
@@ -510,13 +512,171 @@ impl Noise {
         (recv_tunnel_id, hops[0].identity().id(), message)
     }
 
+    pub fn create_short_tunnel_build_request_inbound<R: Runtime>(
+        &mut self,
+        hops: Vec<RouterInfo>,
+        our_hash: Vec<u8>,
+    ) -> (u32, RouterId, Vec<u8>) {
+        assert!(hops.len() == 2);
+
+        let first_tunnel_id = R::rng().next_u32();
+        let second_tunnel_id = R::rng().next_u32();
+        let recv_tunnel_id = R::rng().next_u32();
+        let message_id = R::rng().next_u32();
+        let time_now = R::time_since_epoch().as_secs() as u32;
+        let expiration = (R::time_since_epoch() + Duration::from_secs(180)).as_secs() as u32;
+
+        tracing::info!("tunnels: {first_tunnel_id} -> {second_tunnel_id} -> {recv_tunnel_id}");
+        tracing::info!("message id = {message_id}");
+
+        // first record
+        let mut record1 = ShortTunnelBuildRecordBuilder::default()
+            .with_tunnel_id(first_tunnel_id)
+            .with_next_tunnel_id(second_tunnel_id)
+            .with_next_router_hash(hops[1].identity().hash().to_vec())
+            .with_role(HopRole::InboundGateway)
+            .with_request_time(time_now)
+            .with_request_expiration(expiration)
+            .with_next_message_id(message_id) // TODO: different for every message?
+            .serialize();
+
+        // second record
+        let mut record2 = ShortTunnelBuildRecordBuilder::default()
+            .with_tunnel_id(second_tunnel_id)
+            .with_next_tunnel_id(recv_tunnel_id)
+            .with_next_router_hash(our_hash)
+            .with_role(HopRole::Intermediary)
+            .with_request_time(time_now)
+            .with_request_expiration(expiration)
+            .with_next_message_id(message_id) // TODO: different for every message?
+            .serialize();
+
+        // derive ck/aead/tunnel keys
+        let (pub1, aead1, (reply_key1, layer_key1, iv_key1, else_key1, garlic_key1, garlic_tag1)) = {
+            let key1 = EphemeralPrivateKey::new(R::rng());
+            let pub1 = key1.public_key().to_vec();
+            let (ck, aead) = self.derive_keys_remote(hops[0].identity().static_key(), key1);
+
+            (pub1, aead, self.derive_tunnel_keys(ck))
+        };
+
+        let (pub2, aead2, (reply_key2, layer_key2, iv_key2, else_key2, garlic_key2, garlic_tag2)) = {
+            let key2 = EphemeralPrivateKey::new(R::rng());
+            let pub2 = key2.public_key().to_vec();
+            let (ck, aead) = self.derive_keys_remote(hops[1].identity().static_key(), key2);
+
+            (pub2, aead, self.derive_tunnel_keys(ck))
+        };
+
+        let state1 = {
+            let state = Sha256::new()
+                .update(&self.outbound_state)
+                .update(hops[0].identity().static_key().to_bytes())
+                .finalize();
+
+            Sha256::new().update(&state).update(&pub1).finalize()
+        };
+
+        let state2 = {
+            let state = Sha256::new()
+                .update(&self.outbound_state)
+                .update(hops[1].identity().static_key().to_bytes())
+                .finalize();
+
+            Sha256::new().update(&state).update(&pub2).finalize()
+        };
+
+        // encrypt records and append tags into them
+        let tag1 = ChaChaPoly::new(&aead1).encrypt_with_ad(&state1, &mut record1).unwrap();
+        record1.extend_from_slice(&tag1);
+
+        let state1 = Sha256::new().update(&state1).update(&record1).finalize();
+
+        let tag2 = ChaChaPoly::new(&aead2).encrypt_with_ad(&state2, &mut record2).unwrap();
+        record2.extend_from_slice(&tag2);
+
+        let state2 = Sha256::new().update(&state2).update(&record2).finalize();
+
+        // decrypt record2 with reply_key1
+        let mut record2 = {
+            let mut record = hops[1].identity().hash()[..16].to_vec();
+            record.extend_from_slice(&pub2);
+            record.extend_from_slice(&record2);
+
+            record
+        };
+
+        ChaCha::with_nonce(&reply_key1, 1u64).decrypt(&mut record2);
+
+        let short_build_request = ShortTunnelBuildRequestBuilder::default()
+            .with_record(hops[0].identity().hash()[..16].to_vec(), pub1, record1)
+            .with_full_record(record2)
+            .serialize();
+
+        let message = RawI2NpMessageBuilder::short()
+            .with_message_type(MessageType::ShortTunnelBuild)
+            .with_message_id(message_id)
+            .with_expiration(expiration)
+            .with_payload(short_build_request)
+            .serialize();
+
+        let mut pending_tunnel = PendingTunnel {
+            inbound: true,
+            hops: VecDeque::new(),
+        };
+
+        pending_tunnel.hops.push_front((
+            first_tunnel_id,
+            TunnelHopNew {
+                role: HopRole::InboundGateway,
+                index: 0usize,
+                reply_key: reply_key1,
+                tunnel_id: first_tunnel_id,
+                next_tunnel_id: second_tunnel_id,
+                next_router_id: hops[1].identity().id(),
+                layer_key: layer_key1,
+                iv_key: else_key1,
+                state: state1,
+                garlic_key: vec![],
+                garlic_tag: vec![],
+            },
+        ));
+        pending_tunnel.hops.push_front((
+            second_tunnel_id,
+            TunnelHopNew {
+                role: HopRole::Intermediary,
+                index: 1usize,
+                reply_key: reply_key2,
+                tunnel_id: second_tunnel_id,
+                next_tunnel_id: recv_tunnel_id,
+                next_router_id: hops[1].identity().id(),
+                layer_key: layer_key2,
+                iv_key: iv_key2,
+                state: state2,
+                garlic_key: garlic_key2,
+                garlic_tag: garlic_tag2,
+            },
+        ));
+
+        self.pending_tunnels.insert(recv_tunnel_id, pending_tunnel);
+        self.pending_messages.insert(message_id, recv_tunnel_id);
+
+        (recv_tunnel_id, hops[0].identity().id(), message)
+    }
+
     /// TODO: explain
     // TODO: verify source of this message is the same as last message
     pub fn create_short_tunnel_hop<R: Runtime>(
         &mut self,
         truncated: &Vec<u8>,
         mut payload: Vec<u8>,
+        message_id: u32,
     ) -> Option<(Vec<u8>, RouterId, Option<u32>)> {
+        if let Some(tunnel_id) = self.pending_messages.remove(&message_id) {
+            self.handle_zero_hop_inbound_gateway(tunnel_id, &payload);
+            todo!();
+        }
+
         // TODO: better abstraction
         let (index, mut record) = payload[1..]
             .chunks_mut(218)
@@ -984,7 +1144,11 @@ impl Noise {
                 } => match (message_type, delivery_instructions) {
                     (MessageType::ShortTunnelBuild, DeliveryInstructions::Local) => {
                         let (msg, hop, maybe_tunnel_delivery) = self
-                            .create_short_tunnel_hop::<R>(truncated, message_body.to_vec())
+                            .create_short_tunnel_hop::<R>(
+                                truncated,
+                                message_body.to_vec(),
+                                message_id,
+                            )
                             .unwrap();
                         assert!(maybe_tunnel_delivery.is_none(), "not handled");
 
@@ -1002,87 +1166,117 @@ impl Noise {
     pub fn handle_zero_hop_inbound_gateway(&mut self, tunnel_id: u32, payload: &[u8]) {
         let PendingTunnel { inbound, hops } = self.pending_tunnels.remove(&tunnel_id).unwrap();
 
-        let RawI2npMessage {
-            message_type,
-            message_id,
-            expiration,
-            mut payload,
-        } = RawI2npMessage::parse::<I2NP_STANDARD>(payload).unwrap();
+        if inbound {
+            assert!(payload[1..].len() % 218 == 0);
+            let num_records = payload[0];
 
-        let (
-            _,
-            TunnelHopNew {
-                garlic_key,
-                garlic_tag,
-                ..
-            },
-        ) = hops.iter().find(|(_, hop)| hop.role == HopRole::OutboundEndpoint).unwrap();
+            let mut message_body = payload[1..].to_vec();
 
-        tracing::error!("garlic key = {garlic_key:?}");
+            for (_, hop) in &hops {
+                tracing::info!("decrypt record at index = {}", hop.index);
 
-        let garlic_tag =
-            u64::from_le_bytes(TryInto::<[u8; 8]>::try_into(garlic_tag.clone()).unwrap());
+                let mut record = message_body[(hop.index * 218)..((1 + hop.index) * 218)].to_vec();
 
-        let test = u32::from_be_bytes(TryInto::<[u8; 4]>::try_into(&payload[..4]).unwrap());
-        tracing::error!("payload len = {}, garlic len = {test:?}", payload.len());
+                ChaChaPoly::with_nonce(&hop.reply_key, hop.index as u64)
+                    .decrypt_with_ad(&hop.state, &mut record)
+                    .unwrap();
 
-        let remote_garlic_tag =
-            u64::from_be_bytes(TryInto::<[u8; 8]>::try_into(&payload[4..12]).unwrap());
+                tracing::info!("accepted = {}", record[201]);
 
-        tracing::error!("our garlic tag = {garlic_tag}, remote's garlic tag = {garlic_tag}");
+                for idx in 0..(num_records as usize) {
+                    if idx != hop.index {
+                        let mut record = message_body[(idx * 218)..((1 + idx) * 218)].to_vec();
 
-        let mut test = payload[12..].to_vec();
-        ChaChaPoly::new(&garlic_key)
-            .decrypt_with_ad(&payload[4..12], &mut test)
-            .unwrap();
+                        ChaCha::with_nonce(&hop.reply_key, idx as u64).decrypt(&mut record);
 
-        let mut message = GarlicMessage::parse(&test).unwrap();
+                        message_body[(idx * 218)..((1 + idx) * 218)].copy_from_slice(&record);
+                    }
+                }
+            }
+        } else {
+            let RawI2npMessage {
+                message_type,
+                message_id,
+                expiration,
+                mut payload,
+            } = RawI2npMessage::parse::<I2NP_STANDARD>(payload).unwrap();
 
-        for mut message in message.blocks {
-            match message {
-                GarlicMessageBlock::GarlicClove {
-                    message_type,
-                    message_id,
-                    expiration,
-                    delivery_instructions,
-                    ref mut message_body,
-                } => {
-                    tracing::error!(
-                        "message id = {message_id}, num records = {}",
-                        message_body[0]
-                    );
+            let (
+                _,
+                TunnelHopNew {
+                    garlic_key,
+                    garlic_tag,
+                    ..
+                },
+            ) = hops.iter().find(|(_, hop)| hop.role == HopRole::OutboundEndpoint).unwrap();
 
-                    assert!(message_body[1..].len() % 218 == 0);
-                    let num_records = message_body[0];
+            tracing::error!("garlic key = {garlic_key:?}");
 
-                    let mut message_body = message_body[1..].to_vec();
+            let garlic_tag =
+                u64::from_le_bytes(TryInto::<[u8; 8]>::try_into(garlic_tag.clone()).unwrap());
 
-                    for (_, hop) in &hops {
-                        tracing::info!("decrypt record at index = {}", hop.index);
+            let test = u32::from_be_bytes(TryInto::<[u8; 4]>::try_into(&payload[..4]).unwrap());
+            tracing::error!("payload len = {}, garlic len = {test:?}", payload.len());
 
-                        let mut record =
-                            message_body[(hop.index * 218)..((1 + hop.index) * 218)].to_vec();
+            let remote_garlic_tag =
+                u64::from_be_bytes(TryInto::<[u8; 8]>::try_into(&payload[4..12]).unwrap());
 
-                        ChaChaPoly::with_nonce(&hop.reply_key, hop.index as u64)
-                            .decrypt_with_ad(&hop.state, &mut record)
-                            .unwrap();
+            tracing::error!("our garlic tag = {garlic_tag}, remote's garlic tag = {garlic_tag}");
 
-                        tracing::info!("accepted = {}", record[201]);
+            let mut test = payload[12..].to_vec();
+            ChaChaPoly::new(&garlic_key)
+                .decrypt_with_ad(&payload[4..12], &mut test)
+                .unwrap();
 
-                        for idx in 0..(num_records as usize) {
-                            if idx != hop.index {
-                                let mut record =
-                                    message_body[(idx * 218)..((1 + idx) * 218)].to_vec();
+            let mut message = GarlicMessage::parse(&test).unwrap();
 
-                                ChaCha::with_nonce(&hop.reply_key, idx as u64).decrypt(&mut record);
+            for mut message in message.blocks {
+                match message {
+                    GarlicMessageBlock::GarlicClove {
+                        message_type,
+                        message_id,
+                        expiration,
+                        delivery_instructions,
+                        ref mut message_body,
+                    } => {
+                        tracing::error!(
+                            "message id = {message_id}, num records = {}",
+                            message_body[0]
+                        );
 
-                                message_body[(idx * 218)..((1 + idx) * 218)]
-                                    .copy_from_slice(&record);
+                        assert!(message_body[1..].len() % 218 == 0);
+                        let num_records = message_body[0];
+
+                        let mut message_body = message_body[1..].to_vec();
+
+                        for (_, hop) in &hops {
+                            tracing::info!("decrypt record at index = {}", hop.index);
+
+                            let mut record =
+                                message_body[(hop.index * 218)..((1 + hop.index) * 218)].to_vec();
+
+                            ChaChaPoly::with_nonce(&hop.reply_key, hop.index as u64)
+                                .decrypt_with_ad(&hop.state, &mut record)
+                                .unwrap();
+
+                            tracing::info!("accepted = {}", record[201]);
+
+                            for idx in 0..(num_records as usize) {
+                                if idx != hop.index {
+                                    let mut record =
+                                        message_body[(idx * 218)..((1 + idx) * 218)].to_vec();
+
+                                    ChaCha::with_nonce(&hop.reply_key, idx as u64)
+                                        .decrypt(&mut record);
+
+                                    message_body[(idx * 218)..((1 + idx) * 218)]
+                                        .copy_from_slice(&record);
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 

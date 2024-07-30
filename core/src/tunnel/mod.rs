@@ -108,7 +108,8 @@ impl<R: Runtime> TunnelManager<R> {
         let hops = routers.get_routers(2, |_, _| true);
 
         Self {
-            record: Some(noise.create_short_tunnel_build_request_outbound::<R>(hops, hash)),
+            record: Some(noise.create_short_tunnel_build_request_inbound::<R>(hops, hash)),
+            // record: Some(noise.create_short_tunnel_build_request_outbound::<R>(hops, hash)),
             local_router_id,
             noise,
             routers: HashMap::new(),
@@ -262,8 +263,10 @@ impl<R: Runtime> TunnelManager<R> {
                 self.send_message(&hop, msg);
             }
             MessageType::ShortTunnelBuild => {
-                let (msg, hop, maybe_local_delivery) =
-                    self.noise.create_short_tunnel_hop::<R>(&self.truncated_hash, payload).unwrap();
+                let (msg, hop, maybe_local_delivery) = self
+                    .noise
+                    .create_short_tunnel_hop::<R>(&self.truncated_hash, payload, message_id)
+                    .unwrap();
 
                 match maybe_local_delivery {
                     Some(tunnel_id) =>
