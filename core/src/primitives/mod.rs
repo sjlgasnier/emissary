@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use core::fmt;
+
 /// Logging target for the module.
 const LOG_TARGET: &str = "emissary::primitives";
 
@@ -32,3 +34,35 @@ mod router_address;
 mod router_identity;
 mod router_info;
 mod string;
+
+/// Tunnel ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TunnelId(u32);
+
+impl From<u32> for TunnelId {
+    fn from(value: u32) -> Self {
+        TunnelId(value)
+    }
+}
+
+impl fmt::Display for TunnelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Message Id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageId(u32);
+
+impl From<u32> for MessageId {
+    fn from(value: u32) -> Self {
+        MessageId(value)
+    }
+}
+
+impl fmt::Display for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
