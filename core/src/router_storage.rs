@@ -53,6 +53,11 @@ impl RouterStorage {
         }
     }
 
+    /// Return the number of routers in [`RouterStorage`].
+    pub fn len(&self) -> usize {
+        self.routers.read().len()
+    }
+
     /// Get `RouterInfo` of `router` if it exists.
     //
     // TODO: no clones
@@ -72,5 +77,20 @@ impl RouterStorage {
             .filter_map(|(router, info)| filter(router, info).then_some(info.clone()))
             .take(num_routers)
             .collect()
+    }
+
+    /// Create new [`RouterStorage`] from random `routers`.
+    ///
+    /// Only used in tests.
+    #[cfg(test)]
+    pub fn from_random(routers: Vec<RouterInfo>) -> Self {
+        let routers = routers
+            .into_iter()
+            .map(|router| (router.identity().id(), router))
+            .collect::<HashMap<_, _>>();
+
+        Self {
+            routers: Arc::new(RwLock::new(routers)),
+        }
     }
 }

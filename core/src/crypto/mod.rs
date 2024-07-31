@@ -116,6 +116,15 @@ impl StaticPublicKey {
     }
 }
 
+impl AsRef<[u8]> for StaticPublicKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::X25519(key) => key.as_ref(),
+            Self::ElGamal(key) => key.as_ref(),
+        }
+    }
+}
+
 /// Static private key.
 #[derive(Clone)]
 pub enum StaticPrivateKey {

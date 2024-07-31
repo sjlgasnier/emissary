@@ -50,6 +50,9 @@ pub enum TunnelError {
 
     /// Invalid hop role for an operation.
     InvalidHop,
+
+    /// Too many hops.
+    TooManyHops(usize),
 }
 
 impl fmt::Display for TunnelError {
@@ -57,6 +60,7 @@ impl fmt::Display for TunnelError {
         match self {
             Self::TunnelDoesntExist(tunnel_id) => write!(f, "tunnel ({tunnel_id}) does't exist"),
             Self::InvalidHop => write!(f, "invalid hop role for operation"),
+            Self::TooManyHops(hops) => write!(f, "too many hops {hops}"),
         }
     }
 }

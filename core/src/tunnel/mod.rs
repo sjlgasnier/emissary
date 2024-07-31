@@ -17,32 +17,28 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
-    i2np::{
-        HopRole, I2NpMessage, MessageType, RawI2NpMessageBuilder, RawI2npMessage, TunnelMessage,
-        I2NP_SHORT, I2NP_STANDARD,
-    },
+    i2np::{MessageType, RawI2npMessage},
     primitives::{RouterId, RouterInfo},
     router_storage::RouterStorage,
-    runtime::{MetricType, MetricsHandle, Runtime},
+    runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
-    tunnel::noise::Noise,
+    tunnel::metrics::*,
 };
 
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use hashbrown::HashMap;
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
-use pool::TunnelPoolManager;
 
+mod garlic;
+mod hop;
+mod metrics;
 mod noise;
 mod pool;
 
@@ -64,38 +60,24 @@ pub enum RouterState {
 
 /// Tunnel manager.
 pub struct TunnelManager<R: Runtime> {
-    /// Local router ID.
-    local_router_id: RouterId,
-
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
 
-    /// Noise key context.
-    noise: Noise,
+    /// Local router info.
+    router_info: RouterInfo,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
 
     /// Transport service.
     service: TransportService,
-
-    /// Truncated router hash.
-    truncated_hash: Vec<u8>,
-
-    record: Option<(u32, RouterId, Vec<u8>)>,
-
-    /// Marker for `Runtime`
-    _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> TunnelManager<R> {
     /// Create new [`TunnelManager`].
     pub fn new(
         service: TransportService,
-        local_key: StaticPrivateKey,
-        truncated_hash: Vec<u8>,
-        hash: Vec<u8>,
-        local_router_id: RouterId,
+        router_info: RouterInfo,
         metrics_handle: R::MetricsHandle,
         routers: RouterStorage,
     ) -> Self {
@@ -104,25 +86,17 @@ impl<R: Runtime> TunnelManager<R> {
             "starting tunnel manager",
         );
 
-        let mut noise = Noise::new::<R>(local_key);
-        let hops = routers.get_routers(2, |_, _| true);
-
         Self {
-            record: Some(noise.create_short_tunnel_build_request_inbound::<R>(hops, hash)),
-            // record: Some(noise.create_short_tunnel_build_request_outbound::<R>(hops, hash)),
-            local_router_id,
-            noise,
+            metrics_handle,
+            router_info,
             routers: HashMap::new(),
             service,
-            truncated_hash,
-            metrics_handle,
-            _marker: Default::default(),
         }
     }
 
     /// Collect tunnel-related metric counters, gauges and histograms.
-    pub fn metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
-        metrics
+    pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
+        metrics::register_metrics(metrics)
     }
 
     fn on_connection_established(&mut self, router: RouterId) {
@@ -131,32 +105,6 @@ impl<R: Runtime> TunnelManager<R> {
             %router,
             "connection established",
         );
-
-        match self.routers.remove(&router) {
-            Some(RouterState::Dialing { pending_messages }) if !pending_messages.is_empty() => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    ?router,
-                    "router with pending messages connected",
-                );
-
-                for message in pending_messages {
-                    self.service.send(&router, message);
-                }
-            }
-            Some(RouterState::Dialing { .. }) | None => {}
-            state => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?router,
-                    ?state,
-                    "invalid state for connected router",
-                );
-                debug_assert!(false);
-            }
-        }
-
-        self.routers.insert(router.clone(), RouterState::Connected);
     }
 
     fn on_connection_closed(&mut self, router: &RouterId) {
@@ -165,7 +113,6 @@ impl<R: Runtime> TunnelManager<R> {
             %router,
             "connection closed",
         );
-        self.routers.remove(router);
     }
 
     fn on_connection_failure(&mut self, router: &RouterId) {
@@ -174,70 +121,11 @@ impl<R: Runtime> TunnelManager<R> {
             %router,
             "failed to open connection to router",
         );
-
-        if self.routers.remove(router).is_none() {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "connection failure for unknown router",
-            );
-            debug_assert!(false);
-        }
     }
 
-    fn send_message(&mut self, router: &RouterId, message: Vec<u8>) {
-        match self.routers.get_mut(router) {
-            Some(RouterState::Connected) => {
-                if let Err(error) = self.service.send(&router, message) {
-                    tracing::error!(
-                        target: LOG_TARGET,
-                        ?router,
-                        ?error,
-                        "failed to send message to router",
-                    );
-                }
-            }
-            Some(RouterState::Dialing {
-                ref mut pending_messages,
-            }) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    ?router,
-                    "router is being dialed, buffer message",
-                );
-                pending_messages.push(message);
-            }
-            None => match router == &self.local_router_id {
-                true => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        message_type = ?MessageType::from_u8(message[2]),
-                        message_len = ?message.len(),
-                        "router message to self",
-                    );
-                    let message = RawI2npMessage::parse::<I2NP_SHORT>(&message).unwrap();
-                    self.on_message(message);
-                }
-                false => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        ?router,
-                        "start dialing router",
-                    );
-
-                    self.service.connect(&router);
-                    self.routers.insert(
-                        router.clone(),
-                        RouterState::Dialing {
-                            pending_messages: vec![message],
-                        },
-                    );
-                }
-            },
-        }
-    }
-
-    // TODO: no unwraps
     fn on_message(&mut self, message: RawI2npMessage) {
+        self.metrics_handle.counter(NUM_TUNNEL_MESSAGES).increment(1);
+
         let RawI2npMessage {
             message_type,
             message_id,
@@ -246,84 +134,19 @@ impl<R: Runtime> TunnelManager<R> {
         } = message;
 
         match message_type {
-            MessageType::VariableTunnelBuild => {
-                // TODO: this should return destination?
-                let (payload, hop, message_id, message_type) =
-                    self.noise.create_tunnel_hop(&self.truncated_hash, payload).unwrap();
-
-                let msg = RawI2NpMessageBuilder::short()
-                    .with_message_type(message_type)
-                    .with_message_id(message_id)
-                    .with_expiration(
-                        (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                    )
-                    .with_payload(payload)
-                    .serialize();
-
-                self.send_message(&hop, msg);
-            }
-            MessageType::ShortTunnelBuild => {
-                let (msg, hop, maybe_local_delivery) = self
-                    .noise
-                    .create_short_tunnel_hop::<R>(&self.truncated_hash, payload, message_id)
-                    .unwrap();
-
-                match maybe_local_delivery {
-                    Some(tunnel_id) =>
-                        match self.noise.handle_outbound_tunnel_build_reply::<R>(tunnel_id, msg) {
-                            Ok((msg, hop)) => self.send_message(&hop, msg),
-                            Err(error) =>
-                                tracing::error!(target: LOG_TARGET, "failed to handle outbound tunnel build reply"),
-                        },
-                    None => self.send_message(&hop, msg),
-                }
-            }
-            MessageType::TunnelData => {
-                let Some((message, hop)) = self.noise.handle_tunnel_data(
-                    &self.truncated_hash,
-                    message.expiration,
-                    payload,
-                ) else {
-                    tracing::warn!(target: LOG_TARGET, "failed to handle tunnel data message");
-                    return;
-                };
-
-                self.send_message(&hop, message);
-            }
             MessageType::Garlic => {
-                let messages = self.noise.handle_garlic_message::<R>(
-                    &self.truncated_hash,
-                    message_id,
-                    payload,
-                );
-
-                for (msg, hop) in messages {
-                    self.send_message(&hop, msg);
-                }
+                todo!();
             }
-            MessageType::TunnelGateway => {
-                match self.noise.handle_tunnel_gateway::<R>(
-                    &self.truncated_hash,
-                    message_id,
-                    expiration,
-                    payload,
-                ) {
-                    Ok((message, hop)) => self.send_message(&hop, message),
-                    Err(error) => tracing::warn!(
-                        target: LOG_TARGET,
-                        ?message_id,
-                        ?error,
-                        "failed to handle tunnel gateway message",
-                    ),
-                }
-            }
-            MessageType::OutboundTunnelBuildReply => unreachable!(),
-            message => tracing::warn!(
-                target: LOG_TARGET,
-                ?message,
-                "unhandled message",
-            ),
+            _ => todo!(),
         }
+
+        // TODO: message can be:
+        // TODO:  - garlic-wrapped netdb message
+        // TODO:  - garlic-wrapped tunnel message to us
+        // TODO:
+        // TODO:
+
+        todo!();
     }
 }
 
@@ -331,11 +154,6 @@ impl<R: Runtime> Future for TunnelManager<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some((tunnel, router, message)) = self.record.take() {
-            tracing::error!("sending record");
-            self.send_message(&router, message);
-        }
-
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,

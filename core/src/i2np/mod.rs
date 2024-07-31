@@ -23,6 +23,7 @@
 use crate::{
     crypto::base64_encode,
     primitives::{Date, Mapping},
+    runtime::Runtime,
     subsystem::SubsystemKind,
 };
 
@@ -37,6 +38,7 @@ use nom::{
 
 use alloc::{vec, vec::Vec};
 use core::fmt;
+use rand_core::RngCore;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2np";
@@ -342,6 +344,20 @@ pub struct ShortTunnelBuildRequestBuilder {
 }
 
 impl ShortTunnelBuildRequestBuilder {
+    pub fn with_records(records: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(1 + 218 * records.len());
+        out.put_u8(records.len() as u8);
+
+        records
+            .into_iter()
+            .fold(out, |mut acc, record| {
+                acc.put_slice(&record);
+                acc
+            })
+            .freeze()
+            .to_vec()
+    }
+
     pub fn with_record(
         mut self,
         truncated_hash: Vec<u8>,
@@ -377,17 +393,17 @@ impl ShortTunnelBuildRequestBuilder {
 }
 
 #[derive(Default)]
-pub struct ShortTunnelBuildRecordBuilder {
+pub struct ShortTunnelBuildRecordBuilder<'a> {
     tunnel_id: Option<u32>,
     next_tunnel_id: Option<u32>,
-    next_router_hash: Option<Vec<u8>>,
+    next_router_hash: Option<&'a [u8]>,
     role: Option<HopRole>,
     request_time: Option<u32>,
     request_expiration: Option<u32>,
     next_message_id: Option<u32>,
 }
 
-impl ShortTunnelBuildRecordBuilder {
+impl<'a> ShortTunnelBuildRecordBuilder<'a> {
     pub fn with_tunnel_id(mut self, tunnel_id: u32) -> Self {
         self.tunnel_id = Some(tunnel_id);
         self
@@ -398,7 +414,7 @@ impl ShortTunnelBuildRecordBuilder {
         self
     }
 
-    pub fn with_next_router_hash(mut self, next_router_hash: Vec<u8>) -> Self {
+    pub fn with_next_router_hash(mut self, next_router_hash: &'a [u8]) -> Self {
         self.next_router_hash = Some(next_router_hash);
         self
     }
@@ -423,8 +439,18 @@ impl ShortTunnelBuildRecordBuilder {
         self
     }
 
+    /// Returns a full-length build record (218) of random bytes.
+    pub fn random<R: Runtime>() -> Vec<u8> {
+        let mut out = vec![0u8; 218];
+        R::rng().fill_bytes(&mut out);
+
+        out
+    }
+
+    // TODO: bytesmut
     pub fn serialize(self) -> Vec<u8> {
-        let mut out = vec![0u8; 154];
+        let mut out = Vec::with_capacity(154 + 16);
+        out.resize(154, 0);
         let mut offset = 0;
 
         out[offset..offset + 4].copy_from_slice(&self.tunnel_id.expect("to exist").to_be_bytes());

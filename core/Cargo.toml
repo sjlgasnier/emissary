@@ -34,7 +34,9 @@ zerocopy = { version = "0.7.35", features = ["derive"], default-features = false
 zeroize = { version = "1.8.1", features = ["alloc"], default-features = false }
 
 [dev-dependencies]
+tokio = { version = "1.38.0", features = ["full"] }
 rand_core = { version = "0.6.4", features = ["getrandom"], default-features = false }
+tracing-subscriber = { version = "0.3.18", features = ["chrono", "env-filter", "time"] }
 
 [lib]
 name = "emissary"

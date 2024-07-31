@@ -45,12 +45,14 @@ use crate::{
     Error,
 };
 
+use bytes::Bytes;
 use hashbrown::HashMap;
 use rand_core::RngCore;
 use zeroize::Zeroize;
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
+    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -127,6 +129,178 @@ struct FragmentedMessage {
     delivery_instructions: OwnedDeliveryInstruction,
     middle_fragments: BTreeMap<usize, Vec<u8>>,
     last_fragment: Option<Vec<u8>>,
+}
+
+/// Noise context for tunnels.
+#[derive(Clone)]
+pub struct NoiseContext {
+    /// Chaining key.
+    chaining_key: Bytes,
+
+    /// Inbound state.
+    inbound_state: Bytes,
+
+    /// Outbound state.
+    outbound_state: Bytes,
+
+    /// Local static key.
+    local_key: Arc<StaticPrivateKey>,
+}
+
+pub struct PendingTunnelKeyContext {
+    pub garlic_key: Option<Vec<u8>>,
+    pub garlic_tag: Option<Vec<u8>>,
+    pub iv_key: Vec<u8>,
+    pub layer_key: Vec<u8>,
+    pub local_ephemeral: Vec<u8>,
+    pub reply_key: Vec<u8>,
+    pub state: Vec<u8>,
+    pub chacha: Vec<u8>,
+}
+
+impl NoiseContext {
+    /// Create new [`NoiseContext`].
+    pub fn new(local_key: StaticPrivateKey) -> Self {
+        let chaining_key = {
+            let mut chaining_key = PROTOCOL_NAME.as_bytes().to_vec();
+            chaining_key.append(&mut vec![0u8]);
+            chaining_key
+        };
+        let outbound_state = Sha256::new().update(&chaining_key).finalize();
+        let inbound_state = Sha256::new()
+            .update(&outbound_state)
+            .update(local_key.public().to_bytes())
+            .finalize();
+
+        Self {
+            chaining_key: Bytes::from(chaining_key),
+            inbound_state: Bytes::from(inbound_state),
+            outbound_state: Bytes::from(outbound_state),
+            local_key: Arc::new(local_key),
+        }
+    }
+
+    /// Derive chaining and Chacha20Poly1305 keys for an inbound session.
+    pub fn derive_inbound_keys(&self, remote_ephemeral: StaticPublicKey) -> (Vec<u8>, Vec<u8>) {
+        let mut shared_secret = self.local_key.diffie_hellman(&remote_ephemeral);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+
+        (chaining_key, aead_key)
+    }
+
+    /// Derive chaining and Chacha20Poly1305 keys for an outbound session.
+    fn derive_outbound_keys(
+        &self,
+        remote_static: StaticPublicKey,
+        local_ephemeral: EphemeralPrivateKey,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut shared_secret = local_ephemeral.diffie_hellman(&remote_static);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+        local_ephemeral.zeroize();
+
+        (chaining_key, aead_key)
+    }
+
+    /// Derive tunnel key context for an outbound session.
+    pub fn derive_outbound_tunnel_keys<R: Runtime>(
+        &self,
+        remote_static: StaticPublicKey,
+        role: HopRole,
+    ) -> PendingTunnelKeyContext {
+        let local_ephemeral = EphemeralPrivateKey::new(R::rng());
+        let local_ephemeral_public = local_ephemeral.public_key().to_vec();
+        let state = {
+            let state = Sha256::new()
+                .update(&self.outbound_state)
+                .update(remote_static.as_ref())
+                .finalize();
+
+            Sha256::new().update(&state).update(&local_ephemeral_public).finalize()
+        };
+        let (mut chaining_key, aead_key) =
+            self.derive_outbound_keys(remote_static, local_ephemeral);
+
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        match role {
+            HopRole::InboundGateway | HopRole::Intermediary => {
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: aead_key,
+                    garlic_key: None,
+                    garlic_tag: None,
+                    iv_key: ck,
+                    layer_key,
+                    local_ephemeral: local_ephemeral_public,
+                    reply_key,
+                    state,
+                }
+            }
+            HopRole::OutboundEndpoint => {
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let ck =
+                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let iv_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"TunnelLayerIVKey")
+                    .update(&[0x02])
+                    .finalize();
+
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let mut ck =
+                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let garlic_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"RGarlicKeyAndTag")
+                    .update(&[0x02])
+                    .finalize();
+
+                let garlic_tag = ck[..8].to_vec();
+
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: aead_key,
+                    garlic_key: Some(garlic_key),
+                    garlic_tag: Some(garlic_tag),
+                    iv_key,
+                    layer_key,
+                    local_ephemeral: local_ephemeral_public,
+                    reply_key,
+                    state,
+                }
+            }
+        }
+    }
 }
 
 /// Noise key context.
@@ -382,7 +556,7 @@ impl Noise {
         let mut record1 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(first_tunnel_id)
             .with_next_tunnel_id(second_tunnel_id)
-            .with_next_router_hash(hops[1].identity().hash().to_vec())
+            .with_next_router_hash(hops[1].identity().hash().as_ref())
             .with_role(HopRole::Intermediary)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
@@ -393,7 +567,7 @@ impl Noise {
         let mut record2 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(second_tunnel_id)
             .with_next_tunnel_id(recv_tunnel_id)
-            .with_next_router_hash(our_hash)
+            .with_next_router_hash(&our_hash)
             .with_role(HopRole::OutboundEndpoint)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
@@ -533,7 +707,7 @@ impl Noise {
         let mut record1 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(first_tunnel_id)
             .with_next_tunnel_id(second_tunnel_id)
-            .with_next_router_hash(hops[1].identity().hash().to_vec())
+            .with_next_router_hash(hops[1].identity().hash().as_ref())
             .with_role(HopRole::InboundGateway)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
@@ -544,7 +718,7 @@ impl Noise {
         let mut record2 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(second_tunnel_id)
             .with_next_tunnel_id(recv_tunnel_id)
-            .with_next_router_hash(our_hash)
+            .with_next_router_hash(&our_hash)
             .with_role(HopRole::Intermediary)
             .with_request_time(time_now)
             .with_request_expiration(expiration)

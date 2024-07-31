@@ -50,6 +50,12 @@ impl From<String> for RouterId {
     }
 }
 
+impl From<Vec<u8>> for RouterId {
+    fn from(value: Vec<u8>) -> Self {
+        RouterId(Arc::new(base64_encode(value)))
+    }
+}
+
 // TODO: doc
 #[derive(Debug, AsBytes)]
 #[repr(C)]

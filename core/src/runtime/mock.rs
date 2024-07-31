@@ -30,7 +30,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 pub struct MockTcpStream {}
@@ -166,7 +166,7 @@ impl Runtime for MockRuntime {
 
     /// Return duration since Unix epoch.
     fn time_since_epoch() -> Duration {
-        todo!();
+        SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("to succeed")
     }
 
     /// Return opaque type for generating random bytes.
@@ -185,11 +185,11 @@ impl Runtime for MockRuntime {
 
     /// Register `metrics` and return handle for registering metrics.
     fn register_metrics(metrics: Vec<crate::runtime::MetricType>) -> Self::MetricsHandle {
-        todo!();
+        MockMetricsHandle {}
     }
 
     /// Return future which blocks for `duration` before returning.
     fn delay(duration: Duration) -> BoxFuture<'static, ()> {
-        todo!();
+        Box::pin(tokio::time::sleep(duration))
     }
 }
