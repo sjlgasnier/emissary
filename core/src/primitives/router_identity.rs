@@ -21,6 +21,7 @@ use crate::{
     Error,
 };
 
+use bytes::Bytes;
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -74,7 +75,7 @@ pub struct RouterIdentity {
     signing_key: SigningPublicKey,
 
     /// Identity hash.
-    identity_hash: Vec<u8>,
+    identity_hash: Bytes,
 }
 
 impl RouterIdentity {
@@ -103,7 +104,7 @@ impl RouterIdentity {
         Ok(Self {
             static_key,
             signing_key,
-            identity_hash,
+            identity_hash: Bytes::from(identity_hash),
         })
     }
 
@@ -138,7 +139,7 @@ impl RouterIdentity {
             RouterIdentity {
                 static_key,
                 signing_key,
-                identity_hash: Sha256::new().update(&input[..391]).finalize(),
+                identity_hash: Bytes::from(Sha256::new().update(&input[..391]).finalize()),
             },
         ))
     }
@@ -174,8 +175,8 @@ impl RouterIdentity {
     }
 
     /// Router identity hash as bytes.
-    pub fn hash(&self) -> &[u8] {
-        self.identity_hash.as_ref()
+    pub fn hash(&self) -> Bytes {
+        self.identity_hash.clone()
     }
 
     /// Get [`RouterId`].
