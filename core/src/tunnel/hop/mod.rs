@@ -23,26 +23,72 @@ use crate::{
     tunnel::{hop::pending::PendingTunnelHop, noise::NoiseContext},
 };
 
-use alloc::vec::Vec;
-
 use bytes::Bytes;
+
+use alloc::{collections::VecDeque, vec::Vec};
+use core::iter;
+
 pub use inbound::InboundTunnel;
 pub use pending::PendingTunnel;
+
+mod inbound;
+mod pending;
+
+/// Tunnel direction.
+#[derive(Debug)]
+pub enum TunnelDirection {
+    /// Inbound tunnel.
+    Inbound,
+
+    /// Outbound tunnel.
+    Outbound,
+}
+
+pub trait Tunnel {
+    fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole>;
+    fn direction() -> TunnelDirection;
+}
 
 #[derive(Debug)]
 pub struct OutboundTunnel {}
 
+impl Tunnel for OutboundTunnel {
+    fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole> {
+        match num_hops == 1 {
+            true => iter::once(HopRole::OutboundEndpoint).collect::<Vec<_>>().into_iter(),
+            false => (0..num_hops - 1)
+                .map(|_| HopRole::Intermediary)
+                .chain(iter::once(HopRole::OutboundEndpoint))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    fn direction() -> TunnelDirection {
+        TunnelDirection::Outbound
+    }
+}
+
 pub struct OutboundTunnelBuilder {
     /// Tunnel ID.
     tunnel_id: TunnelId,
+
+    /// Hops.
+    hops: VecDeque<PendingTunnelHop>,
 }
 
 impl OutboundTunnelBuilder {
+    /// Create new [`OutboundTunnelBuilder `].
     pub fn new(tunnel_id: TunnelId) -> Self {
-        Self { tunnel_id }
+        Self {
+            tunnel_id,
+            hops: VecDeque::new(),
+        }
     }
 
-    pub fn with_hop(self, _hop: PendingTunnelHop) -> Self {
+    /// Push new hop into tunnel's hops.
+    pub fn with_hop(mut self, hop: PendingTunnelHop) -> Self {
+        self.hops.push_back(hop);
         self
     }
 
@@ -50,9 +96,6 @@ impl OutboundTunnelBuilder {
         OutboundTunnel {}
     }
 }
-
-mod inbound;
-mod pending;
 
 /// Tunnel build parameters.
 pub struct TunnelBuildParameters {

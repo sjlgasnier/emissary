@@ -29,7 +29,9 @@ use crate::{
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
-        hop::{OutboundTunnel, OutboundTunnelBuilder, TunnelBuildParameters},
+        hop::{
+            InboundTunnel, OutboundTunnel, OutboundTunnelBuilder, Tunnel, TunnelBuildParameters,
+        },
         noise::PendingTunnelKeyContext,
         LOG_TARGET,
     },
@@ -39,12 +41,12 @@ use aes::cipher::Key;
 use rand_core::RngCore;
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::{iter, time::Duration};
+use core::{iter, marker::PhantomData, time::Duration};
 
-/// How many build records can a `ShortTunnelBuildRequest` contain.
+/// How many build records should a `ShortTunnelBuildRequest` contain.
 ///
 /// This includes the actual build request records and any fake records.
-const MAX_BUILD_RECORDS: usize = 4;
+const NUM_BUILD_RECORDS: usize = 4;
 
 /// How long is reply waited for a build request until it's considered expired.
 const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(10);
@@ -62,19 +64,19 @@ pub struct PendingTunnelHop {
 }
 
 /// Outbound tunnel.
-pub struct PendingTunnel {
+pub struct PendingTunnel<T: Tunnel> {
     /// Tunnel ID.
     tunnel_id: TunnelId,
 
     /// Pending tunnel hops.
     hops: VecDeque<PendingTunnelHop>,
+
+    /// Marker for tunnel.
+    _tunnel: PhantomData<T>,
 }
 
-impl PendingTunnel {
-    /// Create new [`OutboundTunnel`].
-    //
-    // TODO: async and use `spawn_blocking()`?
-    pub fn create_outbound_tunnel<R: Runtime>(
+impl<T: Tunnel> PendingTunnel<T> {
+    pub fn create_tunnel<R: Runtime>(
         parameters: TunnelBuildParameters,
     ) -> Result<(Self, RouterId, Vec<u8>), TunnelError> {
         let TunnelBuildParameters {
@@ -89,11 +91,12 @@ impl PendingTunnel {
             target: LOG_TARGET,
             %message_id,
             %tunnel_id,
+            direction = ?T::direction(),
             num_hops = ?hops.len(),
-            "create outbound tunnel",
+            "create tunnel",
         );
 
-        if hops.len() > MAX_BUILD_RECORDS {
+        if hops.len() > NUM_BUILD_RECORDS {
             return Err(TunnelError::TooManyHops(hops.len()));
         }
 
@@ -117,11 +120,7 @@ impl PendingTunnel {
                 .iter()
                 .zip(tunnel_ids.iter().skip(1))
                 .zip(router_hashes.iter().skip(1))
-                .zip(
-                    (0..num_hops - 1)
-                        .map(|_| HopRole::Intermediary)
-                        .chain(iter::once(HopRole::OutboundEndpoint)),
-                )
+                .zip(T::hop_roles(num_hops))
                 .zip(hops.into_iter().map(|(_, key)| key))
                 .map(
                     |((((tunnel_id, next_tunnel_id), next_router_hash), hop_role), key)| {
@@ -129,6 +128,7 @@ impl PendingTunnel {
                             PendingTunnelHop {
                                 role: hop_role,
                                 tunnel_id: *tunnel_id,
+                                // TODO: ???
                                 key_context: noise.derive_outbound_tunnel_keys::<R>(key, hop_role),
                             },
                             ShortTunnelBuildRecordBuilder::default()
@@ -150,7 +150,7 @@ impl PendingTunnel {
         // key of the local router
         //
         // additionally, append fake records at the end so that the length of the tunnel build
-        // request message is `MAX_BUILD_RECORDS` records long
+        // request message is `NUM_BUILD_RECORDS` records long
         let mut encrypted_records = router_hashes
             .iter()
             .zip(build_records.iter_mut())
@@ -173,7 +173,7 @@ impl PendingTunnel {
                     })
             })
             .chain(
-                (0..MAX_BUILD_RECORDS - num_hops)
+                (0..NUM_BUILD_RECORDS - num_hops)
                     .map(|_| ShortTunnelBuildRecordBuilder::random::<R>()),
             )
             .collect::<Vec<_>>();
@@ -197,6 +197,7 @@ impl PendingTunnel {
             Self {
                 tunnel_id,
                 hops: tunnel_hops,
+                _tunnel: Default::default(),
             },
             RouterId::from(router_hashes[0].clone().to_vec()),
             RawI2NpMessageBuilder::short()
@@ -307,7 +308,7 @@ mod test {
     }
 
     #[test]
-    fn create_outbound_tunnel_build_request() {
+    fn create_outbound_tunnel() {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|_| make_router())
             .into_iter()
@@ -319,7 +320,97 @@ mod test {
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::create_outbound_tunnel::<MockRuntime>(TunnelBuildParameters {
+            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
+                hops: hops.clone(),
+                noise: local_noise,
+                message_id,
+                tunnel_id,
+                our_hash: local_hash,
+            })
+            .unwrap();
+
+        let Some(RawI2npMessage {
+            message_type: MessageType::ShortTunnelBuild,
+            message_id: parsed_message_id,
+            expiration,
+            mut payload,
+        }) = RawI2npMessage::parse::<true>(&message)
+        else {
+            panic!("invalid message");
+        };
+
+        assert_eq!(parsed_message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+        assert_eq!(payload[0], 4u8);
+        assert_eq!(payload[1..].len() % 218, 0);
+
+        fn find_own_record<'a>(
+            hash: &Bytes,
+            payload: &'a mut [u8],
+        ) -> Option<(usize, &'a mut [u8])> {
+            payload
+                .chunks_mut(218)
+                .enumerate()
+                .find(|(_, chunk)| &chunk[..16] == &hash[..16])
+        }
+
+        // TODO: this needs to refactored
+        for ((router_hash, _), noise) in hops.iter().zip(noise_contexts.iter()) {
+            let (record_idx, record) = find_own_record(&router_hash, &mut payload[1..]).unwrap();
+
+            let mut new_record = record[..].to_vec();
+
+            let pk = StaticPublicKey::from_bytes(new_record[16..48].to_vec()).unwrap();
+
+            let (chaining_key, aead_key, state) = noise.derive_inbound_keys(pk);
+            let new_state = Sha256::new().update(&state).update(&new_record[48..]).finalize();
+
+            let (tunnel_id, role) = {
+                let mut test = new_record[48..].to_vec();
+                ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
+
+                let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
+                (record.tunnel_id(), record.role())
+            };
+
+            let context = noise.derive_inbound_tunnel_keys::<MockRuntime>(chaining_key, role);
+
+            new_record[201] = 0x00;
+
+            let mut new_record = new_record[..202].to_vec();
+
+            ChaChaPoly::with_nonce(&context.reply_key, record_idx as u64)
+                .encrypt_with_ad_new(&new_state, &mut new_record)
+                .unwrap();
+
+            record[..].copy_from_slice(&new_record);
+
+            payload[1..]
+                .chunks_mut(218)
+                .enumerate()
+                .filter(|(index, _)| index != &record_idx)
+                .for_each(|(index, mut record)| {
+                    ChaCha::with_nonce(&context.reply_key, index as u64).encrypt(&mut record);
+                });
+        }
+
+        assert!(pending_tunnel.process_tunnel_build_response(payload).is_ok());
+    }
+
+    #[test]
+    fn create_inbound_tunnel() {
+        let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|_| make_router())
+            .into_iter()
+            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .unzip();
+
+        let (local_hash, local_pk, local_noise) = make_router();
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, next_router, message) =
+            PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
                 noise: local_noise,
                 message_id,
@@ -409,7 +500,7 @@ mod test {
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::create_outbound_tunnel::<MockRuntime>(TunnelBuildParameters {
+            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
                 noise: local_noise,
                 message_id,
@@ -505,7 +596,7 @@ mod test {
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::create_outbound_tunnel::<MockRuntime>(TunnelBuildParameters {
+            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
                 noise: local_noise,
                 message_id,

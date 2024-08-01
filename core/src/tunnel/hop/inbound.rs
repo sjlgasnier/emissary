@@ -17,9 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    i2np::HopRole,
     primitives::{MessageId, TunnelId},
     runtime::Runtime,
+    tunnel::hop::{Tunnel, TunnelDirection},
 };
+
+use alloc::vec::Vec;
+use core::iter;
 
 #[derive(Debug)]
 pub struct InboundTunnel {}
@@ -27,5 +32,21 @@ pub struct InboundTunnel {}
 impl InboundTunnel {
     pub fn new(tunnel_id: TunnelId, message_id: MessageId) -> Self {
         Self {}
+    }
+}
+
+impl Tunnel for InboundTunnel {
+    fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole> {
+        match num_hops == 1 {
+            true => iter::once(HopRole::InboundGateway).collect::<Vec<_>>().into_iter(),
+            false => iter::once(HopRole::InboundGateway)
+                .chain((0..num_hops - 1).map(|_| HopRole::Intermediary))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    fn direction() -> TunnelDirection {
+        TunnelDirection::Inbound
     }
 }

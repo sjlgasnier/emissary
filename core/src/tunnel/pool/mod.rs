@@ -200,13 +200,15 @@ impl<R: Runtime> TunnelPool<R> {
                         continue;
                     };
 
-                    match PendingTunnel::create_outbound_tunnel::<R>(TunnelBuildParameters {
-                        hops,
-                        tunnel_id,
-                        message_id,
-                        noise: self.noise.clone(),
-                        our_hash: self.our_hash.clone(),
-                    }) {
+                    match PendingTunnel::<OutboundTunnel>::create_tunnel::<R>(
+                        TunnelBuildParameters {
+                            hops,
+                            tunnel_id,
+                            message_id,
+                            noise: self.noise.clone(),
+                            our_hash: self.our_hash.clone(),
+                        },
+                    ) {
                         Ok((tunnel, router, message)) => {
                             // TODO: what to do with tunnel?
                             events.push(TunnelPoolEvent::SendI2NpMessage {
