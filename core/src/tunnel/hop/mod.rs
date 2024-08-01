@@ -26,7 +26,7 @@ use crate::{
 use bytes::Bytes;
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::{iter, marker::PhantomData};
+use core::{iter, marker::PhantomData, num::NonZeroUsize};
 
 pub mod inbound;
 pub mod outbound;
@@ -61,7 +61,7 @@ pub trait Tunnel {
     fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self;
 
     /// Get an iterator of hop roles for the tunnel participants.
-    fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole>;
+    fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole>;
 
     /// Get tunnel direction.
     fn direction() -> TunnelDirection;

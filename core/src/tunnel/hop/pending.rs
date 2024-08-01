@@ -42,7 +42,7 @@ use aes::cipher::Key;
 use rand_core::RngCore;
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::{iter, marker::PhantomData, time::Duration};
+use core::{iter, marker::PhantomData, num::NonZeroUsize, time::Duration};
 
 /// How many build records should a `ShortTunnelBuildRequest` contain.
 ///
@@ -92,7 +92,8 @@ impl<T: Tunnel> PendingTunnel<T> {
         // set build record to expire 10 seconds from now
         let time_now = R::time_since_epoch();
         let build_expiration = (time_now + TUNNEL_BUILD_EXPIRATION).as_secs() as u32;
-        let num_hops = hops.len();
+        let num_hops =
+            NonZeroUsize::new(hops.len()).ok_or(TunnelError::NotEnoughHops(hops.len()))?;
 
         // prepare router info for build records
         //
@@ -161,7 +162,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                     })
             })
             .chain(
-                (0..NUM_BUILD_RECORDS - num_hops)
+                (0..NUM_BUILD_RECORDS - num_hops.get())
                     .map(|_| ShortTunnelBuildRecordBuilder::random::<R>()),
             )
             .collect::<Vec<_>>();

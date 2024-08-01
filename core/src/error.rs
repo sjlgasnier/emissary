@@ -54,6 +54,9 @@ pub enum TunnelError {
     /// Too many hops.
     TooManyHops(usize),
 
+    /// Not enough hops.
+    NotEnoughHops(usize),
+
     /// Invalid tunnel message.
     InvalidMessage,
 
@@ -69,6 +72,7 @@ impl fmt::Display for TunnelError {
             Self::TooManyHops(hops) => write!(f, "too many hops {hops}"),
             Self::InvalidMessage => write!(f, "invalid tunnel message"),
             Self::TunnelRejected(reason) => write!(f, "tunnel rejected: {reason}"),
+            Self::NotEnoughHops(hops) => write!(f, "not enough hops {hops}"),
         }
     }
 }

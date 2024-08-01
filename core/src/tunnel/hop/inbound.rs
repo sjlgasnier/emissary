@@ -24,7 +24,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::iter;
+use core::{iter, num::NonZeroUsize};
 
 /// Inbound tunnel.
 #[derive(Debug)]
@@ -48,11 +48,11 @@ impl Tunnel for InboundTunnel {
         InboundTunnel::new(tunnel_id, hops)
     }
 
-    fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole> {
-        match num_hops == 1 {
+    fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole> {
+        match num_hops.get() == 1 {
             true => iter::once(HopRole::InboundGateway).collect::<Vec<_>>().into_iter(),
             false => iter::once(HopRole::InboundGateway)
-                .chain((0..num_hops - 1).map(|_| HopRole::Intermediary))
+                .chain((0..num_hops.get() - 1).map(|_| HopRole::Intermediary))
                 .collect::<Vec<_>>()
                 .into_iter(),
         }
