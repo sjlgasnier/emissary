@@ -30,7 +30,8 @@ use crate::{
     runtime::Runtime,
     tunnel::{
         hop::{
-            InboundTunnel, OutboundTunnel, Tunnel, TunnelBuildParameters, TunnelBuilder, TunnelHop,
+            inbound::InboundTunnel, outbound::OutboundTunnel, Tunnel, TunnelBuildParameters,
+            TunnelBuilder, TunnelHop,
         },
         noise::PendingTunnelKeyContext,
         LOG_TARGET,

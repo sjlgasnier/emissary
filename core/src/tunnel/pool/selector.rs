@@ -22,7 +22,7 @@ use crate::{
     router_storage::RouterStorage,
     runtime::Runtime,
     tunnel::{
-        hop::{InboundTunnel, OutboundTunnel},
+        hop::{inbound::InboundTunnel, outbound::OutboundTunnel},
         pool::TunnelPool,
     },
 };

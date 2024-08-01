@@ -28,11 +28,9 @@ use bytes::Bytes;
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{iter, marker::PhantomData};
 
-pub use inbound::InboundTunnel;
-pub use pending::PendingTunnel;
-
-mod inbound;
-mod pending;
+pub mod inbound;
+pub mod outbound;
+pub mod pending;
 
 /// Tunnel hop.
 #[derive(Debug)]
@@ -67,44 +65,6 @@ pub trait Tunnel {
 
     /// Get tunnel direction.
     fn direction() -> TunnelDirection;
-}
-
-/// Outbound tunnel.
-#[derive(Debug)]
-pub struct OutboundTunnel {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-
-    /// Tunnel hops.
-    hops: Vec<TunnelHop>,
-}
-
-impl OutboundTunnel {
-    /// Create new [`OutboundTunnel`].
-    pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        Self { tunnel_id, hops }
-    }
-}
-
-impl Tunnel for OutboundTunnel {
-    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        OutboundTunnel::new(tunnel_id, hops)
-    }
-
-    fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole> {
-        match num_hops == 1 {
-            true => iter::once(HopRole::OutboundEndpoint).collect::<Vec<_>>().into_iter(),
-            false => (0..num_hops - 1)
-                .map(|_| HopRole::Intermediary)
-                .chain(iter::once(HopRole::OutboundEndpoint))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        }
-    }
-
-    fn direction() -> TunnelDirection {
-        TunnelDirection::Outbound
-    }
 }
 
 pub struct TunnelBuilder<T: Tunnel> {

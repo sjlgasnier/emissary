@@ -22,7 +22,10 @@ use crate::{
     router_storage::RouterStorage,
     runtime::Runtime,
     tunnel::{
-        hop::{InboundTunnel, OutboundTunnel, PendingTunnel, TunnelBuildParameters},
+        hop::{
+            inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
+            TunnelBuildParameters,
+        },
         noise::NoiseContext,
         pool::selector::{ClientSelector, ExploratorySelector, HopSelector, TunnelSelector},
     },
