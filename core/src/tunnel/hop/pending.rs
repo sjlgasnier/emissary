@@ -104,7 +104,7 @@ impl PendingTunnel {
             .unzip();
 
         // create build records and generate key contexts for each hop
-        let (mut build_records, mut tunnel_hops): (Vec<Vec<u8>>, VecDeque<PendingTunnelHop>) =
+        let (mut tunnel_hops, mut build_records): (VecDeque<PendingTunnelHop>, Vec<Vec<u8>>) =
             tunnel_ids
                 .iter()
                 .zip(tunnel_ids.iter().skip(1))
@@ -118,6 +118,11 @@ impl PendingTunnel {
                 .map(
                     |((((tunnel_id, next_tunnel_id), next_router_hash), hop_role), key)| {
                         (
+                            PendingTunnelHop {
+                                role: hop_role,
+                                tunnel_id: *tunnel_id,
+                                key_context: noise.derive_outbound_tunnel_keys::<R>(key, hop_role),
+                            },
                             ShortTunnelBuildRecordBuilder::default()
                                 .with_tunnel_id((*tunnel_id).into())
                                 .with_next_tunnel_id((*next_tunnel_id).into())
@@ -127,11 +132,6 @@ impl PendingTunnel {
                                 .with_request_expiration(build_expiration)
                                 .with_next_message_id(message_id.into())
                                 .serialize(),
-                            PendingTunnelHop {
-                                role: hop_role,
-                                tunnel_id: *tunnel_id,
-                                key_context: noise.derive_outbound_tunnel_keys::<R>(key, hop_role),
-                            },
                         )
                     },
                 )
@@ -171,13 +171,18 @@ impl PendingTunnel {
             .collect::<Vec<_>>();
 
         // double encrypt records
-        encrypted_records.iter_mut().enumerate().for_each(|(record_idx, mut record)| {
-            tunnel_hops.iter().enumerate().for_each(|(hop_idx, hop)| {
-                if record_idx != hop_idx {
-                    ChaCha::with_nonce(&hop.key_context.reply_key, record_idx as u64)
-                        .decrypt(&mut record);
-                }
-            })
+        //
+        // TODO: randomize order
+        tunnel_hops.iter().enumerate().for_each(|(hop_idx, hop)| {
+            encrypted_records.iter_mut().skip(hop_idx + 1).enumerate().for_each(
+                |(record_idx, mut record)| {
+                    ChaCha::with_nonce(
+                        &hop.key_context.reply_key,
+                        (hop_idx + record_idx + 1) as u64,
+                    )
+                    .decrypt(&mut record);
+                },
+            )
         });
 
         Ok((
