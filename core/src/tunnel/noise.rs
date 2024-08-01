@@ -181,16 +181,25 @@ impl NoiseContext {
     }
 
     /// Derive chaining and Chacha20Poly1305 keys for an inbound session.
-    pub fn derive_inbound_keys(&self, remote_ephemeral: StaticPublicKey) -> (Vec<u8>, Vec<u8>) {
+    //
+    // TODO: wrong key type!
+    pub fn derive_inbound_keys(
+        &self,
+        remote_ephemeral: StaticPublicKey,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut shared_secret = self.local_key.diffie_hellman(&remote_ephemeral);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
         let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
         let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let state = Sha256::new()
+            .update(&self.inbound_state)
+            .update(&remote_ephemeral.to_bytes())
+            .finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
 
-        (chaining_key, aead_key)
+        (chaining_key, aead_key, state)
     }
 
     /// Derive chaining and Chacha20Poly1305 keys for an outbound session.
@@ -297,6 +306,84 @@ impl NoiseContext {
                     local_ephemeral: local_ephemeral_public,
                     reply_key,
                     state,
+                }
+            }
+        }
+    }
+
+    /// Derive tunnel key context for an inbound session.
+    pub fn derive_inbound_tunnel_keys<R: Runtime>(
+        &self,
+        mut chaining_key: Vec<u8>,
+        role: HopRole,
+    ) -> PendingTunnelKeyContext {
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        match role {
+            HopRole::InboundGateway | HopRole::Intermediary => {
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: None,
+                    garlic_tag: None,
+                    iv_key: ck,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+            HopRole::OutboundEndpoint => {
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let ck =
+                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let iv_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"TunnelLayerIVKey")
+                    .update(&[0x02])
+                    .finalize();
+
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let mut ck =
+                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let garlic_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"RGarlicKeyAndTag")
+                    .update(&[0x02])
+                    .finalize();
+
+                let garlic_tag = ck[..8].to_vec();
+
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: Some(garlic_key),
+                    garlic_tag: Some(garlic_tag),
+                    iv_key,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
                 }
             }
         }

@@ -20,7 +20,7 @@ use crate::{
     crypto::StaticPublicKey,
     i2np::HopRole,
     primitives::{MessageId, RouterId, TunnelId},
-    tunnel::noise::NoiseContext,
+    tunnel::{hop::pending::PendingTunnelHop, noise::NoiseContext},
 };
 
 use alloc::vec::Vec;
@@ -28,9 +28,28 @@ use alloc::vec::Vec;
 use bytes::Bytes;
 pub use inbound::InboundTunnel;
 pub use pending::PendingTunnel;
-// pub use outbound::OutboundTunnel;
 
+#[derive(Debug)]
 pub struct OutboundTunnel {}
+
+pub struct OutboundTunnelBuilder {
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
+}
+
+impl OutboundTunnelBuilder {
+    pub fn new(tunnel_id: TunnelId) -> Self {
+        Self { tunnel_id }
+    }
+
+    pub fn with_hop(self, _hop: PendingTunnelHop) -> Self {
+        self
+    }
+
+    pub fn build(self) -> OutboundTunnel {
+        OutboundTunnel {}
+    }
+}
 
 mod inbound;
 mod pending;

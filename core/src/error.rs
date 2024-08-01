@@ -20,7 +20,7 @@ use alloc::string::String;
 use core::fmt;
 
 /// Channel error.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ChannelError {
     /// Channel is full.
     Full,
@@ -43,7 +43,7 @@ impl fmt::Display for ChannelError {
 }
 
 /// Tunnel error.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TunnelError {
     /// Tunnel doesn't exist.
     TunnelDoesntExist(u32),
@@ -53,6 +53,12 @@ pub enum TunnelError {
 
     /// Too many hops.
     TooManyHops(usize),
+
+    /// Invalid tunnel message.
+    InvalidMessage,
+
+    /// Tunnel rejected.
+    TunnelRejected(u8),
 }
 
 impl fmt::Display for TunnelError {
@@ -61,6 +67,8 @@ impl fmt::Display for TunnelError {
             Self::TunnelDoesntExist(tunnel_id) => write!(f, "tunnel ({tunnel_id}) does't exist"),
             Self::InvalidHop => write!(f, "invalid hop role for operation"),
             Self::TooManyHops(hops) => write!(f, "too many hops {hops}"),
+            Self::InvalidMessage => write!(f, "invalid tunnel message"),
+            Self::TunnelRejected(reason) => write!(f, "tunnel rejected: {reason}"),
         }
     }
 }
