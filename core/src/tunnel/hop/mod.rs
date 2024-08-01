@@ -20,19 +20,32 @@ use crate::{
     crypto::StaticPublicKey,
     i2np::HopRole,
     primitives::{MessageId, RouterId, TunnelId},
-    tunnel::{hop::pending::PendingTunnelHop, noise::NoiseContext},
+    tunnel::noise::{NoiseContext, PendingTunnelKeyContext},
 };
 
 use bytes::Bytes;
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::iter;
+use core::{iter, marker::PhantomData};
 
 pub use inbound::InboundTunnel;
 pub use pending::PendingTunnel;
 
 mod inbound;
 mod pending;
+
+/// Tunnel hop.
+#[derive(Debug)]
+pub struct TunnelHop {
+    /// Hop role
+    role: HopRole,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
+
+    /// Key context.
+    key_context: PendingTunnelKeyContext,
+}
 
 /// Tunnel direction.
 #[derive(Debug)]
@@ -44,15 +57,40 @@ pub enum TunnelDirection {
     Outbound,
 }
 
+/// Common interface for local tunnels (initiated by us).
 pub trait Tunnel {
+    /// Create new [`Tunnel`].
+    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self;
+
+    /// Get an iterator of hop roles for the tunnel participants.
     fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole>;
+
+    /// Get tunnel direction.
     fn direction() -> TunnelDirection;
 }
 
+/// Outbound tunnel.
 #[derive(Debug)]
-pub struct OutboundTunnel {}
+pub struct OutboundTunnel {
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
+
+    /// Tunnel hops.
+    hops: Vec<TunnelHop>,
+}
+
+impl OutboundTunnel {
+    /// Create new [`OutboundTunnel`].
+    pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
+        Self { tunnel_id, hops }
+    }
+}
 
 impl Tunnel for OutboundTunnel {
+    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
+        OutboundTunnel::new(tunnel_id, hops)
+    }
+
     fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole> {
         match num_hops == 1 {
             true => iter::once(HopRole::OutboundEndpoint).collect::<Vec<_>>().into_iter(),
@@ -69,31 +107,36 @@ impl Tunnel for OutboundTunnel {
     }
 }
 
-pub struct OutboundTunnelBuilder {
+pub struct TunnelBuilder<T: Tunnel> {
     /// Tunnel ID.
     tunnel_id: TunnelId,
 
     /// Hops.
-    hops: VecDeque<PendingTunnelHop>,
+    hops: VecDeque<TunnelHop>,
+
+    /// Marker for `Tunnel`
+    _tunnel: PhantomData<T>,
 }
 
-impl OutboundTunnelBuilder {
-    /// Create new [`OutboundTunnelBuilder `].
+impl<T: Tunnel> TunnelBuilder<T> {
+    /// Create new [`TunnelBuilder`].
     pub fn new(tunnel_id: TunnelId) -> Self {
         Self {
             tunnel_id,
             hops: VecDeque::new(),
+            _tunnel: Default::default(),
         }
     }
 
     /// Push new hop into tunnel's hops.
-    pub fn with_hop(mut self, hop: PendingTunnelHop) -> Self {
+    pub fn with_hop(mut self, hop: TunnelHop) -> Self {
         self.hops.push_back(hop);
         self
     }
 
-    pub fn build(self) -> OutboundTunnel {
-        OutboundTunnel {}
+    pub fn build(self) -> T {
+        // TODO: reverse order based on tunnel direction?
+        T::new(self.tunnel_id, self.hops.into_iter().collect())
     }
 }
 

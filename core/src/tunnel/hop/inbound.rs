@@ -20,22 +20,34 @@ use crate::{
     i2np::HopRole,
     primitives::{MessageId, TunnelId},
     runtime::Runtime,
-    tunnel::hop::{Tunnel, TunnelDirection},
+    tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
 };
 
 use alloc::vec::Vec;
 use core::iter;
 
+/// Inbound tunnel.
 #[derive(Debug)]
-pub struct InboundTunnel {}
+pub struct InboundTunnel {
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
+
+    /// Tunnel hops.
+    hops: Vec<TunnelHop>,
+}
 
 impl InboundTunnel {
-    pub fn new(tunnel_id: TunnelId, message_id: MessageId) -> Self {
-        Self {}
+    /// Create new [`InboundTunnel`].
+    pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
+        Self { tunnel_id, hops }
     }
 }
 
 impl Tunnel for InboundTunnel {
+    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
+        InboundTunnel::new(tunnel_id, hops)
+    }
+
     fn hop_roles(num_hops: usize) -> impl Iterator<Item = HopRole> {
         match num_hops == 1 {
             true => iter::once(HopRole::InboundGateway).collect::<Vec<_>>().into_iter(),

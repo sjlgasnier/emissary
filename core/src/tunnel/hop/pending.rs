@@ -30,7 +30,7 @@ use crate::{
     runtime::Runtime,
     tunnel::{
         hop::{
-            InboundTunnel, OutboundTunnel, OutboundTunnelBuilder, Tunnel, TunnelBuildParameters,
+            InboundTunnel, OutboundTunnel, Tunnel, TunnelBuildParameters, TunnelBuilder, TunnelHop,
         },
         noise::PendingTunnelKeyContext,
         LOG_TARGET,
@@ -51,25 +51,13 @@ const NUM_BUILD_RECORDS: usize = 4;
 /// How long is reply waited for a build request until it's considered expired.
 const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(10);
 
-/// Pending tunnel hop.
-pub struct PendingTunnelHop {
-    /// Hop role
-    role: HopRole,
-
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-
-    /// Key context.
-    key_context: PendingTunnelKeyContext,
-}
-
 /// Outbound tunnel.
 pub struct PendingTunnel<T: Tunnel> {
     /// Tunnel ID.
     tunnel_id: TunnelId,
 
     /// Pending tunnel hops.
-    hops: VecDeque<PendingTunnelHop>,
+    hops: VecDeque<TunnelHop>,
 
     /// Marker for tunnel.
     _tunnel: PhantomData<T>,
@@ -115,35 +103,34 @@ impl<T: Tunnel> PendingTunnel<T> {
             .unzip();
 
         // create build records and generate key contexts for each hop
-        let (mut tunnel_hops, mut build_records): (VecDeque<PendingTunnelHop>, Vec<Vec<u8>>) =
-            tunnel_ids
-                .iter()
-                .zip(tunnel_ids.iter().skip(1))
-                .zip(router_hashes.iter().skip(1))
-                .zip(T::hop_roles(num_hops))
-                .zip(hops.into_iter().map(|(_, key)| key))
-                .map(
-                    |((((tunnel_id, next_tunnel_id), next_router_hash), hop_role), key)| {
-                        (
-                            PendingTunnelHop {
-                                role: hop_role,
-                                tunnel_id: *tunnel_id,
-                                // TODO: ???
-                                key_context: noise.derive_outbound_tunnel_keys::<R>(key, hop_role),
-                            },
-                            ShortTunnelBuildRecordBuilder::default()
-                                .with_tunnel_id((*tunnel_id).into())
-                                .with_next_tunnel_id((*next_tunnel_id).into())
-                                .with_next_router_hash(next_router_hash.as_ref())
-                                .with_role(hop_role)
-                                .with_request_time(time_now.as_secs() as u32)
-                                .with_request_expiration(build_expiration)
-                                .with_next_message_id(message_id.into())
-                                .serialize(),
-                        )
-                    },
-                )
-                .unzip();
+        let (mut tunnel_hops, mut build_records): (VecDeque<TunnelHop>, Vec<Vec<u8>>) = tunnel_ids
+            .iter()
+            .zip(tunnel_ids.iter().skip(1))
+            .zip(router_hashes.iter().skip(1))
+            .zip(T::hop_roles(num_hops))
+            .zip(hops.into_iter().map(|(_, key)| key))
+            .map(
+                |((((tunnel_id, next_tunnel_id), next_router_hash), hop_role), key)| {
+                    (
+                        TunnelHop {
+                            role: hop_role,
+                            tunnel_id: *tunnel_id,
+                            // TODO: ???
+                            key_context: noise.derive_outbound_tunnel_keys::<R>(key, hop_role),
+                        },
+                        ShortTunnelBuildRecordBuilder::default()
+                            .with_tunnel_id((*tunnel_id).into())
+                            .with_next_tunnel_id((*next_tunnel_id).into())
+                            .with_next_router_hash(next_router_hash.as_ref())
+                            .with_role(hop_role)
+                            .with_request_time(time_now.as_secs() as u32)
+                            .with_request_expiration(build_expiration)
+                            .with_next_message_id(message_id.into())
+                            .serialize(),
+                    )
+                },
+            )
+            .unzip();
 
         // encrypt build records with each hop's aead key and extend the build record into full
         // `ShortTunnelBuildRecord` by prepending hop's truncated router hash and ephemeral public
@@ -211,21 +198,18 @@ impl<T: Tunnel> PendingTunnel<T> {
         ))
     }
 
-    /// Process tunnel build response.
+    /// Try to build tunnel from the tunnel build response contained in `payload`.
     ///
-    /// This function consumes `self` and returns either an `OutboundTunnel` which can then be used
+    /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn process_tunnel_build_response(
-        self,
-        mut payload: Vec<u8>,
-    ) -> Result<OutboundTunnel, TunnelError> {
+    pub fn try_build_tunnel(self, mut payload: Vec<u8>) -> Result<T, TunnelError> {
         self.hops
             .into_iter()
             .enumerate()
             .rev()
             .try_fold(
-                OutboundTunnelBuilder::new(self.tunnel_id),
+                TunnelBuilder::new(self.tunnel_id),
                 |builder, (hop_idx, hop)| {
                     let mut record =
                         payload[1 + (hop_idx * 218)..1 + ((1 + hop_idx) * 218)].to_vec();
@@ -394,7 +378,7 @@ mod test {
                 });
         }
 
-        assert!(pending_tunnel.process_tunnel_build_response(payload).is_ok());
+        assert!(pending_tunnel.try_build_tunnel(payload).is_ok());
     }
 
     #[test]
@@ -484,7 +468,7 @@ mod test {
                 });
         }
 
-        assert!(pending_tunnel.process_tunnel_build_response(payload).is_ok());
+        assert!(pending_tunnel.try_build_tunnel(payload).is_ok());
     }
 
     #[test]
@@ -578,7 +562,7 @@ mod test {
         }
 
         assert_eq!(
-            pending_tunnel.process_tunnel_build_response(payload).unwrap_err(),
+            pending_tunnel.try_build_tunnel(payload).unwrap_err(),
             TunnelError::TunnelRejected(0x30)
         );
     }
@@ -622,7 +606,7 @@ mod test {
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
         assert_eq!(
-            pending_tunnel.process_tunnel_build_response(payload).unwrap_err(),
+            pending_tunnel.try_build_tunnel(payload).unwrap_err(),
             TunnelError::InvalidMessage
         );
     }

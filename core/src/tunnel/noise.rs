@@ -158,6 +158,12 @@ pub struct PendingTunnelKeyContext {
     pub chacha: Vec<u8>,
 }
 
+impl fmt::Debug for PendingTunnelKeyContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingTunnelKeyContext").finish_non_exhaustive()
+    }
+}
+
 impl NoiseContext {
     /// Create new [`NoiseContext`].
     pub fn new(local_key: StaticPrivateKey) -> Self {
