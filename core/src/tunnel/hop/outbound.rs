@@ -51,7 +51,7 @@ impl Tunnel for OutboundTunnel {
         match num_hops.get() == 1 {
             true => iter::once(HopRole::OutboundEndpoint).collect::<Vec<_>>().into_iter(),
             false => (0..num_hops.get() - 1)
-                .map(|_| HopRole::Intermediary)
+                .map(|_| HopRole::Participant)
                 .chain(iter::once(HopRole::OutboundEndpoint))
                 .collect::<Vec<_>>()
                 .into_iter(),

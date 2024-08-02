@@ -170,7 +170,7 @@ pub enum HopRole {
     OutboundEndpoint,
 
     /// Router acts as an intermediary participant.
-    Intermediary,
+    Participant,
 }
 
 impl HopRole {
@@ -178,7 +178,7 @@ impl HopRole {
         match role {
             0x80 => Some(HopRole::InboundGateway),
             0x40 => Some(HopRole::OutboundEndpoint),
-            0x00 => Some(HopRole::Intermediary),
+            0x00 => Some(HopRole::Participant),
             role => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -195,7 +195,7 @@ impl HopRole {
         match self {
             HopRole::InboundGateway => 0x80,
             HopRole::OutboundEndpoint => 0x40,
-            HopRole::Intermediary => 0x00,
+            HopRole::Participant => 0x00,
         }
     }
 }

@@ -262,7 +262,7 @@ impl NoiseContext {
             .finalize();
 
         match role {
-            HopRole::InboundGateway | HopRole::Intermediary => {
+            HopRole::InboundGateway | HopRole::Participant => {
                 ck.zeroize();
                 temp_key.zeroize();
                 chaining_key.zeroize();
@@ -340,7 +340,7 @@ impl NoiseContext {
             .finalize();
 
         match role {
-            HopRole::InboundGateway | HopRole::Intermediary => {
+            HopRole::InboundGateway | HopRole::Participant => {
                 ck.zeroize();
                 temp_key.zeroize();
                 chaining_key.zeroize();
@@ -650,7 +650,7 @@ impl Noise {
             .with_tunnel_id(first_tunnel_id)
             .with_next_tunnel_id(second_tunnel_id)
             .with_next_router_hash(hops[1].identity().hash().as_ref())
-            .with_role(HopRole::Intermediary)
+            .with_role(HopRole::Participant)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
             .with_next_message_id(message_id) // TODO: different for every message?
@@ -744,7 +744,7 @@ impl Noise {
         pending_tunnel.hops.push_front((
             first_tunnel_id,
             TunnelHopNew {
-                role: HopRole::Intermediary,
+                role: HopRole::Participant,
                 index: 0usize,
                 reply_key: reply_key1,
                 tunnel_id: first_tunnel_id,
@@ -812,7 +812,7 @@ impl Noise {
             .with_tunnel_id(second_tunnel_id)
             .with_next_tunnel_id(recv_tunnel_id)
             .with_next_router_hash(&our_hash)
-            .with_role(HopRole::Intermediary)
+            .with_role(HopRole::Participant)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
             .with_next_message_id(message_id) // TODO: different for every message?
@@ -911,7 +911,7 @@ impl Noise {
         pending_tunnel.hops.push_front((
             second_tunnel_id,
             TunnelHopNew {
-                role: HopRole::Intermediary,
+                role: HopRole::Participant,
                 index: 1usize,
                 reply_key: reply_key2,
                 tunnel_id: second_tunnel_id,
@@ -1141,7 +1141,7 @@ impl Noise {
 
         match hop.role {
             HopRole::InboundGateway => todo!("inbound gateway not supported"),
-            HopRole::Intermediary => {
+            HopRole::Participant => {
                 let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
                 let iv = aes.encrypt(tunnel_data.iv());
 

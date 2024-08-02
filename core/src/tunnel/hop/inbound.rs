@@ -52,7 +52,7 @@ impl Tunnel for InboundTunnel {
         match num_hops.get() == 1 {
             true => iter::once(HopRole::InboundGateway).collect::<Vec<_>>().into_iter(),
             false => iter::once(HopRole::InboundGateway)
-                .chain((0..num_hops.get() - 1).map(|_| HopRole::Intermediary))
+                .chain((0..num_hops.get() - 1).map(|_| HopRole::Participant))
                 .collect::<Vec<_>>()
                 .into_iter(),
         }
