@@ -41,7 +41,9 @@ use rand_core::RngCore;
 use alloc::{boxed::Box, vec::Vec};
 use core::time::Duration;
 
+/// Common interface for transit tunnels.
 pub trait TransitTunnel: Send {
+    /// Get role of the transit tunnel hop.
     fn role(&self) -> HopRole;
 }
 

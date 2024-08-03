@@ -118,6 +118,7 @@ impl<R: Runtime> Router<R> {
             let tunnel_manager = TunnelManager::<R>::new(
                 transport_service,
                 local_router_info.clone(), // TODO: should be cheap
+                local_key,
                 metrics_handle,
                 router_storage,
             );

@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPrivateKey,
     i2np::{MessageType, RawI2npMessage},
-    primitives::{RouterId, RouterInfo},
+    primitives::{MessageId, RouterId, RouterInfo},
     router_storage::RouterStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
@@ -33,7 +33,7 @@ use crate::{
 };
 
 use futures::StreamExt;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use alloc::vec::Vec;
 use core::{
@@ -71,6 +71,12 @@ pub struct TunnelManager<R: Runtime> {
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
 
+    /// Pending local tunnels.
+    pending_tunnels: HashSet<MessageId>,
+
+    /// Tunnel pool manager.
+    pools: TunnelPoolManager<R>,
+
     /// Local router info.
     router_info: RouterInfo,
 
@@ -79,6 +85,9 @@ pub struct TunnelManager<R: Runtime> {
 
     /// Transport service.
     service: TransportService,
+
+    /// Transit tunnel manager.
+    transit: TransitTunnelManager<R>,
 }
 
 impl<R: Runtime> TunnelManager<R> {
@@ -86,6 +95,7 @@ impl<R: Runtime> TunnelManager<R> {
     pub fn new(
         service: TransportService,
         router_info: RouterInfo,
+        local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
         routers: RouterStorage,
     ) -> Self {
@@ -94,11 +104,23 @@ impl<R: Runtime> TunnelManager<R> {
             "starting tunnel manager",
         );
 
+        let noise = NoiseContext::new(local_key, router_info.identity().hash());
+        let pools = TunnelPoolManager::new(
+            noise.clone(),
+            metrics_handle.clone(),
+            routers,
+            TunnelPoolConfig::default(),
+        );
+        let transit = TransitTunnelManager::new(noise, metrics_handle.clone());
+
         Self {
-            metrics_handle,
+            metrics_handle: metrics_handle.clone(),
+            pending_tunnels: HashSet::new(),
+            pools,
             router_info,
             routers: HashMap::new(),
             service,
+            transit,
         }
     }
 
@@ -131,6 +153,23 @@ impl<R: Runtime> TunnelManager<R> {
         );
     }
 
+    fn on_tunnel_gateway(&mut self, messsage_id: u32, expiration: u64, payload: Vec<u8>) {}
+    fn on_tunnel_data(&mut self, messsage_id: u32, expiration: u64, payload: Vec<u8>) {}
+    fn on_garlic(&mut self, messsage_id: u32, expiration: u64, payload: Vec<u8>) {}
+    fn on_delivery_status(&mut self, messsage_id: u32, expiration: u64, payload: Vec<u8>) {}
+    fn on_variable_tunnel_build(&mut self, messsage_id: u32, expiration: u64, payload: Vec<u8>) {}
+    fn on_short_tunnel_build(&mut self, messsage_id: u32, expiration: u64, payload: Vec<u8>) {}
+    fn on_outbound_tunnel_build_reply(
+        &mut self,
+        messsage_id: u32,
+        expiration: u64,
+        payload: Vec<u8>,
+    ) {
+    }
+    fn on_build_tunnel(&mut self, router: RouterId, messsage_id: MessageId, message: Vec<u8>) {}
+    fn on_send_message(&mut self, router: RouterId, messsage_id: MessageId, message: Vec<u8>) {}
+
+    /// Handle received message from one of the open connections.
     fn on_message(&mut self, message: RawI2npMessage) {
         self.metrics_handle.counter(NUM_TUNNEL_MESSAGES).increment(1);
 
@@ -142,19 +181,24 @@ impl<R: Runtime> TunnelManager<R> {
         } = message;
 
         match message_type {
-            MessageType::Garlic => {
-                todo!();
-            }
-            _ => todo!(),
+            MessageType::DeliveryStatus => self.on_delivery_status(message_id, expiration, payload),
+            MessageType::Garlic => self.on_garlic(message_id, expiration, payload),
+            MessageType::TunnelData => self.on_tunnel_data(message_id, expiration, payload),
+            MessageType::TunnelGateway => self.on_tunnel_gateway(message_id, expiration, payload),
+            MessageType::VariableTunnelBuild =>
+                self.on_variable_tunnel_build(message_id, expiration, payload),
+            MessageType::ShortTunnelBuild =>
+                self.on_short_tunnel_build(message_id, expiration, payload),
+            MessageType::OutboundTunnelBuildReply =>
+                self.on_outbound_tunnel_build_reply(message_id, expiration, payload),
+            MessageType::TunnelBuild
+            | MessageType::TunnelBuildReply
+            | MessageType::Data
+            | MessageType::VariableTunnelBuildReply => unimplemented!(),
+            MessageType::DatabaseStore
+            | MessageType::DatabaseLookup
+            | MessageType::DatabaseSearchReply => unreachable!(),
         }
-
-        // TODO: message can be:
-        // TODO:  - garlic-wrapped netdb message
-        // TODO:  - garlic-wrapped tunnel message to us
-        // TODO:
-        // TODO:
-
-        todo!();
     }
 }
 
@@ -162,6 +206,25 @@ impl<R: Runtime> Future for TunnelManager<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.pools.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(event)) => match event {
+                    TunnelPoolEvent::BuildTunnel {
+                        router,
+                        message_id,
+                        message,
+                    } => self.on_build_tunnel(router, message_id, message),
+                    TunnelPoolEvent::SendI2NpMessage {
+                        router,
+                        message_id,
+                        message,
+                    } => self.on_send_message(router, message_id, message),
+                },
+            }
+        }
+
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,

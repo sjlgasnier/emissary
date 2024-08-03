@@ -56,6 +56,18 @@ const TUNNEL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Events emitted by the tunnel pools.
 pub enum TunnelPoolEvent {
+    /// Build tunnel.
+    BuildTunnel {
+        /// Router ID.
+        router: RouterId,
+
+        /// Message ID.
+        message_id: MessageId,
+
+        /// Serialized I2NP message.
+        message: Vec<u8>,
+    },
+
     /// Send I2NP message to router.
     SendI2NpMessage {
         /// Router ID.
@@ -72,6 +84,15 @@ pub enum TunnelPoolEvent {
 impl fmt::Debug for TunnelPoolEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BuildTunnel {
+                router,
+                message_id,
+                message,
+            } => f
+                .debug_struct("TunnelPoolEvent::BuildTunnel")
+                .field("router", &router)
+                .field("message_id", &message_id)
+                .finish_non_exhaustive(),
             Self::SendI2NpMessage {
                 router,
                 message_id,
