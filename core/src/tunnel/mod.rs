@@ -41,6 +41,7 @@ mod hop;
 mod metrics;
 mod noise;
 mod pool;
+mod transit;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";

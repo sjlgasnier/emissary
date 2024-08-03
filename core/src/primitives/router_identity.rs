@@ -44,14 +44,8 @@ impl fmt::Display for RouterId {
     }
 }
 
-impl From<String> for RouterId {
-    fn from(value: String) -> Self {
-        RouterId(Arc::new(value))
-    }
-}
-
-impl From<Vec<u8>> for RouterId {
-    fn from(value: Vec<u8>) -> Self {
+impl<T: AsRef<[u8]>> From<T> for RouterId {
+    fn from(value: T) -> Self {
         RouterId(Arc::new(base64_encode(value)))
     }
 }

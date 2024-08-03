@@ -272,12 +272,11 @@ mod test {
     use super::*;
     use crate::{
         crypto::{base64_encode, StaticPrivateKey, StaticPublicKey},
-        i2np::ShortTunnelBuildRecord,
+        i2np::{ShortTunnelBuildRecord, TunnelGatewayMessage},
         primitives::MessageId,
         runtime::mock::MockRuntime,
-        tunnel::noise::NoiseContext,
+        tunnel::{noise::NoiseContext, transit::TransitTunnelManager},
     };
-
     use bytes::Bytes;
 
     fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
@@ -289,16 +288,30 @@ mod test {
 
         let sk = StaticPrivateKey::from(key_bytes);
         let pk = sk.public();
+        let router_hash = Bytes::from(router_hash);
 
-        (Bytes::from(router_hash), pk, NoiseContext::new(sk))
+        (router_hash.clone(), pk, NoiseContext::new(sk, router_hash))
     }
 
     #[test]
     fn create_outbound_tunnel() {
-        let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+        use tracing_subscriber::prelude::*;
+        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
+
+        let handle = MockRuntime::register_metrics(vec![]);
+
+        let (hops, mut transit_managers): (
+            Vec<(Bytes, StaticPublicKey)>,
+            Vec<TransitTunnelManager<MockRuntime>>,
+        ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, pk, noise_context)| {
+                (
+                    (router_hash, pk),
+                    TransitTunnelManager::new(noise_context, handle.clone()),
+                )
+            })
             .unzip();
 
         let (local_hash, local_pk, local_noise) = make_router();
@@ -315,80 +328,61 @@ mod test {
             })
             .unwrap();
 
+        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+        assert_eq!(message.payload[0], 4u8);
+        assert_eq!(message.payload[1..].len() % 218, 0);
+
+        let message = hops.iter().zip(transit_managers.iter_mut()).fold(
+            message,
+            |acc, ((router_hash, _), transit_manager)| {
+                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                RawI2npMessage::parse::<true>(&message).unwrap()
+            },
+        );
+        assert_eq!(message.message_type, MessageType::TunnelGateway);
+
+        let TunnelGatewayMessage {
+            tunnel_id: recv_tunnel_id,
+            payload,
+        } = TunnelGatewayMessage::parse(&message.payload).unwrap();
+
+        assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
+
         let Some(RawI2npMessage {
-            message_type: MessageType::ShortTunnelBuild,
-            message_id: parsed_message_id,
+            message_type: MessageType::OutboundTunnelBuildReply,
+            message_id,
             expiration,
-            mut payload,
-        }) = RawI2npMessage::parse::<true>(&message)
+            payload,
+        }) = RawI2npMessage::parse::<false>(&payload)
         else {
             panic!("invalid message");
         };
-
-        assert_eq!(parsed_message_id, message_id.into());
-        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(payload[0], 4u8);
-        assert_eq!(payload[1..].len() % 218, 0);
-
-        fn find_own_record<'a>(
-            hash: &Bytes,
-            payload: &'a mut [u8],
-        ) -> Option<(usize, &'a mut [u8])> {
-            payload
-                .chunks_mut(218)
-                .enumerate()
-                .find(|(_, chunk)| &chunk[..16] == &hash[..16])
-        }
-
-        // TODO: this needs to refactored
-        for ((router_hash, _), noise) in hops.iter().zip(noise_contexts.iter()) {
-            let (record_idx, record) = find_own_record(&router_hash, &mut payload[1..]).unwrap();
-
-            let mut new_record = record[..].to_vec();
-
-            let pk = StaticPublicKey::from_bytes(new_record[16..48].to_vec()).unwrap();
-
-            let (chaining_key, aead_key, state) = noise.derive_inbound_keys(pk);
-            let new_state = Sha256::new().update(&state).update(&new_record[48..]).finalize();
-
-            let (tunnel_id, role) = {
-                let mut test = new_record[48..].to_vec();
-                ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
-
-                let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
-                (record.tunnel_id(), record.role())
-            };
-
-            let context = noise.derive_inbound_tunnel_keys::<MockRuntime>(chaining_key, role);
-
-            new_record[201] = 0x00;
-
-            let mut new_record = new_record[..202].to_vec();
-
-            ChaChaPoly::with_nonce(&context.reply_key, record_idx as u64)
-                .encrypt_with_ad_new(&new_state, &mut new_record)
-                .unwrap();
-
-            record[..].copy_from_slice(&new_record);
-
-            payload[1..]
-                .chunks_mut(218)
-                .enumerate()
-                .filter(|(index, _)| index != &record_idx)
-                .for_each(|(index, mut record)| {
-                    ChaCha::with_nonce(&context.reply_key, index as u64).encrypt(&mut record);
-                });
-        }
 
         assert!(pending_tunnel.try_build_tunnel(payload).is_ok());
     }
 
     #[test]
     fn create_inbound_tunnel() {
-        let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+        use tracing_subscriber::prelude::*;
+        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
+
+        let handle = MockRuntime::register_metrics(vec![]);
+
+        let (hops, mut transit_managers): (
+            Vec<(Bytes, StaticPublicKey)>,
+            Vec<TransitTunnelManager<MockRuntime>>,
+        ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, pk, noise_context)| {
+                (
+                    (router_hash, pk),
+                    TransitTunnelManager::new(noise_context, handle.clone()),
+                )
+            })
             .unzip();
 
         let (local_hash, local_pk, local_noise) = make_router();
@@ -405,72 +399,23 @@ mod test {
             })
             .unwrap();
 
-        let Some(RawI2npMessage {
-            message_type: MessageType::ShortTunnelBuild,
-            message_id: parsed_message_id,
-            expiration,
-            mut payload,
-        }) = RawI2npMessage::parse::<true>(&message)
-        else {
-            panic!("invalid message");
-        };
+        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
 
-        assert_eq!(parsed_message_id, message_id.into());
+        assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(payload[0], 4u8);
-        assert_eq!(payload[1..].len() % 218, 0);
+        assert_eq!(message.payload[0], 4u8);
+        assert_eq!(message.payload[1..].len() % 218, 0);
 
-        fn find_own_record<'a>(
-            hash: &Bytes,
-            payload: &'a mut [u8],
-        ) -> Option<(usize, &'a mut [u8])> {
-            payload
-                .chunks_mut(218)
-                .enumerate()
-                .find(|(_, chunk)| &chunk[..16] == &hash[..16])
-        }
+        let message = hops.iter().zip(transit_managers.iter_mut()).fold(
+            message,
+            |acc, ((router_hash, _), transit_manager)| {
+                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                RawI2npMessage::parse::<true>(&message).unwrap()
+            },
+        );
 
-        // TODO: this needs to refactored
-        for ((router_hash, _), noise) in hops.iter().zip(noise_contexts.iter()) {
-            let (record_idx, record) = find_own_record(&router_hash, &mut payload[1..]).unwrap();
-
-            let mut new_record = record[..].to_vec();
-
-            let pk = StaticPublicKey::from_bytes(new_record[16..48].to_vec()).unwrap();
-
-            let (chaining_key, aead_key, state) = noise.derive_inbound_keys(pk);
-            let new_state = Sha256::new().update(&state).update(&new_record[48..]).finalize();
-
-            let (tunnel_id, role) = {
-                let mut test = new_record[48..].to_vec();
-                ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
-
-                let record = ShortTunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
-                (record.tunnel_id(), record.role())
-            };
-
-            let context = noise.derive_inbound_tunnel_keys::<MockRuntime>(chaining_key, role);
-
-            new_record[201] = 0x00;
-
-            let mut new_record = new_record[..202].to_vec();
-
-            ChaChaPoly::with_nonce(&context.reply_key, record_idx as u64)
-                .encrypt_with_ad_new(&new_state, &mut new_record)
-                .unwrap();
-
-            record[..].copy_from_slice(&new_record);
-
-            payload[1..]
-                .chunks_mut(218)
-                .enumerate()
-                .filter(|(index, _)| index != &record_idx)
-                .for_each(|(index, mut record)| {
-                    ChaCha::with_nonce(&context.reply_key, index as u64).encrypt(&mut record);
-                });
-        }
-
-        assert!(pending_tunnel.try_build_tunnel(payload).is_ok());
+        assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
+        assert!(pending_tunnel.try_build_tunnel(message.payload).is_ok());
     }
 
     #[test]

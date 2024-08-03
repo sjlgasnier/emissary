@@ -40,6 +40,14 @@ impl OutboundTunnel {
     pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
         Self { tunnel_id, hops }
     }
+
+    // TODO: return future?
+    pub fn send(&mut self) -> impl Iterator<Item = Vec<u8>> {
+        // TODO: split input i2np message into fragments
+        // TODO: encrypt fragments (tunnel delivery)
+        // TODO: send fragments to next hop
+        alloc::vec![].into_iter()
+    }
 }
 
 impl Tunnel for OutboundTunnel {

@@ -145,6 +145,26 @@ pub struct NoiseContext {
 
     /// Local static key.
     local_key: Arc<StaticPrivateKey>,
+
+    /// Local router hash.
+    local_router_hash: Bytes,
+}
+
+pub struct TunnelKeyContext {
+    iv_key: Vec<u8>,
+    layer_key: Vec<u8>,
+}
+
+impl TunnelKeyContext {
+    /// Get reference to IV key.
+    pub fn iv_key(&self) -> &[u8] {
+        &self.iv_key
+    }
+
+    /// Get reference to layer key.
+    pub fn layer_key(&self) -> &[u8] {
+        &self.layer_key
+    }
 }
 
 pub struct PendingTunnelKeyContext {
@@ -164,9 +184,117 @@ impl fmt::Debug for PendingTunnelKeyContext {
     }
 }
 
+pub struct PendingTunnelSession {
+    /// Chaining key.
+    chaining_key: Vec<u8>,
+
+    /// ChaCha20Poly1305 key for decrypting the build request record.
+    aead_key: Vec<u8>,
+
+    /// AEAD state.
+    state: Vec<u8>,
+}
+
+impl PendingTunnelSession {
+    /// Create new [`PendingTunnelSession`].
+    fn new(chaining_key: Vec<u8>, aead_key: Vec<u8>, state: Vec<u8>) -> Self {
+        Self {
+            chaining_key,
+            aead_key,
+            state,
+        }
+    }
+
+    // TODO: ugly
+    pub fn decrypt_build_record(
+        &mut self,
+        mut record: Vec<u8>,
+    ) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+        let state = Sha256::new().update(&self.state).update(&record).finalize();
+
+        ChaChaPoly::new(&self.aead_key).decrypt_with_ad(&self.state, &mut record)?;
+
+        Ok((record, state))
+    }
+
+    /// Derive tunnel key context for an inbound session.
+    pub fn derive_tunnel_keys(mut self, role: HopRole) -> PendingTunnelKeyContext {
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        match role {
+            HopRole::InboundGateway | HopRole::Participant => {
+                ck.zeroize();
+                temp_key.zeroize();
+                self.chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: None,
+                    garlic_tag: None,
+                    iv_key: ck,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+            HopRole::OutboundEndpoint => {
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let ck =
+                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let iv_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"TunnelLayerIVKey")
+                    .update(&[0x02])
+                    .finalize();
+
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let mut ck =
+                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let garlic_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"RGarlicKeyAndTag")
+                    .update(&[0x02])
+                    .finalize();
+
+                let garlic_tag = ck[..8].to_vec();
+
+                ck.zeroize();
+                temp_key.zeroize();
+                self.chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: Some(garlic_key),
+                    garlic_tag: Some(garlic_tag),
+                    iv_key,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+        }
+    }
+}
+
 impl NoiseContext {
     /// Create new [`NoiseContext`].
-    pub fn new(local_key: StaticPrivateKey) -> Self {
+    pub fn new(local_key: StaticPrivateKey, local_router_hash: Bytes) -> Self {
         let chaining_key = {
             let mut chaining_key = PROTOCOL_NAME.as_bytes().to_vec();
             chaining_key.append(&mut vec![0u8]);
@@ -179,6 +307,7 @@ impl NoiseContext {
             .finalize();
 
         Self {
+            local_router_hash,
             chaining_key: Bytes::from(chaining_key),
             inbound_state: Bytes::from(inbound_state),
             outbound_state: Bytes::from(outbound_state),
@@ -186,9 +315,15 @@ impl NoiseContext {
         }
     }
 
+    /// Get reference to local router hash.
+    pub fn local_router_hash(&self) -> &Bytes {
+        &self.local_router_hash
+    }
+
     /// Derive chaining and Chacha20Poly1305 keys for an inbound session.
     //
     // TODO: wrong key type!
+    // TODO: remove
     pub fn derive_inbound_keys(
         &self,
         remote_ephemeral: StaticPublicKey,
@@ -206,6 +341,29 @@ impl NoiseContext {
         shared_secret.zeroize();
 
         (chaining_key, aead_key, state)
+    }
+
+    /// Create
+    //
+    // TODO: wrong key type!
+    // TODO: rename
+    pub fn create_pending_tunnel_session(
+        &mut self,
+        remote_ephemeral: StaticPublicKey,
+    ) -> PendingTunnelSession {
+        let mut shared_secret = self.local_key.diffie_hellman(&remote_ephemeral);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let state = Sha256::new()
+            .update(&self.inbound_state)
+            .update(&remote_ephemeral.to_bytes())
+            .finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+
+        PendingTunnelSession::new(chaining_key, aead_key, state)
     }
 
     /// Derive chaining and Chacha20Poly1305 keys for an outbound session.
@@ -318,6 +476,8 @@ impl NoiseContext {
     }
 
     /// Derive tunnel key context for an inbound session.
+    //
+    // TODO: why does this take `Runtime`?
     pub fn derive_inbound_tunnel_keys<R: Runtime>(
         &self,
         mut chaining_key: Vec<u8>,

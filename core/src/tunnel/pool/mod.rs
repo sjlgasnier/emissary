@@ -48,11 +48,11 @@ use core::{
 
 mod selector;
 
-/// Tunnel maintenance interval.
-const TUNNEL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
-
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::pool";
+
+/// Tunnel maintenance interval.
+const TUNNEL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Events emitted by the tunnel pools.
 pub enum TunnelPoolEvent {
@@ -103,6 +103,18 @@ pub struct TunnelPoolConfig {
     destination: (),
 }
 
+impl Default for TunnelPoolConfig {
+    fn default() -> Self {
+        Self {
+            num_inbound: 1usize,
+            num_inbound_hops: 2usize,
+            num_outbound: 1usize,
+            num_outbound_hops: 2usize,
+            destination: (),
+        }
+    }
+}
+
 pub struct TunnelPool<R> {
     /// Tunnel pool configuration.
     config: TunnelPoolConfig,
@@ -112,9 +124,6 @@ pub struct TunnelPool<R> {
 
     /// Noise context.
     noise: NoiseContext,
-
-    /// Local router hash.
-    our_hash: Bytes,
 
     /// Outbound tunnels.
     outbound: HashMap<TunnelId, OutboundTunnel>,
@@ -128,13 +137,12 @@ pub struct TunnelPool<R> {
 
 impl<R: Runtime> TunnelPool<R> {
     /// Create empty [`TunnelPool`] from [`TunnelPoolConfig`].
-    pub fn new(noise: NoiseContext, our_hash: Bytes, config: TunnelPoolConfig) -> Self {
+    pub fn new(noise: NoiseContext, config: TunnelPoolConfig) -> Self {
         Self {
             config,
             inbound: HashMap::new(),
             _marker: Default::default(),
             noise,
-            our_hash,
             outbound: HashMap::new(),
             pending: HashMap::new(),
         }
@@ -209,11 +217,13 @@ impl<R: Runtime> TunnelPool<R> {
                             tunnel_id,
                             message_id,
                             noise: self.noise.clone(),
-                            our_hash: self.our_hash.clone(),
+                            our_hash: self.noise.local_router_hash().clone(),
                         },
                     ) {
                         Ok((tunnel, router, message)) => {
                             // TODO: what to do with tunnel?
+                            // TODO: probably better to call it `BuildTunnel`?
+                            // TODO:
                             events.push(TunnelPoolEvent::SendI2NpMessage {
                                 router,
                                 message_id,
@@ -267,13 +277,12 @@ impl<R: Runtime> TunnelPoolManager<R> {
     /// Create new [`TunnelPoolManager`].
     pub fn new(
         noise: NoiseContext,
-        our_hash: Bytes,
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
         exploratory_pool_config: TunnelPoolConfig,
     ) -> Self {
         Self {
-            exploratory_pool: TunnelPool::new(noise.clone(), our_hash, exploratory_pool_config),
+            exploratory_pool: TunnelPool::new(noise.clone(), exploratory_pool_config),
             maintenance_timer: Box::pin(ready(())),
             metrics_handle,
             noise,
@@ -346,8 +355,6 @@ mod tests {
 
     #[tokio::test]
     async fn tunnel_test() {
-        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         let handle = MockRuntime::register_metrics(Vec::new());
         let router_storage = RouterStorage::from_random(
             (0..25).map(|_| RouterInfo::random::<MockRuntime>()).collect(),
@@ -359,31 +366,22 @@ mod tests {
             num_outbound_hops: 3usize,
             destination: (),
         };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
-
-            NoiseContext::new(StaticPrivateKey::from(key_bytes))
-        };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut our_hash);
 
             Bytes::from(our_hash)
         };
+        let noise = {
+            let mut key_bytes = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-        tracing::info!("our router hash = {}", base64_encode(&our_hash));
+            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+        };
 
-        let mut pool_manager = TunnelPoolManager::<MockRuntime>::new(
-            noise,
-            our_hash,
-            handle,
-            router_storage,
-            pool_config,
-        );
+        let mut pool_manager =
+            TunnelPoolManager::<MockRuntime>::new(noise, handle, router_storage, pool_config);
 
-        let event = pool_manager.next().await;
-
-        tracing::error!("{event:?}");
+        let _ = pool_manager.next().await;
     }
 }

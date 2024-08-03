@@ -42,6 +42,8 @@ pub struct TunnelHop {
     tunnel_id: TunnelId,
 
     /// Key context.
+    //
+    // TODO: this is not pending context
     key_context: PendingTunnelKeyContext,
 }
 
