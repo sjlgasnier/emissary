@@ -395,7 +395,7 @@ impl NoiseContext {
         let state = {
             let state = Sha256::new()
                 .update(&self.outbound_state)
-                .update(remote_static.as_ref())
+                .update::<&[u8]>(remote_static.as_ref())
                 .finalize();
 
             Sha256::new().update(&state).update(&local_ephemeral_public).finalize()

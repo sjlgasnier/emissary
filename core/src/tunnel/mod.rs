@@ -17,13 +17,19 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::StaticPrivateKey,
     i2np::{MessageType, RawI2npMessage},
     primitives::{RouterId, RouterInfo},
     router_storage::RouterStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
-    tunnel::metrics::*,
+    tunnel::{
+        metrics::*,
+        new_noise::NoiseContext,
+        pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolManager},
+        transit::TransitTunnelManager,
+    },
 };
 
 use futures::StreamExt;
@@ -39,6 +45,7 @@ use core::{
 mod garlic;
 mod hop;
 mod metrics;
+mod new_noise;
 mod noise;
 mod pool;
 mod transit;

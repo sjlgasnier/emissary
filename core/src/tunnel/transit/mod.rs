@@ -21,7 +21,7 @@ use crate::{
         base64_encode,
         chachapoly::{ChaCha, ChaChaPoly},
         sha256::Sha256,
-        StaticPublicKey,
+        EphemeralPublicKey, StaticPublicKey,
     },
     error::TunnelError,
     i2np::{
@@ -30,16 +30,16 @@ use crate::{
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::noise::{NoiseContext, PendingTunnelKeyContext},
+    tunnel::new_noise::{NoiseContext, TunnelKeys},
     Error,
 };
 
 use bytes::Bytes;
 use hashbrown::HashMap;
+use rand_core::RngCore;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::time::Duration;
-use rand_core::RngCore;
 
 pub trait TransitTunnel: Send {
     fn role(&self) -> HopRole;
@@ -56,7 +56,7 @@ struct Participant {
     next_router: RouterId,
 
     /// Tunnel key context.
-    key_context: PendingTunnelKeyContext,
+    key_context: TunnelKeys,
 }
 
 impl TransitTunnel for Participant {
@@ -76,7 +76,7 @@ struct InboundGateway {
     next_router: RouterId,
 
     /// Tunnel key context.
-    key_context: PendingTunnelKeyContext,
+    key_context: TunnelKeys,
 }
 
 impl TransitTunnel for InboundGateway {
@@ -96,7 +96,7 @@ struct OutboundEndpoint {
     next_router: RouterId,
 
     /// Tunnel key context.
-    key_context: PendingTunnelKeyContext,
+    key_context: TunnelKeys,
 }
 
 impl TransitTunnel for OutboundEndpoint {
@@ -110,7 +110,7 @@ impl Participant {
         tunnel_id: TunnelId,
         next_tunnel_id: TunnelId,
         next_router: RouterId,
-        key_context: PendingTunnelKeyContext,
+        key_context: TunnelKeys,
     ) -> Self
     where
         Self: Sized,
@@ -129,7 +129,7 @@ impl InboundGateway {
         tunnel_id: TunnelId,
         next_tunnel_id: TunnelId,
         next_router: RouterId,
-        key_context: PendingTunnelKeyContext,
+        key_context: TunnelKeys,
     ) -> Self
     where
         Self: Sized,
@@ -148,7 +148,7 @@ impl OutboundEndpoint {
         tunnel_id: TunnelId,
         next_tunnel_id: TunnelId,
         next_router: RouterId,
-        key_context: PendingTunnelKeyContext,
+        key_context: TunnelKeys,
     ) -> Self
     where
         Self: Sized,
@@ -221,10 +221,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
         // create pending tunnel session by deriving keys for decrypting the record
-        let mut session = self.noise.create_pending_tunnel_session(
-            StaticPublicKey::from_bytes(record[16..48].to_vec()).expect("to succeed"),
+        let mut session = self.noise.create_inbound_session(
+            EphemeralPublicKey::from_bytes(record[16..48].to_vec()).expect("to succeed"),
         );
-        let (decrypted_record, aead_state) = session.decrypt_build_record(record[48..].to_vec())?;
+        let decrypted_record = session.decrypt_build_record(record[48..].to_vec())?;
 
         let build_record = ShortTunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
             tracing::debug!(
@@ -241,7 +241,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
         let next_tunnel_id = TunnelId::from(build_record.next_tunnel_id());
         let next_message_id = build_record.next_message_id();
         let next_router = RouterId::from(build_record.next_router_hash());
-        let tunnel_session = session.derive_tunnel_keys(role);
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -257,21 +256,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
         record[49] = 0x00;
         record[201] = 0x00; // accept
 
-        // encrypt our record with chachapoly
-        // TODO: so ugly
-        let tag = ChaChaPoly::with_nonce(&tunnel_session.reply_key, record_idx as u64)
-            .encrypt_with_ad(&aead_state, &mut record[0..202])
-            .unwrap();
-        record[202..218].copy_from_slice(&tag);
-
-        // encrypt other records with chacha
-        payload[1..]
-            .chunks_mut(SHORT_BUILD_REQUEST_RECORD)
-            .enumerate()
-            .filter(|(idx, _)| idx != &record_idx)
-            .for_each(|(idx, mut record)| {
-                ChaCha::with_nonce(&tunnel_session.reply_key, idx as u64).encrypt(&mut record);
-            });
+        // derive tunnel keys and encrypt build records
+        session.create_tunnel_keys(role)?;
+        session.encrypt_build_records(&mut payload, record_idx)?;
 
         self.tunnels.insert(
             tunnel_id,
@@ -280,19 +267,19 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     tunnel_id,
                     next_tunnel_id,
                     next_router.clone(),
-                    tunnel_session,
+                    session.finalize()?,
                 )),
                 HopRole::Participant => Box::new(Participant::new(
                     tunnel_id,
                     next_tunnel_id,
                     next_router.clone(),
-                    tunnel_session,
+                    session.finalize()?,
                 )),
                 HopRole::OutboundEndpoint => Box::new(OutboundEndpoint::new(
                     tunnel_id,
                     next_tunnel_id,
                     next_router.clone(),
-                    tunnel_session,
+                    session.finalize()?,
                 )),
             },
         );

@@ -62,6 +62,9 @@ pub enum TunnelError {
 
     /// Tunnel rejected.
     TunnelRejected(u8),
+
+    /// Local record not found in the build request.
+    RecordNotFound,
 }
 
 impl fmt::Display for TunnelError {
@@ -73,6 +76,7 @@ impl fmt::Display for TunnelError {
             Self::InvalidMessage => write!(f, "invalid tunnel message"),
             Self::TunnelRejected(reason) => write!(f, "tunnel rejected: {reason}"),
             Self::NotEnoughHops(hops) => write!(f, "not enough hops {hops}"),
+            Self::RecordNotFound => write!(f, "local record not found"),
         }
     }
 }

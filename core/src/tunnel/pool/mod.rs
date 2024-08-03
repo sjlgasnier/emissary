@@ -26,7 +26,7 @@ use crate::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
             TunnelBuildParameters,
         },
-        noise::NoiseContext,
+        new_noise::NoiseContext,
         pool::selector::{ClientSelector, ExploratorySelector, HopSelector, TunnelSelector},
     },
 };

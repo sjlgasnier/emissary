@@ -33,7 +33,6 @@ use crate::{
             inbound::InboundTunnel, outbound::OutboundTunnel, Tunnel, TunnelBuildParameters,
             TunnelBuilder, TunnelHop,
         },
-        noise::PendingTunnelKeyContext,
         LOG_TARGET,
     },
 };
@@ -117,8 +116,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         TunnelHop {
                             role: hop_role,
                             tunnel_id: *tunnel_id,
-                            // TODO: ???
-                            key_context: noise.derive_outbound_tunnel_keys::<R>(key, hop_role),
+                            key_context: noise.create_outbound_session::<R>(key, hop_role),
                         },
                         ShortTunnelBuildRecordBuilder::default()
                             .with_tunnel_id((*tunnel_id).into())
@@ -145,17 +143,21 @@ impl<T: Tunnel> PendingTunnel<T> {
             .zip(build_records.iter_mut())
             .zip(tunnel_hops.iter_mut())
             .filter_map(|(((router_hash), mut record), mut tunnel_hop)| {
-                ChaChaPoly::new(&tunnel_hop.key_context.chacha)
-                    .encrypt_with_ad_new(&tunnel_hop.key_context.state, &mut record)
+                ChaChaPoly::new(&tunnel_hop.key_context.aead_key())
+                    .encrypt_with_ad_new(&tunnel_hop.key_context.state(), &mut record)
                     .ok()
                     .map(|_| {
-                        tunnel_hop.key_context.state = Sha256::new()
-                            .update(&tunnel_hop.key_context.state)
-                            .update(&record)
-                            .finalize();
+                        // update associated data to include the encrypted record
+                        // which is used when decrypting the build reply
+                        tunnel_hop.key_context.set_state(
+                            Sha256::new()
+                                .update(&tunnel_hop.key_context.state())
+                                .update(&record)
+                                .finalize(),
+                        );
 
                         let mut full_record = router_hash[..16].to_vec();
-                        full_record.extend_from_slice(&tunnel_hop.key_context.local_ephemeral);
+                        full_record.extend_from_slice(&tunnel_hop.key_context.ephemeral_key());
                         full_record.extend_from_slice(&record);
 
                         full_record
@@ -174,7 +176,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             encrypted_records.iter_mut().skip(hop_idx + 1).enumerate().for_each(
                 |(record_idx, mut record)| {
                     ChaCha::with_nonce(
-                        &hop.key_context.reply_key,
+                        &hop.key_context.reply_key(),
                         (hop_idx + record_idx + 1) as u64,
                     )
                     .decrypt(&mut record);
@@ -216,8 +218,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                     let mut record =
                         payload[1 + (hop_idx * 218)..1 + ((1 + hop_idx) * 218)].to_vec();
 
-                    ChaChaPoly::with_nonce(&hop.key_context.reply_key, hop_idx as u64)
-                        .decrypt_with_ad(&hop.key_context.state, &mut record)
+                    ChaChaPoly::with_nonce(&hop.key_context.reply_key(), hop_idx as u64)
+                        .decrypt_with_ad(&hop.key_context.state(), &mut record)
                         .map_err(|error| {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -256,7 +258,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         .enumerate()
                         .filter(|(index, _)| index != &hop_idx)
                         .for_each(|(index, mut record)| {
-                            ChaCha::with_nonce(&hop.key_context.reply_key, index as u64)
+                            ChaCha::with_nonce(&hop.key_context.reply_key(), index as u64)
                                 .encrypt(&mut record);
                         });
 
@@ -271,11 +273,11 @@ impl<T: Tunnel> PendingTunnel<T> {
 mod test {
     use super::*;
     use crate::{
-        crypto::{base64_encode, StaticPrivateKey, StaticPublicKey},
+        crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
         i2np::{ShortTunnelBuildRecord, TunnelGatewayMessage},
         primitives::MessageId,
         runtime::mock::MockRuntime,
-        tunnel::{noise::NoiseContext, transit::TransitTunnelManager},
+        tunnel::{new_noise::NoiseContext, transit::TransitTunnelManager},
     };
     use bytes::Bytes;
 
@@ -470,42 +472,24 @@ mod test {
 
             let mut new_record = record[..].to_vec();
 
-            let pk = StaticPublicKey::from_bytes(new_record[16..48].to_vec()).unwrap();
+            let pk = EphemeralPublicKey::from_bytes(new_record[16..48].to_vec()).unwrap();
 
-            let (chaining_key, aead_key, state) = noise.derive_inbound_keys(pk);
-            let new_state = Sha256::new().update(&state).update(&new_record[48..]).finalize();
+            let mut session = noise.create_inbound_session(pk);
+            let decrypted_record = session.decrypt_build_record(record[48..].to_vec()).unwrap();
 
             let (tunnel_id, role) = {
-                let mut test = new_record[48..].to_vec();
-                ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
-
-                let record = ShortTunnelBuildRecord::parse(&test).unwrap();
+                let record = ShortTunnelBuildRecord::parse(&decrypted_record).unwrap();
                 (record.tunnel_id(), record.role())
             };
 
-            let context = noise.derive_inbound_tunnel_keys::<MockRuntime>(chaining_key, role);
-
             if record_idx % 2 == 0 {
-                new_record[201] = 0x30;
+                record[201] = 0x30;
             } else {
-                new_record[201] = 0x00;
+                record[201] = 0x00;
             }
 
-            let mut new_record = new_record[..202].to_vec();
-
-            ChaChaPoly::with_nonce(&context.reply_key, record_idx as u64)
-                .encrypt_with_ad_new(&new_state, &mut new_record)
-                .unwrap();
-
-            record[..].copy_from_slice(&new_record);
-
-            payload[1..]
-                .chunks_mut(218)
-                .enumerate()
-                .filter(|(index, _)| index != &record_idx)
-                .for_each(|(index, mut record)| {
-                    ChaCha::with_nonce(&context.reply_key, index as u64).encrypt(&mut record);
-                });
+            session.create_tunnel_keys(role).unwrap();
+            session.encrypt_build_records(&mut payload, record_idx).unwrap();
         }
 
         assert_eq!(

@@ -20,7 +20,7 @@ use crate::{
     crypto::StaticPublicKey,
     i2np::HopRole,
     primitives::{MessageId, RouterId, TunnelId},
-    tunnel::noise::{NoiseContext, PendingTunnelKeyContext},
+    tunnel::new_noise::{NoiseContext, OutboundSession},
 };
 
 use bytes::Bytes;
@@ -42,9 +42,7 @@ pub struct TunnelHop {
     tunnel_id: TunnelId,
 
     /// Key context.
-    //
-    // TODO: this is not pending context
-    key_context: PendingTunnelKeyContext,
+    key_context: OutboundSession,
 }
 
 /// Tunnel direction.
@@ -69,6 +67,7 @@ pub trait Tunnel {
     fn direction() -> TunnelDirection;
 }
 
+/// Tunnel builder.
 pub struct TunnelBuilder<T: Tunnel> {
     /// Tunnel ID.
     tunnel_id: TunnelId,
@@ -96,8 +95,8 @@ impl<T: Tunnel> TunnelBuilder<T> {
         self
     }
 
+    // Build new tunnel from provided hops.
     pub fn build(self) -> T {
-        // TODO: reverse order based on tunnel direction?
         T::new(self.tunnel_id, self.hops.into_iter().collect())
     }
 }
@@ -105,7 +104,6 @@ impl<T: Tunnel> TunnelBuilder<T> {
 /// Tunnel build parameters.
 pub struct TunnelBuildParameters {
     /// Tunnel hops.
-    // TODO: introduce proper tunnel hop type?
     pub hops: Vec<(Bytes, StaticPublicKey)>,
 
     /// Noise context.
