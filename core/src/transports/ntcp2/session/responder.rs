@@ -274,7 +274,7 @@ impl Responder {
 
         // encrypt `Y`
         let mut aes = Aes::new_encryptor(&local_router_hash, &iv);
-        let ciphertext = aes.encrypt(pk.as_ref().to_vec());
+        let ciphertext = aes.encrypt(pk);
 
         // encrypt options and construct `SessionCreated message`
         let mut options = ResponderOptions {

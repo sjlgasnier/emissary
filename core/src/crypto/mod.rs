@@ -150,11 +150,9 @@ impl StaticPrivateKey {
     }
 
     /// Perform Diffie-Hellman and return the shared secret as byte vector.
-    pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
-        match (self, public_key) {
-            (Self::X25519(sk), StaticPublicKey::X25519(pk)) =>
-                sk.diffie_hellman(pk).to_bytes().to_vec(),
-            _ => todo!("not implemented"),
+    pub fn diffie_hellman<T: AsRef<x25519_dalek::PublicKey>>(&self, public_key: &T) -> Vec<u8> {
+        match self {
+            Self::X25519(key) => key.diffie_hellman(public_key.as_ref()).to_bytes().to_vec(),
         }
     }
 }
@@ -231,6 +229,14 @@ impl AsRef<[u8]> for EphemeralPublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
             Self::X25519(key) => key.as_ref(),
+        }
+    }
+}
+
+impl AsRef<x25519_dalek::PublicKey> for EphemeralPublicKey {
+    fn as_ref(&self) -> &x25519_dalek::PublicKey {
+        match self {
+            Self::X25519(key) => &key,
         }
     }
 }
