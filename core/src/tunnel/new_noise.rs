@@ -130,7 +130,6 @@ impl TunnelKeys {
 
         match hop_role {
             HopRole::InboundGateway | HopRole::Participant => {
-                ck.zeroize();
                 temp_key.zeroize();
                 chaining_key.zeroize();
 
@@ -163,14 +162,13 @@ impl TunnelKeys {
 
                 let garlic_tag = ck[..8].to_vec();
 
-                ck.zeroize();
                 temp_key.zeroize();
                 chaining_key.zeroize();
 
                 TunnelKeys {
                     garlic_key: Some(garlic_key),
                     garlic_tag: Some(garlic_tag),
-                    iv_key: ck,
+                    iv_key,
                     layer_key,
                     reply_key,
                 }
