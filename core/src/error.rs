@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::primitives::TunnelId;
+
 use alloc::string::String;
 use core::fmt;
 
@@ -47,13 +49,16 @@ impl fmt::Display for ChannelError {
 pub enum RejectionReason {
     /// Message/operation not supported.
     NotSupported,
+
+    /// Invalid checksum.
+    InvalidChecksum,
 }
 
 /// Tunnel error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TunnelError {
     /// Tunnel doesn't exist.
-    TunnelDoesntExist(u32),
+    TunnelDoesntExist(TunnelId),
 
     /// Invalid hop role for an operation.
     InvalidHop,

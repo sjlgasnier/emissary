@@ -25,8 +25,8 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage, ShortTunnelBuildRecord,
-        TunnelBuildRecord, TunnelGatewayMessage,
+        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage,
+        ShortTunnelBuildRecord, TunnelBuildRecord, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -70,6 +70,15 @@ const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 pub trait TransitTunnel: Send {
     /// Get role of the transit tunnel hop.
     fn role(&self) -> HopRole;
+
+    /// Handle tunnel data.
+    ///
+    /// Return `RouterId` of the next hop and the message that
+    /// needs to be forwarded to them on success.
+    fn handle_tunnel_data<'a>(
+        &mut self,
+        tunnel_data: EncryptedTunnelData<'a>,
+    ) -> crate::Result<(RouterId, Vec<u8>)>;
 }
 
 /// Transit tunnel manager.
@@ -153,9 +162,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?role,
-                ?tunnel_id,
-                ?next_tunnel_id,
-                ?next_message_id,
+                %tunnel_id,
+                %next_tunnel_id,
+                %next_message_id,
                 ?next_router,
                 "variable tunnel build only supported for outbound enpoint",
             );
@@ -168,9 +177,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
         tracing::trace!(
             target: LOG_TARGET,
             ?role,
-            ?tunnel_id,
-            ?next_tunnel_id,
-            ?next_message_id,
+            %tunnel_id,
+            %next_tunnel_id,
+            %next_message_id,
             ?next_router,
             "variable tunnel build request",
         );
@@ -236,9 +245,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
         tracing::trace!(
             target: LOG_TARGET,
             ?role,
-            ?tunnel_id,
-            ?next_tunnel_id,
-            ?next_message_id,
+            %tunnel_id,
+            %next_tunnel_id,
+            %next_message_id,
             ?next_router,
             "short tunnel build request",
         );
@@ -259,13 +268,13 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     next_router.clone(),
                     session.finalize()?,
                 )),
-                HopRole::Participant => Box::new(Participant::new(
+                HopRole::Participant => Box::new(Participant::<R>::new(
                     tunnel_id,
                     next_tunnel_id,
                     next_router.clone(),
                     session.finalize()?,
                 )),
-                HopRole::OutboundEndpoint => Box::new(OutboundEndpoint::new(
+                HopRole::OutboundEndpoint => Box::new(OutboundEndpoint::<R>::new(
                     tunnel_id,
                     next_tunnel_id,
                     next_router.clone(),
@@ -313,6 +322,29 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 Ok((next_router, message))
             }
         }
+    }
+
+    /// Handle tunnel data.
+    pub fn handle_tunnel_data(
+        &mut self,
+        message: RawI2npMessage,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
+        let RawI2npMessage {
+            message_type,
+            message_id,
+            expiration,
+            payload,
+        } = message;
+
+        let tunnel_data = EncryptedTunnelData::parse(&payload)
+            .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
+
+        self.tunnels
+            .get_mut(&tunnel_data.tunnel_id())
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
+                tunnel_data.tunnel_id(),
+            )))?
+            .handle_tunnel_data(tunnel_data)
     }
 }
 

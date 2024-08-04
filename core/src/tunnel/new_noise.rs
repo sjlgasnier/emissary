@@ -18,12 +18,13 @@
 
 use crate::{
     crypto::{
+        aes::{cbc, ecb},
         chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
         sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
-    i2np::HopRole,
+    i2np::{EncryptedTunnelData, HopRole},
     runtime::Runtime,
     Error,
 };
@@ -106,6 +107,22 @@ impl TunnelKeys {
     /// Get reference to reply key.
     pub fn reply_key(&self) -> &[u8] {
         &self.reply_key
+    }
+
+    /// Decrypt `TunnelData` record and return plaintext and IV.
+    ///
+    /// https://geti2p.net/en/docs/tunnels/implementation
+    pub fn decrypt_record<'a>(&self, tunnel_data: EncryptedTunnelData<'a>) -> (Vec<u8>, Vec<u8>) {
+        let mut aes = ecb::Aes::new_encryptor(&self.iv_key);
+        let iv = aes.encrypt(tunnel_data.iv());
+
+        let mut aes = cbc::Aes::new_encryptor(&self.layer_key, &iv);
+        let ciphertext = aes.encrypt(tunnel_data.ciphertext());
+
+        let mut aes = ecb::Aes::new_encryptor(&self.iv_key);
+        let iv = aes.encrypt(iv);
+
+        (ciphertext, iv)
     }
 }
 

@@ -39,7 +39,7 @@ use crate::{
         ShortTunnelBuildRecordBuilder, ShortTunnelBuildRequestBuilder, TunnelBuildRecord,
         TunnelData, TunnelGatewayMessage, I2NP_SHORT, I2NP_STANDARD,
     },
-    primitives::{RouterId, RouterInfo},
+    primitives::{RouterId, RouterInfo, TunnelId},
     runtime::Runtime,
     tunnel::LOG_TARGET,
     Error,
@@ -571,7 +571,7 @@ pub struct Noise {
     outbound_state: Vec<u8>,
 
     /// Tunnel hops.
-    tunnels: HashMap<u32, TunnelHop>,
+    tunnels: HashMap<TunnelId, TunnelHop>,
 
     pending_tunnels: HashMap<u32, PendingTunnel>,
     pending_messages: HashMap<u32, u32>,
@@ -696,7 +696,7 @@ impl Noise {
                 iv_key,
                 fragments: HashMap::new(),
             };
-            self.tunnels.insert(record.tunnel_id(), hop);
+            self.tunnels.insert(TunnelId::from(record.tunnel_id()), hop);
 
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
@@ -1180,7 +1180,7 @@ impl Noise {
                     _ => else_key,
                 },
             };
-            self.tunnels.insert(record.tunnel_id(), hop);
+            self.tunnels.insert(TunnelId::from(record.tunnel_id()), hop);
 
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
@@ -1740,10 +1740,9 @@ impl Noise {
             layer_key,
             iv_key,
             ..
-        } = self
-            .tunnels
-            .get(&tunnel_id)
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+        } = self.tunnels.get(&TunnelId::from(tunnel_id)).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(TunnelId::from(tunnel_id)),
+        ))?
         else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -1828,10 +1827,9 @@ impl Noise {
             layer_key,
             iv_key,
             ..
-        } = self
-            .tunnels
-            .get(&tunnel_id)
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+        } = self.tunnels.get(&TunnelId::from(tunnel_id)).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(TunnelId::from(tunnel_id)),
+        ))?
         else {
             tracing::warn!(
                 target: LOG_TARGET,

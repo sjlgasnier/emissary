@@ -17,10 +17,17 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2np::HopRole,
+    error::{RejectionReason, TunnelError},
+    i2np::{EncryptedTunnelData, HopRole},
     primitives::{RouterId, TunnelId},
     tunnel::{new_noise::TunnelKeys, transit::TransitTunnel},
+    Error,
 };
+
+use alloc::vec::Vec;
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::transit::ibgw";
 
 /// Inbound gateway.
 pub struct InboundGateway {
@@ -59,5 +66,19 @@ impl InboundGateway {
 impl TransitTunnel for InboundGateway {
     fn role(&self) -> HopRole {
         HopRole::InboundGateway
+    }
+
+    fn handle_tunnel_data<'a>(
+        &mut self,
+        tunnel_data: EncryptedTunnelData<'a>,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "tunnel data received to inbound gateway",
+        );
+
+        Err(Error::Tunnel(TunnelError::MessageRejected(
+            RejectionReason::NotSupported,
+        )))
     }
 }

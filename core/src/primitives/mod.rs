@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use core::fmt;
+use core::{fmt, ops::Deref};
 
 /// Logging target for the module.
 const LOG_TARGET: &str = "emissary::primitives";
@@ -48,6 +48,14 @@ impl From<u32> for TunnelId {
 impl Into<u32> for TunnelId {
     fn into(self) -> u32 {
         self.0
+    }
+}
+
+impl Deref for TunnelId {
+    type Target = u32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

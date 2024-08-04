@@ -22,7 +22,7 @@
 
 use crate::{
     crypto::base64_encode,
-    primitives::{Date, Mapping},
+    primitives::{Date, Mapping, TunnelId},
     runtime::Runtime,
     subsystem::SubsystemKind,
 };
@@ -1192,7 +1192,7 @@ impl RawI2npMessage {
 /// Encrypted tunnel data.
 pub struct EncryptedTunnelData<'a> {
     /// Tunnel ID.
-    tunnel_id: u32,
+    tunnel_id: TunnelId,
 
     /// AES-256-ECB IV.
     iv: &'a [u8],
@@ -1211,7 +1211,7 @@ impl<'a> EncryptedTunnelData<'a> {
         Ok((
             rest,
             EncryptedTunnelData {
-                tunnel_id,
+                tunnel_id: TunnelId::from(tunnel_id),
                 iv,
                 ciphertext,
             },
@@ -1224,7 +1224,7 @@ impl<'a> EncryptedTunnelData<'a> {
     }
 
     /// Get tunnel ID of the message.
-    pub fn tunnel_id(&self) -> u32 {
+    pub fn tunnel_id(&self) -> TunnelId {
         self.tunnel_id
     }
 

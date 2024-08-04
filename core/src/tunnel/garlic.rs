@@ -15,3 +15,38 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
+
+use crate::{
+    i2np::RawI2npMessage, primitives::RouterId, runtime::Runtime, tunnel::new_noise::NoiseContext,
+};
+
+use alloc::{vec, vec::Vec};
+
+/// Garlic message handler.
+pub struct GarlicHandler<R: Runtime> {
+    /// Noise context.
+    noise: NoiseContext,
+
+    /// Metrics handle.
+    metrics_handle: R::MetricsHandle,
+}
+
+impl<R: Runtime> GarlicHandler<R> {
+    /// Create new [`GarlicHandler`].
+    pub fn new(noise: NoiseContext, metrics_handle: R::MetricsHandle) -> Self {
+        Self {
+            noise,
+            metrics_handle,
+        }
+    }
+
+    /// Handle garlic message.
+    //
+    // TODO: docs
+    pub fn handle_message(
+        &mut self,
+        message: RawI2npMessage,
+    ) -> impl Iterator<Item = (RouterId, Vec<u8>)> {
+        vec![].into_iter()
+    }
+}
