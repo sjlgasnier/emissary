@@ -294,15 +294,20 @@ impl<R: Runtime> TunnelManager<R> {
     /// This message is either a response to a short build request sent by us
     /// or a transit tunnel build request.
     fn on_short_tunnel_build(&mut self, message: RawI2npMessage) {
-        match self.transit.handle_short_tunnel_build(message) {
-            Ok((router, message)) => self.send_message(&router, message),
-            Err(error) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to handle short tunnel build request",
-                );
+        match self.pending_inbound.remove(&MessageId::from(message.message_id)) {
+            true => {
+                self.pools.handle_inbound_tunnel_build_response(message);
             }
+            false => match self.transit.handle_short_tunnel_build(message) {
+                Ok((router, message)) => self.send_message(&router, message),
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to handle short tunnel build request",
+                    );
+                }
+            },
         }
     }
 
@@ -321,9 +326,7 @@ impl<R: Runtime> TunnelManager<R> {
         match self.transit.handle_tunnel_gateway(&message) {
             Ok((router, message)) => self.send_message(&router, message),
             Err(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id))) =>
-                if let Err(error) =
-                    self.pools.handle_outbound_tunnel_build_reply(tunnel_id, message)
-                {
+                if let Err(error) = self.pools.handle_outbound_tunnel_build_reply(message) {
                     tracing::debug!(
                         target: LOG_TARGET,
                         ?tunnel_id,

@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::TunnelId;
+use crate::primitives::{MessageId, TunnelId};
 
 use alloc::string::String;
 use core::fmt;
@@ -82,6 +82,9 @@ pub enum TunnelError {
     ///
     /// This is different from tunnel rejection.
     MessageRejected(RejectionReason),
+
+    /// Message doesn't exist.
+    MessageDoesntExist(MessageId),
 }
 
 impl fmt::Display for TunnelError {
@@ -95,6 +98,8 @@ impl fmt::Display for TunnelError {
             Self::NotEnoughHops(hops) => write!(f, "not enough hops {hops}"),
             Self::RecordNotFound => write!(f, "local record not found"),
             Self::MessageRejected(reason) => write!(f, "message rejected, reason: {reason:?}"),
+            Self::MessageDoesntExist(message_id) =>
+                write!(f, "message doesn't exist: {message_id}"),
         }
     }
 }

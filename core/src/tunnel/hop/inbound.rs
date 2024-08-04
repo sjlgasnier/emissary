@@ -41,6 +41,11 @@ impl InboundTunnel {
     pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
         Self { tunnel_id, hops }
     }
+
+    /// Get reference to tunnel ID.
+    pub fn tunnel_id(&self) -> &TunnelId {
+        &self.tunnel_id
+    }
 }
 
 impl Tunnel for InboundTunnel {

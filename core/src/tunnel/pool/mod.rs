@@ -288,6 +288,58 @@ impl<R: Runtime> TunnelPool<R> {
             }
         }
 
+        // build one or more inbound tunnels
+        //
+        // select an outbound tunnel for reply delivery from one of the pool's outbound tunnels
+        // and if none exist, create a fake 0-hop outbound tunnel
+        for _ in 0..num_inbound_to_build {
+            match selector.select_outbound_tunnel(self.outbound.iter()) {
+                Some((tunnel_id, tunnel)) => todo!(),
+                None => {
+                    let message_id = self.next_message_id();
+                    let tunnel_id = self.next_tunnel_id::<true>();
+                    let Some(hops) = selector.select_hops(self.config.num_inbound_hops) else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            hops_required = ?self.config.num_inbound_hops,
+                            "not enough routers for inbound tunnel build",
+                        );
+                        continue;
+                    };
+
+                    match PendingTunnel::<InboundTunnel>::create_tunnel::<R>(
+                        TunnelBuildParameters {
+                            hops,
+                            tunnel_id,
+                            message_id,
+                            noise: self.noise.clone(),
+                            our_hash: self.noise.local_router_hash().clone(),
+                        },
+                    ) {
+                        Ok((tunnel, router, message)) => {
+                            self.pending_inbound.insert(message_id, tunnel);
+
+                            events.push(TunnelPoolEvent::BuildTunnel {
+                                router,
+                                message,
+                                direction: TunnelBuildDirection::Inbound { message_id },
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?tunnel_id,
+                                ?message_id,
+                                ?error,
+                                "failed to create inbound tunnel",
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         events.into_iter()
     }
 
@@ -297,18 +349,16 @@ impl<R: Runtime> TunnelPool<R> {
     /// a new outbound tunnel is created for the pool.
     pub fn handle_outbound_tunnel_build_reply(
         &mut self,
-        tunnel_id: TunnelId,
-        message: &[u8],
+        message: TunnelGatewayMessage,
     ) -> crate::Result<()> {
-        let tunnel = self
-            .pending_outbound
-            .remove(&tunnel_id)
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?;
+        let tunnel = self.pending_outbound.remove(message.tunnel_id()).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(*message.tunnel_id()),
+        ))?;
 
-        let message = RawI2npMessage::parse::<I2NP_STANDARD>(message)
+        let parsed_message = RawI2npMessage::parse::<I2NP_STANDARD>(message.payload())
             .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
 
-        match tunnel.try_build_tunnel(message) {
+        match tunnel.try_build_tunnel(parsed_message) {
             Ok(tunnel) => {
                 tracing::info!(
                     target: LOG_TARGET,
@@ -322,9 +372,48 @@ impl<R: Runtime> TunnelPool<R> {
             Err(error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    %tunnel_id,
+                    tunnel_id = %message.tunnel_id(),
                     ?error,
                     "failed to create outbound tunnel",
+                );
+
+                Err(error)
+            }
+        }
+    }
+
+    /// Handle inbound tunnel build reply.
+    ///
+    /// If the message is valid and all hops agreed to participate in the tunnel,
+    /// a new inbound tunnel is created for the pool.
+    pub fn handle_inbound_tunnel_build_reply(
+        &mut self,
+        message: RawI2npMessage,
+    ) -> crate::Result<()> {
+        let message_id = MessageId::from(message.message_id);
+
+        let tunnel = self
+            .pending_inbound
+            .remove(&message_id)
+            .ok_or(Error::Tunnel(TunnelError::MessageDoesntExist(message_id)))?;
+
+        match tunnel.try_build_tunnel(message) {
+            Ok(tunnel) => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    tunnel_id = %tunnel.tunnel_id(),
+                    "outbound tunnel created",
+                );
+                self.inbound.insert(*tunnel.tunnel_id(), tunnel);
+
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %message_id,
+                    ?error,
+                    "failed to create inbound tunnel",
                 );
 
                 Err(error)
@@ -457,19 +546,30 @@ impl<R: Runtime> TunnelPoolManager<R> {
     /// Handle outbound tunnel build reply.
     pub fn handle_outbound_tunnel_build_reply(
         &mut self,
-        tunnel_id: TunnelId,
         message: TunnelGatewayMessage,
     ) -> crate::Result<()> {
         // TODO: this may have to more complicated if an actual inbound tunnel is used
         self.pending_outbound
-            .remove(&tunnel_id)
+            .remove(message.tunnel_id())
             .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
-            .handle_outbound_tunnel_build_reply(tunnel_id, message.payload())
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
+                *message.tunnel_id(),
+            )))?
+            .handle_outbound_tunnel_build_reply(message)
     }
 
-    pub fn handle_inbound_tunnel_build_response(&mut self, message_id: MessageId) {
-        tracing::error!("handle inbound tunnel build response");
+    /// Handle inbound tunnel build reply.
+    pub fn handle_inbound_tunnel_build_response(
+        &mut self,
+        message: RawI2npMessage,
+    ) -> crate::Result<()> {
+        self.pending_inbound
+            .remove(&MessageId::from(message.message_id))
+            .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
+            .ok_or(Error::Tunnel(TunnelError::MessageDoesntExist(
+                MessageId::from(message.message_id),
+            )))?
+            .handle_inbound_tunnel_build_reply(message)
     }
 }
 

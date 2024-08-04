@@ -186,6 +186,8 @@ impl<T: Tunnel> PendingTunnel<T> {
             )
         });
 
+        // TODO: garlic encrypt for inbound builds
+
         Ok((
             Self {
                 tunnel_id,

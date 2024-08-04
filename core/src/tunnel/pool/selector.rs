@@ -48,7 +48,7 @@ pub trait TunnelSelector {
     fn select_outbound_tunnel<'a>(
         &'a self,
         outbound_tunnels: impl Iterator<Item = (&'a TunnelId, &'a OutboundTunnel)>,
-    ) -> OutboundTunnel;
+    ) -> Option<(&'a TunnelId, &'a OutboundTunnel)>;
 }
 
 /// Hop selector.
@@ -83,9 +83,9 @@ impl<'a> TunnelSelector for ExploratorySelector<'a> {
 
     fn select_outbound_tunnel<'b>(
         &'b self,
-        outbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b OutboundTunnel)>,
-    ) -> OutboundTunnel {
-        todo!();
+        mut outbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b OutboundTunnel)>,
+    ) -> Option<(&'b TunnelId, &'b OutboundTunnel)> {
+        outbound_tunnels.next()
     }
 }
 
@@ -141,9 +141,9 @@ impl<'a, R: Runtime> TunnelSelector for ClientSelector<'a, R> {
 
     fn select_outbound_tunnel<'b>(
         &'b self,
-        outbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b OutboundTunnel)>,
-    ) -> OutboundTunnel {
-        todo!();
+        mut outbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b OutboundTunnel)>,
+    ) -> Option<(&'b TunnelId, &'b OutboundTunnel)> {
+        outbound_tunnels.chain(self.exploratory.outbound().iter()).next()
     }
 }
 
