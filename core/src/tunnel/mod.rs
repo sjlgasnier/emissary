@@ -300,8 +300,18 @@ impl<R: Runtime> TunnelManager<R> {
         }
     }
 
+    /// Handle tunnel gateway message.
     fn on_tunnel_gateway(&mut self, message: RawI2npMessage) {
-        todo!();
+        match self.transit.handle_tunnel_gateway(message) {
+            Ok((router, message)) => self.send_message(&router, message),
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to handle tunnel gateway message",
+                );
+            }
+        }
     }
 
     /// Handle tunnel data.

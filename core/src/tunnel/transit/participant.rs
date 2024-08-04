@@ -18,10 +18,14 @@
 
 use crate::{
     crypto::aes::{cbc, ecb},
-    i2np::{EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder},
+    error::{RejectionReason, TunnelError},
+    i2np::{
+        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, TunnelGatewayMessage,
+    },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{new_noise::TunnelKeys, transit::TransitTunnel},
+    Error,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -61,10 +65,7 @@ impl<R: Runtime> Participant<R> {
         next_tunnel_id: TunnelId,
         next_router: RouterId,
         tunnel_keys: TunnelKeys,
-    ) -> Self
-    where
-        Self: Sized,
-    {
+    ) -> Self {
         Participant {
             tunnel_id,
             next_tunnel_id,
@@ -109,5 +110,14 @@ impl<R: Runtime> TransitTunnel for Participant<R> {
             .serialize();
 
         return Ok((self.next_router.clone(), message));
+    }
+
+    fn handle_tunnel_gateway(
+        &mut self,
+        tunnel_gateway: TunnelGatewayMessage,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
+        Err(Error::Tunnel(TunnelError::MessageRejected(
+            RejectionReason::NotSupported,
+        )))
     }
 }

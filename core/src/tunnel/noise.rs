@@ -56,7 +56,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{fmt, time::Duration};
+use core::{fmt, ops::Deref, time::Duration};
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
@@ -1231,7 +1231,7 @@ impl Noise {
 
             // TODO: garlic encrypt?
             let payload = TunnelGatewayMessage {
-                tunnel_id: next_tunnel_id,
+                tunnel_id: TunnelId::from(next_tunnel_id),
                 payload: &msg,
             }
             .serialize();
@@ -1393,7 +1393,7 @@ impl Noise {
                                 );
 
                                 let payload = TunnelGatewayMessage {
-                                    tunnel_id: *tunnel_id,
+                                    tunnel_id: TunnelId::from(*tunnel_id),
                                     payload: &message.message,
                                 }
                                 .serialize();
@@ -1729,8 +1729,8 @@ impl Noise {
             "tunnel gateway",
         );
 
-        if self.pending_tunnels.contains_key(&tunnel_id) {
-            self.handle_zero_hop_inbound_gateway(tunnel_id, payload);
+        if self.pending_tunnels.contains_key(tunnel_id.deref()) {
+            self.handle_zero_hop_inbound_gateway(tunnel_id.into(), payload);
         }
 
         let TunnelHop {

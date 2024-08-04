@@ -63,10 +63,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
         next_tunnel_id: TunnelId,
         next_router: RouterId,
         tunnel_keys: TunnelKeys,
-    ) -> Self
-    where
-        Self: Sized,
-    {
+    ) -> Self {
         OutboundEndpoint {
             tunnel_id,
             next_tunnel_id,
@@ -215,7 +212,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
                         );
 
                         let payload = TunnelGatewayMessage {
-                            tunnel_id,
+                            tunnel_id: TunnelId::from(tunnel_id),
                             payload: &message.message,
                         }
                         .serialize();
@@ -240,6 +237,15 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
             }
         }
 
+        Err(Error::Tunnel(TunnelError::MessageRejected(
+            RejectionReason::NotSupported,
+        )))
+    }
+
+    fn handle_tunnel_gateway(
+        &mut self,
+        tunnel_gateway: TunnelGatewayMessage,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
         Err(Error::Tunnel(TunnelError::MessageRejected(
             RejectionReason::NotSupported,
         )))

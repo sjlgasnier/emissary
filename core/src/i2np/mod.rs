@@ -1493,9 +1493,10 @@ impl<'a> TunnelData<'a> {
     }
 }
 
+// TODO: remove `pub`
 pub struct TunnelGatewayMessage<'a> {
     /// Tunnel ID.
-    pub tunnel_id: u32,
+    pub tunnel_id: TunnelId,
 
     /// Payload.
     pub payload: &'a [u8],
@@ -1507,7 +1508,13 @@ impl<'a> TunnelGatewayMessage<'a> {
         let (rest, size) = be_u16(rest)?;
         let (rest, payload) = take(size as usize)(rest)?;
 
-        Ok((rest, TunnelGatewayMessage { tunnel_id, payload }))
+        Ok((
+            rest,
+            TunnelGatewayMessage {
+                tunnel_id: TunnelId::from(tunnel_id),
+                payload,
+            },
+        ))
     }
 
     pub fn parse(input: &'a [u8]) -> Option<TunnelGatewayMessage<'a>> {
@@ -1522,5 +1529,15 @@ impl<'a> TunnelGatewayMessage<'a> {
         out[6..].copy_from_slice(self.payload);
 
         out
+    }
+
+    /// Get reference to `TunnelId`.
+    pub fn tunnel_id(&self) -> &TunnelId {
+        &self.tunnel_id
+    }
+
+    /// Get reference to `TunnelGateway` payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
     }
 }
