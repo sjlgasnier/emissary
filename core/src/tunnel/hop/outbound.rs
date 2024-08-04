@@ -41,6 +41,11 @@ impl OutboundTunnel {
         Self { tunnel_id, hops }
     }
 
+    /// Get reference to tunnel ID.
+    pub fn tunnel_id(&self) -> &TunnelId {
+        &self.tunnel_id
+    }
+
     // TODO: return future?
     pub fn send(&mut self) -> impl Iterator<Item = Vec<u8>> {
         // TODO: split input i2np message into fragments

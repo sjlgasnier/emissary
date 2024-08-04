@@ -82,7 +82,7 @@ impl<R: Runtime> Future for NetDb<R> {
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(event)) => tracing::warn!(
+                Poll::Ready(Some(event)) => tracing::trace!(
                     target: LOG_TARGET,
                     ?event,
                     "unhandled event",

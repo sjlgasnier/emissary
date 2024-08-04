@@ -87,7 +87,7 @@ pub trait TransitTunnel: Send {
     /// `TunnelGatewayMessage` will only be accepted by IBGWs.
     fn handle_tunnel_gateway<'a>(
         &mut self,
-        tunnel_gateway: TunnelGatewayMessage<'a>,
+        tunnel_gateway: &'a TunnelGatewayMessage<'a>,
     ) -> crate::Result<(RouterId, Vec<u8>)>;
 }
 
@@ -360,24 +360,14 @@ impl<R: Runtime> TransitTunnelManager<R> {
     /// Handle tunnel gateway message.
     pub fn handle_tunnel_gateway(
         &mut self,
-        message: RawI2npMessage,
+        message: &TunnelGatewayMessage,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
-        let RawI2npMessage {
-            message_type,
-            message_id,
-            expiration,
-            payload,
-        } = message;
-
-        let tunnel_gateway = TunnelGatewayMessage::parse(&payload)
-            .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
-
         self.tunnels
-            .get_mut(tunnel_gateway.tunnel_id())
+            .get_mut(message.tunnel_id())
             .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                *tunnel_gateway.tunnel_id(),
+                *message.tunnel_id(),
             )))?
-            .handle_tunnel_gateway(tunnel_gateway)
+            .handle_tunnel_gateway(&message)
     }
 }
 

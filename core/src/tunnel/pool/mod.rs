@@ -17,7 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2np::RawI2npMessage,
+    error::TunnelError,
+    i2np::{RawI2npMessage, TunnelGatewayMessage, I2NP_STANDARD},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::Runtime,
@@ -29,6 +30,7 @@ use crate::{
         new_noise::NoiseContext,
         pool::selector::{ClientSelector, ExploratorySelector, HopSelector, TunnelSelector},
     },
+    Error,
 };
 
 use bytes::Bytes;
@@ -54,6 +56,22 @@ const LOG_TARGET: &str = "emissary::tunnel::pool";
 /// Tunnel maintenance interval.
 const TUNNEL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Tunnel build direction.
+#[derive(Debug)]
+pub enum TunnelBuildDirection {
+    /// Outbound tunnel.
+    Outbound {
+        /// Tunnel ID of the inbound gateway.
+        tunnel_id: TunnelId,
+    },
+
+    /// Inbound tunnel.
+    Inbound {
+        /// Message ID of the build request
+        message_id: MessageId,
+    },
+}
+
 /// Events emitted by the tunnel pools.
 pub enum TunnelPoolEvent {
     /// Build tunnel.
@@ -61,8 +79,8 @@ pub enum TunnelPoolEvent {
         /// Router ID.
         router: RouterId,
 
-        /// Message ID.
-        message_id: MessageId,
+        /// Tunnel build direction.
+        direction: TunnelBuildDirection,
 
         /// Serialized I2NP message.
         message: Vec<u8>,
@@ -86,12 +104,12 @@ impl fmt::Debug for TunnelPoolEvent {
         match self {
             Self::BuildTunnel {
                 router,
-                message_id,
+                direction,
                 message,
             } => f
                 .debug_struct("TunnelPoolEvent::BuildTunnel")
                 .field("router", &router)
-                .field("message_id", &message_id)
+                .field("direction", &direction)
                 .finish_non_exhaustive(),
             Self::SendI2NpMessage {
                 router,
@@ -136,6 +154,7 @@ impl Default for TunnelPoolConfig {
     }
 }
 
+/// Tunnel pool.
 pub struct TunnelPool<R> {
     /// Tunnel pool configuration.
     config: TunnelPoolConfig,
@@ -149,10 +168,13 @@ pub struct TunnelPool<R> {
     /// Outbound tunnels.
     outbound: HashMap<TunnelId, OutboundTunnel>,
 
-    /// Pending tunnels.
-    pending: HashMap<MessageId, ()>,
+    /// Pending inbound tunnels.
+    pending_inbound: HashMap<MessageId, PendingTunnel<InboundTunnel>>,
 
-    /// Marker
+    /// Pending outbound tunnels.
+    pending_outbound: HashMap<TunnelId, PendingTunnel<OutboundTunnel>>,
+
+    /// Marker for `Runtime`.
     _marker: PhantomData<R>,
 }
 
@@ -162,10 +184,11 @@ impl<R: Runtime> TunnelPool<R> {
         Self {
             config,
             inbound: HashMap::new(),
-            _marker: Default::default(),
             noise,
             outbound: HashMap::new(),
-            pending: HashMap::new(),
+            pending_inbound: HashMap::new(),
+            pending_outbound: HashMap::new(),
+            _marker: Default::default(),
         }
     }
 
@@ -187,7 +210,7 @@ impl<R: Runtime> TunnelPool<R> {
         loop {
             let message_id = MessageId::from(R::rng().next_u32());
 
-            if !self.pending.contains_key(&message_id) {
+            if !self.pending_inbound.contains_key(&message_id) {
                 return message_id;
             }
         }
@@ -242,13 +265,12 @@ impl<R: Runtime> TunnelPool<R> {
                         },
                     ) {
                         Ok((tunnel, router, message)) => {
-                            // TODO: what to do with tunnel?
-                            // TODO: probably better to call it `BuildTunnel`?
-                            // TODO:
-                            events.push(TunnelPoolEvent::SendI2NpMessage {
+                            self.pending_outbound.insert(tunnel_id, tunnel);
+
+                            events.push(TunnelPoolEvent::BuildTunnel {
                                 router,
-                                message_id,
                                 message,
+                                direction: TunnelBuildDirection::Outbound { tunnel_id },
                             });
                         }
                         Err(error) => {
@@ -267,6 +289,47 @@ impl<R: Runtime> TunnelPool<R> {
         }
 
         events.into_iter()
+    }
+
+    /// Handle outbound tunnel build reply.
+    ///
+    /// If the message is valid and all hops agreed to participate in the tunnel,
+    /// a new outbound tunnel is created for the pool.
+    pub fn handle_outbound_tunnel_build_reply(
+        &mut self,
+        tunnel_id: TunnelId,
+        message: &[u8],
+    ) -> crate::Result<()> {
+        let tunnel = self
+            .pending_outbound
+            .remove(&tunnel_id)
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?;
+
+        let message = RawI2npMessage::parse::<I2NP_STANDARD>(message)
+            .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
+
+        match tunnel.try_build_tunnel(message) {
+            Ok(tunnel) => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    tunnel_id = %tunnel.tunnel_id(),
+                    "outbound tunnel created",
+                );
+                self.outbound.insert(*tunnel.tunnel_id(), tunnel);
+
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %tunnel_id,
+                    ?error,
+                    "failed to create outbound tunnel",
+                );
+
+                Err(error)
+            }
+        }
     }
 }
 
@@ -287,11 +350,25 @@ pub struct TunnelPoolManager<R: Runtime> {
     /// Pending events.
     pending_events: VecDeque<TunnelPoolEvent>,
 
+    /// Pending inbound tunnels.
+    ///
+    /// Value of the entry is an index into `pools`.
+    ///
+    /// `None` denotes the exploratory tunnel pool.
+    pending_inbound: HashMap<MessageId, Option<usize>>,
+
+    /// Pending outbound tunnels.
+    ///
+    /// Value of the entry is an index into `pools`.
+    ///
+    /// `None` denotes the exploratory tunnel pool.
+    pending_outbound: HashMap<TunnelId, Option<usize>>,
+
+    /// Client tunnels pools.
+    pools: Vec<TunnelPool<R>>,
+
     /// Router storage.
     router_storage: RouterStorage,
-
-    /// Client tunnels.
-    tunnels: Vec<TunnelPool<R>>,
 }
 
 impl<R: Runtime> TunnelPoolManager<R> {
@@ -308,8 +385,10 @@ impl<R: Runtime> TunnelPoolManager<R> {
             metrics_handle,
             noise,
             pending_events: VecDeque::new(),
+            pending_inbound: HashMap::new(),
+            pending_outbound: HashMap::new(),
+            pools: Vec::new(),
             router_storage,
-            tunnels: Vec::new(),
         }
     }
 
@@ -321,21 +400,76 @@ impl<R: Runtime> TunnelPoolManager<R> {
     /// Each call to [`TunnelPool::maintain_tunnels()`] yields events which must be forwarded to
     /// `TunnelManager` for further processing.
     fn maintain_tunnel_pools(&mut self) {
-        tracing::trace!(target: LOG_TARGET, "maintain tunnel pools");
+        tracing::trace!(
+            target: LOG_TARGET,
+            num_pools = ?(self.pools.len() + 1),
+            "maintain tunnel pools",
+        );
 
         // maintain the exploratory tunnel pool
         self.pending_events.extend(
             self.exploratory_pool
-                .maintain_tunnels(ExploratorySelector::new(&self.router_storage)),
+                .maintain_tunnels(ExploratorySelector::new(&self.router_storage))
+                .map(|event| {
+                    match event {
+                        TunnelPoolEvent::BuildTunnel { ref direction, .. } => match direction {
+                            TunnelBuildDirection::Outbound { tunnel_id } => {
+                                self.pending_outbound.insert(*tunnel_id, None);
+                            }
+                            TunnelBuildDirection::Inbound { message_id } => {
+                                self.pending_inbound.insert(*message_id, None);
+                            }
+                        },
+                        _ => {}
+                    }
+
+                    event
+                }),
         );
 
         // maintain client tunnel pools
-        self.tunnels.iter_mut().for_each(|tunnel| {
-            self.pending_events.extend(tunnel.maintain_tunnels(ClientSelector::new(
-                &self.exploratory_pool,
-                &self.router_storage,
-            )))
+        self.pools.iter_mut().enumerate().for_each(|(idx, tunnel)| {
+            self.pending_events.extend(
+                tunnel
+                    .maintain_tunnels(ClientSelector::new(
+                        &self.exploratory_pool,
+                        &self.router_storage,
+                    ))
+                    .map(|event| {
+                        match event {
+                            TunnelPoolEvent::BuildTunnel { ref direction, .. } => match direction {
+                                TunnelBuildDirection::Outbound { tunnel_id } => {
+                                    self.pending_outbound.insert(*tunnel_id, Some(idx));
+                                }
+                                TunnelBuildDirection::Inbound { message_id } => {
+                                    self.pending_inbound.insert(*message_id, Some(idx));
+                                }
+                            },
+                            _ => {}
+                        }
+
+                        event
+                    }),
+            )
         })
+    }
+
+    /// Handle outbound tunnel build reply.
+    pub fn handle_outbound_tunnel_build_reply(
+        &mut self,
+        tunnel_id: TunnelId,
+        message: TunnelGatewayMessage,
+    ) -> crate::Result<()> {
+        // TODO: this may have to more complicated if an actual inbound tunnel is used
+        self.pending_outbound
+            .remove(&tunnel_id)
+            .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+            .handle_outbound_tunnel_build_reply(tunnel_id, message.payload())
+    }
+
+    pub fn handle_inbound_tunnel_build_response(&mut self, message_id: MessageId) {
+        tracing::error!("handle inbound tunnel build response");
     }
 }
 
@@ -370,9 +504,7 @@ mod tests {
         primitives::RouterInfo,
         runtime::mock::MockRuntime,
     };
-
     use futures::StreamExt;
-    use tracing_subscriber::prelude::*;
 
     #[tokio::test]
     async fn tunnel_test() {

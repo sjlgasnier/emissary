@@ -242,9 +242,9 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
         )))
     }
 
-    fn handle_tunnel_gateway(
+    fn handle_tunnel_gateway<'a>(
         &mut self,
-        tunnel_gateway: TunnelGatewayMessage,
+        tunnel_gateway: &'a TunnelGatewayMessage<'a>,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         Err(Error::Tunnel(TunnelError::MessageRejected(
             RejectionReason::NotSupported,

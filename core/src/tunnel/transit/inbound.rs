@@ -116,9 +116,9 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
         )))
     }
 
-    fn handle_tunnel_gateway(
+    fn handle_tunnel_gateway<'a>(
         &mut self,
-        tunnel_gateway: TunnelGatewayMessage,
+        tunnel_gateway: &'a TunnelGatewayMessage<'a>,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         tracing::error!(
             target: LOG_TARGET,

@@ -128,10 +128,10 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
 impl<R: Runtime> Transport for Ntcp2Transport<R> {
     fn connect(&mut self, router: RouterInfo) {
-        tracing::info!(
+        tracing::trace!(
             target: LOG_TARGET,
-            router = ?router.identity().hash(),
-            "negotiate ntcp2 session with peer",
+            router = ?router.identity().id(),
+            "negotiate ntcp2 session with router",
         );
 
         let future = self.session_manager.create_session(router);

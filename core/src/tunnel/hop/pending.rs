@@ -23,8 +23,8 @@ use crate::{
     },
     error::TunnelError,
     i2np::{
-        HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage, ShortTunnelBuildRecordBuilder,
-        ShortTunnelBuildRequestBuilder,
+        GarlicMessage, GarlicMessageBlock, HopRole, MessageType, RawI2NpMessageBuilder,
+        RawI2npMessage, ShortTunnelBuildRecordBuilder, ShortTunnelBuildRequestBuilder,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -209,13 +209,64 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn try_build_tunnel(self, mut message: RawI2npMessage) -> Result<T, TunnelError> {
+    pub fn try_build_tunnel(self, mut message: RawI2npMessage) -> crate::Result<T> {
+        tracing::trace!(
+            target: LOG_TARGET,
+            tunnel = %self.tunnel_id,
+            direction = ?T::direction(),
+            "handle tunnel build reply",
+        );
+
         let mut payload = match (T::direction(), message.message_type) {
-            (TunnelDirection::Inbound, MessageType::ShortTunnelBuild) => &mut message.payload,
+            // for inbound build the message type doesn't change from `ShortTunnelBuild`
+            (TunnelDirection::Inbound, MessageType::ShortTunnelBuild) => message.payload.to_vec(),
+
+            // for outbound builds the reply can be received in `OutboundTunnelBuildReply`
             (TunnelDirection::Outbound, MessageType::OutboundTunnelBuildReply) =>
-                &mut message.payload,
+                message.payload.to_vec(),
+
+            // outbound reply can also be wrapped in a `GarlicMessage`
             (TunnelDirection::Outbound, MessageType::Garlic) => {
-                todo!();
+                // tunnel must exist since it was created by us
+                let outbound_endpoint = self.hops.back().expect("tunnel to exist");
+
+                // garlic decrypt the payload with OBEP's garlic key and tag
+                // and try to parse the plaintext into a `GarlicMessage`
+                let mut record = message.payload[12..].to_vec();
+                ChaChaPoly::new(outbound_endpoint.key_context.garlic_key())
+                    .decrypt_with_ad(outbound_endpoint.key_context.garlic_tag(), &mut record)?;
+
+                let message = GarlicMessage::parse(&record).ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel_id = %self.tunnel_id,
+                        "malformed garlic message as tunnel build reply",
+                    );
+
+                    Error::Tunnel(TunnelError::InvalidMessage)
+                })?;
+
+                // try to locate a garlic glove containing `OutboundTunnelBuildReply`
+                // and discard any other cloves as they're no interesting at this time
+                match message.blocks.into_iter().find(|message| match message {
+                    GarlicMessageBlock::GarlicClove {
+                        message_type: MessageType::OutboundTunnelBuildReply,
+                        ..
+                    } => true,
+                    _ => false,
+                }) {
+                    Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =>
+                        message_body.to_vec(),
+                    _ => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            "garlic messge didn't contain valid tunnel reply",
+                        );
+
+                        return Err(Error::Tunnel(TunnelError::InvalidMessage));
+                    }
+                }
             }
             (direction, message_type) => {
                 tracing::warn!(
@@ -226,7 +277,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                     "invalid build message reply",
                 );
 
-                return Err(TunnelError::InvalidMessage);
+                return Err(Error::Tunnel(TunnelError::InvalidMessage));
             }
         };
 
@@ -251,7 +302,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                                 "failed to decrypt build record"
                             );
 
-                            TunnelError::InvalidMessage
+                            Error::Tunnel(TunnelError::InvalidMessage)
                         })?;
 
                     match record[201] {
@@ -271,7 +322,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                                 ?reason,
                                 "outbound tunnel rejected",
                             );
-                            return Err(TunnelError::TunnelRejected(reason));
+
+                            return Err(Error::Tunnel(TunnelError::TunnelRejected(reason)));
                         }
                     }
 
@@ -506,10 +558,10 @@ mod test {
             payload,
         };
 
-        assert_eq!(
-            pending_tunnel.try_build_tunnel(message).unwrap_err(),
-            TunnelError::TunnelRejected(0x30)
-        );
+        match pending_tunnel.try_build_tunnel(message).unwrap_err() {
+            Error::Tunnel(TunnelError::TunnelRejected(0x30)) => {}
+            _ => panic!("invalid error"),
+        }
     }
 
     #[test]
@@ -542,9 +594,9 @@ mod test {
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
-        assert_eq!(
-            pending_tunnel.try_build_tunnel(message).unwrap_err(),
-            TunnelError::InvalidMessage
-        );
+        match pending_tunnel.try_build_tunnel(message).unwrap_err() {
+            Error::Tunnel(TunnelError::InvalidMessage) => {}
+            _ => panic!("invalid error"),
+        }
     }
 }
