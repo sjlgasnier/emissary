@@ -23,14 +23,17 @@ use crate::{
         sha256::Sha256,
         EphemeralPublicKey, StaticPublicKey,
     },
-    error::TunnelError,
+    error::{RejectionReason, TunnelError},
     i2np::{
         HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage, ShortTunnelBuildRecord,
-        TunnelGatewayMessage,
+        TunnelBuildRecord, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::new_noise::{NoiseContext, TunnelKeys},
+    tunnel::{
+        new_noise::{NoiseContext, TunnelKeys},
+        transit::{inbound::InboundGateway, outbound::OutboundEndpoint, participant::Participant},
+    },
     Error,
 };
 
@@ -39,136 +42,35 @@ use hashbrown::HashMap;
 use rand_core::RngCore;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::time::Duration;
+use core::{
+    ops::{Range, RangeFrom},
+    time::Duration,
+};
+
+mod inbound;
+mod outbound;
+mod participant;
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::transit";
+
+/// Short tunnel build request record size.
+const SHORT_RECORD_LEN: usize = 218;
+
+/// Variable tunnel build request record size.
+const VARIABLE_RECORD_LEN: usize = 528;
+
+/// Public key offset in the build request record.
+const PUBLIC_KEY_OFFSET: Range<usize> = 16..48;
+
+/// Start offset for the build request record payload.
+const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 
 /// Common interface for transit tunnels.
 pub trait TransitTunnel: Send {
     /// Get role of the transit tunnel hop.
     fn role(&self) -> HopRole;
 }
-
-/// Tunnel participant.
-struct Participant {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-    /// Next tunnel ID.
-    next_tunnel_id: TunnelId,
-
-    /// Next router ID.
-    next_router: RouterId,
-
-    /// Tunnel key context.
-    key_context: TunnelKeys,
-}
-
-impl TransitTunnel for Participant {
-    fn role(&self) -> HopRole {
-        HopRole::Participant
-    }
-}
-
-/// Inbound gateway.
-struct InboundGateway {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-    /// Next tunnel ID.
-    next_tunnel_id: TunnelId,
-
-    /// Next router ID.
-    next_router: RouterId,
-
-    /// Tunnel key context.
-    key_context: TunnelKeys,
-}
-
-impl TransitTunnel for InboundGateway {
-    fn role(&self) -> HopRole {
-        HopRole::InboundGateway
-    }
-}
-
-/// Outbound endpoint.
-struct OutboundEndpoint {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-    /// Next tunnel ID.
-    next_tunnel_id: TunnelId,
-
-    /// Next router ID.
-    next_router: RouterId,
-
-    /// Tunnel key context.
-    key_context: TunnelKeys,
-}
-
-impl TransitTunnel for OutboundEndpoint {
-    fn role(&self) -> HopRole {
-        HopRole::OutboundEndpoint
-    }
-}
-
-impl Participant {
-    fn new(
-        tunnel_id: TunnelId,
-        next_tunnel_id: TunnelId,
-        next_router: RouterId,
-        key_context: TunnelKeys,
-    ) -> Self
-    where
-        Self: Sized,
-    {
-        Participant {
-            tunnel_id,
-            next_tunnel_id,
-            next_router,
-            key_context,
-        }
-    }
-}
-
-impl InboundGateway {
-    fn new(
-        tunnel_id: TunnelId,
-        next_tunnel_id: TunnelId,
-        next_router: RouterId,
-        key_context: TunnelKeys,
-    ) -> Self
-    where
-        Self: Sized,
-    {
-        InboundGateway {
-            tunnel_id,
-            next_tunnel_id,
-            next_router,
-            key_context,
-        }
-    }
-}
-
-impl OutboundEndpoint {
-    fn new(
-        tunnel_id: TunnelId,
-        next_tunnel_id: TunnelId,
-        next_router: RouterId,
-        key_context: TunnelKeys,
-    ) -> Self
-    where
-        Self: Sized,
-    {
-        OutboundEndpoint {
-            tunnel_id,
-            next_tunnel_id,
-            next_router,
-            key_context,
-        }
-    }
-}
-
-/// Logging target for the file.
-const LOG_TARGET: &str = "emissary::tunnel::transit";
-
-/// Short tunnel build request record size.
-const SHORT_BUILD_REQUEST_RECORD: usize = 218;
 
 /// Transit tunnel manager.
 pub struct TransitTunnelManager<R: Runtime> {
@@ -193,16 +95,104 @@ impl<R: Runtime> TransitTunnelManager<R> {
     }
 
     /// Return mutable reference to local build record and its index the build request messages.
-    fn find_local_record<'a>(&self, payload: &'a mut [u8]) -> Option<(usize, &'a mut [u8])> {
-        (payload.len() > SHORT_BUILD_REQUEST_RECORD
-            && (payload.len() - 1) % SHORT_BUILD_REQUEST_RECORD == 0)
+    fn find_local_record<'a, const RECORD_SIZE: usize>(
+        &self,
+        payload: &'a mut [u8],
+    ) -> Option<(usize, &'a mut [u8])> {
+        (payload.len() > RECORD_SIZE && (payload.len() - 1) % RECORD_SIZE == 0)
             .then(|| {
                 payload[1..]
-                    .chunks_mut(SHORT_BUILD_REQUEST_RECORD)
+                    .chunks_mut(RECORD_SIZE)
                     .enumerate()
                     .find(|(i, chunk)| &chunk[..16] == &self.noise.local_router_hash()[..16])
             })
             .flatten()
+    }
+
+    /// Handle variable tunnel build request.
+    ///
+    /// Only OBEP is supported, for any other hop the message is dropped.
+    pub fn handle_variable_tunnel_build(
+        &mut self,
+        message: RawI2npMessage,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
+        let RawI2npMessage {
+            message_id,
+            expiration,
+            mut payload,
+            ..
+        } = message;
+
+        let (record_idx, mut record) = self
+            .find_local_record::<VARIABLE_RECORD_LEN>(&mut payload)
+            .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
+
+        let mut session = self
+            .noise
+            .create_long_inbound_session(EphemeralPublicKey::try_from(&record[PUBLIC_KEY_OFFSET])?);
+        let decrypted_record =
+            session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
+
+        let build_record = TunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?message_id,
+                "malformed variable tunnel build request",
+            );
+
+            Error::InvalidData
+        })?;
+
+        let role = build_record.role();
+        let tunnel_id = TunnelId::from(build_record.tunnel_id());
+        let next_tunnel_id = TunnelId::from(build_record.next_tunnel_id());
+        let next_message_id = build_record.next_message_id();
+        let next_router = RouterId::from(build_record.next_router_hash());
+
+        if role != HopRole::OutboundEndpoint {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?role,
+                ?tunnel_id,
+                ?next_tunnel_id,
+                ?next_message_id,
+                ?next_router,
+                "variable tunnel build only supported for outbound enpoint",
+            );
+
+            return Err(Error::Tunnel(TunnelError::MessageRejected(
+                RejectionReason::NotSupported,
+            )));
+        }
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            ?role,
+            ?tunnel_id,
+            ?next_tunnel_id,
+            ?next_message_id,
+            ?next_router,
+            "variable tunnel build request",
+        );
+
+        record[48] = 0x00; // no options
+        record[49] = 0x00;
+        record[511] = 0x00; // accept
+
+        session.encrypt_build_record(&mut record);
+        session.finalize(
+            build_record.tunnel_layer_key().to_vec(),
+            build_record.tunnel_iv_key().to_vec(),
+        );
+
+        let message = RawI2NpMessageBuilder::short()
+            .with_message_type(MessageType::VariableTunnelBuildReply)
+            .with_message_id(message_id)
+            .with_expiration(expiration)
+            .with_payload(payload)
+            .serialize();
+
+        Ok((next_router, message))
     }
 
     /// Handle short tunnel build request.
@@ -217,16 +207,15 @@ impl<R: Runtime> TransitTunnelManager<R> {
             mut payload,
         } = message;
 
-        // try to locate our record
         let (record_idx, record) = self
-            .find_local_record(&mut payload)
+            .find_local_record::<SHORT_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        // create pending tunnel session by deriving keys for decrypting the record
-        let mut session = self.noise.create_inbound_session(
-            EphemeralPublicKey::from_bytes(record[16..48].to_vec()).expect("to succeed"),
-        );
-        let decrypted_record = session.decrypt_build_record(record[48..].to_vec())?;
+        let mut session = self.noise.create_short_inbound_session(EphemeralPublicKey::try_from(
+            &record[PUBLIC_KEY_OFFSET],
+        )?);
+        let decrypted_record =
+            session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
         let build_record = ShortTunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
             tracing::debug!(
@@ -258,7 +247,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
         record[49] = 0x00;
         record[201] = 0x00; // accept
 
-        // derive tunnel keys and encrypt build records
         session.create_tunnel_keys(role)?;
         session.encrypt_build_records(&mut payload, record_idx)?;
 

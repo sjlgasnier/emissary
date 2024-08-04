@@ -42,6 +42,13 @@ impl fmt::Display for ChannelError {
     }
 }
 
+/// Tunnel message rejection reason.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RejectionReason {
+    /// Message/operation not supported.
+    NotSupported,
+}
+
 /// Tunnel error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TunnelError {
@@ -65,6 +72,11 @@ pub enum TunnelError {
 
     /// Local record not found in the build request.
     RecordNotFound,
+
+    /// Tunnel message rejected.
+    ///
+    /// This is different from tunnel rejection.
+    MessageRejected(RejectionReason),
 }
 
 impl fmt::Display for TunnelError {
@@ -77,6 +89,7 @@ impl fmt::Display for TunnelError {
             Self::TunnelRejected(reason) => write!(f, "tunnel rejected: {reason}"),
             Self::NotEnoughHops(hops) => write!(f, "not enough hops {hops}"),
             Self::RecordNotFound => write!(f, "local record not found"),
+            Self::MessageRejected(reason) => write!(f, "message rejected, reason: {reason:?}"),
         }
     }
 }

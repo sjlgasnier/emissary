@@ -179,8 +179,8 @@ impl TunnelKeys {
     }
 }
 
-/// Inbound session (transit tunnel) state.
-enum InboundSessionState {
+/// Inbound session (transit tunnel) state with short records.
+enum ShortInboundSessionState {
     /// Inbound state has been initialized.
     ///
     /// Next step is decrypting the received build record.
@@ -228,33 +228,38 @@ enum InboundSessionState {
     Poisoned,
 }
 
-impl fmt::Debug for InboundSessionState {
+impl fmt::Debug for ShortInboundSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Initialized { .. } =>
-                f.debug_struct("InboundSessionState::Initialized").finish_non_exhaustive(),
-            Self::RecordDecrypted { .. } =>
-                f.debug_struct("InboundSessionState::RecordDecrypted").finish_non_exhaustive(),
-            Self::TunnelKeysDerived { .. } =>
-                f.debug_struct("InboundSessionState::TunnelKeysDerived").finish_non_exhaustive(),
-            Self::BuildRecordsEncrypted { .. } => f
-                .debug_struct("InboundSessionState::BuildRecordsEncrypted")
+                f.debug_struct("ShortInboundSessionState::Initialized").finish_non_exhaustive(),
+            Self::RecordDecrypted { .. } => f
+                .debug_struct("ShortInboundSessionState::RecordDecrypted")
                 .finish_non_exhaustive(),
-            Self::Poisoned => f.debug_struct("InboundSessionState::Poisoned").finish(),
+            Self::TunnelKeysDerived { .. } => f
+                .debug_struct("ShortInboundSessionState::TunnelKeysDerived")
+                .finish_non_exhaustive(),
+            Self::BuildRecordsEncrypted { .. } => f
+                .debug_struct("ShortInboundSessionState::BuildRecordsEncrypted")
+                .finish_non_exhaustive(),
+            Self::Poisoned => f.debug_struct("ShortInboundSessionState::Poisoned").finish(),
         }
     }
 }
 
-/// Noise context for inbound session (transit tunnels).
-pub struct InboundSession {
-    state: InboundSessionState,
+/// Noise context for inbound session (transit tunnels) with short records.
+///
+/// https://geti2p.net/spec/tunnel-creation-ecies#short-record-specification
+pub struct ShortInboundSession {
+    /// Inbound session state.
+    state: ShortInboundSessionState,
 }
 
-impl InboundSession {
-    /// Create new [`InboundSession`].
+impl ShortInboundSession {
+    /// Create new [`ShortInboundSession`].
     pub fn new(chaining_key: Vec<u8>, aead_key: Vec<u8>, state: Vec<u8>) -> Self {
         Self {
-            state: InboundSessionState::Initialized {
+            state: ShortInboundSessionState::Initialized {
                 chaining_key,
                 aead_key,
                 state,
@@ -264,8 +269,8 @@ impl InboundSession {
 
     /// Decrypt build record and return the plaintext record.
     pub fn decrypt_build_record(&mut self, mut record: Vec<u8>) -> crate::Result<Vec<u8>> {
-        match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
-            InboundSessionState::Initialized {
+        match mem::replace(&mut self.state, ShortInboundSessionState::Poisoned) {
+            ShortInboundSessionState::Initialized {
                 chaining_key,
                 aead_key,
                 state,
@@ -274,7 +279,7 @@ impl InboundSession {
 
                 ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut record)?;
 
-                self.state = InboundSessionState::RecordDecrypted {
+                self.state = ShortInboundSessionState::RecordDecrypted {
                     state: new_state,
                     chaining_key,
                     aead_key,
@@ -296,13 +301,13 @@ impl InboundSession {
 
     /// Create tunnel keys for the transit tunnel.
     pub fn create_tunnel_keys(&mut self, hop_role: HopRole) -> crate::Result<()> {
-        match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
-            InboundSessionState::RecordDecrypted {
+        match mem::replace(&mut self.state, ShortInboundSessionState::Poisoned) {
+            ShortInboundSessionState::RecordDecrypted {
                 chaining_key,
                 mut aead_key,
                 state,
             } => {
-                self.state = InboundSessionState::TunnelKeysDerived {
+                self.state = ShortInboundSessionState::TunnelKeysDerived {
                     state,
                     tunnel_keys: TunnelKeys::new(chaining_key, hop_role),
                 };
@@ -333,8 +338,8 @@ impl InboundSession {
         payload: &mut [u8],
         our_record: usize,
     ) -> crate::Result<()> {
-        match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
-            InboundSessionState::TunnelKeysDerived { state, tunnel_keys } => {
+        match mem::replace(&mut self.state, ShortInboundSessionState::Poisoned) {
+            ShortInboundSessionState::TunnelKeysDerived { state, tunnel_keys } => {
                 debug_assert!(payload.len() > 218 && (payload.len() - 1) % 218 == 0);
 
                 // encrypt our record with chachapoly, using the associated data derived in
@@ -350,7 +355,7 @@ impl InboundSession {
                             .encrypt(&mut record);
                     }
                 });
-                self.state = InboundSessionState::BuildRecordsEncrypted { tunnel_keys };
+                self.state = ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys };
 
                 Ok(())
             }
@@ -369,7 +374,161 @@ impl InboundSession {
     /// Finalize inbound session creation and return tunnel keys.
     pub fn finalize(mut self) -> crate::Result<TunnelKeys> {
         match self.state {
-            InboundSessionState::BuildRecordsEncrypted { tunnel_keys } => Ok(tunnel_keys),
+            ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys } => Ok(tunnel_keys),
+            state => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?state,
+                    "state is poisoned",
+                );
+                debug_assert!(false);
+                Err(Error::InvalidState)
+            }
+        }
+    }
+}
+
+/// Inbound session (transit tunnel) state with long records.
+///
+/// https://geti2p.net/spec/tunnel-creation-ecies#long-record-specification
+enum LongInboundSessionState {
+    /// Inbound state has been initialized.
+    ///
+    /// Next step is decrypting the received build record.
+    Initialized {
+        /// Chaining key.
+        chaining_key: Vec<u8>,
+
+        /// AEAD key, used to encrypt/decrypt build records.
+        aead_key: Vec<u8>,
+
+        /// Associaed data for encrypting/decrypting build records.
+        state: Vec<u8>,
+    },
+
+    /// Build record decrypted.
+    RecordDecrypted {
+        /// Chaining key.
+        chaining_key: Vec<u8>,
+
+        /// Associaed data for encrypting/decrypting build records.
+        state: Vec<u8>,
+    },
+
+    /// Build records encrypted.
+    ///
+    /// This is the final state before finalizing the session creation.
+    BuildRecordsEncrypted,
+
+    /// State has been poisoned.
+    Poisoned,
+}
+
+impl fmt::Debug for LongInboundSessionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Initialized { .. } =>
+                f.debug_struct("LongInboundSessionState::Initialized").finish_non_exhaustive(),
+            Self::RecordDecrypted { .. } => f
+                .debug_struct("LongInboundSessionState::RecordDecrypted")
+                .finish_non_exhaustive(),
+            Self::BuildRecordsEncrypted { .. } =>
+                f.debug_struct("LongInboundSessionState::BuildRecordsEncrypted").finish(),
+            Self::Poisoned => f.debug_struct("LongInboundSessionState::Poisoned").finish(),
+        }
+    }
+}
+
+/// Noise context for inbound session (transit tunnels).
+pub struct LongInboundSession {
+    /// Inbound session state.
+    state: LongInboundSessionState,
+}
+
+impl LongInboundSession {
+    /// Create new [`LongInboundSession`].
+    pub fn new(chaining_key: Vec<u8>, aead_key: Vec<u8>, state: Vec<u8>) -> Self {
+        Self {
+            state: LongInboundSessionState::Initialized {
+                chaining_key,
+                aead_key,
+                state,
+            },
+        }
+    }
+
+    /// Decrypt build record and return the plaintext record.
+    pub fn decrypt_build_record(&mut self, mut record: Vec<u8>) -> crate::Result<Vec<u8>> {
+        match mem::replace(&mut self.state, LongInboundSessionState::Poisoned) {
+            LongInboundSessionState::Initialized {
+                chaining_key,
+                aead_key,
+                state,
+            } => {
+                let new_state = Sha256::new().update(&state).update(&record).finalize();
+
+                ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut record)?;
+
+                self.state = LongInboundSessionState::RecordDecrypted {
+                    state: new_state,
+                    chaining_key,
+                };
+
+                Ok(record)
+            }
+            state => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?state,
+                    "state is poisoned",
+                );
+                debug_assert!(false);
+                Err(Error::InvalidState)
+            }
+        }
+    }
+
+    /// Encrypt build records of the tunnel build request.
+    ///
+    /// `our_record` denotes the index of our record inside the build request. This record is
+    /// encrypted with ChaCha20Poly1305 whereas the other records are encrypted with ChaCha20.
+    pub fn encrypt_build_record(&mut self, record: &mut [u8]) -> crate::Result<()> {
+        match mem::replace(&mut self.state, LongInboundSessionState::Poisoned) {
+            LongInboundSessionState::RecordDecrypted {
+                mut chaining_key,
+                state,
+            } => {
+                let tag = ChaChaPoly::new(&chaining_key)
+                    .encrypt_with_ad(&state, &mut record[0..512])
+                    .unwrap();
+                record[512..528].copy_from_slice(&tag);
+
+                self.state = LongInboundSessionState::BuildRecordsEncrypted;
+
+                Ok(())
+            }
+            state => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?state,
+                    "state is poisoned",
+                );
+                debug_assert!(false);
+                Err(Error::InvalidState)
+            }
+        }
+    }
+
+    /// Finalize inbound session creation and return tunnel keys.
+    pub fn finalize(mut self, layer_key: Vec<u8>, iv_key: Vec<u8>) -> crate::Result<TunnelKeys> {
+        match self.state {
+            LongInboundSessionState::BuildRecordsEncrypted => Ok(TunnelKeys {
+                garlic_key: None,
+                garlic_tag: None,
+                iv_key,
+                layer_key,
+                reply_key: Vec::new(),
+            }),
             state => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -534,8 +693,11 @@ impl NoiseContext {
         }
     }
 
-    /// Create inbound Noise session for a transit tunnel.
-    pub fn create_inbound_session(&self, remote_key: EphemeralPublicKey) -> InboundSession {
+    /// Create inbound Noise session for a transit tunnel with short build records (218 bytes).
+    pub fn create_short_inbound_session(
+        &self,
+        remote_key: EphemeralPublicKey,
+    ) -> ShortInboundSession {
         let mut shared_secret = self.local_key.diffie_hellman(&remote_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
         let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
@@ -548,6 +710,26 @@ impl NoiseContext {
         temp_key.zeroize();
         shared_secret.zeroize();
 
-        InboundSession::new(chaining_key, aead_key, state)
+        ShortInboundSession::new(chaining_key, aead_key, state)
+    }
+
+    /// Create inbound Noise session for a transit tunnel with long build records (528 bytes).
+    pub fn create_long_inbound_session(
+        &self,
+        remote_key: EphemeralPublicKey,
+    ) -> LongInboundSession {
+        let mut shared_secret = self.local_key.diffie_hellman(&remote_key);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let state = Sha256::new()
+            .update(&self.inbound_state)
+            .update(&remote_key.to_vec())
+            .finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+
+        LongInboundSession::new(chaining_key, aead_key, state)
     }
 }

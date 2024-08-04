@@ -204,13 +204,6 @@ pub enum EphemeralPublicKey {
 }
 
 impl EphemeralPublicKey {
-    /// Try to create [`EphemeralPublicKey`] from `bytes`.
-    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        let key: [u8; 32] = bytes.try_into().ok()?;
-
-        Some(Self::X25519(x25519_dalek::PublicKey::from(key)))
-    }
-
     pub fn to_vec(&self) -> Vec<u8> {
         match self {
             Self::X25519(key) => key.as_bytes().to_vec(),
@@ -222,6 +215,16 @@ impl EphemeralPublicKey {
         match self {
             Self::X25519(mut key) => key.zeroize(),
         }
+    }
+}
+
+impl TryFrom<&[u8]> for EphemeralPublicKey {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let key: [u8; 32] = value.try_into().map_err(|_| Error::InvalidData)?;
+
+        Ok(Self::X25519(x25519_dalek::PublicKey::from(key)))
     }
 }
 
