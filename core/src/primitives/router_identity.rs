@@ -76,6 +76,9 @@ pub struct RouterIdentity {
 
     /// Identity hash.
     identity_hash: Bytes,
+
+    /// Router ID.
+    router: RouterId,
 }
 
 impl RouterIdentity {
@@ -104,7 +107,8 @@ impl RouterIdentity {
         Ok(Self {
             static_key,
             signing_key,
-            identity_hash: Bytes::from(identity_hash),
+            identity_hash: Bytes::from(identity_hash.clone()),
+            router: RouterId::from(identity_hash),
         })
     }
 
@@ -134,12 +138,15 @@ impl RouterIdentity {
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
+        let identity_hash = Bytes::from(Sha256::new().update(&input[..391]).finalize());
+
         Ok((
             rest,
             RouterIdentity {
                 static_key,
                 signing_key,
-                identity_hash: Bytes::from(Sha256::new().update(&input[..391]).finalize()),
+                identity_hash: identity_hash.clone(),
+                router: RouterId::from(identity_hash),
             },
         ))
     }
@@ -181,7 +188,7 @@ impl RouterIdentity {
 
     /// Get [`RouterId`].
     pub fn id(&self) -> RouterId {
-        RouterId(Arc::new(base64_encode(&self.identity_hash[..16])))
+        self.router.clone()
     }
 }
 
