@@ -31,10 +31,11 @@ use crate::{
     tunnel::{
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, Tunnel, TunnelBuildParameters,
-            TunnelBuilder, TunnelHop,
+            TunnelBuilder, TunnelDirection, TunnelHop,
         },
         LOG_TARGET,
     },
+    Error,
 };
 
 use aes::cipher::Key;
@@ -52,6 +53,7 @@ const NUM_BUILD_RECORDS: usize = 4;
 const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(10);
 
 /// Outbound tunnel.
+#[derive(Debug)]
 pub struct PendingTunnel<T: Tunnel> {
     /// Tunnel ID.
     tunnel_id: TunnelId,
@@ -207,7 +209,27 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn try_build_tunnel(self, mut payload: Vec<u8>) -> Result<T, TunnelError> {
+    pub fn try_build_tunnel(self, mut message: RawI2npMessage) -> Result<T, TunnelError> {
+        let mut payload = match (T::direction(), message.message_type) {
+            (TunnelDirection::Inbound, MessageType::ShortTunnelBuild) => &mut message.payload,
+            (TunnelDirection::Outbound, MessageType::OutboundTunnelBuildReply) =>
+                &mut message.payload,
+            (TunnelDirection::Outbound, MessageType::Garlic) => {
+                todo!();
+            }
+            (direction, message_type) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    tunnel_id = %self.tunnel_id,
+                    ?direction,
+                    ?message_type,
+                    "invalid build message reply",
+                );
+
+                return Err(TunnelError::InvalidMessage);
+            }
+        };
+
         self.hops
             .into_iter()
             .enumerate()
@@ -297,9 +319,6 @@ mod test {
 
     #[test]
     fn create_outbound_tunnel() {
-        use tracing_subscriber::prelude::*;
-        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
@@ -353,24 +372,12 @@ mod test {
 
         assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
 
-        let Some(RawI2npMessage {
-            message_type: MessageType::OutboundTunnelBuildReply,
-            message_id,
-            expiration,
-            payload,
-        }) = RawI2npMessage::parse::<false>(&payload)
-        else {
-            panic!("invalid message");
-        };
-
-        assert!(pending_tunnel.try_build_tunnel(payload).is_ok());
+        let message = RawI2npMessage::parse::<false>(&payload).unwrap();
+        assert!(pending_tunnel.try_build_tunnel(message).is_ok());
     }
 
     #[test]
     fn create_inbound_tunnel() {
-        use tracing_subscriber::prelude::*;
-        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
@@ -417,7 +424,7 @@ mod test {
         );
 
         assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
-        assert!(pending_tunnel.try_build_tunnel(message.payload).is_ok());
+        assert!(pending_tunnel.try_build_tunnel(message).is_ok());
     }
 
     #[test]
@@ -492,8 +499,15 @@ mod test {
             session.encrypt_build_records(&mut payload, record_idx).unwrap();
         }
 
+        let message = RawI2npMessage {
+            message_type: MessageType::OutboundTunnelBuildReply,
+            message_id: message_id.into(),
+            expiration,
+            payload,
+        };
+
         assert_eq!(
-            pending_tunnel.try_build_tunnel(payload).unwrap_err(),
+            pending_tunnel.try_build_tunnel(message).unwrap_err(),
             TunnelError::TunnelRejected(0x30)
         );
     }
@@ -520,24 +534,16 @@ mod test {
             })
             .unwrap();
 
-        let Some(RawI2npMessage {
-            message_type: MessageType::ShortTunnelBuild,
-            message_id: parsed_message_id,
-            expiration,
-            mut payload,
-        }) = RawI2npMessage::parse::<true>(&message)
-        else {
-            panic!("invalid message");
-        };
+        let message = RawI2npMessage::parse::<true>(&message).unwrap();
 
-        assert_eq!(parsed_message_id, message_id.into());
+        assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(payload[0], 4u8);
-        assert_eq!(payload[1..].len() % 218, 0);
+        assert_eq!(message.payload[0], 4u8);
+        assert_eq!(message.payload[1..].len() % 218, 0);
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
         assert_eq!(
-            pending_tunnel.try_build_tunnel(payload).unwrap_err(),
+            pending_tunnel.try_build_tunnel(message).unwrap_err(),
             TunnelError::InvalidMessage
         );
     }
