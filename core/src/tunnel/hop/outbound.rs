@@ -49,7 +49,7 @@ impl OutboundTunnel {
     }
 
     /// Send `message` to `router`
-    pub fn send_to_router(&mut self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
+    pub fn send_to_router(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
         assert!(message.len() < 500, "fragmentation not supported");
 
         tracing::trace!(
@@ -65,7 +65,7 @@ impl OutboundTunnel {
 
     /// Send `message` to tunnel identified by the (`router`, `gateway`) tuple.
     pub fn send_to_tunnel<R: Runtime>(
-        &mut self,
+        &self,
         router: RouterId,
         gateway: TunnelId,
         message: Vec<u8>,
@@ -83,6 +83,8 @@ impl OutboundTunnel {
 
         // hop must exist since the tunnel is created by us
         let next_hop = self.hops.iter().next().expect("tunnel to exist");
+
+        tracing::error!("next hop tunnel id = {}", next_hop.tunnel_id);
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(router.into(), gateway, &message)
@@ -108,9 +110,12 @@ impl OutboundTunnel {
         message[4..20].copy_from_slice(&iv);
         message[20..].copy_from_slice(&ciphertext);
 
+        let message_id = R::rng().next_u32();
+        tracing::error!("outer message id = {message_id}");
+
         let message = RawI2NpMessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
-            .with_message_id(R::rng().next_u32())
+            .with_message_id(message_id)
             .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
             .with_payload(message)
             .serialize();
@@ -119,7 +124,7 @@ impl OutboundTunnel {
     }
 
     /// Send `message` to `router`
-    pub fn send(&mut self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
+    pub fn send(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
         assert!(message.len() < 500, "fragmentation not supported");
 
         tracing::trace!(

@@ -18,7 +18,10 @@
 
 use crate::{
     error::TunnelError,
-    i2np::{EncryptedTunnelData, RawI2npMessage, TunnelGatewayMessage, I2NP_STANDARD},
+    i2np::{
+        EncryptedTunnelData, MessageType, RawI2NpMessageBuilder, RawI2npMessage,
+        TunnelGatewayMessage, I2NP_STANDARD,
+    },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::Runtime,
@@ -340,7 +343,33 @@ impl<R: Runtime> TunnelPool<R> {
             }
         }
 
-        // TODO: select two random pairs of tunnels and send deliverystatus
+        if self.outbound.len() == 1 && self.inbound.len() == 1 {
+            let message_id = R::rng().next_u32();
+            let msg = RawI2NpMessageBuilder::standard()
+                .with_message_type(MessageType::DeliveryStatus)
+                .with_message_id(message_id)
+                .with_expiration((R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs()) // TODO: fix time
+                .with_payload(vec![1, 2, 3, 4]) // TODO: create proper test message
+                .serialize();
+
+            tracing::error!(
+                target: LOG_TARGET,
+                ?message_id,
+                "test tunnels",
+            );
+
+            let (_, inbound_tunnel) = self.inbound.iter().next().unwrap();
+            let (_, outbound_tunnel) = self.outbound.iter().next().unwrap();
+
+            let (router, gateway) = inbound_tunnel.gateway();
+            let (router, message) = outbound_tunnel.send_to_tunnel::<R>(router, gateway, msg);
+
+            events.push(TunnelPoolEvent::SendI2NpMessage {
+                router,
+                message_id: MessageId::from(message_id),
+                message,
+            });
+        }
 
         events.into_iter()
     }
@@ -404,7 +433,7 @@ impl<R: Runtime> TunnelPool<R> {
                 tracing::info!(
                     target: LOG_TARGET,
                     tunnel_id = %tunnel.tunnel_id(),
-                    "outbound tunnel created",
+                    "inbound tunnel created",
                 );
                 let tunnel_id = *tunnel.tunnel_id();
 
@@ -421,6 +450,46 @@ impl<R: Runtime> TunnelPool<R> {
                 );
 
                 Err(error)
+            }
+        }
+    }
+
+    /// Handle tunnel data message.
+    pub fn handle_tunnel_data(&mut self, message: &EncryptedTunnelData) -> crate::Result<()> {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "handle tunnel data",
+        );
+
+        let tunnel = self.inbound.get_mut(&message.tunnel_id()).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(message.tunnel_id()),
+        ))?;
+
+        match tunnel.handle_tunnel_data(message) {
+            Ok(message) => {
+                let message = RawI2npMessage::parse::<false>(&message).ok_or(Error::InvalidData)?;
+
+                tracing::info!(
+                    "tunnel tested successfully, payload = {:?}",
+                    message.payload
+                );
+
+                Ok(())
+            }
+            Ok(message) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?message,
+                    "message doesn't contain the correct payload",
+                );
+                Err(Error::InvalidData)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to handle tunnel data message",
+                );
+                Err(Error::InvalidData)
             }
         }
     }
@@ -590,7 +659,13 @@ impl<R: Runtime> TunnelPoolManager<R> {
 
     /// Handle tunnel data.
     pub fn handle_tunnel_data(&mut self, message: &EncryptedTunnelData) -> crate::Result<()> {
-        todo!();
+        self.inbound
+            .get_mut(&message.tunnel_id())
+            .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
+            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
+                message.tunnel_id(),
+            )))?
+            .handle_tunnel_data(message)
     }
 }
 

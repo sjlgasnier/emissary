@@ -113,7 +113,7 @@ impl InboundTunnel {
     /// Handle tunnel data.
     pub fn handle_tunnel_data<'a>(
         &mut self,
-        tunnel_data: EncryptedTunnelData<'a>,
+        tunnel_data: &EncryptedTunnelData<'a>,
     ) -> crate::Result<Vec<u8>> {
         tracing::trace!(
             target: LOG_TARGET,

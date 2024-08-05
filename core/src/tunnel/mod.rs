@@ -386,7 +386,7 @@ impl<R: Runtime> TunnelManager<R> {
     ///
     /// Decrypt the payload, return the garlic cloves and handle them individually.
     fn on_garlic(&mut self, mut message: RawI2npMessage) {
-        tracing::error!(
+        tracing::trace!(
             target: LOG_TARGET,
             message_id = ?message.message_id,
             "garlic",
@@ -432,7 +432,7 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     fn on_send_message(&mut self, router: RouterId, messsage_id: MessageId, message: Vec<u8>) {
-        todo!();
+        self.send_message(&router, message);
     }
 
     /// Handle received message from one of the open connections.
