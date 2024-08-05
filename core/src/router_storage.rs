@@ -19,6 +19,9 @@
 use crate::primitives::{RouterId, RouterInfo};
 
 use hashbrown::HashMap;
+#[cfg(feature = "std")]
+use parking_lot::RwLock;
+#[cfg(feature = "no_std")]
 use spin::rwlock::RwLock;
 
 use alloc::{sync::Arc, vec::Vec};
