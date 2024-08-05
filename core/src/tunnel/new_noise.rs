@@ -112,7 +112,10 @@ impl TunnelKeys {
     /// Decrypt `TunnelData` record and return plaintext and IV.
     ///
     /// https://geti2p.net/en/docs/tunnels/implementation
-    pub fn decrypt_record<'a>(&self, tunnel_data: EncryptedTunnelData<'a>) -> (Vec<u8>, Vec<u8>) {
+    pub fn decrypt_record<'a>(
+        &self,
+        tunnel_data: &'a EncryptedTunnelData<'a>,
+    ) -> (Vec<u8>, Vec<u8>) {
         let mut aes = ecb::Aes::new_encryptor(&self.iv_key);
         let iv = aes.encrypt(tunnel_data.iv());
 

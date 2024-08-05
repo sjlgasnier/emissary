@@ -77,17 +77,17 @@ pub trait TransitTunnel: Send {
     /// needs to be forwarded to them on success.
     ///
     /// `EncryptedTunnelData` will only be accepted by OBEPs and participants.
-    fn handle_tunnel_data<'a>(
+    fn handle_tunnel_data(
         &mut self,
-        tunnel_data: EncryptedTunnelData<'a>,
+        tunnel_data: &EncryptedTunnelData,
     ) -> crate::Result<(RouterId, Vec<u8>)>;
 
     /// Handle tunnel gateway message.
     ///
     /// `TunnelGatewayMessage` will only be accepted by IBGWs.
-    fn handle_tunnel_gateway<'a>(
+    fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &'a TunnelGatewayMessage<'a>,
+        tunnel_gateway: &TunnelGatewayMessage,
     ) -> crate::Result<(RouterId, Vec<u8>)>;
 }
 
@@ -335,26 +335,16 @@ impl<R: Runtime> TransitTunnelManager<R> {
     }
 
     /// Handle tunnel data.
-    pub fn handle_tunnel_data(
+    pub fn handle_tunnel_data<'a>(
         &mut self,
-        message: RawI2npMessage,
+        message: &'a EncryptedTunnelData<'a>,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
-        let RawI2npMessage {
-            message_type,
-            message_id,
-            expiration,
-            payload,
-        } = message;
-
-        let tunnel_data = EncryptedTunnelData::parse(&payload)
-            .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
-
         self.tunnels
-            .get_mut(&tunnel_data.tunnel_id())
+            .get_mut(&message.tunnel_id())
             .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                tunnel_data.tunnel_id(),
+                message.tunnel_id(),
             )))?
-            .handle_tunnel_data(tunnel_data)
+            .handle_tunnel_data(message)
     }
 
     /// Handle tunnel gateway message.

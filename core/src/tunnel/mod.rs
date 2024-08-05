@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPrivateKey,
     error::TunnelError,
-    i2np::{MessageType, RawI2npMessage, TunnelGatewayMessage, I2NP_SHORT},
+    i2np::{EncryptedTunnelData, MessageType, RawI2npMessage, TunnelGatewayMessage, I2NP_SHORT},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
@@ -326,6 +326,7 @@ impl<R: Runtime> TunnelManager<R> {
             return;
         };
 
+        // TODO: should be smarter at dispatching message to correct tunnel
         match self.transit.handle_tunnel_gateway(&message) {
             Ok((router, message)) => self.send_message(&router, message),
             Err(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id))) =>
@@ -349,9 +350,28 @@ impl<R: Runtime> TunnelManager<R> {
 
     /// Handle tunnel data.
     fn on_tunnel_data(&mut self, message: RawI2npMessage) {
-        match self.transit.handle_tunnel_data(message) {
+        let Some(message) = EncryptedTunnelData::parse(&message.payload) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                message_id = ?message.message_id,
+                "malformed tunnel data message",
+            );
+
+            return;
+        };
+
+        // TODO: should be smarter at dispatching message to correct tunnel
+        match self.transit.handle_tunnel_data(&message) {
             Ok((router, message)) => self.send_message(&router, message),
-            // TODO: try passing the message to local tunnel
+            Err(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id))) =>
+                if let Err(error) = self.pools.handle_tunnel_data(&message) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?tunnel_id,
+                        ?error,
+                        "failed to handle tunnel data message for tunnel pool",
+                    );
+                },
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,

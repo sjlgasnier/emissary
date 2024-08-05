@@ -18,7 +18,7 @@
 
 use crate::{
     error::TunnelError,
-    i2np::{RawI2npMessage, TunnelGatewayMessage, I2NP_STANDARD},
+    i2np::{EncryptedTunnelData, RawI2npMessage, TunnelGatewayMessage, I2NP_STANDARD},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::Runtime,
@@ -391,7 +391,7 @@ impl<R: Runtime> TunnelPool<R> {
     pub fn handle_inbound_tunnel_build_reply(
         &mut self,
         message: RawI2npMessage,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<TunnelId> {
         let message_id = MessageId::from(message.message_id);
 
         let tunnel = self
@@ -406,9 +406,11 @@ impl<R: Runtime> TunnelPool<R> {
                     tunnel_id = %tunnel.tunnel_id(),
                     "outbound tunnel created",
                 );
-                self.inbound.insert(*tunnel.tunnel_id(), tunnel);
+                let tunnel_id = *tunnel.tunnel_id();
 
-                Ok(())
+                self.inbound.insert(tunnel_id, tunnel);
+
+                Ok(tunnel_id)
             }
             Err(error) => {
                 tracing::warn!(
@@ -428,6 +430,9 @@ impl<R: Runtime> TunnelPool<R> {
 pub struct TunnelPoolManager<R: Runtime> {
     /// Exploratory tunnel pool.
     exploratory_pool: TunnelPool<R>,
+
+    /// `TunnelId` -> `TunnelPool` mappings.
+    inbound: HashMap<TunnelId, Option<usize>>,
 
     /// Maintenance timer.
     maintenance_timer: BoxFuture<'static, ()>,
@@ -472,6 +477,7 @@ impl<R: Runtime> TunnelPoolManager<R> {
     ) -> Self {
         Self {
             exploratory_pool: TunnelPool::new(noise.clone(), exploratory_pool_config),
+            inbound: HashMap::new(),
             maintenance_timer: Box::pin(ready(())),
             metrics_handle,
             noise,
@@ -565,13 +571,26 @@ impl<R: Runtime> TunnelPoolManager<R> {
         &mut self,
         message: RawI2npMessage,
     ) -> crate::Result<()> {
-        self.pending_inbound
+        let (idx, mut pool) = self
+            .pending_inbound
             .remove(&MessageId::from(message.message_id))
-            .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
+            .map(|pool| {
+                pool.map_or((None, &mut self.exploratory_pool), |idx| {
+                    (Some(idx), &mut self.pools[idx])
+                })
+            })
             .ok_or(Error::Tunnel(TunnelError::MessageDoesntExist(
                 MessageId::from(message.message_id),
-            )))?
-            .handle_inbound_tunnel_build_reply(message)
+            )))?;
+
+        pool.handle_inbound_tunnel_build_reply(message).map(|tunnel| {
+            self.inbound.insert(tunnel, idx);
+        })
+    }
+
+    /// Handle tunnel data.
+    pub fn handle_tunnel_data(&mut self, message: &EncryptedTunnelData) -> crate::Result<()> {
+        todo!();
     }
 }
 

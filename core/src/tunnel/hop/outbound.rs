@@ -188,12 +188,14 @@ mod tests {
 
         // first outbound hop (participant)
         let message = RawI2npMessage::parse::<true>(&message).unwrap();
-        let (next_router, message) = outbound_transit[0].handle_tunnel_data(message).unwrap();
+        let message = EncryptedTunnelData::parse(&message.payload).unwrap();
+        let (next_router, message) = outbound_transit[0].handle_tunnel_data(&message).unwrap();
         assert_eq!(outbound_transit[1].router(), next_router);
 
         // second outbound hop (obep)
         let message = RawI2npMessage::parse::<true>(&message).unwrap();
-        let (next_router, message) = outbound_transit[1].handle_tunnel_data(message).unwrap();
+        let message = EncryptedTunnelData::parse(&message.payload).unwrap();
+        let (next_router, message) = outbound_transit[1].handle_tunnel_data(&message).unwrap();
         assert_eq!(inbound_transit[0].router(), next_router);
 
         // first inbound hop (ibgw)
@@ -213,7 +215,8 @@ mod tests {
 
         // second inbound hop (participant)
         let message = RawI2npMessage::parse::<true>(&message).unwrap();
-        let (next_router, message) = inbound_transit[1].handle_tunnel_data(message).unwrap();
+        let message = EncryptedTunnelData::parse(&message.payload).unwrap();
+        let (next_router, message) = inbound_transit[1].handle_tunnel_data(&message).unwrap();
         assert_eq!(RouterId::from(local_inbound_hash), next_router);
 
         // inbound endpoint

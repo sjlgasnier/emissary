@@ -133,9 +133,9 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
         HopRole::OutboundEndpoint
     }
 
-    fn handle_tunnel_data<'a>(
+    fn handle_tunnel_data(
         &mut self,
-        tunnel_data: EncryptedTunnelData<'a>,
+        tunnel_data: &EncryptedTunnelData,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         tracing::trace!(
             target: LOG_TARGET,
@@ -243,9 +243,9 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
         )))
     }
 
-    fn handle_tunnel_gateway<'a>(
+    fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &'a TunnelGatewayMessage<'a>,
+        tunnel_gateway: &TunnelGatewayMessage,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         Err(Error::Tunnel(TunnelError::MessageRejected(
             RejectionReason::NotSupported,
