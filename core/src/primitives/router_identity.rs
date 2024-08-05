@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
+    crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
     Error,
 };
 
@@ -47,6 +47,12 @@ impl fmt::Display for RouterId {
 impl<T: AsRef<[u8]>> From<T> for RouterId {
     fn from(value: T) -> Self {
         RouterId(Arc::new(base64_encode(value)))
+    }
+}
+
+impl Into<Vec<u8>> for RouterId {
+    fn into(self) -> Vec<u8> {
+        base64_decode(&self.0.as_bytes())
     }
 }
 

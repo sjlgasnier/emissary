@@ -38,6 +38,9 @@ pub struct TunnelHop {
     /// Hop role
     role: HopRole,
 
+    /// Router ID.
+    router: RouterId,
+
     /// Tunnel ID.
     tunnel_id: TunnelId,
 
@@ -65,6 +68,9 @@ pub trait Tunnel {
 
     /// Get tunnel direction.
     fn direction() -> TunnelDirection;
+
+    /// Get reference to tunnel ID.
+    fn tunnel_id(&self) -> &TunnelId;
 }
 
 /// Tunnel builder.
@@ -97,7 +103,7 @@ impl<T: Tunnel> TunnelBuilder<T> {
 
     // Build new tunnel from provided hops.
     pub fn build(self) -> T {
-        T::new(self.tunnel_id, self.hops.into_iter().collect())
+        T::new(self.tunnel_id, self.hops.into_iter().rev().collect())
     }
 }
 

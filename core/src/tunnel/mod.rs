@@ -351,6 +351,7 @@ impl<R: Runtime> TunnelManager<R> {
     fn on_tunnel_data(&mut self, message: RawI2npMessage) {
         match self.transit.handle_tunnel_data(message) {
             Ok((router, message)) => self.send_message(&router, message),
+            // TODO: try passing the message to local tunnel
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,

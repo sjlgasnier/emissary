@@ -378,25 +378,14 @@ mod tests {
         crypto::StaticPrivateKey,
         primitives::MessageId,
         runtime::mock::MockRuntime,
-        tunnel::hop::{
-            inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
-            TunnelBuildParameters,
+        tunnel::{
+            hop::{
+                inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
+                TunnelBuildParameters,
+            },
+            tests::make_router,
         },
     };
-
-    fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
-        let mut key_bytes = vec![0u8; 32];
-        let mut router_hash = vec![0u8; 32];
-
-        MockRuntime::rng().fill_bytes(&mut key_bytes);
-        MockRuntime::rng().fill_bytes(&mut router_hash);
-
-        let sk = StaticPrivateKey::from(key_bytes);
-        let pk = sk.public();
-        let router_hash = Bytes::from(router_hash);
-
-        (router_hash.clone(), pk, NoiseContext::new(sk, router_hash))
-    }
 
     #[test]
     fn accept_tunnel_build_request_participant() {

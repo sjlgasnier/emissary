@@ -108,16 +108,21 @@ impl<T: Tunnel> PendingTunnel<T> {
         // create build records and generate key contexts for each hop
         let (mut tunnel_hops, mut build_records): (VecDeque<TunnelHop>, Vec<Vec<u8>>) = tunnel_ids
             .iter()
+            .zip(router_hashes.iter())
             .zip(tunnel_ids.iter().skip(1))
             .zip(router_hashes.iter().skip(1))
             .zip(T::hop_roles(num_hops))
             .zip(hops.into_iter().map(|(_, key)| key))
             .map(
-                |((((tunnel_id, next_tunnel_id), next_router_hash), hop_role), key)| {
+                |(
+                    ((((tunnel_id, router_hash), next_tunnel_id), next_router_hash), hop_role),
+                    key,
+                )| {
                     (
                         TunnelHop {
                             role: hop_role,
                             tunnel_id: *tunnel_id,
+                            router: RouterId::from(router_hash),
                             key_context: noise.create_outbound_session::<R>(key, hop_role),
                         },
                         ShortTunnelBuildRecordBuilder::default()
@@ -372,10 +377,7 @@ mod test {
             .map(|manager| {
                 let manager = TestTransitTunnelManager::new();
 
-                (
-                    (manager.router_hash.clone(), manager.public_key.clone()),
-                    manager,
-                )
+                ((manager.router_hash(), manager.public_key()), manager)
             })
             .unzip();
 

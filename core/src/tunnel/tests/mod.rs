@@ -51,13 +51,16 @@ pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
 
 pub struct TestTransitTunnelManager {
     /// Transit tunnel manager.
-    pub manager: TransitTunnelManager<MockRuntime>,
+    manager: TransitTunnelManager<MockRuntime>,
 
     /// Router hash.
-    pub router_hash: Bytes,
+    router_hash: Bytes,
 
     /// Static public key.
-    pub public_key: StaticPublicKey,
+    public_key: StaticPublicKey,
+
+    /// Router ID.
+    router: RouterId,
 }
 
 impl TestTransitTunnelManager {
@@ -65,13 +68,29 @@ impl TestTransitTunnelManager {
         let (router_hash, public_key, noise) = make_router();
 
         Self {
-            router_hash,
+            router_hash: router_hash.clone(),
+            router: RouterId::from(router_hash),
             public_key,
             manager: TransitTunnelManager::<MockRuntime>::new(
                 noise,
                 MockRuntime::register_metrics(vec![]),
             ),
         }
+    }
+
+    /// Get hash of the router.
+    pub fn router_hash(&self) -> Bytes {
+        self.router_hash.clone()
+    }
+
+    /// Get public key of the router.
+    pub fn public_key(&self) -> StaticPublicKey {
+        self.public_key.clone()
+    }
+
+    /// Get ID of the router.
+    pub fn router(&self) -> RouterId {
+        self.router.clone()
     }
 
     /// Handle short tunnel build.
@@ -81,10 +100,27 @@ impl TestTransitTunnelManager {
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.manager.handle_short_tunnel_build(message)
     }
+
+    /// Handle tunnel data.
+    pub fn handle_tunnel_data(
+        &mut self,
+        message: RawI2npMessage,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
+        self.manager.handle_tunnel_data(message)
+    }
+
+    pub fn handle_tunnel_gateway(
+        &mut self,
+        message: &TunnelGatewayMessage,
+    ) -> crate::Result<(RouterId, Vec<u8>)> {
+        self.manager.handle_tunnel_gateway(message)
+    }
 }
 
 /// Build outbound tunnel.
-pub fn build_outbound_tunnel(num_hops: usize) -> (OutboundTunnel, Vec<TestTransitTunnelManager>) {
+pub fn build_outbound_tunnel(
+    num_hops: usize,
+) -> (Bytes, OutboundTunnel, Vec<TestTransitTunnelManager>) {
     let (hops, mut transit_managers): (
         Vec<(Bytes, StaticPublicKey)>,
         Vec<TestTransitTunnelManager>,
@@ -109,7 +145,7 @@ pub fn build_outbound_tunnel(num_hops: usize) -> (OutboundTunnel, Vec<TestTransi
             noise: local_noise,
             message_id,
             tunnel_id,
-            our_hash: local_hash,
+            our_hash: local_hash.clone(),
         })
         .unwrap();
 
@@ -129,11 +165,13 @@ pub fn build_outbound_tunnel(num_hops: usize) -> (OutboundTunnel, Vec<TestTransi
     let message = RawI2npMessage::parse::<false>(&payload).unwrap();
     let tunnel = pending_tunnel.try_build_tunnel(message).unwrap();
 
-    (tunnel, transit_managers)
+    (local_hash, tunnel, transit_managers)
 }
 
 /// Build inbound tunnel.
-pub fn build_inbound_tunnel(num_hops: usize) -> (InboundTunnel, Vec<TestTransitTunnelManager>) {
+pub fn build_inbound_tunnel(
+    num_hops: usize,
+) -> (Bytes, InboundTunnel, Vec<TestTransitTunnelManager>) {
     let (hops, mut transit_managers): (
         Vec<(Bytes, StaticPublicKey)>,
         Vec<TestTransitTunnelManager>,
@@ -158,7 +196,7 @@ pub fn build_inbound_tunnel(num_hops: usize) -> (InboundTunnel, Vec<TestTransitT
             noise: local_noise,
             message_id,
             tunnel_id,
-            our_hash: local_hash,
+            our_hash: local_hash.clone(),
         })
         .unwrap();
 
@@ -179,5 +217,5 @@ pub fn build_inbound_tunnel(num_hops: usize) -> (InboundTunnel, Vec<TestTransitT
 
     let tunnel = pending_tunnel.try_build_tunnel(message).unwrap();
 
-    (tunnel, transit_managers)
+    (local_hash, tunnel, transit_managers)
 }

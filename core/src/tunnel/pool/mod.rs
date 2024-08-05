@@ -24,7 +24,7 @@ use crate::{
     runtime::Runtime,
     tunnel::{
         hop::{
-            inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
+            inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, Tunnel,
             TunnelBuildParameters,
         },
         new_noise::NoiseContext,
@@ -339,6 +339,8 @@ impl<R: Runtime> TunnelPool<R> {
                 }
             }
         }
+
+        // TODO: select two random pairs of tunnels and send deliverystatus
 
         events.into_iter()
     }

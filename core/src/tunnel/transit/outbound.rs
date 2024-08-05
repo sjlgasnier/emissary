@@ -32,9 +32,10 @@ use crate::{
     Error,
 };
 
+use rand_core::RngCore;
+
 use alloc::vec::Vec;
 use core::{marker::PhantomData, time::Duration};
-use rand_core::RngCore;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::transit::obep";

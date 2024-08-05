@@ -21,7 +21,7 @@
 //! https://geti2p.net/spec/i2np
 
 use crate::{
-    crypto::base64_encode,
+    crypto::{base64_encode, sha256::Sha256},
     primitives::{Date, Mapping, TunnelId},
     runtime::Runtime,
     subsystem::SubsystemKind,
@@ -1490,6 +1490,127 @@ impl<'a> TunnelData<'a> {
         Some(Self {
             messages: Self::parse_inner(input, Vec::new())?,
         })
+    }
+}
+
+// TODO: remove
+pub struct NewTunnelDataMessage<'a> {
+    /// Delivery instructions.
+    delivery_instructions: OwnedDeliveryInstruction,
+
+    /// Message.
+    message: &'a [u8],
+}
+
+pub struct TunnelDataBuilder<'a> {
+    /// Next tunnel ID.
+    next_tunnel_id: TunnelId,
+
+    /// Messages.
+    messages: Vec<NewTunnelDataMessage<'a>>,
+}
+
+impl<'a> TunnelDataBuilder<'a> {
+    pub fn new(next_tunnel_id: TunnelId) -> Self {
+        Self {
+            next_tunnel_id,
+            messages: Vec::new(),
+        }
+    }
+
+    pub fn with_local_delivery(mut self, message: &'a [u8]) -> Self {
+        self.messages.push(NewTunnelDataMessage {
+            delivery_instructions: OwnedDeliveryInstruction::Local,
+            message,
+        });
+
+        self
+    }
+
+    pub fn with_router_delivery(mut self, hash: Vec<u8>, message: &'a [u8]) -> Self {
+        self.messages.push(NewTunnelDataMessage {
+            delivery_instructions: OwnedDeliveryInstruction::Router { hash },
+            message,
+        });
+
+        self
+    }
+
+    pub fn with_tunnel_delivery(
+        mut self,
+        hash: Vec<u8>,
+        tunnel_id: TunnelId,
+        message: &'a [u8],
+    ) -> Self {
+        self.messages.push(NewTunnelDataMessage {
+            delivery_instructions: OwnedDeliveryInstruction::Tunnel {
+                tunnel_id: tunnel_id.into(),
+                hash,
+            },
+            message,
+        });
+
+        self
+    }
+
+    /// Serialize message fragments into a `TunnelData` message.
+    //
+    // TODO: return iterator of messages
+    pub fn build<R: Runtime>(mut self) -> Vec<u8> {
+        assert_eq!(self.messages.len(), 1);
+
+        let mut out = BytesMut::with_capacity(1028);
+
+        let message = self.messages.pop().unwrap();
+
+        let delivery_instructions: Vec<u8> = match message.delivery_instructions {
+            OwnedDeliveryInstruction::Local => vec![0x00],
+            OwnedDeliveryInstruction::Router { hash } => {
+                let mut out = BytesMut::with_capacity(33);
+                out.put_u8(0x02 << 5);
+                out.put_slice(&hash);
+
+                out.freeze().to_vec()
+            }
+            OwnedDeliveryInstruction::Tunnel { tunnel_id, hash } => {
+                let mut out = BytesMut::with_capacity(37);
+                out.put_u8(0x01 << 5);
+                out.put_u32(tunnel_id);
+                out.put_slice(&hash);
+
+                out.freeze().to_vec()
+            }
+        };
+
+        // total message size - tunnel id - aes iv - checksum - flag - delivery instructions -
+        // payload
+        let padding_size =
+            1028 - 4 - 16 - 4 - 1 - 2 - delivery_instructions.len() - message.message.len();
+        let offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
+        let aes_iv = {
+            let mut iv = [0u8; 16];
+            R::rng().fill_bytes(&mut iv);
+
+            iv
+        };
+        let padding = vec![3u8; padding_size];
+        let checksum = Sha256::new()
+            .update(&delivery_instructions)
+            .update((message.message.len() as u16).to_be_bytes())
+            .update(&message.message)
+            .update(&aes_iv)
+            .finalize();
+
+        out.put_u32(self.next_tunnel_id.into());
+        out.put_slice(&aes_iv);
+        out.put_slice(&checksum[..4]);
+        out.put_slice(&padding);
+        out.put_u8(0x00); // zero byte (end of padding)
+        out.put_slice(&delivery_instructions);
+        out.put_u16(message.message.len() as u16);
+        out.put_slice(message.message);
+
+        out.freeze().to_vec()
     }
 }
 
