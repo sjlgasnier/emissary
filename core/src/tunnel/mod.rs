@@ -53,6 +53,9 @@ mod noise;
 mod pool;
 mod transit;
 
+#[cfg(test)]
+mod tests;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
 

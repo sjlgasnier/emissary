@@ -353,23 +353,13 @@ mod test {
         i2np::{ShortTunnelBuildRecord, TunnelGatewayMessage},
         primitives::MessageId,
         runtime::mock::MockRuntime,
-        tunnel::{new_noise::NoiseContext, transit::TransitTunnelManager},
+        tunnel::{
+            new_noise::NoiseContext,
+            tests::{make_router, TestTransitTunnelManager},
+            transit::TransitTunnelManager,
+        },
     };
     use bytes::Bytes;
-
-    fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
-        let mut key_bytes = vec![0u8; 32];
-        let mut router_hash = vec![0u8; 32];
-
-        MockRuntime::rng().fill_bytes(&mut key_bytes);
-        MockRuntime::rng().fill_bytes(&mut router_hash);
-
-        let sk = StaticPrivateKey::from(key_bytes);
-        let pk = sk.public();
-        let router_hash = Bytes::from(router_hash);
-
-        (router_hash.clone(), pk, NoiseContext::new(sk, router_hash))
-    }
 
     #[test]
     fn create_outbound_tunnel() {
@@ -377,14 +367,14 @@ mod test {
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
-            Vec<TransitTunnelManager<MockRuntime>>,
+            Vec<TestTransitTunnelManager>,
         ) = (0..3)
-            .map(|_| make_router())
-            .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|manager| {
+                let manager = TestTransitTunnelManager::new();
+
                 (
-                    (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    (manager.router_hash.clone(), manager.public_key.clone()),
+                    manager,
                 )
             })
             .unzip();
