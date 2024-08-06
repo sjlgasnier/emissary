@@ -138,6 +138,21 @@ impl ChaChaPoly {
         Ok(tag.as_slice().to_vec())
     }
 
+    /// Encrypt `plaintext` in place, passing in associated data for authentication.
+    pub fn encrypt_with_ad_new(
+        &mut self,
+        associated_data: &[u8],
+        plaintext: &mut Vec<u8>,
+    ) -> crate::Result<()> {
+        self.cipher
+            .encrypt_in_place(
+                &self.nonce.next().ok_or(Error::NonceOverflow)?,
+                associated_data,
+                plaintext,
+            )
+            .map_err(From::from)
+    }
+
     /// Decrypt `ciphertext` in place, passing in associated data for authentication.
     ///
     /// Return authentication tag on sucess.

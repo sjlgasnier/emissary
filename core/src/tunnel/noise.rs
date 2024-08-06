@@ -33,28 +33,31 @@ use crate::{
     },
     error::TunnelError,
     i2np::{
-        DeliveryInstruction, EncryptedTunnelBuildRequestRecord, EncryptedTunnelData, HopRole,
-        MessageKind, MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction,
+        DeliveryInstruction, DeliveryInstructions, EncryptedTunnelBuildRequestRecord,
+        EncryptedTunnelData, GarlicClove, GarlicMessage, GarlicMessageBlock, GarlicMessageType,
+        HopRole, MessageKind, MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction,
         RawI2NpMessageBuilder, RawI2npMessage, ShortTunnelBuildRecord,
         ShortTunnelBuildRecordBuilder, ShortTunnelBuildRequestBuilder, TunnelBuildRecord,
         TunnelData, TunnelGatewayMessage, I2NP_SHORT, I2NP_STANDARD,
     },
-    primitives::{RouterId, RouterInfo},
+    primitives::{RouterId, RouterInfo, TunnelId},
     runtime::Runtime,
     tunnel::LOG_TARGET,
     Error,
 };
 
+use bytes::Bytes;
 use hashbrown::HashMap;
 use rand_core::RngCore;
 use zeroize::Zeroize;
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
+    sync::Arc,
     vec,
     vec::Vec,
 };
-use core::{fmt, time::Duration};
+use core::{fmt, ops::Deref, time::Duration};
 
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
@@ -129,6 +132,431 @@ struct FragmentedMessage {
     last_fragment: Option<Vec<u8>>,
 }
 
+/// Noise context for tunnels.
+#[derive(Clone)]
+pub struct NoiseContext {
+    /// Chaining key.
+    chaining_key: Bytes,
+
+    /// Inbound state.
+    inbound_state: Bytes,
+
+    /// Outbound state.
+    outbound_state: Bytes,
+
+    /// Local static key.
+    local_key: Arc<StaticPrivateKey>,
+
+    /// Local router hash.
+    local_router_hash: Bytes,
+}
+
+pub struct TunnelKeyContext {
+    iv_key: Vec<u8>,
+    layer_key: Vec<u8>,
+}
+
+impl TunnelKeyContext {
+    /// Get reference to IV key.
+    pub fn iv_key(&self) -> &[u8] {
+        &self.iv_key
+    }
+
+    /// Get reference to layer key.
+    pub fn layer_key(&self) -> &[u8] {
+        &self.layer_key
+    }
+}
+
+pub struct PendingTunnelKeyContext {
+    pub garlic_key: Option<Vec<u8>>,
+    pub garlic_tag: Option<Vec<u8>>,
+    pub iv_key: Vec<u8>,
+    pub layer_key: Vec<u8>,
+    pub local_ephemeral: Vec<u8>,
+    pub reply_key: Vec<u8>,
+    pub state: Vec<u8>,
+    pub chacha: Vec<u8>,
+}
+
+impl fmt::Debug for PendingTunnelKeyContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingTunnelKeyContext").finish_non_exhaustive()
+    }
+}
+
+pub struct PendingTunnelSession {
+    /// Chaining key.
+    chaining_key: Vec<u8>,
+
+    /// ChaCha20Poly1305 key for decrypting the build request record.
+    aead_key: Vec<u8>,
+
+    /// AEAD state.
+    state: Vec<u8>,
+}
+
+impl PendingTunnelSession {
+    /// Create new [`PendingTunnelSession`].
+    fn new(chaining_key: Vec<u8>, aead_key: Vec<u8>, state: Vec<u8>) -> Self {
+        Self {
+            chaining_key,
+            aead_key,
+            state,
+        }
+    }
+
+    // TODO: ugly
+    pub fn decrypt_build_record(
+        &mut self,
+        mut record: Vec<u8>,
+    ) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+        let state = Sha256::new().update(&self.state).update(&record).finalize();
+
+        ChaChaPoly::new(&self.aead_key).decrypt_with_ad(&self.state, &mut record)?;
+
+        Ok((record, state))
+    }
+
+    /// Derive tunnel key context for an inbound session.
+    pub fn derive_tunnel_keys(mut self, role: HopRole) -> PendingTunnelKeyContext {
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        match role {
+            HopRole::InboundGateway | HopRole::Participant => {
+                ck.zeroize();
+                temp_key.zeroize();
+                self.chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: None,
+                    garlic_tag: None,
+                    iv_key: ck,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+            HopRole::OutboundEndpoint => {
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let ck =
+                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let iv_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"TunnelLayerIVKey")
+                    .update(&[0x02])
+                    .finalize();
+
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let mut ck =
+                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let garlic_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"RGarlicKeyAndTag")
+                    .update(&[0x02])
+                    .finalize();
+
+                let garlic_tag = ck[..8].to_vec();
+
+                ck.zeroize();
+                temp_key.zeroize();
+                self.chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: Some(garlic_key),
+                    garlic_tag: Some(garlic_tag),
+                    iv_key,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+        }
+    }
+}
+
+impl NoiseContext {
+    /// Create new [`NoiseContext`].
+    pub fn new(local_key: StaticPrivateKey, local_router_hash: Bytes) -> Self {
+        let chaining_key = {
+            let mut chaining_key = PROTOCOL_NAME.as_bytes().to_vec();
+            chaining_key.append(&mut vec![0u8]);
+            chaining_key
+        };
+        let outbound_state = Sha256::new().update(&chaining_key).finalize();
+        let inbound_state = Sha256::new()
+            .update(&outbound_state)
+            .update(local_key.public().to_bytes())
+            .finalize();
+
+        Self {
+            local_router_hash,
+            chaining_key: Bytes::from(chaining_key),
+            inbound_state: Bytes::from(inbound_state),
+            outbound_state: Bytes::from(outbound_state),
+            local_key: Arc::new(local_key),
+        }
+    }
+
+    /// Get reference to local router hash.
+    pub fn local_router_hash(&self) -> &Bytes {
+        &self.local_router_hash
+    }
+
+    /// Derive chaining and Chacha20Poly1305 keys for an inbound session.
+    //
+    // TODO: wrong key type!
+    // TODO: remove
+    pub fn derive_inbound_keys(
+        &self,
+        remote_ephemeral: StaticPublicKey,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut shared_secret = self.local_key.diffie_hellman(&remote_ephemeral);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let state = Sha256::new()
+            .update(&self.inbound_state)
+            .update(&remote_ephemeral.to_bytes())
+            .finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+
+        (chaining_key, aead_key, state)
+    }
+
+    /// Create
+    //
+    // TODO: wrong key type!
+    // TODO: rename
+    pub fn create_pending_tunnel_session(
+        &mut self,
+        remote_ephemeral: StaticPublicKey,
+    ) -> PendingTunnelSession {
+        let mut shared_secret = self.local_key.diffie_hellman(&remote_ephemeral);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let state = Sha256::new()
+            .update(&self.inbound_state)
+            .update(&remote_ephemeral.to_bytes())
+            .finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+
+        PendingTunnelSession::new(chaining_key, aead_key, state)
+    }
+
+    /// Derive chaining and Chacha20Poly1305 keys for an outbound session.
+    fn derive_outbound_keys(
+        &self,
+        remote_static: StaticPublicKey,
+        local_ephemeral: EphemeralPrivateKey,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut shared_secret = local_ephemeral.diffie_hellman(&remote_static);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+        local_ephemeral.zeroize();
+
+        (chaining_key, aead_key)
+    }
+
+    /// Derive tunnel key context for an outbound session.
+    pub fn derive_outbound_tunnel_keys<R: Runtime>(
+        &self,
+        remote_static: StaticPublicKey,
+        role: HopRole,
+    ) -> PendingTunnelKeyContext {
+        let local_ephemeral = EphemeralPrivateKey::new(R::rng());
+        let local_ephemeral_public = local_ephemeral.public_key().to_vec();
+        let state = {
+            let state = Sha256::new()
+                .update(&self.outbound_state)
+                .update::<&[u8]>(remote_static.as_ref())
+                .finalize();
+
+            Sha256::new().update(&state).update(&local_ephemeral_public).finalize()
+        };
+        let (mut chaining_key, aead_key) =
+            self.derive_outbound_keys(remote_static, local_ephemeral);
+
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        match role {
+            HopRole::InboundGateway | HopRole::Participant => {
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: aead_key,
+                    garlic_key: None,
+                    garlic_tag: None,
+                    iv_key: ck,
+                    layer_key,
+                    local_ephemeral: local_ephemeral_public,
+                    reply_key,
+                    state,
+                }
+            }
+            HopRole::OutboundEndpoint => {
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let ck =
+                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let iv_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"TunnelLayerIVKey")
+                    .update(&[0x02])
+                    .finalize();
+
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let mut ck =
+                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let garlic_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"RGarlicKeyAndTag")
+                    .update(&[0x02])
+                    .finalize();
+
+                let garlic_tag = ck[..8].to_vec();
+
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: aead_key,
+                    garlic_key: Some(garlic_key),
+                    garlic_tag: Some(garlic_tag),
+                    iv_key,
+                    layer_key,
+                    local_ephemeral: local_ephemeral_public,
+                    reply_key,
+                    state,
+                }
+            }
+        }
+    }
+
+    /// Derive tunnel key context for an inbound session.
+    //
+    // TODO: why does this take `Runtime`?
+    pub fn derive_inbound_tunnel_keys<R: Runtime>(
+        &self,
+        mut chaining_key: Vec<u8>,
+        role: HopRole,
+    ) -> PendingTunnelKeyContext {
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let reply_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelReplyKey")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let layer_key = Hmac::new(&temp_key)
+            .update(&ck)
+            .update(&b"SMTunnelLayerKey")
+            .update(&[0x02])
+            .finalize();
+
+        match role {
+            HopRole::InboundGateway | HopRole::Participant => {
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: None,
+                    garlic_tag: None,
+                    iv_key: ck,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+            HopRole::OutboundEndpoint => {
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let ck =
+                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let iv_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"TunnelLayerIVKey")
+                    .update(&[0x02])
+                    .finalize();
+
+                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
+                let mut ck =
+                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let garlic_key = Hmac::new(&temp_key)
+                    .update(&ck)
+                    .update(&b"RGarlicKeyAndTag")
+                    .update(&[0x02])
+                    .finalize();
+
+                let garlic_tag = ck[..8].to_vec();
+
+                ck.zeroize();
+                temp_key.zeroize();
+                chaining_key.zeroize();
+
+                PendingTunnelKeyContext {
+                    chacha: Vec::new(),
+                    garlic_key: Some(garlic_key),
+                    garlic_tag: Some(garlic_tag),
+                    iv_key,
+                    layer_key,
+                    local_ephemeral: Vec::new(),
+                    reply_key,
+                    state: Vec::new(),
+                }
+            }
+        }
+    }
+}
+
 /// Noise key context.
 pub struct Noise {
     /// Chaining key.
@@ -144,7 +572,7 @@ pub struct Noise {
     outbound_state: Vec<u8>,
 
     /// Tunnel hops.
-    tunnels: HashMap<u32, TunnelHop>,
+    tunnels: HashMap<TunnelId, TunnelHop>,
 
     pending_tunnels: HashMap<u32, PendingTunnel>,
     pending_messages: HashMap<u32, u32>,
@@ -269,7 +697,7 @@ impl Noise {
                 iv_key,
                 fragments: HashMap::new(),
             };
-            self.tunnels.insert(record.tunnel_id(), hop);
+            self.tunnels.insert(TunnelId::from(record.tunnel_id()), hop);
 
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
@@ -382,8 +810,8 @@ impl Noise {
         let mut record1 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(first_tunnel_id)
             .with_next_tunnel_id(second_tunnel_id)
-            .with_next_router_hash(hops[1].identity().hash().to_vec())
-            .with_role(HopRole::Intermediary)
+            .with_next_router_hash(hops[1].identity().hash().as_ref())
+            .with_role(HopRole::Participant)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
             .with_next_message_id(message_id) // TODO: different for every message?
@@ -393,7 +821,7 @@ impl Noise {
         let mut record2 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(second_tunnel_id)
             .with_next_tunnel_id(recv_tunnel_id)
-            .with_next_router_hash(our_hash)
+            .with_next_router_hash(&our_hash)
             .with_role(HopRole::OutboundEndpoint)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
@@ -477,7 +905,7 @@ impl Noise {
         pending_tunnel.hops.push_front((
             first_tunnel_id,
             TunnelHopNew {
-                role: HopRole::Intermediary,
+                role: HopRole::Participant,
                 index: 0usize,
                 reply_key: reply_key1,
                 tunnel_id: first_tunnel_id,
@@ -533,7 +961,7 @@ impl Noise {
         let mut record1 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(first_tunnel_id)
             .with_next_tunnel_id(second_tunnel_id)
-            .with_next_router_hash(hops[1].identity().hash().to_vec())
+            .with_next_router_hash(hops[1].identity().hash().as_ref())
             .with_role(HopRole::InboundGateway)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
@@ -544,8 +972,8 @@ impl Noise {
         let mut record2 = ShortTunnelBuildRecordBuilder::default()
             .with_tunnel_id(second_tunnel_id)
             .with_next_tunnel_id(recv_tunnel_id)
-            .with_next_router_hash(our_hash)
-            .with_role(HopRole::Intermediary)
+            .with_next_router_hash(&our_hash)
+            .with_role(HopRole::Participant)
             .with_request_time(time_now)
             .with_request_expiration(expiration)
             .with_next_message_id(message_id) // TODO: different for every message?
@@ -644,7 +1072,7 @@ impl Noise {
         pending_tunnel.hops.push_front((
             second_tunnel_id,
             TunnelHopNew {
-                role: HopRole::Intermediary,
+                role: HopRole::Participant,
                 index: 1usize,
                 reply_key: reply_key2,
                 tunnel_id: second_tunnel_id,
@@ -753,7 +1181,7 @@ impl Noise {
                     _ => else_key,
                 },
             };
-            self.tunnels.insert(record.tunnel_id(), hop);
+            self.tunnels.insert(TunnelId::from(record.tunnel_id()), hop);
 
             ((
                 RouterId::from(base64_encode(&record.next_router_hash()[..16])),
@@ -804,7 +1232,7 @@ impl Noise {
 
             // TODO: garlic encrypt?
             let payload = TunnelGatewayMessage {
-                tunnel_id: next_tunnel_id,
+                tunnel_id: TunnelId::from(next_tunnel_id),
                 payload: &msg,
             }
             .serialize();
@@ -874,7 +1302,7 @@ impl Noise {
 
         match hop.role {
             HopRole::InboundGateway => todo!("inbound gateway not supported"),
-            HopRole::Intermediary => {
+            HopRole::Participant => {
                 let mut aes = ecb::Aes::new_encryptor(&hop.iv_key);
                 let iv = aes.encrypt(tunnel_data.iv());
 
@@ -966,7 +1394,7 @@ impl Noise {
                                 );
 
                                 let payload = TunnelGatewayMessage {
-                                    tunnel_id: *tunnel_id,
+                                    tunnel_id: TunnelId::from(*tunnel_id),
                                     payload: &message.message,
                                 }
                                 .serialize();
@@ -1302,8 +1730,8 @@ impl Noise {
             "tunnel gateway",
         );
 
-        if self.pending_tunnels.contains_key(&tunnel_id) {
-            self.handle_zero_hop_inbound_gateway(tunnel_id, payload);
+        if self.pending_tunnels.contains_key(tunnel_id.deref()) {
+            self.handle_zero_hop_inbound_gateway(tunnel_id.into(), payload);
         }
 
         let TunnelHop {
@@ -1313,10 +1741,9 @@ impl Noise {
             layer_key,
             iv_key,
             ..
-        } = self
-            .tunnels
-            .get(&tunnel_id)
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+        } = self.tunnels.get(&TunnelId::from(tunnel_id)).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(TunnelId::from(tunnel_id)),
+        ))?
         else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -1401,10 +1828,9 @@ impl Noise {
             layer_key,
             iv_key,
             ..
-        } = self
-            .tunnels
-            .get(&tunnel_id)
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(tunnel_id)))?
+        } = self.tunnels.get(&TunnelId::from(tunnel_id)).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(TunnelId::from(tunnel_id)),
+        ))?
         else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -1475,276 +1901,5 @@ impl Noise {
             .serialize();
 
         Ok((message, next_router_id.clone()))
-    }
-}
-
-use nom::{
-    bytes::complete::take,
-    error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u32, be_u8},
-    sequence::tuple,
-    Err, IResult,
-};
-
-#[derive(Debug)]
-enum GarlicMessageType {
-    DateTime,
-    Termination,
-    Options,
-    MessageNumber,
-    NextKey,
-    ACK,
-    ACKRequest,
-    GarlicClove,
-    Padding,
-}
-
-impl GarlicMessageType {
-    fn from_u8(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::DateTime),
-            4 => Some(Self::Termination),
-            5 => Some(Self::Options),
-            6 => Some(Self::MessageNumber),
-            7 => Some(Self::NextKey),
-            8 => Some(Self::ACK),
-            9 => Some(Self::ACKRequest),
-            11 => Some(Self::GarlicClove),
-            254 => Some(Self::Padding),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum DeliveryInstructions<'a> {
-    /// Clove meant for the local node
-    Local,
-
-    /// Clove meant for a `Destination`.
-    Destination {
-        /// Hash of the destination.
-        hash: &'a [u8],
-    },
-
-    /// Clove meant for a router.
-    Router {
-        /// Hash of the router.
-        hash: &'a [u8],
-    },
-
-    /// Clove meant for a tunnel.
-    Tunnel {
-        /// Hash of the tunnel.
-        hash: &'a [u8],
-
-        /// Tunnel ID.
-        tunnel_id: u32,
-    },
-}
-
-impl<'a> DeliveryInstructions<'a> {
-    fn serialized_len(&self) -> usize {
-        match self {
-            // 1-byte flag
-            Self::Local => 1usize,
-
-            // 1-byte flag + 32-byte router hash
-            Self::Destination { .. } | Self::Router { .. } => 33usize,
-
-            // 1-byte flag + 32-byte router hash + 4-byte tunnel id
-            Self::Tunnel { .. } => 37usize,
-        }
-    }
-}
-
-enum GarlicMessageBlock<'a> {
-    /// Date time.
-    DateTime {
-        /// Timestamp.
-        timestamp: u32,
-    },
-
-    /// Session termination.
-    Termination {},
-
-    /// Options.
-    Options {},
-
-    ///
-    MessageNumber {},
-    NextKey {},
-    ACK {},
-    ACKRequest {},
-    GarlicClove {
-        /// I2NP message type.
-        message_type: MessageType,
-
-        /// Message ID.
-        message_id: u32,
-
-        /// Message expiration.
-        expiration: u32,
-
-        /// Delivery instructions.
-        delivery_instructions: DeliveryInstructions<'a>,
-
-        /// Message body.
-        message_body: &'a [u8],
-    },
-
-    /// Padding
-    Padding {
-        /// Padding bytes.
-        padding: &'a [u8],
-    },
-}
-
-impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DateTime { timestamp } => f
-                .debug_struct("GarlicMessageBlock::DateTime")
-                .field("timestamp", &timestamp)
-                .finish(),
-            Self::GarlicClove {
-                message_type,
-                message_id,
-                expiration,
-                delivery_instructions,
-                ..
-            } => f
-                .debug_struct("GarlicMessageBlock::GarlicClove")
-                .field("message_type", &message_type)
-                .field("message_id", &message_id)
-                .field("expiration", &expiration)
-                .field("delivery_instructions", &delivery_instructions)
-                .finish_non_exhaustive(),
-            Self::Padding { .. } =>
-                f.debug_struct("DeliveryInstructions::Padding").finish_non_exhaustive(),
-            _ => todo!(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct GarlicMessage<'a> {
-    blocks: Vec<GarlicMessageBlock<'a>>,
-}
-
-impl<'a> GarlicMessage<'a> {
-    /// Try to parse [`GarlicMessage::DateTime`] from `input`.
-    fn parse_date_time(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
-        let (rest, timestamp) = be_u32(rest)?;
-
-        debug_assert!(size == 4, "invalid size for datetime block");
-
-        Ok((rest, GarlicMessageBlock::DateTime { timestamp }))
-    }
-
-    /// Try to parse [`DeliveryInstructions`] for [`GarlicMessage::GarlicClove`] from `input`.
-    fn parse_delivery_instructions(input: &'a [u8]) -> IResult<&'a [u8], DeliveryInstructions<'a>> {
-        let (rest, flag) = be_u8(input)?;
-
-        // TODO: handle gracefully
-        assert!(flag >> 7 & 1 == 0, "encrypted garlic");
-        assert!(flag >> 4 & 1 == 0, "delay");
-
-        match (flag >> 5) & 0x3 {
-            0x00 => Ok((rest, DeliveryInstructions::Local)),
-            0x01 => {
-                let (rest, hash) = take(32usize)(rest)?;
-
-                Ok((rest, DeliveryInstructions::Destination { hash }))
-            }
-            0x02 => {
-                let (rest, hash) = take(32usize)(rest)?;
-
-                Ok((rest, DeliveryInstructions::Router { hash }))
-            }
-            0x03 => {
-                let (rest, hash) = take(32usize)(rest)?;
-                let (rest, tunnel_id) = be_u32(rest)?;
-
-                Ok((rest, DeliveryInstructions::Tunnel { hash, tunnel_id }))
-            }
-            _ => panic!("invalid garlic type"), // TODO: don't panic
-        }
-    }
-
-    /// Try to parse [`GarlicMessage::GarlicClove`] from `input`.
-    fn parse_garlic_clove(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
-        let (rest, delivery_instructions) = Self::parse_delivery_instructions(rest)?;
-        let (rest, message_type) = be_u8(rest)?;
-        let (rest, message_id) = be_u32(rest)?;
-        let (rest, expiration) = be_u32(rest)?;
-
-        let message_type = MessageType::from_u8(message_type)
-            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-        // parse body and make sure it has sane length
-        let message_body_len =
-            (size as usize).saturating_sub(delivery_instructions.serialized_len() + 1 + 2 * 4);
-        let (rest, message_body) = take(message_body_len)(rest)?;
-
-        Ok((
-            rest,
-            GarlicMessageBlock::GarlicClove {
-                message_type,
-                message_id,
-                expiration,
-                delivery_instructions,
-                message_body,
-            },
-        ))
-    }
-
-    /// Try to parse [`GarlicMessage::Padding`] from `input`.
-    fn parse_padding(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
-        let (rest, padding) = take(size)(rest)?;
-
-        Ok((rest, GarlicMessageBlock::Padding { padding }))
-    }
-
-    fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, message_type) = be_u8(input)?;
-
-        match GarlicMessageType::from_u8(message_type) {
-            Some(GarlicMessageType::DateTime) => Self::parse_date_time(rest),
-            Some(GarlicMessageType::GarlicClove) => Self::parse_garlic_clove(rest),
-            Some(GarlicMessageType::Padding) => Self::parse_padding(rest),
-            message_type => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?message_type,
-                    "invalid garlic message block",
-                );
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
-            }
-        }
-    }
-
-    /// Recursively parse `input` into a vector of [`GarlicMessageBlock`]s
-    fn parse_inner(
-        input: &'a [u8],
-        mut messages: Vec<GarlicMessageBlock<'a>>,
-    ) -> Option<(Vec<GarlicMessageBlock<'a>>)> {
-        let (rest, message) = Self::parse_frame(input).ok()?;
-        messages.push(message);
-
-        match rest.is_empty() {
-            true => Some(messages),
-            false => Self::parse_inner(rest, messages),
-        }
-    }
-
-    /// Attempt to parse `input` into [`GarlicMessage`].
-    pub fn parse(input: &'a [u8]) -> Option<Self> {
-        Some(Self {
-            blocks: Self::parse_inner(input, Vec::new())?,
-        })
     }
 }

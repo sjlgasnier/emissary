@@ -29,6 +29,9 @@ pub struct Aes {
 
 impl Aes {
     /// Create new [`Aes`] encryptor instance.
+    //
+    // TODO: change this to take `[u8; 32]`
+    // TODO: or `GenericArray` directly?
     pub fn new_encryptor(key: &[u8]) -> Self {
         let key: [u8; 32] = key.try_into().expect("valid aes key");
 

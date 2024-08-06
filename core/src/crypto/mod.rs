@@ -116,6 +116,24 @@ impl StaticPublicKey {
     }
 }
 
+impl AsRef<[u8]> for StaticPublicKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::X25519(key) => key.as_ref(),
+            Self::ElGamal(key) => key.as_ref(),
+        }
+    }
+}
+
+impl AsRef<x25519_dalek::PublicKey> for StaticPublicKey {
+    fn as_ref(&self) -> &x25519_dalek::PublicKey {
+        match self {
+            Self::X25519(key) => &key,
+            Self::ElGamal(_) => todo!(),
+        }
+    }
+}
+
 /// Static private key.
 #[derive(Clone)]
 pub enum StaticPrivateKey {
@@ -132,11 +150,9 @@ impl StaticPrivateKey {
     }
 
     /// Perform Diffie-Hellman and return the shared secret as byte vector.
-    pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
-        match (self, public_key) {
-            (Self::X25519(sk), StaticPublicKey::X25519(pk)) =>
-                sk.diffie_hellman(pk).to_bytes().to_vec(),
-            _ => todo!("not implemented"),
+    pub fn diffie_hellman<T: AsRef<x25519_dalek::PublicKey>>(&self, public_key: &T) -> Vec<u8> {
+        match self {
+            Self::X25519(key) => key.diffie_hellman(public_key.as_ref()).to_bytes().to_vec(),
         }
     }
 }
@@ -168,11 +184,9 @@ impl EphemeralPrivateKey {
     }
 
     /// Perform Diffie-Hellman and return the shared secret as byte vector.
-    pub fn diffie_hellman(&self, public_key: &StaticPublicKey) -> Vec<u8> {
-        match (self, public_key) {
-            (Self::X25519(sk), StaticPublicKey::X25519(pk)) =>
-                sk.diffie_hellman(pk).to_bytes().to_vec(),
-            _ => todo!("not implemented"),
+    pub fn diffie_hellman<T: AsRef<x25519_dalek::PublicKey>>(&self, public_key: &T) -> Vec<u8> {
+        match self {
+            Self::X25519(key) => key.diffie_hellman(public_key.as_ref()).to_bytes().to_vec(),
         }
     }
 
@@ -190,13 +204,6 @@ pub enum EphemeralPublicKey {
 }
 
 impl EphemeralPublicKey {
-    /// Try to create [`EphemeralPublicKey`] from `bytes`.
-    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        let key: [u8; 32] = bytes.try_into().ok()?;
-
-        Some(Self::X25519(x25519_dalek::PublicKey::from(key)))
-    }
-
     pub fn to_vec(&self) -> Vec<u8> {
         match self {
             Self::X25519(key) => key.as_bytes().to_vec(),
@@ -211,10 +218,28 @@ impl EphemeralPublicKey {
     }
 }
 
+impl TryFrom<&[u8]> for EphemeralPublicKey {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let key: [u8; 32] = value.try_into().map_err(|_| Error::InvalidData)?;
+
+        Ok(Self::X25519(x25519_dalek::PublicKey::from(key)))
+    }
+}
+
 impl AsRef<[u8]> for EphemeralPublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
             Self::X25519(key) => key.as_ref(),
+        }
+    }
+}
+
+impl AsRef<x25519_dalek::PublicKey> for EphemeralPublicKey {
+    fn as_ref(&self) -> &x25519_dalek::PublicKey {
+        match self {
+            Self::X25519(key) => &key,
         }
     }
 }

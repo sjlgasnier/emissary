@@ -16,11 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::primitives::{MessageId, TunnelId};
+
 use alloc::string::String;
 use core::fmt;
 
 /// Channel error.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ChannelError {
     /// Channel is full.
     Full,
@@ -42,14 +44,47 @@ impl fmt::Display for ChannelError {
     }
 }
 
+/// Tunnel message rejection reason.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RejectionReason {
+    /// Message/operation not supported.
+    NotSupported,
+
+    /// Invalid checksum.
+    InvalidChecksum,
+}
+
 /// Tunnel error.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TunnelError {
     /// Tunnel doesn't exist.
-    TunnelDoesntExist(u32),
+    TunnelDoesntExist(TunnelId),
 
     /// Invalid hop role for an operation.
     InvalidHop,
+
+    /// Too many hops.
+    TooManyHops(usize),
+
+    /// Not enough hops.
+    NotEnoughHops(usize),
+
+    /// Invalid tunnel message.
+    InvalidMessage,
+
+    /// Tunnel rejected.
+    TunnelRejected(u8),
+
+    /// Local record not found in the build request.
+    RecordNotFound,
+
+    /// Tunnel message rejected.
+    ///
+    /// This is different from tunnel rejection.
+    MessageRejected(RejectionReason),
+
+    /// Message doesn't exist.
+    MessageDoesntExist(MessageId),
 }
 
 impl fmt::Display for TunnelError {
@@ -57,6 +92,14 @@ impl fmt::Display for TunnelError {
         match self {
             Self::TunnelDoesntExist(tunnel_id) => write!(f, "tunnel ({tunnel_id}) does't exist"),
             Self::InvalidHop => write!(f, "invalid hop role for operation"),
+            Self::TooManyHops(hops) => write!(f, "too many hops {hops}"),
+            Self::InvalidMessage => write!(f, "invalid tunnel message"),
+            Self::TunnelRejected(reason) => write!(f, "tunnel rejected: {reason}"),
+            Self::NotEnoughHops(hops) => write!(f, "not enough hops {hops}"),
+            Self::RecordNotFound => write!(f, "local record not found"),
+            Self::MessageRejected(reason) => write!(f, "message rejected, reason: {reason:?}"),
+            Self::MessageDoesntExist(message_id) =>
+                write!(f, "message doesn't exist: {message_id}"),
         }
     }
 }

@@ -17,8 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::SigningPrivateKey,
+    crypto::{SigningPrivateKey, StaticPrivateKey},
     primitives::{Date, Mapping, RouterAddress, RouterIdentity, Str, LOG_TARGET},
+    runtime::Runtime,
     Config,
 };
 
@@ -31,6 +32,7 @@ use nom::{
 
 use alloc::{vec, vec::Vec};
 use core::str::FromStr;
+use rand_core::RngCore;
 
 use super::router_address::TransportKind;
 
@@ -205,6 +207,65 @@ impl RouterInfo {
     /// Get reference to router's publish date.
     pub fn date(&self) -> &Date {
         &self.published
+    }
+}
+
+#[cfg(test)]
+impl RouterInfo {
+    /// Create new random [`RouterInfo`].
+    pub fn random<R: Runtime>() -> Self {
+        let static_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+
+        let signing_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+
+        Self::from_keys::<R>(static_key, signing_key)
+    }
+
+    /// Create new random [`RouterInfo`] from static and signing keys.
+    pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> Self {
+        let identity = RouterIdentity::from_keys(static_key, signing_key).expect("to succeed");
+
+        // let ntcp2_config = ntcp2_config.unwrap();
+        let ntcp2_port = R::rng().next_u32() as u16;
+        let ntcp2_host = String::from("127.0.0.1");
+        let ntcp2_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+        let ntcp2_iv = {
+            let mut iv_bytes = [0u8; 16];
+            R::rng().fill_bytes(&mut iv_bytes);
+
+            iv_bytes
+        };
+
+        let ntcp2 = RouterAddress::new_published(ntcp2_key, ntcp2_iv, ntcp2_port, ntcp2_host);
+        let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
+        let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
+        let router_version = Mapping::new(
+            Str::from_str("router.version").unwrap(),
+            Str::from_str("0.9.62").unwrap(),
+        );
+        let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
+
+        RouterInfo {
+            identity,
+            published: Date::new(R::rng().next_u64()),
+            addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2)]),
+            options,
+        }
     }
 }
 

@@ -108,7 +108,7 @@ impl TcpStream for TokioTcpStream {
         net::TcpStream::connect(address)
             .await
             .map_err(|error| {
-                tracing::warn!("error: {error:?}");
+                tracing::debug!("error: {error:?}");
                 ()
             })
             .ok()

@@ -176,7 +176,7 @@ impl Initiator {
 
         // encrypt X
         let mut aes = Aes::new_encryptor(&router_hash, &iv);
-        let encrypted_x = aes.encrypt(pk.as_ref().to_vec());
+        let encrypted_x = aes.encrypt(pk);
 
         // create `SessionRequest` message
         let mut buffer = alloc::vec![0u8; 96];

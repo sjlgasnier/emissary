@@ -17,10 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
+    crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
     Error,
 };
 
+use bytes::Bytes;
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -39,13 +40,19 @@ pub struct RouterId(Arc<String>);
 
 impl fmt::Display for RouterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", &self.0[..8])
     }
 }
 
-impl From<String> for RouterId {
-    fn from(value: String) -> Self {
-        RouterId(Arc::new(value))
+impl<T: AsRef<[u8]>> From<T> for RouterId {
+    fn from(value: T) -> Self {
+        RouterId(Arc::new(base64_encode(value)))
+    }
+}
+
+impl Into<Vec<u8>> for RouterId {
+    fn into(self) -> Vec<u8> {
+        base64_decode(&self.0.as_bytes())
     }
 }
 
@@ -74,7 +81,10 @@ pub struct RouterIdentity {
     signing_key: SigningPublicKey,
 
     /// Identity hash.
-    identity_hash: Vec<u8>,
+    identity_hash: Bytes,
+
+    /// Router ID.
+    router: RouterId,
 }
 
 impl RouterIdentity {
@@ -103,7 +113,8 @@ impl RouterIdentity {
         Ok(Self {
             static_key,
             signing_key,
-            identity_hash,
+            identity_hash: Bytes::from(identity_hash.clone()),
+            router: RouterId::from(identity_hash),
         })
     }
 
@@ -133,12 +144,15 @@ impl RouterIdentity {
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
+        let identity_hash = Bytes::from(Sha256::new().update(&input[..391]).finalize());
+
         Ok((
             rest,
             RouterIdentity {
                 static_key,
                 signing_key,
-                identity_hash: Sha256::new().update(&input[..391]).finalize(),
+                identity_hash: identity_hash.clone(),
+                router: RouterId::from(identity_hash),
             },
         ))
     }
@@ -174,13 +188,13 @@ impl RouterIdentity {
     }
 
     /// Router identity hash as bytes.
-    pub fn hash(&self) -> &[u8] {
-        self.identity_hash.as_ref()
+    pub fn hash(&self) -> Bytes {
+        self.identity_hash.clone()
     }
 
     /// Get [`RouterId`].
     pub fn id(&self) -> RouterId {
-        RouterId(Arc::new(base64_encode(&self.identity_hash[..16])))
+        self.router.clone()
     }
 }
 

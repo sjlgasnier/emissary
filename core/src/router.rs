@@ -117,10 +117,8 @@ impl<R: Runtime> Router<R> {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
             let tunnel_manager = TunnelManager::<R>::new(
                 transport_service,
+                local_router_info.clone(), // TODO: should be cheap
                 local_key,
-                local_router_info.identity().hash()[..16].to_vec(),
-                local_router_info.identity().hash().to_vec(),
-                local_router_id,
                 metrics_handle,
                 router_storage,
             );
