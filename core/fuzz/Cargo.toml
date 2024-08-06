@@ -1,0 +1,26 @@
+[package]
+name = "emissary-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+emissary-core = { path = "../", features = ["std"] }
+libfuzzer-sys = "0.4.0"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "variable_tunnel_build"
+path = "fuzz_targets/variable_tunnel_build.rs"
+test = false
+doc = false
