@@ -25,8 +25,8 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage,
-        ShortTunnelBuildRecord, TunnelBuildRecord, TunnelGatewayMessage,
+        tunnel::build::variable, EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder,
+        RawI2npMessage, ShortTunnelBuildRecord, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -152,21 +152,22 @@ impl<R: Runtime> TransitTunnelManager<R> {
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
-        let build_record = TunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?message_id,
-                "malformed variable tunnel build request",
-            );
+        let build_record =
+            variable::TunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?message_id,
+                    "malformed variable tunnel build request",
+                );
 
-            Error::InvalidData
-        })?;
+                Error::InvalidData
+            })?;
 
         let role = build_record.role();
-        let tunnel_id = TunnelId::from(build_record.tunnel_id());
-        let next_tunnel_id = TunnelId::from(build_record.next_tunnel_id());
+        let tunnel_id = build_record.tunnel_id();
+        let next_tunnel_id = build_record.next_tunnel_id();
         let next_message_id = build_record.next_message_id();
-        let next_router = RouterId::from(build_record.next_router_hash());
+        let next_router = build_record.next_router();
 
         if role != HopRole::OutboundEndpoint {
             tracing::warn!(
@@ -175,7 +176,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 %tunnel_id,
                 %next_tunnel_id,
                 %next_message_id,
-                ?next_router,
+                %next_router,
                 "variable tunnel build only supported for outbound enpoint",
             );
 
@@ -190,7 +191,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
             %tunnel_id,
             %next_tunnel_id,
             %next_message_id,
-            ?next_router,
+            %next_router,
             "variable tunnel build request",
         );
 
@@ -206,7 +207,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
         let message = RawI2NpMessageBuilder::short()
             .with_message_type(MessageType::VariableTunnelBuildReply)
-            .with_message_id(next_message_id)
+            .with_message_id(next_message_id.into())
             .with_expiration(expiration)
             .with_payload(payload)
             .serialize();

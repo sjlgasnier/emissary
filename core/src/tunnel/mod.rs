@@ -52,7 +52,6 @@ mod garlic;
 mod hop;
 mod metrics;
 mod new_noise;
-mod noise;
 mod pool;
 mod transit;
 

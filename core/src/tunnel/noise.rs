@@ -33,12 +33,12 @@ use crate::{
     },
     error::TunnelError,
     i2np::{
-        DeliveryInstruction, DeliveryInstructions, EncryptedTunnelBuildRequestRecord,
-        EncryptedTunnelData, GarlicClove, GarlicMessage, GarlicMessageBlock, GarlicMessageType,
-        HopRole, MessageKind, MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction,
-        RawI2NpMessageBuilder, RawI2npMessage, ShortTunnelBuildRecord,
-        ShortTunnelBuildRecordBuilder, ShortTunnelBuildRequestBuilder, TunnelBuildRecord,
-        TunnelData, TunnelGatewayMessage, I2NP_SHORT, I2NP_STANDARD,
+        tunnel::build::variable, DeliveryInstruction, DeliveryInstructions, EncryptedTunnelData,
+        GarlicClove, GarlicMessage, GarlicMessageBlock, GarlicMessageType, HopRole, MessageKind,
+        MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction, RawI2NpMessageBuilder,
+        RawI2npMessage, ShortTunnelBuildRecord, ShortTunnelBuildRecordBuilder,
+        ShortTunnelBuildRequestBuilder, TunnelData, TunnelGatewayMessage, I2NP_SHORT,
+        I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo, TunnelId},
     runtime::Runtime,
@@ -674,7 +674,7 @@ impl Noise {
         ChaChaPoly::new(&aead_key).decrypt_with_ad(&state, &mut test).unwrap();
 
         let (next_router, message_id, message_type) = {
-            let record = TunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
+            let record = variable::TunnelBuildRecord::parse(&test).unwrap(); // TODO: no unwraps
 
             let layer_key = record.tunnel_layer_key().to_vec();
             let iv_key = record.tunnel_iv_key().to_vec();
@@ -690,9 +690,9 @@ impl Noise {
 
             let hop = TunnelHop {
                 role: record.role(),
-                tunnel_id: record.tunnel_id(),
-                next_tunnel_id: record.next_tunnel_id(),
-                next_router_id: RouterId::from(base64_encode(&record.next_router_hash()[..16])),
+                tunnel_id: *record.tunnel_id(),
+                next_tunnel_id: *record.next_tunnel_id(),
+                next_router_id: record.next_router(),
                 layer_key,
                 iv_key,
                 fragments: HashMap::new(),
@@ -700,7 +700,7 @@ impl Noise {
             self.tunnels.insert(TunnelId::from(record.tunnel_id()), hop);
 
             ((
-                RouterId::from(base64_encode(&record.next_router_hash()[..16])),
+                record.next_router(),
                 record.next_message_id(),
                 match record.role() {
                     HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
