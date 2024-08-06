@@ -206,7 +206,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
         let message = RawI2NpMessageBuilder::short()
             .with_message_type(MessageType::VariableTunnelBuildReply)
-            .with_message_id(message_id)
+            .with_message_id(next_message_id)
             .with_expiration(expiration)
             .with_payload(payload)
             .serialize();
