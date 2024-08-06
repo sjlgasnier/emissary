@@ -40,7 +40,7 @@ pub struct RouterId(Arc<String>);
 
 impl fmt::Display for RouterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", &self.0[..8])
     }
 }
 

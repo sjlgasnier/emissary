@@ -422,7 +422,7 @@ impl<R: Runtime> TunnelManager<R> {
     ) {
         tracing::trace!(
             target: LOG_TARGET,
-            ?router,
+            %router,
             ?direction,
             "build tunnel",
         );
