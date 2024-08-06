@@ -19,14 +19,17 @@
 use crate::{
     crypto::StaticPrivateKey,
     error::TunnelError,
-    i2np::{EncryptedTunnelData, MessageType, RawI2npMessage, TunnelGatewayMessage, I2NP_SHORT},
+    i2np::{
+        EncryptedTunnelData, GarlicMessage, MessageType, RawI2npMessage, TunnelGatewayMessage,
+        I2NP_SHORT,
+    },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::{
-        garlic::GarlicHandler,
+        garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         new_noise::NoiseContext,
         pool::{TunnelBuildDirection, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolManager},
@@ -384,17 +387,22 @@ impl<R: Runtime> TunnelManager<R> {
 
     /// Handle garlic message.
     ///
-    /// Decrypt the payload, return the garlic cloves and handle them individually.
+    /// Decrypt the payload, return I2NP messages inside the garlic cloves
+    /// and process them individually.
     fn on_garlic(&mut self, mut message: RawI2npMessage) {
-        tracing::trace!(
-            target: LOG_TARGET,
-            message_id = ?message.message_id,
-            "garlic",
-        );
-
-        // self.garlic.handle_message(message).for_each(|_| {
-        //     todo!();
-        // })
+        self.garlic.handle_message(message).map(|messages| {
+            messages.for_each(|delivery_instructions| match delivery_instructions {
+                DeliveryInstructions::Local { message } => self.on_message(message),
+                DeliveryInstructions::Router { router, message } =>
+                    self.send_message(&router, message),
+                DeliveryInstructions::Tunnel {
+                    router,
+                    tunnel,
+                    message,
+                } => self.send_message(&router, message),
+                DeliveryInstructions::Destination => unreachable!(),
+            })
+        });
     }
 
     fn on_delivery_status(&mut self, message: RawI2npMessage) {

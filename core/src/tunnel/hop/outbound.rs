@@ -236,7 +236,7 @@ mod tests {
         };
 
         let message = EncryptedTunnelData::parse(&payload).unwrap();
-        let message = inbound.handle_tunnel_data(message).unwrap();
+        let message = inbound.handle_tunnel_data(&message).unwrap();
         assert_eq!(message, b"hello, world".to_vec());
     }
 }

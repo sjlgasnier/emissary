@@ -1733,6 +1733,20 @@ impl<'a> DeliveryInstructions<'a> {
             Self::Tunnel { .. } => 37usize,
         }
     }
+
+    pub fn to_owned(&self) -> OwnedDeliveryInstruction {
+        match self {
+            Self::Local => OwnedDeliveryInstruction::Local,
+            Self::Router { hash } => OwnedDeliveryInstruction::Router {
+                hash: hash.to_vec(),
+            },
+            Self::Tunnel { tunnel_id, hash } => OwnedDeliveryInstruction::Tunnel {
+                tunnel_id: *tunnel_id,
+                hash: hash.to_vec(),
+            },
+            Self::Destination { .. } => todo!(),
+        }
+    }
 }
 
 pub enum GarlicMessageBlock<'a> {
@@ -1799,7 +1813,7 @@ impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
                 .finish_non_exhaustive(),
             Self::Padding { .. } =>
                 f.debug_struct("DeliveryInstructions::Padding").finish_non_exhaustive(),
-            _ => todo!(),
+            _ => f.debug_struct("Unknown").finish_non_exhaustive(),
         }
     }
 }

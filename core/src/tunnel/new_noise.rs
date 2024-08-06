@@ -750,4 +750,24 @@ impl NoiseContext {
 
         LongInboundSession::new(chaining_key, aead_key, state)
     }
+
+    /// Derive keys for `GarlicMessage`.
+    ///
+    /// Returns a ChaCha20Poly1305 cipher key.
+    pub fn derive_garlic_key(&self, ephemeral_key: EphemeralPublicKey) -> (Vec<u8>, Vec<u8>) {
+        let state = Sha256::new()
+            .update(&self.inbound_state)
+            .update::<&[u8]>(ephemeral_key.as_ref())
+            .finalize();
+        let mut shared_secret = self.local_key.diffie_hellman(&ephemeral_key);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+        chaining_key.zeroize();
+
+        (aead_key, state)
+    }
 }
