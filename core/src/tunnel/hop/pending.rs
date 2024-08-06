@@ -23,8 +23,8 @@ use crate::{
     },
     error::TunnelError,
     i2np::{
-        GarlicMessage, GarlicMessageBlock, HopRole, MessageType, RawI2NpMessageBuilder,
-        RawI2npMessage, ShortTunnelBuildRecordBuilder, ShortTunnelBuildRequestBuilder,
+        tunnel::build::short, GarlicMessage, GarlicMessageBlock, HopRole, MessageType,
+        RawI2NpMessageBuilder, RawI2npMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -125,15 +125,15 @@ impl<T: Tunnel> PendingTunnel<T> {
                             router: RouterId::from(router_hash),
                             key_context: noise.create_outbound_session::<R>(key, hop_role),
                         },
-                        ShortTunnelBuildRecordBuilder::default()
-                            .with_tunnel_id((*tunnel_id).into())
-                            .with_next_tunnel_id((*next_tunnel_id).into())
+                        short::TunnelBuildRecordBuilder::default()
+                            .with_tunnel_id(*tunnel_id)
+                            .with_next_tunnel_id(*next_tunnel_id)
                             .with_next_router_hash(next_router_hash.as_ref())
-                            .with_role(hop_role)
+                            .with_hop_role(hop_role)
                             .with_request_time(time_now.as_secs() as u32)
                             .with_request_expiration(build_expiration)
-                            .with_next_message_id(message_id.into())
-                            .serialize(),
+                            .with_next_message_id(message_id)
+                            .serialize(&mut R::rng()),
                     )
                 },
             )
@@ -172,7 +172,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             })
             .chain(
                 (0..NUM_BUILD_RECORDS - num_hops.get())
-                    .map(|_| ShortTunnelBuildRecordBuilder::random::<R>()),
+                    .map(|_| short::TunnelBuildRecordBuilder::random(&mut R::rng())),
             )
             .collect::<Vec<_>>();
 
@@ -204,7 +204,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                 .with_expiration(build_expiration)
                 .with_message_type(MessageType::ShortTunnelBuild)
                 .with_message_id(message_id.into())
-                .with_payload(ShortTunnelBuildRequestBuilder::with_records(
+                .with_payload(short::TunnelBuildReplyBuilder::from_records(
                     encrypted_records,
                 ))
                 .serialize(),
@@ -355,7 +355,7 @@ mod test {
     use super::*;
     use crate::{
         crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
-        i2np::{ShortTunnelBuildRecord, TunnelGatewayMessage},
+        i2np::{tunnel::build::short::TunnelBuildRecord, TunnelGatewayMessage},
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
@@ -531,7 +531,7 @@ mod test {
             let decrypted_record = session.decrypt_build_record(record[48..].to_vec()).unwrap();
 
             let (tunnel_id, role) = {
-                let record = ShortTunnelBuildRecord::parse(&decrypted_record).unwrap();
+                let record = short::TunnelBuildRecord::parse(&decrypted_record).unwrap();
                 (record.tunnel_id(), record.role())
             };
 

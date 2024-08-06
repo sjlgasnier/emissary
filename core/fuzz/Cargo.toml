@@ -11,6 +11,7 @@ cargo-fuzz = true
 arbitrary = { version = "1", features = ["derive"] }
 emissary-core = { path = "../", features = ["std"] }
 libfuzzer-sys = "0.4.0"
+rand_core = {version = "0.6.4", features = ["alloc", "getrandom"] }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -22,5 +23,17 @@ debug = 1
 [[bin]]
 name = "variable_tunnel_build"
 path = "fuzz_targets/variable_tunnel_build.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "short_tunnel_build_builder"
+path = "fuzz_targets/short_tunnel_build_builder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "short_tunnel_build"
+path = "fuzz_targets/short_tunnel_build.rs"
 test = false
 doc = false

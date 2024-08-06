@@ -31,7 +31,6 @@ mod config;
 mod crypto;
 mod error;
 mod netdb;
-mod primitives;
 mod router_storage;
 mod subsystem;
 mod transports;
@@ -39,5 +38,6 @@ mod tunnel;
 mod util;
 
 pub mod i2np;
+pub mod primitives;
 pub mod router;
 pub mod runtime;

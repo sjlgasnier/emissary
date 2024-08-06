@@ -86,3 +86,11 @@ impl Into<u32> for MessageId {
         self.0
     }
 }
+
+impl Deref for MessageId {
+    type Target = u32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}

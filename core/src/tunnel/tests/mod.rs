@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
-    i2np::{EncryptedTunnelData, RawI2npMessage, ShortTunnelBuildRecord, TunnelGatewayMessage},
+    i2np::{tunnel::build::short, EncryptedTunnelData, RawI2npMessage, TunnelGatewayMessage},
     primitives::{MessageId, RouterId, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
