@@ -45,7 +45,7 @@ impl Into<MessageType> for GeneratedMessageType {
 
 fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
     for values in buffer {
-        {
+        let standard = {
             let message = MessageBuilder::standard()
                 .with_message_type(values.0.into())
                 .with_message_id(values.1)
@@ -53,10 +53,10 @@ fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
                 .with_payload(&values.3)
                 .build();
 
-            assert!(Message::parse_standard(&message).is_some());
-        }
+            Message::parse_standard(&message)
+        };
 
-        {
+        let short = {
             let message = MessageBuilder::short()
                 .with_message_type(values.0.into())
                 .with_message_id(values.1)
@@ -64,7 +64,19 @@ fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
                 .with_payload(&values.3)
                 .build();
 
-            assert!(Message::parse_short(&message).is_some());
+            Message::parse_short(&message)
+        };
+
+        if values.3.is_empty() {
+            assert!(standard.is_none());
+            assert!(short.is_none());
+        } else {
+            let standard = standard.unwrap();
+            let short = short.unwrap();
+
+            assert_eq!(standard.message_id, short.message_id);
+            assert_eq!(standard.message_type, short.message_type);
+            assert_eq!(standard.payload, short.payload);
         }
     }
 });

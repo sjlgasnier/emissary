@@ -442,6 +442,11 @@ impl Message {
         let (rest, size) = be_u16(rest)?;
         let (rest, _checksum) = be_u8(rest)?;
         let (rest, payload) = take(size as usize)(rest)?;
+
+        if payload.is_empty() {
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
         let message_type = MessageType::from_u8(message_type)
             .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
 
@@ -1290,6 +1295,32 @@ mod tests {
         out.put_u32(13371338u32);
         out.put_u32(0xdeadbeefu32);
         out.put_slice(&vec![1, 2, 3, 4]);
+        let serialized = out.freeze().to_vec();
+
+        assert!(Message::parse_short(&serialized).is_none());
+    }
+
+    #[test]
+    fn empty_payload_short() {
+        let mut out = BytesMut::with_capacity(I2NP_SHORT_HEADER_LEN + 2);
+
+        out.put_u16(4u16); // invalid size
+        out.put_u8(MessageType::DeliveryStatus.as_u8());
+        out.put_u32(13371338u32);
+        out.put_u32(0xdeadbeefu32);
+        let serialized = out.freeze().to_vec();
+
+        assert!(Message::parse_short(&serialized).is_none());
+    }
+
+    #[test]
+    fn empty_payload_standard() {
+        let mut out = BytesMut::with_capacity(I2NP_SHORT_HEADER_LEN + 2);
+
+        out.put_u16(4u16); // invalid size
+        out.put_u8(MessageType::DeliveryStatus.as_u8());
+        out.put_u32(13371338u32);
+        out.put_u32(0xdeadbeefu32);
         let serialized = out.freeze().to_vec();
 
         assert!(Message::parse_short(&serialized).is_none());
