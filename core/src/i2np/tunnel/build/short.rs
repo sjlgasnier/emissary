@@ -30,6 +30,8 @@ use nom::{
 };
 use rand_core::RngCore;
 
+use alloc::{vec, vec::Vec};
+
 /// Short tunnel build reply builder.
 #[derive(Default)]
 pub struct TunnelBuildReplyBuilder;

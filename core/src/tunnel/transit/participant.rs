@@ -19,9 +19,7 @@
 use crate::{
     crypto::aes::{cbc, ecb},
     error::{RejectionReason, TunnelError},
-    i2np::{
-        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, TunnelGatewayMessage,
-    },
+    i2np::{EncryptedTunnelData, HopRole, MessageBuilder, MessageType, TunnelGatewayMessage},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{new_noise::TunnelKeys, transit::TransitTunnel},
@@ -101,13 +99,12 @@ impl<R: Runtime> TransitTunnel for Participant<R> {
         out.put_slice(&iv);
         out.put_slice(&ciphertext);
 
-        // TODO: fix payload to take `AsRef<[u8]>`
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(R::rng().next_u32())
             .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(out.freeze().to_vec())
-            .serialize();
+            .with_payload(&out)
+            .build();
 
         return Ok((self.next_router.clone(), message));
     }

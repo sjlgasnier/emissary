@@ -22,9 +22,7 @@ use crate::{
         sha256::Sha256,
     },
     error::{RejectionReason, TunnelError},
-    i2np::{
-        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, TunnelGatewayMessage,
-    },
+    i2np::{EncryptedTunnelData, HopRole, MessageBuilder, MessageType, TunnelGatewayMessage},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{new_noise::TunnelKeys, transit::TransitTunnel},
@@ -186,12 +184,12 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
         out[4..20].copy_from_slice(&iv);
         out[20..].copy_from_slice(&ciphertext);
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(R::rng().next_u32())
             .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(out.freeze().to_vec())
-            .serialize();
+            .with_payload(&out)
+            .build();
 
         Ok((self.next_router.clone(), message))
     }

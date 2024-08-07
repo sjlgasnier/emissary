@@ -19,10 +19,7 @@
 use crate::{
     crypto::StaticPrivateKey,
     error::TunnelError,
-    i2np::{
-        EncryptedTunnelData, GarlicMessage, MessageType, RawI2npMessage, TunnelGatewayMessage,
-        I2NP_SHORT,
-    },
+    i2np::{EncryptedTunnelData, GarlicMessage, MessageType, Message, TunnelGatewayMessage},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
@@ -190,7 +187,7 @@ impl<R: Runtime> TunnelManager<R> {
                         "router message to self",
                     );
 
-                    match RawI2npMessage::parse::<I2NP_SHORT>(&message) {
+                    match Message::parse_short(&message) {
                         Some(message) => self.on_message(message),
                         None => {
                             tracing::error!(
@@ -289,7 +286,7 @@ impl<R: Runtime> TunnelManager<R> {
     /// Handle variable tunnel build reply.
     ///
     /// Currently these messages are not supported and are dropped without rejection.
-    fn on_variable_tunnel_build(&mut self, message: RawI2npMessage) {
+    fn on_variable_tunnel_build(&mut self, message: Message) {
         // TODO: fix
         let _ = self.transit.handle_variable_tunnel_build(message);
     }
@@ -298,7 +295,7 @@ impl<R: Runtime> TunnelManager<R> {
     ///
     /// This message is either a response to a short build request sent by us
     /// or a transit tunnel build request.
-    fn on_short_tunnel_build(&mut self, message: RawI2npMessage) {
+    fn on_short_tunnel_build(&mut self, message: Message) {
         match self.pending_inbound.remove(&MessageId::from(message.message_id)) {
             true => {
                 self.pools.handle_inbound_tunnel_build_response(message);
@@ -317,7 +314,7 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     /// Handle tunnel gateway message.
-    fn on_tunnel_gateway(&mut self, message: RawI2npMessage) {
+    fn on_tunnel_gateway(&mut self, message: Message) {
         let Some(message) = TunnelGatewayMessage::parse(&message.payload) else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -351,7 +348,7 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     /// Handle tunnel data.
-    fn on_tunnel_data(&mut self, message: RawI2npMessage) {
+    fn on_tunnel_data(&mut self, message: Message) {
         let Some(message) = EncryptedTunnelData::parse(&message.payload) else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -388,7 +385,7 @@ impl<R: Runtime> TunnelManager<R> {
     ///
     /// Decrypt the payload, return I2NP messages inside the garlic cloves
     /// and process them individually.
-    fn on_garlic(&mut self, mut message: RawI2npMessage) {
+    fn on_garlic(&mut self, mut message: Message) {
         self.garlic.handle_message(message).map(|messages| {
             messages.for_each(|delivery_instructions| match delivery_instructions {
                 DeliveryInstructions::Local { message } => self.on_message(message),
@@ -404,11 +401,11 @@ impl<R: Runtime> TunnelManager<R> {
         });
     }
 
-    fn on_delivery_status(&mut self, message: RawI2npMessage) {
+    fn on_delivery_status(&mut self, message: Message) {
         todo!();
     }
 
-    fn on_outbound_tunnel_build_reply(&mut self, message: RawI2npMessage) {
+    fn on_outbound_tunnel_build_reply(&mut self, message: Message) {
         todo!();
     }
 
@@ -443,7 +440,7 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     /// Handle received message from one of the open connections.
-    fn on_message(&mut self, message: RawI2npMessage) {
+    fn on_message(&mut self, message: Message) {
         self.metrics_handle.counter(NUM_TUNNEL_MESSAGES).increment(1);
 
         match message.message_type {

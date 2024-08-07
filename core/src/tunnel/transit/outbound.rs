@@ -23,8 +23,8 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        DeliveryInstruction, EncryptedTunnelData, HopRole, MessageKind, MessageType,
-        RawI2NpMessageBuilder, RawI2npMessage, TunnelData, TunnelGatewayMessage, I2NP_STANDARD,
+        DeliveryInstruction, EncryptedTunnelData, HopRole, Message, MessageBuilder, MessageKind,
+        MessageType, TunnelData, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -166,22 +166,20 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
             {
                 match delivery_instructions {
                     DeliveryInstruction::Router { hash } => {
-                        let RawI2npMessage {
+                        let Message {
                             message_type,
                             message_id,
                             expiration,
                             payload,
-                        } = RawI2npMessage::parse::<I2NP_STANDARD>(&message.message).ok_or_else(
-                            || {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    tunnel_id = %self.tunnel_id,
-                                    "fragment router delivery: invalid message",
-                                );
+                        } = Message::parse_standard(&message.message).ok_or_else(|| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                "fragment router delivery: invalid message",
+                            );
 
-                                Error::Tunnel(TunnelError::InvalidMessage)
-                            },
-                        )?;
+                            Error::Tunnel(TunnelError::InvalidMessage)
+                        })?;
                         let router = RouterId::from(hash);
 
                         tracing::trace!(
@@ -192,12 +190,12 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
                             "fragment router delivery",
                         );
 
-                        let message = RawI2NpMessageBuilder::short()
+                        let message = MessageBuilder::short()
                             .with_message_type(message_type)
                             .with_message_id(message_id)
                             .with_expiration(expiration)
-                            .with_payload(payload)
-                            .serialize();
+                            .with_payload(&payload)
+                            .build();
 
                         return Ok((router, message));
                     }
@@ -218,14 +216,14 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
                         }
                         .serialize();
 
-                        let message = RawI2NpMessageBuilder::short()
+                        let message = MessageBuilder::short()
                             .with_message_type(MessageType::TunnelGateway)
                             .with_message_id(R::rng().next_u32())
                             .with_expiration(
                                 (R::time_since_epoch() + Duration::from_secs(8)).as_secs(),
                             )
-                            .with_payload(payload)
-                            .serialize();
+                            .with_payload(&payload)
+                            .build();
 
                         return Ok((RouterId::from(hash), message));
                     }

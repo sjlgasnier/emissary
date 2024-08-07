@@ -23,8 +23,8 @@ use crate::{
     },
     error::TunnelError,
     i2np::{
-        tunnel::build::short, GarlicMessage, GarlicMessageBlock, HopRole, MessageType,
-        RawI2NpMessageBuilder, RawI2npMessage,
+        tunnel::build::short, GarlicMessage, GarlicMessageBlock, HopRole, Message, MessageBuilder,
+        MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -200,14 +200,14 @@ impl<T: Tunnel> PendingTunnel<T> {
                 _tunnel: Default::default(),
             },
             RouterId::from(router_hashes[0].clone().to_vec()),
-            RawI2NpMessageBuilder::short()
+            MessageBuilder::short()
                 .with_expiration(build_expiration)
                 .with_message_type(MessageType::ShortTunnelBuild)
-                .with_message_id(message_id.into())
-                .with_payload(short::TunnelBuildReplyBuilder::from_records(
+                .with_message_id(message_id)
+                .with_payload(&short::TunnelBuildReplyBuilder::from_records(
                     encrypted_records,
                 ))
-                .serialize(),
+                .build(),
         ))
     }
 
@@ -216,7 +216,7 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn try_build_tunnel(self, mut message: RawI2npMessage) -> crate::Result<T> {
+    pub fn try_build_tunnel(self, mut message: Message) -> crate::Result<T> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -395,7 +395,7 @@ mod test {
             })
             .unwrap();
 
-        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let mut message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
@@ -406,7 +406,7 @@ mod test {
             message,
             |acc, ((router_hash, _), transit_manager)| {
                 let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                RawI2npMessage::parse::<true>(&message).unwrap()
+                Message::parse_short(&message).unwrap()
             },
         );
         assert_eq!(message.message_type, MessageType::TunnelGateway);
@@ -418,7 +418,7 @@ mod test {
 
         assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
 
-        let message = RawI2npMessage::parse::<false>(&payload).unwrap();
+        let message = Message::parse_standard(&payload).unwrap();
         assert!(pending_tunnel.try_build_tunnel(message).is_ok());
     }
 
@@ -454,7 +454,7 @@ mod test {
             })
             .unwrap();
 
-        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let mut message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
@@ -465,7 +465,7 @@ mod test {
             message,
             |acc, ((router_hash, _), transit_manager)| {
                 let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                RawI2npMessage::parse::<true>(&message).unwrap()
+                Message::parse_short(&message).unwrap()
             },
         );
 
@@ -495,12 +495,12 @@ mod test {
             })
             .unwrap();
 
-        let Some(RawI2npMessage {
+        let Some(Message {
             message_type: MessageType::ShortTunnelBuild,
             message_id: parsed_message_id,
             expiration,
             mut payload,
-        }) = RawI2npMessage::parse::<true>(&message)
+        }) = Message::parse_short(&message)
         else {
             panic!("invalid message");
         };
@@ -545,7 +545,7 @@ mod test {
             session.encrypt_build_records(&mut payload, record_idx).unwrap();
         }
 
-        let message = RawI2npMessage {
+        let message = Message {
             message_type: MessageType::OutboundTunnelBuildReply,
             message_id: message_id.into(),
             expiration,
@@ -580,7 +580,7 @@ mod test {
             })
             .unwrap();
 
-        let message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));

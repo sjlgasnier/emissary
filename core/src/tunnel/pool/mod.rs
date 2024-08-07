@@ -18,10 +18,7 @@
 
 use crate::{
     error::TunnelError,
-    i2np::{
-        EncryptedTunnelData, MessageType, RawI2NpMessageBuilder, RawI2npMessage,
-        TunnelGatewayMessage, I2NP_STANDARD,
-    },
+    i2np::{EncryptedTunnelData, Message, MessageBuilder, MessageType, TunnelGatewayMessage},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::Runtime,
@@ -345,12 +342,12 @@ impl<R: Runtime> TunnelPool<R> {
 
         if self.outbound.len() == 1 && self.inbound.len() == 1 {
             let message_id = R::rng().next_u32();
-            let msg = RawI2NpMessageBuilder::standard()
+            let msg = MessageBuilder::standard()
                 .with_message_type(MessageType::DeliveryStatus)
                 .with_message_id(message_id)
                 .with_expiration((R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs()) // TODO: fix time
-                .with_payload(vec![1, 2, 3, 4]) // TODO: create proper test message
-                .serialize();
+                .with_payload(&vec![1, 2, 3, 4]) // TODO: create proper test message
+                .build();
 
             tracing::error!(
                 target: LOG_TARGET,
@@ -386,7 +383,7 @@ impl<R: Runtime> TunnelPool<R> {
             TunnelError::TunnelDoesntExist(*message.tunnel_id()),
         ))?;
 
-        let parsed_message = RawI2npMessage::parse::<I2NP_STANDARD>(message.payload())
+        let parsed_message = Message::parse_standard(message.payload())
             .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
 
         match tunnel.try_build_tunnel(parsed_message) {
@@ -419,7 +416,7 @@ impl<R: Runtime> TunnelPool<R> {
     /// a new inbound tunnel is created for the pool.
     pub fn handle_inbound_tunnel_build_reply(
         &mut self,
-        message: RawI2npMessage,
+        message: Message,
     ) -> crate::Result<TunnelId> {
         let message_id = MessageId::from(message.message_id);
 
@@ -467,7 +464,7 @@ impl<R: Runtime> TunnelPool<R> {
 
         match tunnel.handle_tunnel_data(message) {
             Ok(message) => {
-                let message = RawI2npMessage::parse::<false>(&message).ok_or(Error::InvalidData)?;
+                let message = Message::parse_standard(&message).ok_or(Error::InvalidData)?;
 
                 tracing::info!(
                     "tunnel tested successfully, payload = {:?}",
@@ -636,10 +633,7 @@ impl<R: Runtime> TunnelPoolManager<R> {
     }
 
     /// Handle inbound tunnel build reply.
-    pub fn handle_inbound_tunnel_build_response(
-        &mut self,
-        message: RawI2npMessage,
-    ) -> crate::Result<()> {
+    pub fn handle_inbound_tunnel_build_response(&mut self, message: Message) -> crate::Result<()> {
         let (idx, mut pool) = self
             .pending_inbound
             .remove(&MessageId::from(message.message_id))

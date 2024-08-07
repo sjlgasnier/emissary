@@ -20,8 +20,7 @@ use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
     error::TunnelError,
     i2np::{
-        self, GarlicMessage, GarlicMessageBlock, RawI2NpMessageBuilder, RawI2npMessage,
-        TunnelGatewayMessage,
+        self, GarlicMessage, GarlicMessageBlock, Message, MessageBuilder, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -40,7 +39,7 @@ pub enum DeliveryInstructions {
     /// Message meant for the local router.
     Local {
         /// I2NP message
-        message: RawI2npMessage,
+        message: Message,
     },
 
     /// Message meant for router delivery.
@@ -89,9 +88,9 @@ impl<R: Runtime> GarlicHandler<R> {
     /// Handle garlic message.
     pub fn handle_message(
         &mut self,
-        message: RawI2npMessage,
+        message: Message,
     ) -> crate::Result<impl Iterator<Item = DeliveryInstructions>> {
-        let RawI2npMessage {
+        let Message {
             message_type,
             message_id,
             expiration,
@@ -141,7 +140,7 @@ impl<R: Runtime> GarlicHandler<R> {
                     message_body,
                 } => match delivery_instructions {
                     i2np::DeliveryInstructions::Local => Some(DeliveryInstructions::Local {
-                        message: RawI2npMessage {
+                        message: Message {
                             message_type,
                             message_id,
                             expiration: expiration.into(),
@@ -151,20 +150,20 @@ impl<R: Runtime> GarlicHandler<R> {
                     i2np::DeliveryInstructions::Router { hash } =>
                         Some(DeliveryInstructions::Router {
                             router: RouterId::from(hash),
-                            message: RawI2NpMessageBuilder::short()
+                            message: MessageBuilder::short()
                                 .with_message_type(message_type)
                                 .with_message_id(message_id)
                                 .with_expiration(expiration)
-                                .with_payload(message_body.to_vec())
-                                .serialize(),
+                                .with_payload(&message_body)
+                                .build(),
                         }),
                     i2np::DeliveryInstructions::Tunnel { hash, tunnel_id } => {
-                        let message = RawI2NpMessageBuilder::standard()
+                        let message = MessageBuilder::standard()
                             .with_message_type(message_type)
                             .with_message_id(message_id)
                             .with_expiration(expiration)
-                            .with_payload(message_body.to_vec())
-                            .serialize();
+                            .with_payload(&message_body)
+                            .build();
 
                         let message = TunnelGatewayMessage {
                             tunnel_id: tunnel_id.into(),
@@ -175,15 +174,15 @@ impl<R: Runtime> GarlicHandler<R> {
                         Some(DeliveryInstructions::Tunnel {
                             tunnel: TunnelId::from(tunnel_id),
                             router: RouterId::from(hash),
-                            message: RawI2NpMessageBuilder::short()
+                            message: MessageBuilder::short()
                                 .with_message_type(message_type)
                                 .with_message_id(message_id)
                                 // TODO: fix expiration
                                 .with_expiration(
                                     (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
                                 )
-                                .with_payload(message)
-                                .serialize(),
+                                .with_payload(&message)
+                                .build(),
                         })
                     }
                     i2np::DeliveryInstructions::Destination { hash } => {

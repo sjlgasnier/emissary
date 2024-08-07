@@ -22,7 +22,7 @@
 
 use crate::{
     crypto::{base64_encode, sha256::Sha256},
-    primitives::{Date, Mapping, TunnelId},
+    primitives::{Date, Mapping, MessageId, TunnelId},
     runtime::Runtime,
     subsystem::SubsystemKind,
 };
@@ -35,10 +35,10 @@ use nom::{
     sequence::tuple,
     Err, IResult,
 };
+use rand_core::RngCore;
 
 use alloc::{vec, vec::Vec};
 use core::fmt;
-use rand_core::RngCore;
 
 pub mod database;
 pub mod delivery_status;
@@ -72,22 +72,55 @@ const AES256_KEY_LEN: usize = 32usize;
 /// AES IV length.
 const AES256_IV_LEN: usize = 16usize;
 
+/// I2NP short header size.
+const I2NP_SHORT_HEADER_LEN: usize = 9usize;
+
+/// I2NP standard header size.
+const I2NP_STANDARD_HEADER_LEN: usize = 16usize;
+
 /// Message type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
+    /// Database store.
     DatabaseStore,
+
+    /// Database lookup.
     DatabaseLookup,
+
+    /// Database search reply.
     DatabaseSearchReply,
+
+    /// Delivery status.
     DeliveryStatus,
+
+    /// Garlic message.
     Garlic,
+
+    /// Tunnel data.
     TunnelData,
+
+    /// Tunnel gateway.
     TunnelGateway,
+
+    /// Generic data.
     Data,
+
+    /// Tunnel build.
     TunnelBuild,
+
+    /// Tunnel build reply.
     TunnelBuildReply,
+
+    /// Variable tunnel build.
     VariableTunnelBuild,
+
+    /// Variable tunnel build reply.
     VariableTunnelBuildReply,
+
+    /// Short tunnel build.
     ShortTunnelBuild,
+
+    /// Outbound tunnel build reply.
     OutboundTunnelBuildReply,
 }
 
@@ -137,6 +170,7 @@ impl MessageType {
     }
 }
 
+/// Hop role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HopRole {
     /// Router acts as the inbound endpoint.
@@ -177,347 +211,10 @@ impl HopRole {
     }
 }
 
+/// I2NP message builder.
 #[derive(Debug)]
-pub struct TunnelBuildReplyRecord<'a> {
-    pub truncated_hash: &'a [u8],
-    pub status: u8,
-}
-
-impl<'a> TunnelBuildReplyRecord<'a> {
-    fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], Self> {
-        let (rest, truncated_hash) = take(16usize)(input)?;
-        let (rest, _ignore) = take(185usize)(rest)?;
-        let (rest, status) = be_u8(rest)?;
-
-        assert!(rest.is_empty());
-
-        Ok((
-            rest,
-            Self {
-                truncated_hash,
-                status,
-            },
-        ))
-    }
-
-    pub fn parse(input: &'a [u8]) -> Option<Self> {
-        Some(Self::parse_frame(input).ok()?.1)
-    }
-}
-
-#[derive(Debug)]
-pub struct OutboundTunnelBuildReply<'a> {
-    pub records: Vec<TunnelBuildReplyRecord<'a>>,
-}
-
-impl<'a> OutboundTunnelBuildReply<'a> {
-    pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], Self> {
-        assert!(input.len() % 218 == 0);
-
-        let records = input
-            .chunks(218)
-            .try_fold(
-                Vec::<TunnelBuildReplyRecord<'a>>::new(),
-                |mut records, record| {
-                    let record = TunnelBuildReplyRecord::parse_frame(record).ok()?.1;
-                    records.push(record);
-
-                    Some(records)
-                },
-            )
-            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-        Ok((&[], Self { records }))
-    }
-
-    pub fn parse(input: &'a [u8]) -> Option<Self> {
-        Some(Self::parse_frame(input).ok()?.1)
-    }
-}
-
-#[derive(Debug)]
-pub enum GarlicClove<'a> {
-    /// Clove meant for the local node
-    Local,
-
-    /// Clove meant for a `Destination`.
-    Destination {
-        /// Hash of the destination.
-        hash: &'a [u8],
-    },
-
-    /// Clove meant for a router.
-    Router {
-        /// Hash of the router.
-        hash: &'a [u8],
-    },
-
-    /// Clove meant for a tunnel.
-    Tunnel {
-        /// Hash of the tunnel.
-        hash: &'a [u8],
-
-        /// Tunnel ID.
-        tunnel_id: u32,
-    },
-}
-
-// #[derive(Debug)]
-// pub enum I2NpMessage<'a> {
-//     Tunnel(TunnelMessage<'a>),
-//     NetDb(DatabaseMessage<'a>),
-// }
-
-// impl<'a> I2NpMessage<'a> {
-//     /// Parse [`GarlicGlove`].
-//     fn parse_galic_clove(input: &'a [u8]) -> IResult<&'a [u8], GarlicClove<'a>> {
-//         let (rest, flag) = be_u8(input)?;
-
-//         assert!(flag >> 7 & 1 == 0, "encrypted garlic");
-//         assert!(flag >> 4 & 1 == 0, "delay");
-
-//         match (flag >> 5) & 0x3 {
-//             0x00 => Ok((rest, GarlicClove::Local)),
-//             0x01 => {
-//                 let (rest, hash) = take(32usize)(rest)?;
-
-//                 Ok((rest, GarlicClove::Destination { hash }))
-//             }
-//             0x02 => {
-//                 let (rest, hash) = take(32usize)(rest)?;
-
-//                 Ok((rest, GarlicClove::Router { hash }))
-//             }
-//             0x03 => {
-//                 let (rest, hash) = take(32usize)(rest)?;
-//                 let (rest, tunnel_id) = be_u32(rest)?;
-
-//                 Ok((rest, GarlicClove::Tunnel { hash, tunnel_id }))
-//             }
-//             _ => panic!("invalid garlic type"),
-//         }
-//     }
-
-//     /// Parse [`I2NpMessageKind::Garlic`].
-//     fn parse_garlic(input: &'a [u8]) -> IResult<&'a [u8], I2NpMessage<'a>> {
-//         let (rest, size) = be_u32(input)?;
-
-//         // TODO: decrypt
-//         let (mut rest, num_cloves) = be_u8(rest)?;
-
-//         let (rest, cloves) = (0..num_cloves)
-//             .try_fold(
-//                 (rest, Vec::<GarlicClove<'a>>::new()),
-//                 |(rest, mut cloves), _| {
-//                     let (rest, clove) = Self::parse_galic_clove(rest).ok()?;
-//                     cloves.push(clove);
-
-//                     Some((rest, cloves))
-//                 },
-//             )
-//             .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-//         let (rest, _certificate) = take(GARLIC_CERTIFICATE_LEN)(rest)?;
-//         let (rest, message_id) = be_u32(rest)?;
-//         let (rest, expiration) = Date::parse_frame(rest)?;
-
-//         tracing::error!("size = {size}, input size = {}", input.len());
-
-//         todo!();
-//     }
-
-//     fn parse_variable_tunnel_build_request(input: &'a [u8]) -> IResult<&'a [u8], I2NpMessage<'a>>
-// {         let (rest, num_records) = be_u8(input)?;
-
-//         let (rest, records) = (0..num_records)
-//             .try_fold(
-//                 (rest, Vec::<EncryptedTunnelBuildRequestRecord<'a>>::new()),
-//                 |(rest, mut records), _| {
-//                     let (rest, truncated_hash) =
-//                         take::<usize, &[u8], ()>(TRUNCATED_IDENITTY_LEN)(rest).ok()?;
-//                     let (rest, ephemeral_key) =
-//                         take::<usize, &[u8], ()>(X25519_KEY_LEN)(rest).ok()?;
-//                     let (rest, ciphertext) = take::<usize, &[u8], ()>(
-//                         ENCRYPTED_BUILD_REQUEST_LEN + POLY1305_TAG_LEN,
-//                     )(rest)
-//                     .ok()?;
-
-//                     records.push(EncryptedTunnelBuildRequestRecord {
-//                         truncated_hash,
-//                         ephemeral_key,
-//                         ciphertext,
-//                     });
-
-//                     Some((rest, records))
-//                 },
-//             )
-//             .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-//         Ok((
-//             rest,
-//             I2NpMessage::Tunnel(TunnelMessage::VariableBuildRequest { records }),
-//         ))
-//     }
-
-//     fn parse_inner(
-//         message_type: MessageType,
-//         message_id: u32,
-//         short_expiration: u32,
-//         input: &'a [u8],
-//     ) -> IResult<&'a [u8], I2NpMessage<'a>> {
-//         match message_type {
-//             MessageType::Garlic => Self::parse_garlic(input),
-//             MessageType::VariableTunnelBuild => Self::parse_variable_tunnel_build_request(input),
-//             message_type => todo!("unsupported message type: {message_type:?}"),
-//         }
-//     }
-
-//     pub fn parse(message_type: MessageType, buffer: &'a [u8]) -> Option<I2NpMessage<'a>> {
-//         let parsed = Self::parse_inner(message_type, 1337u32, 1338u32, buffer).ok()?.1;
-
-//         Some(parsed)
-//     }
-// }
-
-// // Tunneling-related message.
-// #[derive(Debug)]
-// pub enum TunnelMessage<'a> {
-//     /// Data message.
-//     ///
-//     /// Used by garlic messages/cloves.
-//     Data {
-//         /// Data.
-//         data: &'a [u8],
-//     },
-
-//     /// Garlic
-//     Garlic {
-//         /// Garlic cloves.
-//         cloves: Vec<GarlicClove<'a>>,
-//     },
-
-//     /// Tunnel data.
-//     TunnelData {
-//         /// Tunnel ID.
-//         tunnel_id: u32,
-
-//         /// Data.
-//         ///
-//         /// Length is fixed 1024 bytes.
-//         data: &'a [u8],
-//     },
-
-//     /// Tunnel gateway.
-//     Gateway {
-//         /// Tunnel ID.
-//         tunnel_id: u32,
-
-//         /// Data.
-//         data: &'a [u8],
-//     },
-
-//     /// Tunnel build message, fixed to 8 records.
-//     BuildRequest {
-//         /// Build records.
-//         records: [TunnelBuildRecord<'a>; 8],
-//     },
-
-//     /// Variable tunnel build message.
-//     VariableBuildRequest {
-//         /// Build records.
-//         records: Vec<EncryptedTunnelBuildRequestRecord<'a>>,
-//     },
-
-//     /// Tunnel build reply.
-//     BuildReply {
-//         /// Reply byte (accept/reject).
-//         reply: u8,
-//     },
-
-//     /// Short tunnel build request.
-//     ShortBuildRequest {
-//         /// Records.
-//         records: Vec<ShortTunnelBuildRecord<'a>>,
-//     },
-
-//     /// Outbound tunnel build reply.
-//     OutboundBuildReply {
-//         /// Records.
-//         records: Vec<OutboundTunnelBuildReply<'a>>,
-//     },
-// }
-
-// /// NetDB-related message.
-// #[derive(Debug)]
-// pub enum DatabaseMessage<'a> {
-//     /// Database store request.
-//     Store {
-//         /// SHA256 hash of the key.
-//         key: &'a [u8],
-
-//         /// Store type.
-//         store_type: u8,
-
-//         /// Reply token.
-//         token: Option<u32>,
-
-//         /// Reply tunnel ID.
-//         tunnel_id: Option<u32>,
-
-//         /// SHA256 of the gateway `RouterInfo`
-//         gateway: Option<&'a [u8]>,
-
-//         /// Data.
-//         data: &'a [u8],
-//     },
-
-//     /// Database search request.
-//     Request {
-//         /// SHA256 hash of the key to look up.
-//         key: &'a [u8],
-
-//         /// SHA256 hash of the `RouterInfo` who is asking
-//         /// or the gateway where to send the reply.
-//         origin: &'a [u8],
-
-//         /// Flag
-//         flag: u8,
-
-//         /// Reply tunnel ID.
-//         tunnel_id: u32,
-
-//         /// Count of peer hashes to ignore
-//         exclude_size: u16,
-
-//         /// Peers to ignore.
-//         exclude: Vec<&'a [u8]>,
-
-//         /// Reply key.
-//         reply_key: &'a [u8],
-
-//         /// Size of reply tags.
-//         tags_size: u8,
-
-//         /// Reply tags.
-//         tags: &'a [u8],
-//     },
-
-//     /// Database search reply
-//     Reply {
-//         /// SHA256 hash of the key that was looked up.
-//         key: &'a [u8],
-
-//         /// Peer hashes.
-//         peers: Vec<&'a [u8]>,
-
-//         // SHA256 of the `RouterInfo` this reply was sent from.
-//         from: &'a [u8],
-//     },
-// }
-
-#[derive(Debug)]
-pub enum RawI2NpMessageBuilder {
-    /// Standard I2NP header (TunnelData).
+pub enum MessageBuilder<'a> {
+    /// Standard I2NP header (tunnel messages).
     Standard {
         /// Message type.
         message_type: Option<MessageType>,
@@ -529,7 +226,7 @@ pub enum RawI2NpMessageBuilder {
         expiration: Option<u64>,
 
         /// Raw, unparsed payload.
-        payload: Option<Vec<u8>>,
+        payload: Option<&'a [u8]>,
     },
 
     /// Short I2NP header (NTCP2/SSU2).
@@ -544,11 +241,12 @@ pub enum RawI2NpMessageBuilder {
         expiration: Option<u64>,
 
         /// Raw, unparsed payload.
-        payload: Option<Vec<u8>>,
+        payload: Option<&'a [u8]>,
     },
 }
 
-impl RawI2NpMessageBuilder {
+impl<'a> MessageBuilder<'a> {
+    /// Create I2NP message with short header.
     pub fn short() -> Self {
         Self::Short {
             message_type: None,
@@ -558,6 +256,7 @@ impl RawI2NpMessageBuilder {
         }
     }
 
+    /// Create I2NP message with standard header.
     pub fn standard() -> Self {
         Self::Standard {
             message_type: None,
@@ -567,6 +266,7 @@ impl RawI2NpMessageBuilder {
         }
     }
 
+    /// Add expiration.
     pub fn with_expiration<T: Into<u64>>(mut self, message_expiration: T) -> Self {
         match self {
             Self::Standard {
@@ -582,6 +282,7 @@ impl RawI2NpMessageBuilder {
         self
     }
 
+    /// Add mesage type.
     pub fn with_message_type(mut self, message_type: MessageType) -> Self {
         match self {
             Self::Standard {
@@ -597,7 +298,8 @@ impl RawI2NpMessageBuilder {
         self
     }
 
-    pub fn with_message_id(mut self, message_id: u32) -> Self {
+    /// Add message ID.
+    pub fn with_message_id<T: Into<u32>>(mut self, message_id: T) -> Self {
         match self {
             Self::Standard {
                 message_id: ref mut msg_id,
@@ -606,13 +308,14 @@ impl RawI2NpMessageBuilder {
             | Self::Short {
                 message_id: ref mut msg_id,
                 ..
-            } => *msg_id = Some(message_id),
+            } => *msg_id = Some(message_id.into()),
         }
 
         self
     }
 
-    pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
+    /// Add payload
+    pub fn with_payload(mut self, payload: &'a [u8]) -> Self {
         match self {
             Self::Standard {
                 payload: ref mut msg_payload,
@@ -621,13 +324,14 @@ impl RawI2NpMessageBuilder {
             | Self::Short {
                 payload: ref mut msg_payload,
                 ..
-            } => core::mem::swap(msg_payload, &mut Some(payload)),
+            } => *msg_payload = Some(payload),
         }
 
         self
     }
 
-    pub fn serialize(mut self) -> Vec<u8> {
+    /// Serialize I2NP message.
+    pub fn build(mut self) -> Vec<u8> {
         match self {
             Self::Standard {
                 message_type,
@@ -636,37 +340,35 @@ impl RawI2NpMessageBuilder {
                 mut payload,
             } => {
                 let payload = payload.take().expect("to exist");
-                let expiration = expiration.take().expect("to exist");
+                let mut out = BytesMut::with_capacity(payload.len() + I2NP_STANDARD_HEADER_LEN);
 
-                let mut out = vec![0u8; payload.len() + 16];
+                out.put_u8(message_type.expect("to exist").as_u8());
+                out.put_u32(message_id.expect("to exist"));
+                out.put_u64(expiration.expect("to exist"));
+                out.put_u16((payload.len() as u16));
+                out.put_u8(0x00); // checksum
+                out.put_slice(&payload);
 
-                out[0] = message_type.expect("to exist").as_u8();
-                out[1..5].copy_from_slice(&message_id.expect("to exist").to_be_bytes());
-                out[5..13].copy_from_slice(&expiration.to_be_bytes());
-                out[13..15].copy_from_slice(&(payload.len() as u16).to_be_bytes());
-                out[15] = 0x00; // TODO: correct checksum
-                out[16..].copy_from_slice(&payload);
-
-                out
+                out.freeze().to_vec()
             }
             Self::Short {
                 message_type,
                 message_id,
-                mut expiration,
+                expiration,
                 mut payload,
             } => {
                 let payload = payload.take().expect("to exist");
-                let expiration = expiration.take().expect("to exist") as u32;
 
-                let mut out = vec![0u8; payload.len() + 2 + 1 + 2 * 4];
+                // two extra bytes for the length field
+                let mut out = BytesMut::with_capacity(payload.len() + I2NP_SHORT_HEADER_LEN + 2);
 
-                out[..2].copy_from_slice(&((payload.len() + 1 + 2 * 4) as u16).to_be_bytes());
-                out[2] = message_type.expect("to exist").as_u8();
-                out[3..7].copy_from_slice(&message_id.expect("to exist").to_be_bytes());
-                out[7..11].copy_from_slice(&expiration.to_be_bytes());
-                out[11..].copy_from_slice(&payload);
+                out.put_u16((payload.len() + I2NP_SHORT_HEADER_LEN) as u16);
+                out.put_u8(message_type.expect("to exist").as_u8());
+                out.put_u32(message_id.expect("to exist"));
+                out.put_u32(expiration.expect("to exist") as u32);
+                out.put_slice(&payload);
 
-                out
+                out.freeze().to_vec()
             }
         }
     }
@@ -677,7 +379,7 @@ impl RawI2NpMessageBuilder {
 /// These messages are dispatched by the enabled transports
 /// to appropriate subsystems, based on `message_type`.
 #[derive(Clone)]
-pub struct RawI2npMessage {
+pub struct Message {
     /// Message type.
     pub message_type: MessageType,
 
@@ -691,24 +393,9 @@ pub struct RawI2npMessage {
     pub payload: Vec<u8>,
 }
 
-pub const I2NP_STANDARD: bool = false;
-pub const I2NP_SHORT: bool = true;
-
-// TODO: remove & remove thingbuf zzz
-impl Default for RawI2npMessage {
-    fn default() -> Self {
-        Self {
-            message_type: MessageType::DatabaseStore,
-            message_id: 0u32,
-            expiration: 0u64,
-            payload: Vec::new(),
-        }
-    }
-}
-
-impl fmt::Debug for RawI2npMessage {
+impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RawI2npMessage")
+        f.debug_struct("Message")
             .field("message_type", &self.message_type)
             .field("message_id", &self.message_id)
             .field("expiration", &self.expiration)
@@ -716,19 +403,27 @@ impl fmt::Debug for RawI2npMessage {
     }
 }
 
-impl RawI2npMessage {
-    pub fn parse_short(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+impl Message {
+    /// Attempt to parse I2NP message with short header from `input`.
+    ///
+    /// Returns the parsed message and rest of `input` on success.
+    pub fn parse_frame_short(input: &[u8]) -> IResult<&[u8], Message> {
         let (rest, size) = be_u16(input)?;
         let (rest, message_type) = be_u8(rest)?;
         let (rest, message_id) = be_u32(rest)?;
         let (rest, expiration) = be_u32(rest)?;
-        let (rest, payload) = take(size as usize - (1 + 2 * 4))(rest)?;
+
+        if size as usize <= I2NP_SHORT_HEADER_LEN {
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        let (rest, payload) = take(size as usize - I2NP_SHORT_HEADER_LEN)(rest)?;
         let message_type = MessageType::from_u8(message_type)
             .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
 
         Ok((
             rest,
-            RawI2npMessage {
+            Message {
                 message_type,
                 message_id,
                 expiration: expiration as u64,
@@ -737,7 +432,10 @@ impl RawI2npMessage {
         ))
     }
 
-    pub fn parse_standard(input: &[u8]) -> IResult<&[u8], RawI2npMessage> {
+    /// Attempt to parse I2NP message with standard header from `input`.
+    ///
+    /// Returns the parsed message and rest of `input` on success.
+    pub fn parse_frame_standard(input: &[u8]) -> IResult<&[u8], Message> {
         let (rest, message_type) = be_u8(input)?;
         let (rest, message_id) = be_u32(rest)?;
         let (rest, expiration) = be_u64(rest)?;
@@ -749,7 +447,7 @@ impl RawI2npMessage {
 
         Ok((
             rest,
-            RawI2npMessage {
+            Message {
                 message_type,
                 message_id,
                 expiration,
@@ -758,13 +456,17 @@ impl RawI2npMessage {
         ))
     }
 
-    pub fn parse<const SHORT: bool>(input: &[u8]) -> Option<RawI2npMessage> {
-        match SHORT {
-            true => Some(Self::parse_short(input).ok()?.1),
-            false => Some(Self::parse_standard(input).ok()?.1),
-        }
+    /// Attempt to parse I2NP message with short header from `input`.
+    pub fn parse_short(input: &[u8]) -> Option<Message> {
+        Some(Self::parse_frame_short(input).ok()?.1)
     }
 
+    /// Attempt to parse I2NP message with standard header from `input`.
+    pub fn parse_standard(input: &[u8]) -> Option<Message> {
+        Some(Self::parse_frame_standard(input).ok()?.1)
+    }
+
+    /// Get destination subsystem of the message based on its message type.
     pub fn destination(&self) -> SubsystemKind {
         match self.message_type {
             MessageType::DatabaseStore
@@ -1201,6 +903,7 @@ impl<'a> TunnelDataBuilder<'a> {
 }
 
 // TODO: remove `pub`
+// TODO: implement asref when wrapp inside another message
 pub struct TunnelGatewayMessage<'a> {
     /// Tunnel ID.
     pub tunnel_id: TunnelId,
@@ -1523,5 +1226,72 @@ impl<'a> GarlicMessage<'a> {
         Some(Self {
             blocks: Self::parse_inner(input, Vec::new())?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_short_as_standard() {
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::DeliveryStatus)
+            .with_message_id(1337u32)
+            .with_expiration(0xdeadbeefu64)
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        assert!(Message::parse_standard(&message).is_none());
+    }
+
+    #[test]
+    fn parse_standard_as_short() {
+        let message = MessageBuilder::standard()
+            .with_message_type(MessageType::DeliveryStatus)
+            .with_message_id(1337u32)
+            .with_expiration(0xdeadbeefu64)
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        assert!(Message::parse_short(&message).is_none());
+    }
+
+    #[test]
+    fn invalid_message_type() {
+        let mut out = BytesMut::with_capacity(4 + I2NP_SHORT_HEADER_LEN + 2);
+
+        out.put_u16((4 + I2NP_SHORT_HEADER_LEN) as u16);
+        out.put_u8(252);
+        out.put_u32(13371338u32);
+        out.put_u32(0xdeadbeefu32);
+        out.put_slice(&vec![1, 2, 3, 4]);
+        let serialized = out.freeze().to_vec();
+
+        assert!(Message::parse_short(&serialized).is_none());
+    }
+
+    #[test]
+    fn incomplete_short_header() {
+        assert!(Message::parse_short(&vec![1, 2, 3, 4]).is_none());
+    }
+
+    #[test]
+    fn incomplete_standard_header() {
+        assert!(Message::parse_standard(&vec![1, 2, 3, 4]).is_none());
+    }
+
+    #[test]
+    fn invalid_size_short() {
+        let mut out = BytesMut::with_capacity(4 + I2NP_SHORT_HEADER_LEN + 2);
+
+        out.put_u16(4u16); // invalid size
+        out.put_u8(MessageType::DeliveryStatus.as_u8());
+        out.put_u32(13371338u32);
+        out.put_u32(0xdeadbeefu32);
+        out.put_slice(&vec![1, 2, 3, 4]);
+        let serialized = out.freeze().to_vec();
+
+        assert!(Message::parse_short(&serialized).is_none());
     }
 }

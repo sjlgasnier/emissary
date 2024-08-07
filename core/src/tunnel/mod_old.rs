@@ -19,7 +19,7 @@
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey},
     i2np::{
-        HopRole, I2NpMessage, MessageType, RawI2NpMessageBuilder, RawI2npMessage, TunnelMessage,
+        HopRole, I2NpMessage, MessageType, MessageBuilder, Message, TunnelMessage,
         I2NP_SHORT, I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo},
@@ -214,7 +214,7 @@ impl<R: Runtime> TunnelManager<R> {
                         message_len = ?message.len(),
                         "router message to self",
                     );
-                    let message = RawI2npMessage::parse::<I2NP_SHORT>(&message).unwrap();
+                    let message = Message::parse::<I2NP_SHORT>(&message).unwrap();
                     self.on_message(message);
                 }
                 false => {
@@ -237,8 +237,8 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     // TODO: no unwraps
-    fn on_message(&mut self, message: RawI2npMessage) {
-        let RawI2npMessage {
+    fn on_message(&mut self, message: Message) {
+        let Message {
             message_type,
             message_id,
             expiration,
@@ -251,7 +251,7 @@ impl<R: Runtime> TunnelManager<R> {
                 let (payload, hop, message_id, message_type) =
                     self.noise.create_tunnel_hop(&self.truncated_hash, payload).unwrap();
 
-                let msg = RawI2NpMessageBuilder::short()
+                let msg = MessageBuilder::short()
                     .with_message_type(message_type)
                     .with_message_id(message_id)
                     .with_expiration(

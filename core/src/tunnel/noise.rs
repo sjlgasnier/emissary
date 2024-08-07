@@ -35,8 +35,8 @@ use crate::{
     i2np::{
         tunnel::build::variable, DeliveryInstruction, DeliveryInstructions, EncryptedTunnelData,
         GarlicClove, GarlicMessage, GarlicMessageBlock, GarlicMessageType, HopRole, MessageKind,
-        MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction, RawI2NpMessageBuilder,
-        RawI2npMessage, ShortTunnelBuildRecord, ShortTunnelBuildRecordBuilder,
+        MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction, MessageBuilder,
+        Message, ShortTunnelBuildRecord, ShortTunnelBuildRecordBuilder,
         ShortTunnelBuildRequestBuilder, TunnelData, TunnelGatewayMessage, I2NP_SHORT,
         I2NP_STANDARD,
     },
@@ -890,7 +890,7 @@ impl Noise {
             .with_full_record(record2)
             .serialize();
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::ShortTunnelBuild)
             .with_message_id(message_id)
             .with_expiration(expiration)
@@ -1041,7 +1041,7 @@ impl Noise {
             .with_full_record(record2)
             .serialize();
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::ShortTunnelBuild)
             .with_message_id(message_id)
             .with_expiration(expiration)
@@ -1223,7 +1223,7 @@ impl Noise {
         }
 
         if tunnel_gateway {
-            let msg = RawI2NpMessageBuilder::standard()
+            let msg = MessageBuilder::standard()
                 .with_message_type(message_type)
                 .with_message_id(message_id)
                 .with_expiration((R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()) // TODO: fix
@@ -1237,7 +1237,7 @@ impl Noise {
             }
             .serialize();
 
-            let message = RawI2NpMessageBuilder::short()
+            let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelGateway)
                 .with_message_id(22222222u32) // TODO: fix
                 .with_expiration(11111111u32) // TODO: fix
@@ -1250,7 +1250,7 @@ impl Noise {
             if message_type == MessageType::OutboundTunnelBuildReply {
                 tracing::error!("local delivery, no i2np wrapping applied");
 
-                let msg = RawI2NpMessageBuilder::standard()
+                let msg = MessageBuilder::standard()
                     .with_message_type(message_type)
                     .with_message_id(message_id)
                     .with_expiration(
@@ -1261,7 +1261,7 @@ impl Noise {
 
                 Some((msg, next_router, Some(next_tunnel_id)))
             } else {
-                let msg = RawI2NpMessageBuilder::short()
+                let msg = MessageBuilder::short()
                     .with_message_type(message_type)
                     .with_message_id(message_id)
                     .with_expiration(
@@ -1319,7 +1319,7 @@ impl Noise {
                 out[20..].copy_from_slice(&ciphertext);
 
                 // TODO: fix
-                let msg = RawI2NpMessageBuilder::short()
+                let msg = MessageBuilder::short()
                     .with_message_type(MessageType::TunnelData)
                     .with_message_id(13371338u32)
                     .with_expiration(expiration + 5 * 60)
@@ -1368,15 +1368,15 @@ impl Noise {
                             DeliveryInstruction::Router { hash } => {
                                 tracing::debug!(hash = ?base64_encode(hash), "router delivery");
 
-                                let RawI2npMessage {
+                                let Message {
                                     message_type,
                                     message_id,
                                     expiration,
                                     payload,
-                                } = RawI2npMessage::parse::<I2NP_STANDARD>(&message.message)
+                                } = Message::parse::<I2NP_STANDARD>(&message.message)
                                     .unwrap();
 
-                                let message = RawI2NpMessageBuilder::short()
+                                let message = MessageBuilder::short()
                                     .with_message_type(message_type)
                                     .with_message_id(message_id)
                                     .with_expiration(expiration)
@@ -1399,7 +1399,7 @@ impl Noise {
                                 }
                                 .serialize();
 
-                                let message = RawI2NpMessageBuilder::short()
+                                let message = MessageBuilder::short()
                                     .with_message_type(MessageType::TunnelGateway)
                                     .with_message_id(13371338u32) // TODO: fix
                                     .with_expiration(expiration)
@@ -1517,7 +1517,7 @@ impl Noise {
 
                             let test = combined[combined.len() - 2113..].to_vec();
 
-                            let msg = RawI2npMessage::parse::<I2NP_STANDARD>(&combined)
+                            let msg = Message::parse::<I2NP_STANDARD>(&combined)
                                 .expect("valid message");
 
                             // TODO: handle message
@@ -1622,12 +1622,12 @@ impl Noise {
                 }
             }
         } else {
-            let RawI2npMessage {
+            let Message {
                 message_type,
                 message_id,
                 expiration,
                 mut payload,
-            } = RawI2npMessage::parse::<I2NP_STANDARD>(payload).unwrap();
+            } = Message::parse::<I2NP_STANDARD>(payload).unwrap();
 
             let (
                 _,
@@ -1806,7 +1806,7 @@ impl Noise {
         out[4..20].copy_from_slice(&iv);
         out[20..].copy_from_slice(&ciphertext);
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(13351336)
             .with_expiration(expiration)
@@ -1893,7 +1893,7 @@ impl Noise {
         out[4..20].copy_from_slice(&iv);
         out[20..].copy_from_slice(&ciphertext);
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(13351336)
             .with_expiration((R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs()) // TODO: fix

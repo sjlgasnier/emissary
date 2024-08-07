@@ -37,3 +37,15 @@ name = "short_tunnel_build"
 path = "fuzz_targets/short_tunnel_build.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "i2np_message_builder"
+path = "fuzz_targets/i2np_message_builder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "i2np_message"
+path = "fuzz_targets/i2np_message.rs"
+test = false
+doc = false
