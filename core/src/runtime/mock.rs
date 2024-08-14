@@ -23,7 +23,9 @@ use crate::runtime::{
 
 use futures::{future::BoxFuture, Stream};
 use rand_core::{CryptoRng, RngCore};
+use tokio::task;
 
+use core::task::Waker;
 use std::{
     future::{pending, Future},
     marker::PhantomData,
@@ -120,21 +122,20 @@ impl MetricsHandle for MockMetricsHandle {
     }
 }
 
-pub struct MockJoinSet<T> {
-    _futures: Vec<BoxFuture<'static, T>>,
-}
+pub struct MockJoinSet<T>(task::JoinSet<T>, Option<Waker>);
 
 impl<T: Send + 'static> JoinSet<T> for MockJoinSet<T> {
     fn is_empty(&self) -> bool {
-        true
+        self.0.is_empty()
     }
 
-    fn push<F>(&mut self, _future: F)
+    fn push<F>(&mut self, future: F)
     where
         F: Future<Output = T> + Send + 'static,
         F::Output: Send,
     {
-        drop(_future);
+        let _ = self.0.spawn(future);
+        self.1.as_mut().map(|waker| waker.wake_by_ref());
     }
 }
 
@@ -142,7 +143,14 @@ impl<T: Send + 'static> Stream for MockJoinSet<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Pending
+        match self.0.poll_join_next(cx) {
+            Poll::Pending | Poll::Ready(None) => {
+                self.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Poll::Ready(Some(Err(_))) => Poll::Ready(None),
+            Poll::Ready(Some(Ok(value))) => Poll::Ready(Some(value)),
+        }
     }
 }
 
@@ -180,7 +188,7 @@ impl Runtime for MockRuntime {
     /// For `tokio` this would be `tokio::task::join_set::JoinSet` and
     /// for `futures` this would be `future::stream::FuturesUnordered`
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T> {
-        todo!();
+        MockJoinSet(task::JoinSet::<T>::new(), None)
     }
 
     /// Register `metrics` and return handle for registering metrics.
