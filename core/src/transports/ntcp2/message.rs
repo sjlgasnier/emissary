@@ -20,6 +20,8 @@
 //!
 //! https://geti2p.net/spec/ntcp2#unencrypted-data
 
+use crate::i2np::Message;
+
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -30,8 +32,6 @@ use nom::{
 
 use alloc::{vec, vec::Vec};
 use core::fmt;
-
-use crate::i2np::RawI2npMessage;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::message";
@@ -143,7 +143,7 @@ pub enum MessageBlock<'a> {
     /// I2NP message.
     I2Np {
         /// Raw, unparsed I2NP message.
-        message: RawI2npMessage,
+        message: Message,
     },
 
     /// Session termination.
@@ -250,7 +250,8 @@ impl<'a> MessageBlock<'a> {
 
     /// Parse [`MessageBlock::I2Np`].
     fn parse_i2np(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        let (rest, message) = RawI2npMessage::parse_short(input)?;
+        // TODO: only parse message type!
+        let (rest, message) = Message::parse_frame_short(input)?;
 
         Ok((rest, MessageBlock::I2Np { message }))
     }

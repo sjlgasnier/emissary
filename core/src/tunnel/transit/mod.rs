@@ -25,8 +25,12 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage,
-        ShortTunnelBuildRecord, TunnelBuildRecord, TunnelGatewayMessage,
+        tunnel::{
+            build::{short, variable},
+            data::EncryptedTunnelData,
+            gateway::TunnelGateway,
+        },
+        HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -84,10 +88,10 @@ pub trait TransitTunnel: Send {
 
     /// Handle tunnel gateway message.
     ///
-    /// `TunnelGatewayMessage` will only be accepted by IBGWs.
+    /// `TunnelGateway` will only be accepted by IBGWs.
     fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &TunnelGatewayMessage,
+        tunnel_gateway: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)>;
 }
 
@@ -133,9 +137,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
     /// Only OBEP is supported, for any other hop the message is dropped.
     pub fn handle_variable_tunnel_build(
         &mut self,
-        message: RawI2npMessage,
+        message: Message,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
-        let RawI2npMessage {
+        let Message {
             message_id,
             expiration,
             mut payload,
@@ -152,21 +156,22 @@ impl<R: Runtime> TransitTunnelManager<R> {
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
-        let build_record = TunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?message_id,
-                "malformed variable tunnel build request",
-            );
+        let build_record =
+            variable::TunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?message_id,
+                    "malformed variable tunnel build request",
+                );
 
-            Error::InvalidData
-        })?;
+                Error::InvalidData
+            })?;
 
         let role = build_record.role();
-        let tunnel_id = TunnelId::from(build_record.tunnel_id());
-        let next_tunnel_id = TunnelId::from(build_record.next_tunnel_id());
+        let tunnel_id = build_record.tunnel_id();
+        let next_tunnel_id = build_record.next_tunnel_id();
         let next_message_id = build_record.next_message_id();
-        let next_router = RouterId::from(build_record.next_router_hash());
+        let next_router = build_record.next_router();
 
         if role != HopRole::OutboundEndpoint {
             tracing::warn!(
@@ -175,7 +180,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 %tunnel_id,
                 %next_tunnel_id,
                 %next_message_id,
-                ?next_router,
+                %next_router,
                 "variable tunnel build only supported for outbound enpoint",
             );
 
@@ -190,7 +195,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
             %tunnel_id,
             %next_tunnel_id,
             %next_message_id,
-            ?next_router,
+            %next_router,
             "variable tunnel build request",
         );
 
@@ -204,12 +209,12 @@ impl<R: Runtime> TransitTunnelManager<R> {
             build_record.tunnel_iv_key().to_vec(),
         );
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::VariableTunnelBuildReply)
-            .with_message_id(message_id)
+            .with_message_id(next_message_id)
             .with_expiration(expiration)
-            .with_payload(payload)
-            .serialize();
+            .with_payload(&payload)
+            .build();
 
         Ok((next_router, message))
     }
@@ -217,9 +222,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
     /// Handle short tunnel build request.
     pub fn handle_short_tunnel_build(
         &mut self,
-        message: RawI2npMessage,
+        message: Message,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
-        let RawI2npMessage {
+        let Message {
             message_type,
             message_id,
             expiration,
@@ -236,7 +241,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
-        let build_record = ShortTunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
+        let build_record = short::TunnelBuildRecord::parse(&decrypted_record).ok_or_else(|| {
             tracing::debug!(
                 target: LOG_TARGET,
                 ?message_id,
@@ -247,10 +252,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
         })?;
 
         let role = build_record.role();
-        let tunnel_id = TunnelId::from(build_record.tunnel_id());
-        let next_tunnel_id = TunnelId::from(build_record.next_tunnel_id());
+        let tunnel_id = build_record.tunnel_id();
+        let next_tunnel_id = build_record.next_tunnel_id();
         let next_message_id = build_record.next_message_id();
-        let next_router = RouterId::from(build_record.next_router_hash());
+        let next_router = build_record.next_router();
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -296,12 +301,12 @@ impl<R: Runtime> TransitTunnelManager<R> {
         match role {
             // IBGWs and participants just forward the build request as-is to the next hop
             HopRole::InboundGateway | HopRole::Participant => {
-                let msg = RawI2NpMessageBuilder::short()
+                let msg = MessageBuilder::short()
                     .with_message_type(MessageType::ShortTunnelBuild)
                     .with_message_id(next_message_id)
                     .with_expiration(expiration)
-                    .with_payload(payload)
-                    .serialize();
+                    .with_payload(&payload)
+                    .build();
 
                 Ok((next_router, msg))
             }
@@ -309,25 +314,25 @@ impl<R: Runtime> TransitTunnelManager<R> {
             // the recipient IBGW to be able to forward the tunnel build reply correctly
             HopRole::OutboundEndpoint => {
                 // TODO: garlic encrypt
-                let msg = RawI2NpMessageBuilder::standard()
+                let msg = MessageBuilder::standard()
                     .with_message_type(MessageType::OutboundTunnelBuildReply)
                     .with_message_id(next_message_id)
                     .with_expiration(expiration)
-                    .with_payload(payload)
-                    .serialize();
+                    .with_payload(&payload)
+                    .build();
 
-                let msg = TunnelGatewayMessage {
+                let msg = TunnelGateway {
                     tunnel_id: next_tunnel_id.into(),
                     payload: &msg,
                 }
                 .serialize();
 
-                let message = RawI2NpMessageBuilder::short()
+                let message = MessageBuilder::short()
                     .with_message_type(MessageType::TunnelGateway)
                     .with_message_id(R::rng().next_u32())
                     .with_expiration(expiration)
-                    .with_payload(msg)
-                    .serialize();
+                    .with_payload(&msg)
+                    .build();
 
                 Ok((next_router, message))
             }
@@ -350,12 +355,12 @@ impl<R: Runtime> TransitTunnelManager<R> {
     /// Handle tunnel gateway message.
     pub fn handle_tunnel_gateway(
         &mut self,
-        message: &TunnelGatewayMessage,
+        message: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.tunnels
-            .get_mut(message.tunnel_id())
+            .get_mut(&message.tunnel_id)
             .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                *message.tunnel_id(),
+                message.tunnel_id,
             )))?
             .handle_tunnel_gateway(&message)
     }
@@ -408,7 +413,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let mut message = Message::parse_short(&message).unwrap();
 
         assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
         assert_eq!(transit_managers[0].tunnels.len(), 1);
@@ -449,7 +454,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let mut message = Message::parse_short(&message).unwrap();
 
         assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
         assert_eq!(transit_managers[0].tunnels.len(), 1);
@@ -491,7 +496,7 @@ mod tests {
             .unwrap();
 
         let message = (0..transit_managers.len() - 1).fold(
-            RawI2npMessage::parse::<true>(&message).unwrap(),
+            Message::parse_short(&message).unwrap(),
             |message, i| {
                 let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
 
@@ -501,7 +506,7 @@ mod tests {
                     Some(HopRole::Participant)
                 );
 
-                RawI2npMessage::parse::<true>(&msg).unwrap()
+                Message::parse_short(&msg).unwrap()
             },
         );
 
@@ -512,28 +517,28 @@ mod tests {
             Some(HopRole::OutboundEndpoint)
         );
 
-        let RawI2npMessage {
+        let Message {
             message_type,
             message_id,
             expiration,
             payload,
-        } = RawI2npMessage::parse::<true>(&msg).unwrap();
+        } = Message::parse_short(&msg).unwrap();
 
         assert_eq!(message_type, MessageType::TunnelGateway);
 
-        let TunnelGatewayMessage {
+        let TunnelGateway {
             tunnel_id: recv_tunnel_id,
             payload,
-        } = TunnelGatewayMessage::parse(&payload).unwrap();
+        } = TunnelGateway::parse(&payload).unwrap();
 
         assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
 
-        let Some(RawI2npMessage {
+        let Some(Message {
             message_type: MessageType::OutboundTunnelBuildReply,
             message_id,
             expiration,
             payload,
-        }) = RawI2npMessage::parse::<false>(&payload)
+        }) = Message::parse_standard(&payload)
         else {
             panic!("invalid message");
         };
@@ -570,7 +575,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let mut message = Message::parse_short(&message).unwrap();
 
         // make new router which is not part of the tunnel build request
         let (_, _, noise) = make_router();
@@ -623,7 +628,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let mut message = Message::parse_short(&message).unwrap();
 
         match transit_managers[0].handle_short_tunnel_build(message).unwrap_err() {
             Error::Chacha20Poly1305(_) => {}

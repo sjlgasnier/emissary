@@ -23,7 +23,8 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        EncryptedTunnelData, HopRole, MessageType, RawI2NpMessageBuilder, TunnelGatewayMessage,
+        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        HopRole, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -118,18 +119,18 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
 
     fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &TunnelGatewayMessage,
+        tunnel_gateway: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel_id = %self.tunnel_id,
             gateway_tunnel_id = %tunnel_gateway.tunnel_id,
-            message_type = ?MessageType::from_u8(tunnel_gateway.payload()[0]),
+            message_type = ?MessageType::from_u8(tunnel_gateway.payload[0]),
             "tunnel gateway",
         );
 
         // TODO: explain calculation
-        if tunnel_gateway.payload().len() >= 1028 - 16 - 4 - 1 - 4 - 3 {
+        if tunnel_gateway.payload.len() >= 1028 - 16 - 4 - 1 - 4 - 3 {
             tracing::warn!(
                 target: LOG_TARGET,
                 tunnel_id = %self.tunnel_id,
@@ -150,7 +151,7 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
 
         // total message size - tunnel id - aes iv - checksum - flag - delivery instructions -
         // payload
-        let padding_size = 1028 - 4 - 16 - 4 - 1 - 3 - tunnel_gateway.payload().len();
+        let padding_size = 1028 - 4 - 16 - 4 - 1 - 3 - tunnel_gateway.payload.len();
         let offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
         let aes_iv = {
             let mut iv = [0u8; 16];
@@ -160,8 +161,8 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
         };
         let checksum = Sha256::new()
             .update(&[0x00]) // local delivery
-            .update((tunnel_gateway.payload().len() as u16).to_be_bytes())
-            .update(&tunnel_gateway.payload())
+            .update((tunnel_gateway.payload.len() as u16).to_be_bytes())
+            .update(&tunnel_gateway.payload)
             .update(&aes_iv)
             .finalize();
 
@@ -171,8 +172,8 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
         out.put_slice(&self.padding_bytes[offset..offset + padding_size]);
         out.put_u8(0x00); // zero byte (end of padding)
         out.put_u8(0x00); // local delivery
-        out.put_u16(tunnel_gateway.payload().len() as u16);
-        out.put_slice(tunnel_gateway.payload());
+        out.put_u16(tunnel_gateway.payload.len() as u16);
+        out.put_slice(tunnel_gateway.payload);
 
         let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
         let iv = aes.encrypt(&out[4..20]);
@@ -186,12 +187,12 @@ impl<R: Runtime> TransitTunnel for InboundGateway<R> {
         out[4..20].copy_from_slice(&iv);
         out[20..].copy_from_slice(&ciphertext);
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(R::rng().next_u32())
             .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(out.freeze().to_vec())
-            .serialize();
+            .with_payload(&out)
+            .build();
 
         Ok((self.next_router.clone(), message))
     }

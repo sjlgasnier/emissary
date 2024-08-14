@@ -18,7 +18,10 @@
 
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
-    i2np::{EncryptedTunnelData, RawI2npMessage, ShortTunnelBuildRecord, TunnelGatewayMessage},
+    i2np::{
+        tunnel::{build::short, data, gateway},
+        Message,
+    },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
@@ -96,7 +99,7 @@ impl TestTransitTunnelManager {
     /// Handle short tunnel build.
     pub fn handle_short_tunnel_build(
         &mut self,
-        message: RawI2npMessage,
+        message: Message,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.manager.handle_short_tunnel_build(message)
     }
@@ -104,14 +107,14 @@ impl TestTransitTunnelManager {
     /// Handle tunnel data.
     pub fn handle_tunnel_data(
         &mut self,
-        message: &EncryptedTunnelData,
+        message: &data::EncryptedTunnelData,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.manager.handle_tunnel_data(message)
     }
 
     pub fn handle_tunnel_gateway(
         &mut self,
-        message: &TunnelGatewayMessage,
+        message: &gateway::TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.manager.handle_tunnel_gateway(message)
     }
@@ -149,20 +152,20 @@ pub fn build_outbound_tunnel(
         })
         .unwrap();
 
-    let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+    let mut message = Message::parse_short(&message).unwrap();
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
         |acc, ((router_hash, _), transit_manager)| {
             let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-            RawI2npMessage::parse::<true>(&message).unwrap()
+            Message::parse_short(&message).unwrap()
         },
     );
-    let TunnelGatewayMessage {
+    let gateway::TunnelGateway {
         tunnel_id: recv_tunnel_id,
         payload,
-    } = TunnelGatewayMessage::parse(&message.payload).unwrap();
+    } = gateway::TunnelGateway::parse(&message.payload).unwrap();
 
-    let message = RawI2npMessage::parse::<false>(&payload).unwrap();
+    let message = Message::parse_standard(&payload).unwrap();
     let tunnel = pending_tunnel.try_build_tunnel(message).unwrap();
 
     (local_hash, tunnel, transit_managers)
@@ -200,7 +203,7 @@ pub fn build_inbound_tunnel(
         })
         .unwrap();
 
-    let mut message = RawI2npMessage::parse::<true>(&message).unwrap();
+    let mut message = Message::parse_short(&message).unwrap();
 
     assert_eq!(message.message_id, message_id.into());
     assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
@@ -211,7 +214,7 @@ pub fn build_inbound_tunnel(
         message,
         |acc, ((router_hash, _), transit_manager)| {
             let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-            RawI2npMessage::parse::<true>(&message).unwrap()
+            Message::parse_short(&message).unwrap()
         },
     );
 

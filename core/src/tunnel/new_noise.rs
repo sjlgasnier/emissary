@@ -24,7 +24,7 @@ use crate::{
         sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
-    i2np::{EncryptedTunnelData, HopRole},
+    i2np::{tunnel::data::EncryptedTunnelData, HopRole},
     runtime::Runtime,
     Error,
 };

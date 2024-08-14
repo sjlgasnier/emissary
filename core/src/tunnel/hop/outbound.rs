@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::aes::{cbc, ecb},
-    i2np::{HopRole, MessageType, RawI2NpMessageBuilder, RawI2npMessage, TunnelDataBuilder},
+    i2np::{tunnel::data::TunnelDataBuilder, HopRole, Message, MessageBuilder, MessageType},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
@@ -83,11 +83,12 @@ impl OutboundTunnel {
 
         // hop must exist since the tunnel is created by us
         let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let router: Vec<u8> = router.into();
 
         tracing::error!("next hop tunnel id = {}", next_hop.tunnel_id);
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
-            .with_tunnel_delivery(router.into(), gateway, &message)
+            .with_tunnel_delivery(&router, gateway, &message)
             .build::<R>();
 
         // iterative decrypt the tunnel data message and aes iv
@@ -113,12 +114,12 @@ impl OutboundTunnel {
         let message_id = R::rng().next_u32();
         tracing::error!("outer message id = {message_id}");
 
-        let message = RawI2NpMessageBuilder::short()
+        let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(message_id)
             .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(message)
-            .serialize();
+            .with_payload(&message)
+            .build();
 
         (next_hop.router.clone(), message)
     }
@@ -168,7 +169,7 @@ impl Tunnel for OutboundTunnel {
 mod tests {
     use super::*;
     use crate::{
-        i2np::{EncryptedTunnelData, TunnelGatewayMessage},
+        i2np::tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
     };
@@ -190,45 +191,45 @@ mod tests {
         assert_eq!(outbound_transit[0].router(), next_router);
 
         // first outbound hop (participant)
-        let message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let message = Message::parse_short(&message).unwrap();
         let message = EncryptedTunnelData::parse(&message.payload).unwrap();
         let (next_router, message) = outbound_transit[0].handle_tunnel_data(&message).unwrap();
         assert_eq!(outbound_transit[1].router(), next_router);
 
         // second outbound hop (obep)
-        let message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let message = Message::parse_short(&message).unwrap();
         let message = EncryptedTunnelData::parse(&message.payload).unwrap();
         let (next_router, message) = outbound_transit[1].handle_tunnel_data(&message).unwrap();
         assert_eq!(inbound_transit[0].router(), next_router);
 
         // first inbound hop (ibgw)
-        let Some(RawI2npMessage {
+        let Some(Message {
             message_type: MessageType::TunnelGateway,
             message_id,
             expiration,
             payload,
-        }) = RawI2npMessage::parse::<true>(&message)
+        }) = Message::parse_short(&message)
         else {
             panic!("invalid message");
         };
 
-        let message = TunnelGatewayMessage::parse(&payload).unwrap();
+        let message = TunnelGateway::parse(&payload).unwrap();
         let (next_router, message) = inbound_transit[0].handle_tunnel_gateway(&message).unwrap();
         assert_eq!(inbound_transit[1].router(), next_router);
 
         // second inbound hop (participant)
-        let message = RawI2npMessage::parse::<true>(&message).unwrap();
+        let message = Message::parse_short(&message).unwrap();
         let message = EncryptedTunnelData::parse(&message.payload).unwrap();
         let (next_router, message) = inbound_transit[1].handle_tunnel_data(&message).unwrap();
         assert_eq!(RouterId::from(local_inbound_hash), next_router);
 
         // inbound endpoint
-        let Some(RawI2npMessage {
+        let Some(Message {
             message_type: MessageType::TunnelData,
             message_id,
             expiration,
             payload,
-        }) = RawI2npMessage::parse::<true>(&message)
+        }) = Message::parse_short(&message)
         else {
             panic!("invalid message");
         };

@@ -23,8 +23,11 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        DeliveryInstruction, EncryptedTunnelData, HopRole, MessageKind, MessageType,
-        RawI2NpMessageBuilder, RawI2npMessage, TunnelData, TunnelGatewayMessage, I2NP_STANDARD,
+        tunnel::{
+            data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
+            gateway::TunnelGateway,
+        },
+        HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -165,23 +168,21 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
             } = message.message_kind
             {
                 match delivery_instructions {
-                    DeliveryInstruction::Router { hash } => {
-                        let RawI2npMessage {
+                    DeliveryInstructions::Router { hash } => {
+                        let Message {
                             message_type,
                             message_id,
                             expiration,
                             payload,
-                        } = RawI2npMessage::parse::<I2NP_STANDARD>(&message.message).ok_or_else(
-                            || {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    tunnel_id = %self.tunnel_id,
-                                    "fragment router delivery: invalid message",
-                                );
+                        } = Message::parse_standard(&message.message).ok_or_else(|| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                "fragment router delivery: invalid message",
+                            );
 
-                                Error::Tunnel(TunnelError::InvalidMessage)
-                            },
-                        )?;
+                            Error::Tunnel(TunnelError::InvalidMessage)
+                        })?;
                         let router = RouterId::from(hash);
 
                         tracing::trace!(
@@ -192,16 +193,16 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
                             "fragment router delivery",
                         );
 
-                        let message = RawI2NpMessageBuilder::short()
+                        let message = MessageBuilder::short()
                             .with_message_type(message_type)
                             .with_message_id(message_id)
                             .with_expiration(expiration)
-                            .with_payload(payload)
-                            .serialize();
+                            .with_payload(&payload)
+                            .build();
 
                         return Ok((router, message));
                     }
-                    DeliveryInstruction::Tunnel { hash, tunnel_id } => {
+                    DeliveryInstructions::Tunnel { hash, tunnel_id } => {
                         let router = RouterId::from(hash);
 
                         tracing::trace!(
@@ -212,24 +213,24 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
                             "fragment router delivery",
                         );
 
-                        let payload = TunnelGatewayMessage {
+                        let payload = TunnelGateway {
                             tunnel_id: TunnelId::from(tunnel_id),
                             payload: &message.message,
                         }
                         .serialize();
 
-                        let message = RawI2NpMessageBuilder::short()
+                        let message = MessageBuilder::short()
                             .with_message_type(MessageType::TunnelGateway)
                             .with_message_id(R::rng().next_u32())
                             .with_expiration(
                                 (R::time_since_epoch() + Duration::from_secs(8)).as_secs(),
                             )
-                            .with_payload(payload)
-                            .serialize();
+                            .with_payload(&payload)
+                            .build();
 
                         return Ok((RouterId::from(hash), message));
                     }
-                    DeliveryInstruction::Local => tracing::warn!(
+                    DeliveryInstructions::Local => tracing::warn!(
                         target: LOG_TARGET,
                         tunnel_id = %self.tunnel_id,
                         "local delivery not supported",
@@ -245,7 +246,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
 
     fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &TunnelGatewayMessage,
+        tunnel_gateway: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         Err(Error::Tunnel(TunnelError::MessageRejected(
             RejectionReason::NotSupported,

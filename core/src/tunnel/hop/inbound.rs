@@ -22,7 +22,10 @@ use crate::{
         sha256::Sha256,
     },
     error::{RejectionReason, TunnelError},
-    i2np::{DeliveryInstruction, EncryptedTunnelData, HopRole, MessageKind, TunnelData},
+    i2np::{
+        tunnel::data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
+        HopRole,
+    },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
     tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
@@ -159,7 +162,7 @@ impl InboundTunnel {
                 MessageKind::Unfragmented {
                     delivery_instructions,
                 } => match delivery_instructions {
-                    DeliveryInstruction::Local => return Ok(message.message.to_vec()),
+                    DeliveryInstructions::Local => return Ok(message.message.to_vec()),
                     delivery_instructions => {
                         tracing::warn!(
                             target: LOG_TARGET,

@@ -1,1 +1,4 @@
 target/
+core/fuzz/target
+core/fuzz/artifacts
+core/fuzz/corpus

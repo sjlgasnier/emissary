@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{i2np::RawI2npMessage, primitives::RouterId, Error};
+use crate::{i2np::Message, primitives::RouterId, Error};
 
 use thingbuf::mpsc::{Receiver, Sender};
 
@@ -78,7 +78,7 @@ pub enum InnerSubsystemEvent {
     /// I2NP message.
     I2Np {
         /// Raw, unparsed I2NP messages
-        messages: Vec<RawI2npMessage>,
+        messages: Vec<Message>,
     },
 
     Dummy,
@@ -114,7 +114,7 @@ pub enum SubsystemEvent {
     /// I2NP message.
     I2Np {
         /// Raw, unparsed I2NP messages
-        messages: Vec<RawI2npMessage>,
+        messages: Vec<Message>,
     },
 
     Dummy,
@@ -181,7 +181,7 @@ impl SubsystemHandle {
     }
 
     // TODO: fix error
-    pub fn dispatch_messages(&mut self, messages: Vec<RawI2npMessage>) -> crate::Result<()> {
+    pub fn dispatch_messages(&mut self, messages: Vec<Message>) -> crate::Result<()> {
         let (tunnel_messages, netdb_messages): (Vec<_>, Vec<_>) = messages
             .into_iter()
             .map(|message| match message.destination() {

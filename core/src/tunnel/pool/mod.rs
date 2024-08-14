@@ -19,8 +19,8 @@
 use crate::{
     error::TunnelError,
     i2np::{
-        EncryptedTunnelData, MessageType, RawI2NpMessageBuilder, RawI2npMessage,
-        TunnelGatewayMessage, I2NP_STANDARD,
+        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        Message, MessageBuilder, MessageType,
     },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
@@ -345,12 +345,12 @@ impl<R: Runtime> TunnelPool<R> {
 
         if self.outbound.len() == 1 && self.inbound.len() == 1 {
             let message_id = R::rng().next_u32();
-            let msg = RawI2NpMessageBuilder::standard()
+            let msg = MessageBuilder::standard()
                 .with_message_type(MessageType::DeliveryStatus)
                 .with_message_id(message_id)
                 .with_expiration((R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs()) // TODO: fix time
-                .with_payload(vec![1, 2, 3, 4]) // TODO: create proper test message
-                .serialize();
+                .with_payload(&vec![1, 2, 3, 4]) // TODO: create proper test message
+                .build();
 
             tracing::error!(
                 target: LOG_TARGET,
@@ -380,13 +380,13 @@ impl<R: Runtime> TunnelPool<R> {
     /// a new outbound tunnel is created for the pool.
     pub fn handle_outbound_tunnel_build_reply(
         &mut self,
-        message: TunnelGatewayMessage,
+        message: TunnelGateway,
     ) -> crate::Result<()> {
-        let tunnel = self.pending_outbound.remove(message.tunnel_id()).ok_or(Error::Tunnel(
-            TunnelError::TunnelDoesntExist(*message.tunnel_id()),
+        let tunnel = self.pending_outbound.remove(&message.tunnel_id).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(message.tunnel_id),
         ))?;
 
-        let parsed_message = RawI2npMessage::parse::<I2NP_STANDARD>(message.payload())
+        let parsed_message = Message::parse_standard(message.payload)
             .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
 
         match tunnel.try_build_tunnel(parsed_message) {
@@ -403,7 +403,7 @@ impl<R: Runtime> TunnelPool<R> {
             Err(error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    tunnel_id = %message.tunnel_id(),
+                    tunnel_id = %message.tunnel_id,
                     ?error,
                     "failed to create outbound tunnel",
                 );
@@ -419,7 +419,7 @@ impl<R: Runtime> TunnelPool<R> {
     /// a new inbound tunnel is created for the pool.
     pub fn handle_inbound_tunnel_build_reply(
         &mut self,
-        message: RawI2npMessage,
+        message: Message,
     ) -> crate::Result<TunnelId> {
         let message_id = MessageId::from(message.message_id);
 
@@ -467,7 +467,7 @@ impl<R: Runtime> TunnelPool<R> {
 
         match tunnel.handle_tunnel_data(message) {
             Ok(message) => {
-                let message = RawI2npMessage::parse::<false>(&message).ok_or(Error::InvalidData)?;
+                let message = Message::parse_standard(&message).ok_or(Error::InvalidData)?;
 
                 tracing::info!(
                     "tunnel tested successfully, payload = {:?}",
@@ -623,23 +623,20 @@ impl<R: Runtime> TunnelPoolManager<R> {
     /// Handle outbound tunnel build reply.
     pub fn handle_outbound_tunnel_build_reply(
         &mut self,
-        message: TunnelGatewayMessage,
+        message: TunnelGateway,
     ) -> crate::Result<()> {
         // TODO: this may have to more complicated if an actual inbound tunnel is used
         self.pending_outbound
-            .remove(message.tunnel_id())
+            .remove(&message.tunnel_id)
             .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
             .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                *message.tunnel_id(),
+                message.tunnel_id,
             )))?
             .handle_outbound_tunnel_build_reply(message)
     }
 
     /// Handle inbound tunnel build reply.
-    pub fn handle_inbound_tunnel_build_response(
-        &mut self,
-        message: RawI2npMessage,
-    ) -> crate::Result<()> {
+    pub fn handle_inbound_tunnel_build_response(&mut self, message: Message) -> crate::Result<()> {
         let (idx, mut pool) = self
             .pending_inbound
             .remove(&MessageId::from(message.message_id))

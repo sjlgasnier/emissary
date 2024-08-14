@@ -19,7 +19,7 @@
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
     error::ChannelError,
-    i2np::RawI2npMessage,
+    i2np::Message,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
     router_storage::RouterStorage,
     runtime::{MetricType, Runtime},
