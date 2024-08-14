@@ -20,8 +20,8 @@ use crate::{
     crypto::aes::{cbc, ecb},
     error::{RejectionReason, TunnelError},
     i2np::{
-        tunnel::data::EncryptedTunnelData, HopRole, MessageBuilder, MessageType,
-        TunnelGatewayMessage,
+        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        HopRole, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -114,7 +114,7 @@ impl<R: Runtime> TransitTunnel for Participant<R> {
 
     fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &TunnelGatewayMessage,
+        tunnel_gateway: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         Err(Error::Tunnel(TunnelError::MessageRejected(
             RejectionReason::NotSupported,

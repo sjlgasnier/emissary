@@ -355,7 +355,7 @@ mod test {
     use super::*;
     use crate::{
         crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
-        i2np::{tunnel::build::short::TunnelBuildRecord, TunnelGatewayMessage},
+        i2np::tunnel::{build::short::TunnelBuildRecord, gateway::TunnelGateway},
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
@@ -411,10 +411,10 @@ mod test {
         );
         assert_eq!(message.message_type, MessageType::TunnelGateway);
 
-        let TunnelGatewayMessage {
+        let TunnelGateway {
             tunnel_id: recv_tunnel_id,
             payload,
-        } = TunnelGatewayMessage::parse(&message.payload).unwrap();
+        } = TunnelGateway::parse(&message.payload).unwrap();
 
         assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
 

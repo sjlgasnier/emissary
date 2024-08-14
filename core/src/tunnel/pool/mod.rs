@@ -19,8 +19,8 @@
 use crate::{
     error::TunnelError,
     i2np::{
-        tunnel::data::EncryptedTunnelData, Message, MessageBuilder, MessageType,
-        TunnelGatewayMessage,
+        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        Message, MessageBuilder, MessageType,
     },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
@@ -380,13 +380,13 @@ impl<R: Runtime> TunnelPool<R> {
     /// a new outbound tunnel is created for the pool.
     pub fn handle_outbound_tunnel_build_reply(
         &mut self,
-        message: TunnelGatewayMessage,
+        message: TunnelGateway,
     ) -> crate::Result<()> {
-        let tunnel = self.pending_outbound.remove(message.tunnel_id()).ok_or(Error::Tunnel(
-            TunnelError::TunnelDoesntExist(*message.tunnel_id()),
+        let tunnel = self.pending_outbound.remove(&message.tunnel_id).ok_or(Error::Tunnel(
+            TunnelError::TunnelDoesntExist(message.tunnel_id),
         ))?;
 
-        let parsed_message = Message::parse_standard(message.payload())
+        let parsed_message = Message::parse_standard(message.payload)
             .ok_or(Error::Tunnel(TunnelError::InvalidMessage))?;
 
         match tunnel.try_build_tunnel(parsed_message) {
@@ -403,7 +403,7 @@ impl<R: Runtime> TunnelPool<R> {
             Err(error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    tunnel_id = %message.tunnel_id(),
+                    tunnel_id = %message.tunnel_id,
                     ?error,
                     "failed to create outbound tunnel",
                 );
@@ -623,14 +623,14 @@ impl<R: Runtime> TunnelPoolManager<R> {
     /// Handle outbound tunnel build reply.
     pub fn handle_outbound_tunnel_build_reply(
         &mut self,
-        message: TunnelGatewayMessage,
+        message: TunnelGateway,
     ) -> crate::Result<()> {
         // TODO: this may have to more complicated if an actual inbound tunnel is used
         self.pending_outbound
-            .remove(message.tunnel_id())
+            .remove(&message.tunnel_id)
             .map(|pool| pool.map_or(&mut self.exploratory_pool, |idx| &mut self.pools[idx]))
             .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                *message.tunnel_id(),
+                message.tunnel_id,
             )))?
             .handle_outbound_tunnel_build_reply(message)
     }

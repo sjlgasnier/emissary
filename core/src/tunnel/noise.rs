@@ -37,7 +37,7 @@ use crate::{
         GarlicClove, GarlicMessage, GarlicMessageBlock, GarlicMessageType, HopRole, MessageKind,
         MessageType, OutboundTunnelBuildReply, OwnedDeliveryInstruction, MessageBuilder,
         Message, ShortTunnelBuildRecord, ShortTunnelBuildRecordBuilder,
-        ShortTunnelBuildRequestBuilder, TunnelData, TunnelGatewayMessage, I2NP_SHORT,
+        ShortTunnelBuildRequestBuilder, TunnelData, TunnelGateway, I2NP_SHORT,
         I2NP_STANDARD,
     },
     primitives::{RouterId, RouterInfo, TunnelId},
@@ -1231,7 +1231,7 @@ impl Noise {
                 .serialize();
 
             // TODO: garlic encrypt?
-            let payload = TunnelGatewayMessage {
+            let payload = TunnelGateway {
                 tunnel_id: TunnelId::from(next_tunnel_id),
                 payload: &msg,
             }
@@ -1393,7 +1393,7 @@ impl Noise {
                                     "tunnel gateway delivery"
                                 );
 
-                                let payload = TunnelGatewayMessage {
+                                let payload = TunnelGateway {
                                     tunnel_id: TunnelId::from(*tunnel_id),
                                     payload: &message.message,
                                 }
@@ -1718,8 +1718,8 @@ impl Noise {
         expiration: u64,
         payload: Vec<u8>,
     ) -> crate::Result<(Vec<u8>, RouterId)> {
-        let TunnelGatewayMessage { tunnel_id, payload } =
-            TunnelGatewayMessage::parse(&payload).ok_or(Error::InvalidData)?;
+        let TunnelGateway { tunnel_id, payload } =
+            TunnelGateway::parse(&payload).ok_or(Error::InvalidData)?;
 
         tracing::trace!(
             target: LOG_TARGET,

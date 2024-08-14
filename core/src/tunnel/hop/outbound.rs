@@ -169,7 +169,7 @@ impl Tunnel for OutboundTunnel {
 mod tests {
     use super::*;
     use crate::{
-        i2np::{tunnel::data::EncryptedTunnelData, TunnelGatewayMessage},
+        i2np::tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
     };
@@ -213,7 +213,7 @@ mod tests {
             panic!("invalid message");
         };
 
-        let message = TunnelGatewayMessage::parse(&payload).unwrap();
+        let message = TunnelGateway::parse(&payload).unwrap();
         let (next_router, message) = inbound_transit[0].handle_tunnel_gateway(&message).unwrap();
         assert_eq!(inbound_transit[1].router(), next_router);
 

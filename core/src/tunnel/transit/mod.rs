@@ -28,8 +28,9 @@ use crate::{
         tunnel::{
             build::{short, variable},
             data::EncryptedTunnelData,
+            gateway::TunnelGateway,
         },
-        HopRole, Message, MessageBuilder, MessageType, TunnelGatewayMessage,
+        HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -87,10 +88,10 @@ pub trait TransitTunnel: Send {
 
     /// Handle tunnel gateway message.
     ///
-    /// `TunnelGatewayMessage` will only be accepted by IBGWs.
+    /// `TunnelGateway` will only be accepted by IBGWs.
     fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &TunnelGatewayMessage,
+        tunnel_gateway: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)>;
 }
 
@@ -320,7 +321,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     .with_payload(&payload)
                     .build();
 
-                let msg = TunnelGatewayMessage {
+                let msg = TunnelGateway {
                     tunnel_id: next_tunnel_id.into(),
                     payload: &msg,
                 }
@@ -354,12 +355,12 @@ impl<R: Runtime> TransitTunnelManager<R> {
     /// Handle tunnel gateway message.
     pub fn handle_tunnel_gateway(
         &mut self,
-        message: &TunnelGatewayMessage,
+        message: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.tunnels
-            .get_mut(message.tunnel_id())
+            .get_mut(&message.tunnel_id)
             .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                *message.tunnel_id(),
+                message.tunnel_id,
             )))?
             .handle_tunnel_gateway(&message)
     }
@@ -525,10 +526,10 @@ mod tests {
 
         assert_eq!(message_type, MessageType::TunnelGateway);
 
-        let TunnelGatewayMessage {
+        let TunnelGateway {
             tunnel_id: recv_tunnel_id,
             payload,
-        } = TunnelGatewayMessage::parse(&payload).unwrap();
+        } = TunnelGateway::parse(&payload).unwrap();
 
         assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
 

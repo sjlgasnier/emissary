@@ -20,7 +20,8 @@ use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
     error::TunnelError,
     i2np::{
-        self, GarlicMessage, GarlicMessageBlock, Message, MessageBuilder, TunnelGatewayMessage,
+        self, tunnel::gateway::TunnelGateway, GarlicMessage, GarlicMessageBlock, Message,
+        MessageBuilder,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -165,7 +166,7 @@ impl<R: Runtime> GarlicHandler<R> {
                             .with_payload(&message_body)
                             .build();
 
-                        let message = TunnelGatewayMessage {
+                        let message = TunnelGateway {
                             tunnel_id: tunnel_id.into(),
                             payload: message_body,
                         }

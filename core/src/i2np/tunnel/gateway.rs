@@ -15,3 +15,58 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
+
+use crate::primitives::TunnelId;
+
+use bytes::{BufMut, BytesMut};
+use nom::{
+    bytes::complete::take,
+    number::complete::{be_u16, be_u32},
+    IResult,
+};
+
+use alloc::{vec, vec::Vec};
+
+/// Tunnel gateway message.
+pub struct TunnelGateway<'a> {
+    /// Tunnel ID.
+    pub tunnel_id: TunnelId,
+
+    /// Payload.
+    pub payload: &'a [u8],
+}
+
+impl<'a> TunnelGateway<'a> {
+    /// Attempt to parse `TunnelGateway` from `input`.
+    ///
+    /// Returns the parsed message and rest of `input` on success.
+    fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], TunnelGateway<'a>> {
+        let (rest, tunnel_id) = be_u32(input)?;
+        let (rest, size) = be_u16(rest)?;
+        let (rest, payload) = take(size as usize)(rest)?;
+
+        Ok((
+            rest,
+            TunnelGateway {
+                tunnel_id: TunnelId::from(tunnel_id),
+                payload,
+            },
+        ))
+    }
+
+    /// Attempt to parse `input` into `TunnelGateway`.
+    pub fn parse(input: &'a [u8]) -> Option<TunnelGateway<'a>> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    /// Serialize `TunnelGateway` into a byte vector.
+    pub fn serialize(self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(self.payload.len() + 2 + 4);
+
+        out.put_u32(*self.tunnel_id);
+        out.put_u16(self.payload.len() as u16);
+        out.put_slice(self.payload);
+
+        out.freeze().to_vec()
+    }
+}

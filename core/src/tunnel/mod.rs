@@ -20,8 +20,8 @@ use crate::{
     crypto::StaticPrivateKey,
     error::TunnelError,
     i2np::{
-        tunnel::data::EncryptedTunnelData, GarlicMessage, Message, MessageType,
-        TunnelGatewayMessage,
+        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        GarlicMessage, Message, MessageType,
     },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
@@ -318,7 +318,7 @@ impl<R: Runtime> TunnelManager<R> {
 
     /// Handle tunnel gateway message.
     fn on_tunnel_gateway(&mut self, message: Message) {
-        let Some(message) = TunnelGatewayMessage::parse(&message.payload) else {
+        let Some(message) = TunnelGateway::parse(&message.payload) else {
             tracing::warn!(
                 target: LOG_TARGET,
                 message_id = ?message.message_id,

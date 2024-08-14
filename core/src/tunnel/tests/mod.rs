@@ -19,8 +19,8 @@
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
     i2np::{
-        tunnel::{build::short, data},
-        Message, TunnelGatewayMessage,
+        tunnel::{build::short, data, gateway},
+        Message,
     },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
@@ -114,7 +114,7 @@ impl TestTransitTunnelManager {
 
     pub fn handle_tunnel_gateway(
         &mut self,
-        message: &TunnelGatewayMessage,
+        message: &gateway::TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.manager.handle_tunnel_gateway(message)
     }
@@ -160,10 +160,10 @@ pub fn build_outbound_tunnel(
             Message::parse_short(&message).unwrap()
         },
     );
-    let TunnelGatewayMessage {
+    let gateway::TunnelGateway {
         tunnel_id: recv_tunnel_id,
         payload,
-    } = TunnelGatewayMessage::parse(&message.payload).unwrap();
+    } = gateway::TunnelGateway::parse(&message.payload).unwrap();
 
     let message = Message::parse_standard(&payload).unwrap();
     let tunnel = pending_tunnel.try_build_tunnel(message).unwrap();

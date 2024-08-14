@@ -23,8 +23,11 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        tunnel::data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
-        HopRole, Message, MessageBuilder, MessageType, TunnelGatewayMessage,
+        tunnel::{
+            data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
+            gateway::TunnelGateway,
+        },
+        HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -210,7 +213,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
                             "fragment router delivery",
                         );
 
-                        let payload = TunnelGatewayMessage {
+                        let payload = TunnelGateway {
                             tunnel_id: TunnelId::from(tunnel_id),
                             payload: &message.message,
                         }
@@ -243,7 +246,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
 
     fn handle_tunnel_gateway(
         &mut self,
-        tunnel_gateway: &TunnelGatewayMessage,
+        tunnel_gateway: &TunnelGateway,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         Err(Error::Tunnel(TunnelError::MessageRejected(
             RejectionReason::NotSupported,

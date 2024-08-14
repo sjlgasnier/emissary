@@ -61,3 +61,9 @@ name = "tunnel_data"
 path = "fuzz_targets/tunnel_data.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "tunnel_gateway"
+path = "fuzz_targets/tunnel_gateway.rs"
+test = false
+doc = false
