@@ -153,5 +153,5 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle;
 
     /// Return future which blocks for `duration` before returning.
-    fn delay(duration: Duration) -> BoxFuture<'static, ()>;
+    fn delay(duration: Duration) -> impl Future<Output = ()> + Send;
 }

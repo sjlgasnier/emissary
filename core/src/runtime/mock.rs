@@ -197,7 +197,7 @@ impl Runtime for MockRuntime {
     }
 
     /// Return future which blocks for `duration` before returning.
-    fn delay(duration: Duration) -> BoxFuture<'static, ()> {
-        Box::pin(tokio::time::sleep(duration))
+    fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
+        tokio::time::sleep(duration)
     }
 }

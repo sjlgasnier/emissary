@@ -273,7 +273,7 @@ impl Runtime for TokioRuntime {
         TokioMetricsHandle {}
     }
 
-    fn delay(duration: Duration) -> BoxFuture<'static, ()> {
-        Box::pin(tokio::time::sleep(duration))
+    fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
+        tokio::time::sleep(duration)
     }
 }
