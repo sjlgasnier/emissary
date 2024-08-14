@@ -54,6 +54,7 @@ mod hop;
 mod metrics;
 mod new_noise;
 mod pool;
+mod routing_table;
 mod transit;
 
 #[cfg(test)]

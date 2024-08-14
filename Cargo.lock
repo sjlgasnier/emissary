@@ -633,6 +633,7 @@ dependencies = [
  "data-encoding",
  "ecb",
  "ed25519-dalek",
+ "futures-channel",
  "futures-util",
  "hashbrown",
  "hmac",

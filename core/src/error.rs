@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{MessageId, TunnelId};
+use crate::{
+    i2np::Message,
+    primitives::{MessageId, TunnelId},
+};
 
 use alloc::string::String;
 use core::fmt;
@@ -100,6 +103,54 @@ impl fmt::Display for TunnelError {
             Self::MessageRejected(reason) => write!(f, "message rejected, reason: {reason:?}"),
             Self::MessageDoesntExist(message_id) =>
                 write!(f, "message doesn't exist: {message_id}"),
+        }
+    }
+}
+
+/// Route kind for [`RoutingError::RouteNotFound`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum RouteKind {
+    /// Tunnel not found.
+    Tunnel(TunnelId),
+
+    /// Listener for message not found.
+    Message(MessageId),
+}
+
+impl fmt::Display for RouteKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tunnel(tunnel_id) => write!(f, "{tunnel_id:?}"),
+            Self::Message(message_id) => write!(f, "{message_id:?}"),
+        }
+    }
+}
+
+/// Message routing error.
+#[derive(Debug)]
+pub enum RoutingError {
+    /// Route not found.
+    RouteNotFound(Message, RouteKind),
+
+    /// Failed to parse route from message.
+    ///
+    /// Message is invalid and doesn't contain a route.
+    FailedToParseRoute(Message),
+
+    /// Channel full.
+    ChannelFull(Message),
+
+    /// Channel closed.
+    ChannelClosed(Message),
+}
+
+impl fmt::Display for RoutingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RouteNotFound(_, route) => write!(f, "route not found: {route}"),
+            Self::FailedToParseRoute(message) => write!(f, "failed to parse route"),
+            Self::ChannelFull(_) => write!(f, "channel full"),
+            Self::ChannelClosed(_) => write!(f, "channel closed"),
         }
     }
 }

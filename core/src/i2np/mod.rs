@@ -393,6 +393,17 @@ pub struct Message {
     pub payload: Vec<u8>,
 }
 
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            message_type: MessageType::Data,
+            message_id: 0u32,
+            expiration: 0u64,
+            payload: Vec::new(),
+        }
+    }
+}
+
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Message")
