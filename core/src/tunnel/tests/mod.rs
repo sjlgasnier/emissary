@@ -18,7 +18,10 @@
 
 use crate::{
     crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
-    i2np::{tunnel::build::short, EncryptedTunnelData, Message, TunnelGatewayMessage},
+    i2np::{
+        tunnel::{build::short, data},
+        Message, TunnelGatewayMessage,
+    },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
@@ -104,7 +107,7 @@ impl TestTransitTunnelManager {
     /// Handle tunnel data.
     pub fn handle_tunnel_data(
         &mut self,
-        message: &EncryptedTunnelData,
+        message: &data::EncryptedTunnelData,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         self.manager.handle_tunnel_data(message)
     }

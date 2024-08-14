@@ -18,7 +18,10 @@
 
 use crate::{
     error::TunnelError,
-    i2np::{EncryptedTunnelData, Message, MessageBuilder, MessageType, TunnelGatewayMessage},
+    i2np::{
+        tunnel::data::EncryptedTunnelData, Message, MessageBuilder, MessageType,
+        TunnelGatewayMessage,
+    },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::Runtime,

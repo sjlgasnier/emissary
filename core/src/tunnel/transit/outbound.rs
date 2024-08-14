@@ -23,8 +23,8 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        DeliveryInstruction, EncryptedTunnelData, HopRole, Message, MessageBuilder, MessageKind,
-        MessageType, TunnelData, TunnelGatewayMessage,
+        tunnel::data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
+        HopRole, Message, MessageBuilder, MessageType, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -165,7 +165,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
             } = message.message_kind
             {
                 match delivery_instructions {
-                    DeliveryInstruction::Router { hash } => {
+                    DeliveryInstructions::Router { hash } => {
                         let Message {
                             message_type,
                             message_id,
@@ -199,7 +199,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
 
                         return Ok((router, message));
                     }
-                    DeliveryInstruction::Tunnel { hash, tunnel_id } => {
+                    DeliveryInstructions::Tunnel { hash, tunnel_id } => {
                         let router = RouterId::from(hash);
 
                         tracing::trace!(
@@ -227,7 +227,7 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
 
                         return Ok((RouterId::from(hash), message));
                     }
-                    DeliveryInstruction::Local => tracing::warn!(
+                    DeliveryInstructions::Local => tracing::warn!(
                         target: LOG_TARGET,
                         tunnel_id = %self.tunnel_id,
                         "local delivery not supported",

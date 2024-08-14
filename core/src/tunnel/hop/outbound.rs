@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::aes::{cbc, ecb},
-    i2np::{HopRole, Message, MessageBuilder, MessageType, TunnelDataBuilder},
+    i2np::{tunnel::data::TunnelDataBuilder, HopRole, Message, MessageBuilder, MessageType},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
@@ -83,11 +83,12 @@ impl OutboundTunnel {
 
         // hop must exist since the tunnel is created by us
         let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let router: Vec<u8> = router.into();
 
         tracing::error!("next hop tunnel id = {}", next_hop.tunnel_id);
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
-            .with_tunnel_delivery(router.into(), gateway, &message)
+            .with_tunnel_delivery(&router, gateway, &message)
             .build::<R>();
 
         // iterative decrypt the tunnel data message and aes iv
@@ -168,7 +169,7 @@ impl Tunnel for OutboundTunnel {
 mod tests {
     use super::*;
     use crate::{
-        i2np::{EncryptedTunnelData, TunnelGatewayMessage},
+        i2np::{tunnel::data::EncryptedTunnelData, TunnelGatewayMessage},
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
     };

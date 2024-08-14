@@ -19,7 +19,10 @@
 use crate::{
     crypto::StaticPrivateKey,
     error::TunnelError,
-    i2np::{EncryptedTunnelData, GarlicMessage, MessageType, Message, TunnelGatewayMessage},
+    i2np::{
+        tunnel::data::EncryptedTunnelData, GarlicMessage, Message, MessageType,
+        TunnelGatewayMessage,
+    },
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     router_storage::RouterStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},

@@ -49,3 +49,15 @@ name = "i2np_message"
 path = "fuzz_targets/i2np_message.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "tunnel_data_builder"
+path = "fuzz_targets/tunnel_data_builder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tunnel_data"
+path = "fuzz_targets/tunnel_data.rs"
+test = false
+doc = false

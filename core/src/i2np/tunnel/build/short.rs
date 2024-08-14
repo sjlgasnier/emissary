@@ -173,6 +173,9 @@ pub struct TunnelBuildRecord {
 }
 
 impl TunnelBuildRecord {
+    /// Attempt to parse [`TunnelBuildRecord`] from `input`.
+    ///
+    /// Returns the parsed record and rest of `input` on success.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Self> {
         let (rest, tunnel_id) = be_u32(input)?;
         let (rest, next_tunnel_id) = be_u32(rest)?;

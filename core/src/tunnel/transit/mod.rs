@@ -25,8 +25,11 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        tunnel::build::{short, variable},
-        EncryptedTunnelData, HopRole, Message, MessageBuilder, MessageType, TunnelGatewayMessage,
+        tunnel::{
+            build::{short, variable},
+            data::EncryptedTunnelData,
+        },
+        HopRole, Message, MessageBuilder, MessageType, TunnelGatewayMessage,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,

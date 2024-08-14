@@ -22,7 +22,10 @@ use crate::{
         sha256::Sha256,
     },
     error::{RejectionReason, TunnelError},
-    i2np::{EncryptedTunnelData, HopRole, MessageBuilder, MessageType, TunnelGatewayMessage},
+    i2np::{
+        tunnel::data::EncryptedTunnelData, HopRole, MessageBuilder, MessageType,
+        TunnelGatewayMessage,
+    },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{new_noise::TunnelKeys, transit::TransitTunnel},
