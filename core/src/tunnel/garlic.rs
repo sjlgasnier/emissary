@@ -20,8 +20,11 @@ use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
     error::TunnelError,
     i2np::{
-        self, tunnel::gateway::TunnelGateway, GarlicMessage, GarlicMessageBlock, Message,
-        MessageBuilder,
+        garlic::{
+            DeliveryInstructions as CloveDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
+        },
+        tunnel::gateway::TunnelGateway,
+        Message, MessageBuilder,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -140,7 +143,7 @@ impl<R: Runtime> GarlicHandler<R> {
                     delivery_instructions,
                     message_body,
                 } => match delivery_instructions {
-                    i2np::DeliveryInstructions::Local => Some(DeliveryInstructions::Local {
+                    CloveDeliveryInstructions::Local => Some(DeliveryInstructions::Local {
                         message: Message {
                             message_type,
                             message_id,
@@ -148,7 +151,7 @@ impl<R: Runtime> GarlicHandler<R> {
                             payload: message_body.to_vec(), // TODO: is this really needed
                         },
                     }),
-                    i2np::DeliveryInstructions::Router { hash } =>
+                    CloveDeliveryInstructions::Router { hash } =>
                         Some(DeliveryInstructions::Router {
                             router: RouterId::from(hash),
                             message: MessageBuilder::short()
@@ -158,7 +161,7 @@ impl<R: Runtime> GarlicHandler<R> {
                                 .with_payload(&message_body)
                                 .build(),
                         }),
-                    i2np::DeliveryInstructions::Tunnel { hash, tunnel_id } => {
+                    CloveDeliveryInstructions::Tunnel { hash, tunnel_id } => {
                         let message = MessageBuilder::standard()
                             .with_message_type(message_type)
                             .with_message_id(message_id)
@@ -186,7 +189,7 @@ impl<R: Runtime> GarlicHandler<R> {
                                 .build(),
                         })
                     }
-                    i2np::DeliveryInstructions::Destination { hash } => {
+                    CloveDeliveryInstructions::Destination { hash } => {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?hash,

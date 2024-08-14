@@ -23,8 +23,9 @@ use crate::{
     },
     error::TunnelError,
     i2np::{
-        tunnel::build::short, GarlicMessage, GarlicMessageBlock, HopRole, Message, MessageBuilder,
-        MessageType,
+        garlic::{GarlicMessage, GarlicMessageBlock},
+        tunnel::build::short,
+        HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
