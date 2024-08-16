@@ -61,7 +61,7 @@ pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
 }
 
-pub trait JoinSet<T>: Stream<Item = T> + Unpin {
+pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
     /// Returns whether the `JoinSet` is empty.
     fn is_empty(&self) -> bool;
 

@@ -33,21 +33,27 @@ use crate::{
         HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
-    runtime::Runtime,
+    runtime::{JoinSet, Runtime},
     tunnel::{
         new_noise::{NoiseContext, TunnelKeys},
+        routing_table::RoutingTable,
         transit::{inbound::InboundGateway, outbound::OutboundEndpoint, participant::Participant},
     },
     Error,
 };
 
 use bytes::Bytes;
+use futures::StreamExt;
 use hashbrown::HashMap;
 use rand_core::RngCore;
+use thingbuf::mpsc::{channel, Receiver};
 
 use alloc::{boxed::Box, vec::Vec};
 use core::{
+    future::Future,
     ops::{Range, RangeFrom},
+    pin::Pin,
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -70,54 +76,62 @@ const PUBLIC_KEY_OFFSET: Range<usize> = 16..48;
 /// Start offset for the build request record payload.
 const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 
+/// Tunnel expiration, 10 minutes.
+const TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60);
+
 /// Common interface for transit tunnels.
-pub trait TransitTunnel: Send {
+pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {
+    /// Create new [`TransitTunnel`].
+    fn new(
+        tunnel_id: TunnelId,
+        next_tunnel_id: TunnelId,
+        next_router: RouterId,
+        tunnel_keys: TunnelKeys,
+        routing_table: RoutingTable,
+        metrics_handle: R::MetricsHandle,
+        message_rx: Receiver<Message>,
+    ) -> Self;
+
     /// Get role of the transit tunnel hop.
     fn role(&self) -> HopRole;
-
-    /// Handle tunnel data.
-    ///
-    /// Return `RouterId` of the next hop and the message that
-    /// needs to be forwarded to them on success.
-    ///
-    /// `EncryptedTunnelData` will only be accepted by OBEPs and participants.
-    fn handle_tunnel_data(
-        &mut self,
-        tunnel_data: &EncryptedTunnelData,
-    ) -> crate::Result<(RouterId, Vec<u8>)>;
-
-    /// Handle tunnel gateway message.
-    ///
-    /// `TunnelGateway` will only be accepted by IBGWs.
-    fn handle_tunnel_gateway(
-        &mut self,
-        tunnel_gateway: &TunnelGateway,
-    ) -> crate::Result<(RouterId, Vec<u8>)>;
 }
 
 /// Transit tunnel manager.
 pub struct TransitTunnelManager<R: Runtime> {
+    /// RX channel for receiving messages from `TunnelManager`.
+    message_rx: Receiver<Message>,
+
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
 
     /// Noise context.
     noise: NoiseContext,
 
-    /// Transit tunnels.
-    tunnels: HashMap<TunnelId, Box<dyn TransitTunnel>>,
+    /// Routing table.
+    routing_table: RoutingTable,
+
+    /// Active transit tunnels.
+    tunnels: R::JoinSet<TunnelId>,
 }
 
 impl<R: Runtime> TransitTunnelManager<R> {
     /// Create new [`TransitTunnelManager`].
-    pub fn new(noise: NoiseContext, metrics_handle: R::MetricsHandle) -> Self {
+    pub fn new(
+        noise: NoiseContext,
+        routing_table: RoutingTable,
+        message_rx: Receiver<Message>,
+        metrics_handle: R::MetricsHandle,
+    ) -> Self {
         Self {
-            noise,
+            message_rx,
             metrics_handle,
-            tunnels: HashMap::new(),
+            noise,
+            routing_table,
+            tunnels: R::join_set(),
         }
     }
 
-    /// Return mutable reference to local build record and its index the build request messages.
+    /// Return mutable reference to local build record and its index in the build request message.
     fn find_local_record<'a, const RECORD_SIZE: usize>(
         &self,
         payload: &'a mut [u8],
@@ -130,6 +144,29 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     .find(|(i, chunk)| &chunk[..16] == &self.noise.local_router_hash()[..16])
             })
             .flatten()
+    }
+
+    /// Start tunnel event loop.
+    fn spawn_tunnel<T: TransitTunnel<R> + 'static>(
+        &mut self,
+        tunnel_id: TunnelId,
+        next_tunnel_id: TunnelId,
+        next_router: RouterId,
+        tunnel_keys: TunnelKeys,
+    ) {
+        let (tx, rx) = channel(32);
+        let tunnel = T::new(
+            tunnel_id,
+            next_tunnel_id,
+            next_router,
+            tunnel_keys,
+            self.routing_table.clone(),
+            self.metrics_handle.clone(),
+            rx,
+        );
+
+        self.routing_table.add_tunnel(tunnel_id, tx);
+        self.tunnels.push(tunnel);
     }
 
     /// Handle variable tunnel build request.
@@ -204,10 +241,40 @@ impl<R: Runtime> TransitTunnelManager<R> {
         record[511] = 0x00; // accept
 
         session.encrypt_build_record(&mut record);
-        session.finalize(
-            build_record.tunnel_layer_key().to_vec(),
-            build_record.tunnel_iv_key().to_vec(),
-        );
+
+        // start tunnel event loop
+        //
+        // an accepted tunnel must be maintained for 10 minutes as we won't know
+        // if another participant of the tunnel rejected it
+        match role {
+            HopRole::InboundGateway => self.spawn_tunnel::<InboundGateway<R>>(
+                tunnel_id,
+                next_tunnel_id,
+                next_router.clone(),
+                session.finalize(
+                    build_record.tunnel_layer_key().to_vec(),
+                    build_record.tunnel_iv_key().to_vec(),
+                )?,
+            ),
+            HopRole::Participant => self.spawn_tunnel::<Participant<R>>(
+                tunnel_id,
+                next_tunnel_id,
+                next_router.clone(),
+                session.finalize(
+                    build_record.tunnel_layer_key().to_vec(),
+                    build_record.tunnel_iv_key().to_vec(),
+                )?,
+            ),
+            HopRole::OutboundEndpoint => self.spawn_tunnel::<OutboundEndpoint<R>>(
+                tunnel_id,
+                next_tunnel_id,
+                next_router.clone(),
+                session.finalize(
+                    build_record.tunnel_layer_key().to_vec(),
+                    build_record.tunnel_iv_key().to_vec(),
+                )?,
+            ),
+        }
 
         let message = MessageBuilder::short()
             .with_message_type(MessageType::VariableTunnelBuildReply)
@@ -274,29 +341,30 @@ impl<R: Runtime> TransitTunnelManager<R> {
         session.create_tunnel_keys(role)?;
         session.encrypt_build_records(&mut payload, record_idx)?;
 
-        self.tunnels.insert(
-            tunnel_id,
-            match role {
-                HopRole::InboundGateway => Box::new(InboundGateway::<R>::new(
-                    tunnel_id,
-                    next_tunnel_id,
-                    next_router.clone(),
-                    session.finalize()?,
-                )),
-                HopRole::Participant => Box::new(Participant::<R>::new(
-                    tunnel_id,
-                    next_tunnel_id,
-                    next_router.clone(),
-                    session.finalize()?,
-                )),
-                HopRole::OutboundEndpoint => Box::new(OutboundEndpoint::<R>::new(
-                    tunnel_id,
-                    next_tunnel_id,
-                    next_router.clone(),
-                    session.finalize()?,
-                )),
-            },
-        );
+        // start tunnel event loop
+        //
+        // an accepted tunnel must be maintained for 10 minutes as we won't know
+        // if another participant of the tunnel rejected it
+        match role {
+            HopRole::InboundGateway => self.spawn_tunnel::<InboundGateway<R>>(
+                tunnel_id,
+                next_tunnel_id,
+                next_router.clone(),
+                session.finalize()?,
+            ),
+            HopRole::Participant => self.spawn_tunnel::<Participant<R>>(
+                tunnel_id,
+                next_tunnel_id,
+                next_router.clone(),
+                session.finalize()?,
+            ),
+            HopRole::OutboundEndpoint => self.spawn_tunnel::<OutboundEndpoint<R>>(
+                tunnel_id,
+                next_tunnel_id,
+                next_router.clone(),
+                session.finalize()?,
+            ),
+        }
 
         match role {
             // IBGWs and participants just forward the build request as-is to the next hop
@@ -338,31 +406,50 @@ impl<R: Runtime> TransitTunnelManager<R> {
             }
         }
     }
+}
 
-    /// Handle tunnel data.
-    pub fn handle_tunnel_data<'a>(
-        &mut self,
-        message: &'a EncryptedTunnelData<'a>,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        self.tunnels
-            .get_mut(&message.tunnel_id())
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                message.tunnel_id(),
-            )))?
-            .handle_tunnel_data(message)
-    }
+impl<R: Runtime> Future for TransitTunnelManager<R> {
+    type Output = ();
 
-    /// Handle tunnel gateway message.
-    pub fn handle_tunnel_gateway(
-        &mut self,
-        message: &TunnelGateway,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        self.tunnels
-            .get_mut(&message.tunnel_id)
-            .ok_or(Error::Tunnel(TunnelError::TunnelDoesntExist(
-                message.tunnel_id,
-            )))?
-            .handle_tunnel_gateway(&message)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
+            let result = match event {
+                None => return Poll::Ready(()),
+                Some(message) => match message.message_type {
+                    MessageType::ShortTunnelBuild => self.handle_short_tunnel_build(message),
+                    MessageType::VariableTunnelBuild => self.handle_variable_tunnel_build(message),
+                    message_type => todo!("{message_type:?} not supported"),
+                },
+            };
+
+            match result {
+                Ok((router, message)) =>
+                    if let Err(error) = self.routing_table.send_message(router, message) {
+                        tracing::error!(target: LOG_TARGET, ?error, "failed to send message");
+                    },
+                Err(error) => tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to handle message",
+                ),
+            }
+        }
+
+        while let Poll::Ready(event) = self.tunnels.poll_next_unpin(cx) {
+            match event {
+                None => return Poll::Ready(()),
+                Some(tunnel_id) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        %tunnel_id,
+                        "transit tunnel expired",
+                    );
+                    self.routing_table.remove_tunnel(&tunnel_id);
+                }
+            }
+        }
+
+        Poll::Pending
     }
 }
 
@@ -381,9 +468,10 @@ mod tests {
             tests::make_router,
         },
     };
+    use thingbuf::mpsc::{channel, Sender};
 
-    #[test]
-    fn accept_tunnel_build_request_participant() {
+    #[tokio::test]
+    async fn accept_tunnel_build_request_participant() {
         let handle = MockRuntime::register_metrics(vec![]);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
@@ -392,9 +480,19 @@ mod tests {
             .map(|_| make_router())
             .into_iter()
             .map(|(router_hash, pk, noise_context)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();
@@ -416,15 +514,10 @@ mod tests {
         let mut message = Message::parse_short(&message).unwrap();
 
         assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
-        assert_eq!(transit_managers[0].tunnels.len(), 1);
-        assert_eq!(
-            transit_managers[0].tunnels.iter().next().map(|(_, tunnel)| tunnel.role()),
-            Some(HopRole::Participant)
-        );
     }
 
-    #[test]
-    fn accept_tunnel_build_request_ibgw() {
+    #[tokio::test]
+    async fn accept_tunnel_build_request_ibgw() {
         let handle = MockRuntime::register_metrics(vec![]);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
@@ -433,9 +526,19 @@ mod tests {
             .map(|_| make_router())
             .into_iter()
             .map(|(router_hash, pk, noise_context)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();
@@ -457,15 +560,10 @@ mod tests {
         let mut message = Message::parse_short(&message).unwrap();
 
         assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
-        assert_eq!(transit_managers[0].tunnels.len(), 1);
-        assert_eq!(
-            transit_managers[0].tunnels.iter().next().map(|(_, tunnel)| tunnel.role()),
-            Some(HopRole::InboundGateway)
-        );
     }
 
-    #[test]
-    fn accept_tunnel_build_request_obep() {
+    #[tokio::test]
+    async fn accept_tunnel_build_request_obep() {
         let handle = MockRuntime::register_metrics(vec![]);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
@@ -474,9 +572,19 @@ mod tests {
             .map(|_| make_router())
             .into_iter()
             .map(|(router_hash, pk, noise_context)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();
@@ -500,22 +608,11 @@ mod tests {
             |message, i| {
                 let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
 
-                assert_eq!(transit_managers[i].tunnels.len(), 1);
-                assert_eq!(
-                    transit_managers[i].tunnels.iter().next().map(|(_, tunnel)| tunnel.role()),
-                    Some(HopRole::Participant)
-                );
-
                 Message::parse_short(&msg).unwrap()
             },
         );
 
         let (_, msg) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
-        assert_eq!(transit_managers[2].tunnels.len(), 1);
-        assert_eq!(
-            transit_managers[2].tunnels.iter().next().map(|(_, tunnel)| tunnel.role()),
-            Some(HopRole::OutboundEndpoint)
-        );
 
         let Message {
             message_type,
@@ -554,9 +651,19 @@ mod tests {
             .map(|_| make_router())
             .into_iter()
             .map(|(router_hash, pk, noise_context)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();
@@ -571,7 +678,7 @@ mod tests {
                 noise: local_noise,
                 message_id,
                 tunnel_id,
-                our_hash: local_hash,
+                our_hash: local_hash.clone(),
             })
             .unwrap();
 
@@ -579,7 +686,15 @@ mod tests {
 
         // make new router which is not part of the tunnel build request
         let (_, _, noise) = make_router();
-        let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(noise, handle.clone());
+        let (transit_tx, transit_rx) = channel(16);
+        let (manager_tx, manager_rx) = channel(16);
+        let routing_table = RoutingTable::new(RouterId::from(&local_hash), manager_tx, transit_tx);
+        let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
+            noise,
+            routing_table,
+            transit_rx,
+            handle.clone(),
+        );
 
         match transit_manager.handle_short_tunnel_build(message).unwrap_err() {
             Error::Tunnel(TunnelError::RecordNotFound) => {}
@@ -597,9 +712,19 @@ mod tests {
             .map(|_| make_router())
             .into_iter()
             .map(|(router_hash, pk, noise_context)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();

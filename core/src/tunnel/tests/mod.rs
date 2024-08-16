@@ -30,12 +30,21 @@ use crate::{
             TunnelBuildParameters,
         },
         new_noise::NoiseContext,
+        routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
 };
 
 use bytes::Bytes;
+use futures::FutureExt;
 use rand_core::RngCore;
+use thingbuf::mpsc::{channel, Receiver, Sender};
+
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 /// Make new router.
 pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
@@ -52,32 +61,47 @@ pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
     (router_hash.clone(), pk, NoiseContext::new(sk, router_hash))
 }
 
+/// [`TransitTunnelManager`] for testing.
 pub struct TestTransitTunnelManager {
     /// Transit tunnel manager.
     manager: TransitTunnelManager<MockRuntime>,
 
-    /// Router hash.
-    router_hash: Bytes,
+    /// RX channel for receiving messages from local tunnels.
+    message_rx: Receiver<(RouterId, Vec<u8>)>,
 
     /// Static public key.
     public_key: StaticPublicKey,
 
     /// Router ID.
     router: RouterId,
+
+    /// Router hash.
+    router_hash: Bytes,
+
+    /// Routing table.
+    routing_table: RoutingTable,
 }
 
 impl TestTransitTunnelManager {
     pub fn new() -> Self {
         let (router_hash, public_key, noise) = make_router();
+        let (transit_tx, transit_rx) = channel(64);
+        let (message_tx, message_rx) = channel(64);
+        let routing_table =
+            RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
 
         Self {
-            router_hash: router_hash.clone(),
-            router: RouterId::from(router_hash),
-            public_key,
             manager: TransitTunnelManager::<MockRuntime>::new(
                 noise,
+                routing_table.clone(),
+                transit_rx,
                 MockRuntime::register_metrics(vec![]),
             ),
+            message_rx,
+            public_key,
+            router_hash: router_hash.clone(),
+            router: RouterId::from(router_hash),
+            routing_table,
         }
     }
 
@@ -104,19 +128,22 @@ impl TestTransitTunnelManager {
         self.manager.handle_short_tunnel_build(message)
     }
 
-    /// Handle tunnel data.
-    pub fn handle_tunnel_data(
-        &mut self,
-        message: &data::EncryptedTunnelData,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        self.manager.handle_tunnel_data(message)
+    /// Get mutable reference to the message RX channel.
+    pub fn message_rx(&mut self) -> &mut Receiver<(RouterId, Vec<u8>)> {
+        &mut self.message_rx
     }
 
-    pub fn handle_tunnel_gateway(
-        &mut self,
-        message: &gateway::TunnelGateway,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        self.manager.handle_tunnel_gateway(message)
+    /// Get reference to [`RoutingTable`].
+    pub fn routing_table(&self) -> &RoutingTable {
+        &self.routing_table
+    }
+}
+
+impl Future for TestTransitTunnelManager {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.manager.poll_unpin(cx)
     }
 }
 

@@ -85,8 +85,6 @@ impl OutboundTunnel {
         let next_hop = self.hops.iter().next().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
-        tracing::error!("next hop tunnel id = {}", next_hop.tunnel_id);
-
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(&router, gateway, &message)
             .build::<R>();
@@ -112,7 +110,6 @@ impl OutboundTunnel {
         message[20..].copy_from_slice(&ciphertext);
 
         let message_id = R::rng().next_u32();
-        tracing::error!("outer message id = {message_id}");
 
         let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
@@ -173,10 +170,9 @@ mod tests {
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
     };
-    use tracing_subscriber::prelude::*;
 
-    #[test]
-    fn send_tunnel_message() {
+    #[tokio::test]
+    async fn send_tunnel_message() {
         let (local_outbound_hash, mut outbound, mut outbound_transit) =
             build_outbound_tunnel(2usize);
         let (local_inbound_hash, mut inbound, mut inbound_transit) = build_inbound_tunnel(2usize);
@@ -192,35 +188,46 @@ mod tests {
 
         // first outbound hop (participant)
         let message = Message::parse_short(&message).unwrap();
-        let message = EncryptedTunnelData::parse(&message.payload).unwrap();
-        let (next_router, message) = outbound_transit[0].handle_tunnel_data(&message).unwrap();
+        assert!(outbound_transit[0].routing_table().route_message(message).is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut outbound_transit[0])
+                .await
+                .is_err()
+        );
+        let (next_router, message) = outbound_transit[0].message_rx().try_recv().unwrap();
         assert_eq!(outbound_transit[1].router(), next_router);
 
         // second outbound hop (obep)
         let message = Message::parse_short(&message).unwrap();
-        let message = EncryptedTunnelData::parse(&message.payload).unwrap();
-        let (next_router, message) = outbound_transit[1].handle_tunnel_data(&message).unwrap();
+        assert!(outbound_transit[1].routing_table().route_message(message).is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut outbound_transit[1])
+                .await
+                .is_err()
+        );
+        let (next_router, message) = outbound_transit[1].message_rx().try_recv().unwrap();
         assert_eq!(inbound_transit[0].router(), next_router);
 
         // first inbound hop (ibgw)
-        let Some(Message {
-            message_type: MessageType::TunnelGateway,
-            message_id,
-            expiration,
-            payload,
-        }) = Message::parse_short(&message)
-        else {
-            panic!("invalid message");
-        };
-
-        let message = TunnelGateway::parse(&payload).unwrap();
-        let (next_router, message) = inbound_transit[0].handle_tunnel_gateway(&message).unwrap();
+        let message = Message::parse_short(&message).unwrap();
+        assert!(inbound_transit[0].routing_table().route_message(message).is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut inbound_transit[0])
+                .await
+                .is_err()
+        );
+        let (next_router, message) = inbound_transit[0].message_rx().try_recv().unwrap();
         assert_eq!(inbound_transit[1].router(), next_router);
 
         // second inbound hop (participant)
         let message = Message::parse_short(&message).unwrap();
-        let message = EncryptedTunnelData::parse(&message.payload).unwrap();
-        let (next_router, message) = inbound_transit[1].handle_tunnel_data(&message).unwrap();
+        assert!(inbound_transit[1].routing_table().route_message(message).is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut inbound_transit[1])
+                .await
+                .is_err()
+        );
+        let (next_router, message) = inbound_transit[1].message_rx().try_recv().unwrap();
         assert_eq!(RouterId::from(local_inbound_hash), next_router);
 
         // inbound endpoint

@@ -31,52 +31,58 @@ use crate::{
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::{new_noise::TunnelKeys, transit::TransitTunnel},
+    tunnel::{
+        new_noise::TunnelKeys,
+        routing_table::RoutingTable,
+        transit::{TransitTunnel, TUNNEL_EXPIRATION},
+    },
     Error,
 };
 
+use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 
-use alloc::vec::Vec;
-use core::{marker::PhantomData, time::Duration};
+use alloc::{boxed::Box, vec::Vec};
+use core::{
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
+use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::transit::obep";
 
 /// Outbound endpoint.
 pub struct OutboundEndpoint<R: Runtime> {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-    /// Next tunnel ID.
-    next_tunnel_id: TunnelId,
+    /// Tunnel expiration timer.
+    expiration_timer: BoxFuture<'static, ()>,
+
+    /// RX channel for receiving messages.
+    message_rx: Receiver<Message>,
+
+    /// Metrics handle.
+    metrics_handle: R::MetricsHandle,
 
     /// Next router ID.
     next_router: RouterId,
 
+    /// Next tunnel ID.
+    next_tunnel_id: TunnelId,
+
+    /// Routing table.
+    routing_table: RoutingTable,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
+
     /// Tunnel keys.
     tunnel_keys: TunnelKeys,
-
-    /// Marker for `Runtime`.
-    _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> OutboundEndpoint<R> {
-    /// Create new [`OutboundEndpoint`].
-    pub fn new(
-        tunnel_id: TunnelId,
-        next_tunnel_id: TunnelId,
-        next_router: RouterId,
-        tunnel_keys: TunnelKeys,
-    ) -> Self {
-        OutboundEndpoint {
-            tunnel_id,
-            next_tunnel_id,
-            next_router,
-            tunnel_keys,
-            _marker: Default::default(),
-        }
-    }
-
     /// Find paylod start by locating the 0x00 byte at the end of the padding section and verify
     /// the checksum of the message before returning the index where the payload section starts.
     ///
@@ -129,13 +135,11 @@ impl<R: Runtime> OutboundEndpoint<R> {
 
         Ok(payload_start)
     }
-}
 
-impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
-    fn role(&self) -> HopRole {
-        HopRole::OutboundEndpoint
-    }
-
+    /// Handle tunnel data.
+    ///
+    /// Return `RouterId` of the next hop and the message that needs to be forwarded
+    /// to them on success.
     fn handle_tunnel_data(
         &mut self,
         tunnel_data: &EncryptedTunnelData,
@@ -243,13 +247,87 @@ impl<R: Runtime> TransitTunnel for OutboundEndpoint<R> {
             RejectionReason::NotSupported,
         )))
     }
+}
 
-    fn handle_tunnel_gateway(
-        &mut self,
-        tunnel_gateway: &TunnelGateway,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        Err(Error::Tunnel(TunnelError::MessageRejected(
-            RejectionReason::NotSupported,
-        )))
+impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
+    /// Create new [`OutboundEndpoint`].
+    fn new(
+        tunnel_id: TunnelId,
+        next_tunnel_id: TunnelId,
+        next_router: RouterId,
+        tunnel_keys: TunnelKeys,
+        routing_table: RoutingTable,
+        metrics_handle: R::MetricsHandle,
+        message_rx: Receiver<Message>,
+    ) -> Self {
+        OutboundEndpoint {
+            expiration_timer: Box::pin(R::delay(TUNNEL_EXPIRATION)),
+            message_rx,
+            metrics_handle,
+            next_router,
+            next_tunnel_id,
+            routing_table,
+            tunnel_id,
+            tunnel_keys,
+        }
+    }
+
+    fn role(&self) -> HopRole {
+        HopRole::OutboundEndpoint
+    }
+}
+
+impl<R: Runtime> Future for OutboundEndpoint<R> {
+    type Output = TunnelId;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
+            match event {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel_id = %self.tunnel_id,
+                        "message channel closed",
+                    );
+                    return Poll::Ready(self.tunnel_id);
+                }
+                Some(message) => match message.message_type {
+                    MessageType::TunnelData => match EncryptedTunnelData::parse(&message.payload) {
+                        Some(message) => match self.handle_tunnel_data(&message) {
+                            Ok((router, message)) => {
+                                if let Err(error) = self.routing_table.send_message(router, message)
+                                {
+                                    tracing::error!(
+                                        target: LOG_TARGET,
+                                        tunnel_id = %self.tunnel_id,
+                                        ?error,
+                                        "failed to send message",
+                                    )
+                                }
+                            }
+                            Err(error) => tracing::warn!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                ?error,
+                                "failed to handle tunnel data",
+                            ),
+                        },
+                        None => todo!(),
+                    },
+                    message_type => tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel_id = %self.tunnel_id,
+                        ?message_type,
+                        "unsupported message",
+                    ),
+                },
+            }
+        }
+
+        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+            return Poll::Ready(self.tunnel_id);
+        }
+
+        Poll::Pending
     }
 }

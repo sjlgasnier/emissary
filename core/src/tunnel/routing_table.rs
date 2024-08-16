@@ -27,18 +27,18 @@ use crate::{
 
 use futures_channel::oneshot;
 use hashbrown::HashMap;
-use thingbuf::mpsc::{errors, Receiver, Sender};
+use thingbuf::mpsc::{self, errors::TrySendError};
 
 #[cfg(feature = "std")]
 use parking_lot::RwLock;
 #[cfg(feature = "no_std")]
 use spin::rwlock::RwLock;
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 /// Routing table.
 #[derive(Debug, Clone)]
-struct RoutingTable {
+pub struct RoutingTable {
     /// Local router ID.
     router_hash: RouterId,
 
@@ -46,21 +46,21 @@ struct RoutingTable {
     listeners: Arc<RwLock<HashMap<MessageId, oneshot::Sender<Message>>>>,
 
     /// Active tunnels.
-    tunnels: Arc<RwLock<HashMap<TunnelId, Sender<Message>>>>,
+    tunnels: Arc<RwLock<HashMap<TunnelId, mpsc::Sender<Message>>>>,
 
     /// TX channel for sending inbound messages to `TransitTunnelManager`.
-    transit: Sender<Message>,
+    transit: mpsc::Sender<Message>,
 
     /// TX channel for sending outbound messages to `TunnelManager`.
-    manager: Sender<(RouterId, Vec<u8>)>,
+    manager: mpsc::Sender<(RouterId, Vec<u8>)>,
 }
 
 impl RoutingTable {
     /// Create new [`RoutingTable`].
     pub fn new(
         router_hash: RouterId,
-        manager: Sender<(RouterId, Vec<u8>)>,
-        transit: Sender<Message>,
+        manager: mpsc::Sender<(RouterId, Vec<u8>)>,
+        transit: mpsc::Sender<Message>,
     ) -> Self {
         Self {
             transit,
@@ -74,7 +74,7 @@ impl RoutingTable {
     /// Add tunnel to routing table.
     ///
     /// This can either be a transit tunnel or a tunnel of one of the tunnel pols
-    pub fn add_tunnel(&self, tunnel_id: TunnelId, sender: Sender<Message>) {
+    pub fn add_tunnel(&self, tunnel_id: TunnelId, sender: mpsc::Sender<Message>) {
         self.tunnels.write().insert(tunnel_id, sender);
     }
 
@@ -125,8 +125,8 @@ impl RoutingTable {
         };
 
         sender.try_send(message).map_err(|error| match error {
-            errors::TrySendError::Full(message) => RoutingError::ChannelFull(message),
-            errors::TrySendError::Closed(message) => RoutingError::ChannelClosed(message),
+            TrySendError::Full(message) => RoutingError::ChannelFull(message),
+            TrySendError::Closed(message) => RoutingError::ChannelClosed(message),
             _ => unreachable!(),
         })
     }
@@ -144,8 +144,8 @@ impl RoutingTable {
                 drop(listeners);
 
                 self.transit.try_send(message).map_err(|error| match error {
-                    errors::TrySendError::Full(message) => RoutingError::ChannelFull(message),
-                    errors::TrySendError::Closed(message) => RoutingError::ChannelClosed(message),
+                    TrySendError::Full(message) => RoutingError::ChannelFull(message),
+                    TrySendError::Closed(message) => RoutingError::ChannelClosed(message),
                     _ => unreachable!(),
                 })
             }
@@ -164,17 +164,16 @@ impl RoutingTable {
     /// Send `message` to `router`.
     ///
     /// `router` could point to local router which causes `message` to be routed locally.
-    pub fn send_message(&self, message: Vec<u8>, router: RouterId) -> Result<(), RoutingError> {
+    //
+    // TODO(optimization): take deserialized message and serialize it only if it's for remote
+    pub fn send_message(&self, router: RouterId, message: Vec<u8>) -> Result<(), RoutingError> {
         match router == self.router_hash {
-            true => {
-                let message = Message::parse_short(&message).expect("valid message");
-                self.route_message(message)
-            }
+            true => self.route_message(Message::parse_short(&message).expect("valid message")),
             false => self.manager.try_send((router, message)).map_err(|error| match error {
-                errors::TrySendError::Full((router, message)) => RoutingError::ChannelFull(
+                TrySendError::Full((router, message)) => RoutingError::ChannelFull(
                     Message::parse_short(&message).expect("valid message"),
                 ),
-                errors::TrySendError::Closed((router, message)) => RoutingError::ChannelClosed(
+                TrySendError::Closed((router, message)) => RoutingError::ChannelClosed(
                     Message::parse_short(&message).expect("valid message"),
                 ),
                 _ => unreachable!(),
@@ -411,7 +410,7 @@ mod tests {
             .with_payload(&vec![1, 2, 3, 4, 5])
             .build();
 
-        assert!(routing_table.send_message(message, RouterId::from(vec![1, 3, 3, 7])).is_ok());
+        assert!(routing_table.send_message(RouterId::from(vec![1, 3, 3, 7]), message).is_ok());
         assert!(manager_rx.try_recv().is_ok());
     }
 
@@ -429,7 +428,7 @@ mod tests {
             .with_payload(&vec![1, 2, 3, 4, 5])
             .build();
 
-        assert!(routing_table.send_message(message, RouterId::from(vec![1, 2, 3, 4])).is_ok());
+        assert!(routing_table.send_message(RouterId::from(vec![1, 2, 3, 4]), message).is_ok());
         assert!(transit_rx.try_recv().is_ok());
     }
 }

@@ -361,14 +361,16 @@ mod test {
         runtime::mock::MockRuntime,
         tunnel::{
             new_noise::NoiseContext,
+            routing_table::RoutingTable,
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
         },
     };
     use bytes::Bytes;
+    use thingbuf::mpsc::channel;
 
-    #[test]
-    fn create_outbound_tunnel() {
+    #[tokio::test]
+    async fn create_outbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
@@ -423,8 +425,8 @@ mod test {
         assert!(pending_tunnel.try_build_tunnel(message).is_ok());
     }
 
-    #[test]
-    fn create_inbound_tunnel() {
+    #[tokio::test]
+    async fn create_inbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
@@ -434,9 +436,19 @@ mod test {
             .map(|_| make_router())
             .into_iter()
             .map(|(router_hash, pk, noise_context)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();
