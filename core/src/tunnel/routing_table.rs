@@ -26,7 +26,8 @@ use crate::{
 };
 
 use futures_channel::oneshot;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
+use rand_core::RngCore;
 use thingbuf::mpsc::{self, errors::TrySendError};
 
 #[cfg(feature = "std")]
@@ -39,20 +40,20 @@ use alloc::{sync::Arc, vec::Vec};
 /// Routing table.
 #[derive(Debug, Clone)]
 pub struct RoutingTable {
-    /// Local router ID.
-    router_hash: RouterId,
-
     /// Listeners for specific message.
     listeners: Arc<RwLock<HashMap<MessageId, oneshot::Sender<Message>>>>,
 
-    /// Active tunnels.
-    tunnels: Arc<RwLock<HashMap<TunnelId, mpsc::Sender<Message>>>>,
+    /// TX channel for sending outbound messages to `TunnelManager`.
+    manager: mpsc::Sender<(RouterId, Vec<u8>)>,
+
+    /// Local router ID.
+    router_hash: RouterId,
 
     /// TX channel for sending inbound messages to `TransitTunnelManager`.
     transit: mpsc::Sender<Message>,
 
-    /// TX channel for sending outbound messages to `TunnelManager`.
-    manager: mpsc::Sender<(RouterId, Vec<u8>)>,
+    /// Active tunnels.
+    tunnels: Arc<RwLock<HashMap<TunnelId, mpsc::Sender<Message>>>>,
 }
 
 impl RoutingTable {
@@ -71,11 +72,45 @@ impl RoutingTable {
         }
     }
 
-    /// Add tunnel to routing table.
+    /// Try to add transit tunnel into [`RoutingTable`].
     ///
-    /// This can either be a transit tunnel or a tunnel of one of the tunnel pols
-    pub fn add_tunnel(&self, tunnel_id: TunnelId, sender: mpsc::Sender<Message>) {
-        self.tunnels.write().insert(tunnel_id, sender);
+    /// This function returns if the tunnel already exists in the routing table.
+    pub fn try_add_tunnel<const SIZE: usize>(
+        &self,
+        tunnel_id: TunnelId,
+    ) -> Result<mpsc::Receiver<Message>, RoutingError> {
+        let mut tunnels = self.tunnels.write();
+
+        match tunnels.contains_key(&tunnel_id) {
+            true => Err(RoutingError::TunnelExists(tunnel_id)),
+            false => {
+                let (tx, rx) = mpsc::channel(SIZE);
+                tunnels.insert(tunnel_id, tx);
+
+                Ok(rx)
+            }
+        }
+    }
+
+    /// Insert `sender` into [`RoutingTable`] and allocate it a random [`TunnelId`] which is
+    /// returned to the caller.
+    //
+    /// TODO: add tests
+    pub fn insert_tunnel<const SIZE: usize>(
+        &self,
+        rng: &mut impl RngCore,
+    ) -> (TunnelId, mpsc::Receiver<Message>) {
+        let (tx, rx) = mpsc::channel(SIZE);
+        let mut tunnels = self.tunnels.write();
+
+        loop {
+            let tunnel_id = TunnelId::from(rng.next_u32());
+
+            if !tunnels.contains_key(&tunnel_id) {
+                tunnels.insert(tunnel_id, tx);
+                return (tunnel_id, rx);
+            }
+        }
     }
 
     /// Remove tunnel from [`RoutingTable`].
@@ -83,9 +118,23 @@ impl RoutingTable {
         self.tunnels.write().remove(tunnel_id);
     }
 
-    /// Add listener for a specific message.
-    pub fn add_listener(&self, message_id: MessageId, sender: oneshot::Sender<Message>) {
-        self.listeners.write().insert(message_id, sender);
+    /// Insert `sender` into [`RoutingTable`] and allocate it a random [`MessageId`] which is
+    /// returned to the caller.
+    pub fn insert_listener(
+        &self,
+        rng: &mut impl RngCore,
+    ) -> (MessageId, oneshot::Receiver<Message>) {
+        let (tx, rx) = oneshot::channel();
+        let mut listeners = self.listeners.write();
+
+        loop {
+            let message_id = MessageId::from(rng.next_u32());
+
+            if !listeners.contains_key(&message_id) {
+                listeners.insert(message_id, tx);
+                return (message_id, rx);
+            }
+        }
     }
 
     /// Remove listener from [`RoutingTable`].
@@ -225,13 +274,12 @@ mod tests {
     fn tunnel_exists() {
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
-        let (tunnel_tx, tunnel_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add tunnel into routing table
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        routing_table.add_tunnel(tunnel_id, tunnel_tx);
+        let tunnel_rx = routing_table.try_add_tunnel::<2>(tunnel_id).unwrap();
 
         let message = {
             let message = TunnelDataBuilder::new(TunnelId::from(tunnel_id))
@@ -278,13 +326,11 @@ mod tests {
     fn listener_exists() {
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
-        let (listener_tx, mut listener_rx) = oneshot::channel();
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add listener for message into routing table
-        let message_id = MessageId::from(MockRuntime::rng().next_u32());
-        routing_table.add_listener(message_id, listener_tx);
+        let (message_id, mut listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
 
         let message = {
             let message = MessageBuilder::short()
@@ -306,13 +352,11 @@ mod tests {
     fn channel_closed() {
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
-        let (listener_tx, mut listener_rx) = oneshot::channel();
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add listener for message into routing table
-        let message_id = MessageId::from(MockRuntime::rng().next_u32());
-        routing_table.add_listener(message_id, listener_tx);
+        let (message_id, mut listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
 
         let message = {
             let message = MessageBuilder::short()
@@ -337,13 +381,12 @@ mod tests {
     fn channel_full() {
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
-        let (tunnel_tx, tunnel_rx) = channel(2);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add tunnel into routing table
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        routing_table.add_tunnel(tunnel_id, tunnel_tx);
+        let tunnel_rx = routing_table.try_add_tunnel::<2>(tunnel_id).unwrap();
 
         // fill the tunnel channel with messages
         for _ in 0..2 {
@@ -395,13 +438,11 @@ mod tests {
     fn send_message_to_remote() {
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
-        let (listener_tx, mut listener_rx) = oneshot::channel();
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add listener for message into routing table
-        let message_id = MessageId::from(MockRuntime::rng().next_u32());
-        routing_table.add_listener(message_id, listener_tx);
+        let (message_id, mut listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
 
         let message = MessageBuilder::short()
             .with_message_type(MessageType::ShortTunnelBuild)
@@ -430,5 +471,26 @@ mod tests {
 
         assert!(routing_table.send_message(RouterId::from(vec![1, 2, 3, 4]), message).is_ok());
         assert!(transit_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn tunnel_already_exists() {
+        let (transit_tx, transit_rx) = channel(64);
+        let (manager_tx, manager_rx) = channel(64);
+        let routing_table =
+            RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
+
+        // add tunnel into routing table
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let _ = routing_table.try_add_tunnel::<2>(tunnel_id).unwrap();
+
+        // try to add another transit tunnel with same id in the routing table
+        // and verify that the call fails
+        match routing_table.try_add_tunnel::<2>(tunnel_id).unwrap_err() {
+            RoutingError::TunnelExists(duplicate_tunnel) => {
+                assert_eq!(duplicate_tunnel, tunnel_id);
+            }
+            error => panic!("invalid error: {error:?}"),
+        }
     }
 }

@@ -142,6 +142,9 @@ pub enum RoutingError {
 
     /// Channel closed.
     ChannelClosed(Message),
+
+    /// Tunnel already exists in the routing table.
+    TunnelExists(TunnelId),
 }
 
 impl fmt::Display for RoutingError {
@@ -151,6 +154,8 @@ impl fmt::Display for RoutingError {
             Self::FailedToParseRoute(message) => write!(f, "failed to parse route"),
             Self::ChannelFull(_) => write!(f, "channel full"),
             Self::ChannelClosed(_) => write!(f, "channel closed"),
+            Self::TunnelExists(tunnel_id) =>
+                write!(f, "tunnel ({tunnel_id}) exists in the routing table"),
         }
     }
 }

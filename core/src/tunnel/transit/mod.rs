@@ -23,7 +23,7 @@ use crate::{
         sha256::Sha256,
         EphemeralPublicKey, StaticPublicKey,
     },
-    error::{RejectionReason, TunnelError},
+    error::{RejectionReason, RoutingError, TunnelError},
     i2np::{
         tunnel::{
             build::{short, variable},
@@ -78,6 +78,9 @@ const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 
 /// Tunnel expiration, 10 minutes.
 const TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60);
+
+/// Transit tunnel channel size.
+const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 
 /// Common interface for transit tunnels.
 pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {
@@ -146,29 +149,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
             .flatten()
     }
 
-    /// Start tunnel event loop.
-    fn spawn_tunnel<T: TransitTunnel<R> + 'static>(
-        &mut self,
-        tunnel_id: TunnelId,
-        next_tunnel_id: TunnelId,
-        next_router: RouterId,
-        tunnel_keys: TunnelKeys,
-    ) {
-        let (tx, rx) = channel(32);
-        let tunnel = T::new(
-            tunnel_id,
-            next_tunnel_id,
-            next_router,
-            tunnel_keys,
-            self.routing_table.clone(),
-            self.metrics_handle.clone(),
-            rx,
-        );
-
-        self.routing_table.add_tunnel(tunnel_id, tx);
-        self.tunnels.push(tunnel);
-    }
-
     /// Handle variable tunnel build request.
     ///
     /// Only OBEP is supported, for any other hop the message is dropped.
@@ -218,7 +198,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 %next_tunnel_id,
                 %next_message_id,
                 %next_router,
-                "variable tunnel build only supported for outbound enpoint",
+                "variable tunnel build only supported for outbound endpoint",
             );
 
             return Err(Error::Tunnel(TunnelError::MessageRejected(
@@ -236,44 +216,76 @@ impl<R: Runtime> TransitTunnelManager<R> {
             "variable tunnel build request",
         );
 
-        record[48] = 0x00; // no options
-        record[49] = 0x00;
-        record[511] = 0x00; // accept
-
-        session.encrypt_build_record(&mut record);
-
-        // start tunnel event loop
+        // try to insert transit tunnel into routing table, allocating it a channel
         //
-        // an accepted tunnel must be maintained for 10 minutes as we won't know
-        // if another participant of the tunnel rejected it
-        match role {
-            HopRole::InboundGateway => self.spawn_tunnel::<InboundGateway<R>>(
-                tunnel_id,
-                next_tunnel_id,
-                next_router.clone(),
-                session.finalize(
-                    build_record.tunnel_layer_key().to_vec(),
-                    build_record.tunnel_iv_key().to_vec(),
-                )?,
-            ),
-            HopRole::Participant => self.spawn_tunnel::<Participant<R>>(
-                tunnel_id,
-                next_tunnel_id,
-                next_router.clone(),
-                session.finalize(
-                    build_record.tunnel_layer_key().to_vec(),
-                    build_record.tunnel_iv_key().to_vec(),
-                )?,
-            ),
-            HopRole::OutboundEndpoint => self.spawn_tunnel::<OutboundEndpoint<R>>(
-                tunnel_id,
-                next_tunnel_id,
-                next_router.clone(),
-                session.finalize(
-                    build_record.tunnel_layer_key().to_vec(),
-                    build_record.tunnel_iv_key().to_vec(),
-                )?,
-            ),
+        // if the tunnel already exists in the routing table, the build request is rejected
+        match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %tunnel_id,
+                    ?error,
+                    "tunnel already exists in routing table, rejecting",
+                );
+
+                // TODO: metrics
+                record[48] = 0x00; // no options
+                record[49] = 0x00;
+                record[511] = 0x30; // reject
+
+                session.encrypt_build_record(&mut record)?;
+            }
+            Ok(receiver) => {
+                // TODO: metrics
+                record[48] = 0x00; // no options
+                record[49] = 0x00;
+                record[511] = 0x00; // accept
+
+                session.encrypt_build_record(&mut record)?;
+
+                // start tunnel event loop
+                //
+                // an accepted tunnel must be maintained for 10 minutes as we won't know
+                // if another participant of the tunnel rejected it
+                match role {
+                    HopRole::InboundGateway => self.tunnels.push(InboundGateway::<R>::new(
+                        tunnel_id,
+                        next_tunnel_id,
+                        next_router.clone(),
+                        session.finalize(
+                            build_record.tunnel_layer_key().to_vec(),
+                            build_record.tunnel_iv_key().to_vec(),
+                        )?,
+                        self.routing_table.clone(),
+                        self.metrics_handle.clone(),
+                        receiver,
+                    )),
+                    HopRole::Participant => self.tunnels.push(Participant::<R>::new(
+                        tunnel_id,
+                        next_tunnel_id,
+                        next_router.clone(),
+                        session.finalize(
+                            build_record.tunnel_layer_key().to_vec(),
+                            build_record.tunnel_iv_key().to_vec(),
+                        )?,
+                        self.routing_table.clone(),
+                        self.metrics_handle.clone(),
+                        receiver,
+                    )),
+                    HopRole::OutboundEndpoint => self.tunnels.push(OutboundEndpoint::<R>::new(
+                        tunnel_id,
+                        next_tunnel_id,
+                        next_router.clone(),
+                        session.finalize(
+                            build_record.tunnel_layer_key().to_vec(),
+                            build_record.tunnel_iv_key().to_vec(),
+                        )?,
+                        self.routing_table.clone(),
+                        self.metrics_handle.clone(),
+                        receiver,
+                    )),
+                }
+            }
         }
 
         let message = MessageBuilder::short()
@@ -334,36 +346,69 @@ impl<R: Runtime> TransitTunnelManager<R> {
             "short tunnel build request",
         );
 
-        record[48] = 0x00; // no options
-        record[49] = 0x00;
-        record[201] = 0x00; // accept
-
-        session.create_tunnel_keys(role)?;
-        session.encrypt_build_records(&mut payload, record_idx)?;
-
-        // start tunnel event loop
+        // try to insert transit tunnel into routing table, allocating it a channel
         //
-        // an accepted tunnel must be maintained for 10 minutes as we won't know
-        // if another participant of the tunnel rejected it
-        match role {
-            HopRole::InboundGateway => self.spawn_tunnel::<InboundGateway<R>>(
-                tunnel_id,
-                next_tunnel_id,
-                next_router.clone(),
-                session.finalize()?,
-            ),
-            HopRole::Participant => self.spawn_tunnel::<Participant<R>>(
-                tunnel_id,
-                next_tunnel_id,
-                next_router.clone(),
-                session.finalize()?,
-            ),
-            HopRole::OutboundEndpoint => self.spawn_tunnel::<OutboundEndpoint<R>>(
-                tunnel_id,
-                next_tunnel_id,
-                next_router.clone(),
-                session.finalize()?,
-            ),
+        // if the tunnel already exists in the routing table, the build request is rejected
+        match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %tunnel_id,
+                    ?error,
+                    "tunnel already exists in routing table, rejecting",
+                );
+
+                // TODO: metrics
+                record[48] = 0x00; // no options
+                record[49] = 0x00;
+                record[201] = 0x30; // reject
+
+                session.create_tunnel_keys(role)?;
+                session.encrypt_build_records(&mut payload, record_idx)?;
+            }
+            Ok(receiver) => {
+                // TODO: metrics
+                record[48] = 0x00; // no options
+                record[49] = 0x00;
+                record[201] = 0x00; // accept
+
+                session.create_tunnel_keys(role)?;
+                session.encrypt_build_records(&mut payload, record_idx)?;
+
+                // start tunnel event loop
+                //
+                // an accepted tunnel must be maintained for 10 minutes as we won't know
+                // if another participant of the tunnel rejected it
+                match role {
+                    HopRole::InboundGateway => self.tunnels.push(InboundGateway::<R>::new(
+                        tunnel_id,
+                        next_tunnel_id,
+                        next_router.clone(),
+                        session.finalize()?,
+                        self.routing_table.clone(),
+                        self.metrics_handle.clone(),
+                        receiver,
+                    )),
+                    HopRole::Participant => self.tunnels.push(Participant::<R>::new(
+                        tunnel_id,
+                        next_tunnel_id,
+                        next_router.clone(),
+                        session.finalize()?,
+                        self.routing_table.clone(),
+                        self.metrics_handle.clone(),
+                        receiver,
+                    )),
+                    HopRole::OutboundEndpoint => self.tunnels.push(OutboundEndpoint::<R>::new(
+                        tunnel_id,
+                        next_tunnel_id,
+                        next_router.clone(),
+                        session.finalize()?,
+                        self.routing_table.clone(),
+                        self.metrics_handle.clone(),
+                        receiver,
+                    )),
+                }
+            }
         }
 
         match role {
