@@ -28,7 +28,7 @@ use crate::{
         garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         new_noise::NoiseContext,
-        pool::{new_pool::TunnelPoolNew, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolManager},
+        pool::{new_pool::TunnelPoolNew, TunnelPoolConfig, TunnelPoolEvent},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -92,11 +92,6 @@ pub struct TunnelManager<R: Runtime> {
 
     /// Pending outbound tunnels.
     pending_outbound: HashSet<TunnelId>,
-
-    /// Tunnel pool manager.
-    //
-    // TODO remove
-    pools: TunnelPoolManager<R>,
 
     /// Local router info.
     router_info: RouterInfo,
@@ -162,12 +157,6 @@ impl<R: Runtime> TunnelManager<R> {
             metrics_handle: metrics_handle.clone(),
             pending_inbound: HashSet::new(),
             pending_outbound: HashSet::new(),
-            pools: TunnelPoolManager::new(
-                noise.clone(),
-                metrics_handle.clone(),
-                router_storage,
-                TunnelPoolConfig::default(),
-            ),
             router_info,
             routers: HashMap::new(),
             routing_table,
@@ -370,43 +359,6 @@ impl<R: Runtime> Future for TunnelManager<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        loop {
-            match self.pools.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(event)) => match event {
-                    TunnelPoolEvent::BuildTunnel {
-                        router,
-                        direction,
-                        message,
-                    } => {
-                        // tracing::trace!(
-                        //     target: LOG_TARGET,
-                        //     %router,
-                        //     ?direction,
-                        //     "build tunnel",
-                        // );
-                        // match direction {
-                        //     TunnelBuildDirection::Outbound { tunnel_id } => {
-                        //         self.pending_outbound.insert(tunnel_id);
-                        //     }
-                        //     TunnelBuildDirection::Inbound { message_id } => {
-                        //         self.pending_inbound.insert(message_id);
-                        //     }
-                        // }
-                        // self.send_message(&router, message);
-                    }
-                    TunnelPoolEvent::SendI2NpMessage {
-                        router,
-                        message_id,
-                        message,
-                    } => {
-                        // self.send_message(&router, message),
-                    }
-                },
-            }
-        }
-
         while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
             match event {
                 None => return Poll::Ready(()),
