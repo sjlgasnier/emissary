@@ -65,6 +65,9 @@ pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
     /// Returns whether the `JoinSet` is empty.
     fn is_empty(&self) -> bool;
 
+    /// Get the number of elements in `JoinSet`.
+    fn len(&self) -> usize;
+
     /// Pushes `future` to `JoinSet`.
     fn push<F>(&mut self, future: F)
     where

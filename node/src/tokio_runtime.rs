@@ -142,6 +142,10 @@ impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
         self.0.is_empty()
     }
 
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
     fn push<F>(&mut self, future: F)
     where
         F: Future<Output = T> + Send + 'static,
