@@ -188,7 +188,7 @@ impl Runtime for MockRuntime {
         F: Future + Send + 'static,
         F::Output: Send,
     {
-        todo!();
+        tokio::spawn(future);
     }
 
     /// Return duration since Unix epoch.

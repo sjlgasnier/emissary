@@ -28,7 +28,7 @@ use crate::{
         garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         new_noise::NoiseContext,
-        pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolManager},
+        pool::{new_pool::TunnelPoolNew, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolManager},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -36,6 +36,7 @@ use crate::{
 
 use futures::StreamExt;
 use hashbrown::{HashMap, HashSet};
+use pool::new_pool::ExploratorySelector;
 use thingbuf::mpsc::{channel, Receiver};
 
 use alloc::{vec, vec::Vec};
@@ -93,6 +94,8 @@ pub struct TunnelManager<R: Runtime> {
     pending_outbound: HashSet<TunnelId>,
 
     /// Tunnel pool manager.
+    //
+    // TODO remove
     pools: TunnelPoolManager<R>,
 
     /// Local router info.
@@ -115,7 +118,7 @@ impl<R: Runtime> TunnelManager<R> {
         router_info: RouterInfo,
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
-        routers: RouterStorage,
+        router_storage: RouterStorage,
     ) -> Self {
         tracing::trace!(
             target: LOG_TARGET,
@@ -135,16 +138,23 @@ impl<R: Runtime> TunnelManager<R> {
         // create `TransitTunnelManager` and run it in a separate task
         //
         // `TransitTunnelManager` communicates with `TunnelManager` via `RoutingTable`
-        {
-            let transit = TransitTunnelManager::<R>::new(
-                noise.clone(),
-                routing_table.clone(),
-                transit_rx,
-                metrics_handle.clone(),
-            );
+        R::spawn(TransitTunnelManager::<R>::new(
+            noise.clone(),
+            routing_table.clone(),
+            transit_rx,
+            metrics_handle.clone(),
+        ));
 
-            R::spawn(transit);
-        }
+        // start exploratory tunnel pool
+        //
+        // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
+        R::spawn(TunnelPoolNew::<R, _>::new(
+            TunnelPoolConfig::default(),
+            ExploratorySelector::new(router_storage.clone()),
+            routing_table.clone(),
+            noise.clone(),
+            metrics_handle.clone(),
+        ));
 
         Self {
             garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
@@ -155,12 +165,12 @@ impl<R: Runtime> TunnelManager<R> {
             pools: TunnelPoolManager::new(
                 noise.clone(),
                 metrics_handle.clone(),
-                routers,
+                router_storage,
                 TunnelPoolConfig::default(),
             ),
             router_info,
             routers: HashMap::new(),
-            routing_table: routing_table.clone(),
+            routing_table,
             service,
         }
     }

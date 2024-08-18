@@ -51,6 +51,7 @@ use core::{
     time::Duration,
 };
 
+pub mod new_pool;
 mod selector;
 
 /// Logging target for the file.

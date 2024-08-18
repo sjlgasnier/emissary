@@ -175,6 +175,7 @@ pub enum Error {
     DialFailure,
     Tunnel(TunnelError),
     Channel(ChannelError),
+    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -193,6 +194,7 @@ impl fmt::Display for Error {
             Self::DialFailure => write!(f, "dial failure"),
             Self::Tunnel(error) => write!(f, "tunnel error: {error}"),
             Self::Channel(error) => write!(f, "channel error: {error}"),
+            Self::Timeout => write!(f, "operation timed out"),
         }
     }
 }
