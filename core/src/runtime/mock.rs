@@ -22,16 +22,19 @@ use crate::runtime::{
 };
 
 use futures::{future::BoxFuture, Stream};
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use rand_core::{CryptoRng, RngCore};
 use tokio::task;
 
-use core::task::Waker;
 use std::{
+    collections::HashMap,
     future::{pending, Future},
     marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
-    task::{Context, Poll},
+    sync::Arc,
+    task::{Context, Poll, Waker},
     time::{Duration, SystemTime},
 };
 
@@ -84,11 +87,17 @@ impl TcpListener<MockTcpStream> for MockTcpListener {
     }
 }
 
-pub struct MockMetricsCounter {}
+/// Counters and their values.
+static COUNTERS: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+
+pub struct MockMetricsCounter {
+    name: &'static str,
+}
 
 impl Counter for MockMetricsCounter {
     fn increment(&mut self, value: usize) {
-        todo!();
+        let mut inner = COUNTERS.write();
+        *inner.entry(self.name).or_default() += value;
     }
 }
 
@@ -110,7 +119,7 @@ pub struct MockMetricsHandle {}
 
 impl MetricsHandle for MockMetricsHandle {
     fn counter(&self, name: &'static str) -> impl Counter {
-        MockMetricsCounter {}
+        MockMetricsCounter { name }
     }
 
     fn gauge(&self, name: &'static str) -> impl Gauge {
@@ -160,6 +169,12 @@ impl<T: Send + 'static> Stream for MockJoinSet<T> {
 
 #[derive(Debug, Clone)]
 pub struct MockRuntime {}
+
+impl MockRuntime {
+    pub fn get_counter_value(name: &'static str) -> Option<usize> {
+        COUNTERS.read().get(name).copied()
+    }
+}
 
 impl Runtime for MockRuntime {
     type TcpStream = MockTcpStream;
