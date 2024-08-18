@@ -524,7 +524,7 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, manager_rx) = channel(16);
                 let routing_table =
@@ -542,7 +542,7 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -570,7 +570,7 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, manager_rx) = channel(16);
                 let routing_table =
@@ -588,7 +588,7 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -616,7 +616,7 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, manager_rx) = channel(16);
                 let routing_table =
@@ -634,7 +634,7 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -695,7 +695,7 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, manager_rx) = channel(16);
                 let routing_table =
@@ -713,7 +713,7 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -730,7 +730,7 @@ mod tests {
         let mut message = Message::parse_short(&message).unwrap();
 
         // make new router which is not part of the tunnel build request
-        let (_, _, noise) = make_router();
+        let (_, _, noise, _) = make_router();
         let (transit_tx, transit_rx) = channel(16);
         let (manager_tx, manager_rx) = channel(16);
         let routing_table = RoutingTable::new(RouterId::from(&local_hash), manager_tx, transit_tx);
@@ -756,7 +756,7 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, manager_rx) = channel(16);
                 let routing_table =
@@ -774,7 +774,7 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 

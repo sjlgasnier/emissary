@@ -17,12 +17,15 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
+    crypto::{
+        base64_encode, EphemeralPublicKey, SigningPrivateKey, SigningPublicKey, StaticPrivateKey,
+        StaticPublicKey,
+    },
     i2np::{
         tunnel::{build::short, data, gateway},
         Message,
     },
-    primitives::{MessageId, RouterId, TunnelId},
+    primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
         hop::{
@@ -41,24 +44,33 @@ use rand_core::RngCore;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use core::{
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
 
 /// Make new router.
-pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
-    let mut key_bytes = vec![0u8; 32];
-    let mut router_hash = vec![0u8; 32];
+pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
+    let mut static_key_bytes = vec![0u8; 32];
+    let mut signing_key_bytes = vec![0u8; 32];
 
-    MockRuntime::rng().fill_bytes(&mut key_bytes);
-    MockRuntime::rng().fill_bytes(&mut router_hash);
+    MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+    MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-    let sk = StaticPrivateKey::from(key_bytes);
+    let sk = StaticPrivateKey::from(static_key_bytes.clone());
     let pk = sk.public();
+
+    let router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+    let router_hash: Vec<u8> = router_info.identity().id().into();
     let router_hash = Bytes::from(router_hash);
 
-    (router_hash.clone(), pk, NoiseContext::new(sk, router_hash))
+    (
+        router_hash.clone(),
+        pk,
+        NoiseContext::new(sk.clone(), router_hash),
+        router_info,
+    )
 }
 
 /// [`TransitTunnelManager`] for testing.
@@ -80,11 +92,22 @@ pub struct TestTransitTunnelManager {
 
     /// Routing table.
     routing_table: RoutingTable,
+
+    /// Router info.
+    router_info: RouterInfo,
+}
+
+impl fmt::Debug for TestTransitTunnelManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestTransitTunnelManager")
+            .field("router", &self.router)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TestTransitTunnelManager {
     pub fn new() -> Self {
-        let (router_hash, public_key, noise) = make_router();
+        let (router_hash, public_key, noise, router_info) = make_router();
         let (transit_tx, transit_rx) = channel(64);
         let (message_tx, message_rx) = channel(64);
         let routing_table =
@@ -102,7 +125,13 @@ impl TestTransitTunnelManager {
             router_hash: router_hash.clone(),
             router: RouterId::from(router_hash),
             routing_table,
+            router_info,
         }
+    }
+
+    /// Get copy of [`RouterInfo`].
+    pub fn router_info(&self) -> RouterInfo {
+        self.router_info.clone()
     }
 
     /// Get hash of the router.
@@ -165,7 +194,7 @@ pub fn build_outbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise) = make_router();
+    let (local_hash, local_pk, local_noise, _router_info) = make_router();
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -216,7 +245,7 @@ pub fn build_inbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise) = make_router();
+    let (local_hash, local_pk, local_noise, _router_info) = make_router();
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 

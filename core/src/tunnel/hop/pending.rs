@@ -67,6 +67,7 @@ pub struct PendingTunnel<T: Tunnel> {
 }
 
 impl<T: Tunnel> PendingTunnel<T> {
+    /// Create new [`PendingTunnel`].
     pub fn create_tunnel<R: Runtime>(
         parameters: TunnelBuildParameters,
     ) -> Result<(Self, RouterId, Vec<u8>), TunnelError> {
@@ -384,7 +385,7 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -435,7 +436,7 @@ mod test {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, manager_rx) = channel(16);
                 let routing_table =
@@ -453,7 +454,7 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -491,10 +492,10 @@ mod test {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
@@ -576,10 +577,10 @@ mod test {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
 
