@@ -67,6 +67,11 @@ pub struct PendingTunnel<T: Tunnel> {
 }
 
 impl<T: Tunnel> PendingTunnel<T> {
+    /// Get reference to [`PendingTunnel`]'s `TunnelId`.
+    pub fn tunnel_id(&self) -> &TunnelId {
+        &self.tunnel_id
+    }
+
     /// Create new [`PendingTunnel`].
     pub fn create_tunnel<R: Runtime>(
         parameters: TunnelBuildParameters,
@@ -320,7 +325,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                                 target: LOG_TARGET,
                                 tunnel_id = ?self.tunnel_id,
                                 hop_tunnel_id = ?hop.tunnel_id,
-                                "outbound tunnel accepted",
+                                direction = ?T::direction(),
+                                "tunnel accepted",
                             );
                         }
                         reason => {
@@ -328,8 +334,9 @@ impl<T: Tunnel> PendingTunnel<T> {
                                 target: LOG_TARGET,
                                 tunnel_id = ?self.tunnel_id,
                                 hop_tunnel_id = ?hop.tunnel_id,
+                                direction = ?T::direction(),
                                 ?reason,
-                                "outbound tunnel rejected",
+                                "tunnel rejected",
                             );
 
                             return Err(Error::Tunnel(TunnelError::TunnelRejected(reason)));
