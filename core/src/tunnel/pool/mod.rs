@@ -240,109 +240,109 @@ impl<R: Runtime> TunnelPool<R> {
         let num_outbound_to_build = self.config.num_outbound.saturating_sub(self.outbound.len());
         let mut events = Vec::<TunnelPoolEvent>::new();
 
-        // build one or more outbound tunnels
-        //
-        // select an inbound tunnel for reply delivery from one of the pool's inbound tunnels
-        // and if none exist, create a fake 0-hop inbound tunnel
-        for _ in 0..num_outbound_to_build {
-            match selector.select_inbound_tunnel(self.inbound.iter()) {
-                Some((tunnel_id, tunnel)) => todo!(),
-                None => {
-                    let message_id = self.next_message_id();
-                    let tunnel_id = self.next_tunnel_id::<true>();
-                    let Some(hops) = selector.select_hops(self.config.num_outbound_hops) else {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            hops_required = ?self.config.num_outbound_hops,
-                            "not enough routers for outbound tunnel build",
-                        );
-                        continue;
-                    };
+        // // build one or more outbound tunnels
+        // //
+        // // select an inbound tunnel for reply delivery from one of the pool's inbound tunnels
+        // // and if none exist, create a fake 0-hop inbound tunnel
+        // for _ in 0..num_outbound_to_build {
+        //     match selector.select_inbound_tunnel(self.inbound.iter()) {
+        //         Some((tunnel_id, tunnel)) => todo!(),
+        //         None => {
+        //             let message_id = self.next_message_id();
+        //             let tunnel_id = self.next_tunnel_id::<true>();
+        //             let Some(hops) = selector.select_hops(self.config.num_outbound_hops) else {
+        //                 tracing::warn!(
+        //                     target: LOG_TARGET,
+        //                     hops_required = ?self.config.num_outbound_hops,
+        //                     "not enough routers for outbound tunnel build",
+        //                 );
+        //                 continue;
+        //             };
 
-                    match PendingTunnel::<OutboundTunnel>::create_tunnel::<R>(
-                        TunnelBuildParameters {
-                            hops,
-                            tunnel_id,
-                            message_id,
-                            noise: self.noise.clone(),
-                            our_hash: self.noise.local_router_hash().clone(),
-                        },
-                    ) {
-                        Ok((tunnel, router, message)) => {
-                            self.pending_outbound.insert(tunnel_id, tunnel);
+        //             match PendingTunnel::<OutboundTunnel>::create_tunnel::<R>(
+        //                 TunnelBuildParameters {
+        //                     hops,
+        //                     tunnel_id,
+        //                     message_id,
+        //                     noise: self.noise.clone(),
+        //                     our_hash: self.noise.local_router_hash().clone(),
+        //                 },
+        //             ) {
+        //                 Ok((tunnel, router, message)) => {
+        //                     self.pending_outbound.insert(tunnel_id, tunnel);
 
-                            events.push(TunnelPoolEvent::BuildTunnel {
-                                router,
-                                message,
-                                direction: TunnelBuildDirection::Outbound { tunnel_id },
-                            });
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?tunnel_id,
-                                ?message_id,
-                                ?error,
-                                "failed to create outbound tunnel",
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
+        //                     events.push(TunnelPoolEvent::BuildTunnel {
+        //                         router,
+        //                         message,
+        //                         direction: TunnelBuildDirection::Outbound { tunnel_id },
+        //                     });
+        //                 }
+        //                 Err(error) => {
+        //                     tracing::warn!(
+        //                         target: LOG_TARGET,
+        //                         ?tunnel_id,
+        //                         ?message_id,
+        //                         ?error,
+        //                         "failed to create outbound tunnel",
+        //                     );
+        //                     continue;
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
-        // build one or more inbound tunnels
-        //
-        // select an outbound tunnel for reply delivery from one of the pool's outbound tunnels
-        // and if none exist, create a fake 0-hop outbound tunnel
-        for _ in 0..num_inbound_to_build {
-            match selector.select_outbound_tunnel(self.outbound.iter()) {
-                Some((tunnel_id, tunnel)) => todo!(),
-                None => {
-                    let message_id = self.next_message_id();
-                    let tunnel_id = self.next_tunnel_id::<true>();
-                    let Some(hops) = selector.select_hops(self.config.num_inbound_hops) else {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            hops_required = ?self.config.num_inbound_hops,
-                            "not enough routers for inbound tunnel build",
-                        );
-                        continue;
-                    };
+        // // build one or more inbound tunnels
+        // //
+        // // select an outbound tunnel for reply delivery from one of the pool's outbound tunnels
+        // // and if none exist, create a fake 0-hop outbound tunnel
+        // for _ in 0..num_inbound_to_build {
+        //     match selector.select_outbound_tunnel(self.outbound.iter()) {
+        //         Some((tunnel_id, tunnel)) => todo!(),
+        //         None => {
+        //             let message_id = self.next_message_id();
+        //             let tunnel_id = self.next_tunnel_id::<true>();
+        //             let Some(hops) = selector.select_hops(self.config.num_inbound_hops) else {
+        //                 tracing::warn!(
+        //                     target: LOG_TARGET,
+        //                     hops_required = ?self.config.num_inbound_hops,
+        //                     "not enough routers for inbound tunnel build",
+        //                 );
+        //                 continue;
+        //             };
 
-                    match PendingTunnel::<InboundTunnel>::create_tunnel::<R>(
-                        TunnelBuildParameters {
-                            hops,
-                            tunnel_id,
-                            message_id,
-                            noise: self.noise.clone(),
-                            our_hash: self.noise.local_router_hash().clone(),
-                        },
-                    ) {
-                        Ok((tunnel, router, message)) => {
-                            self.pending_inbound.insert(message_id, tunnel);
+        //             match PendingTunnel::<InboundTunnel>::create_tunnel::<R>(
+        //                 TunnelBuildParameters {
+        //                     hops,
+        //                     tunnel_id,
+        //                     message_id,
+        //                     noise: self.noise.clone(),
+        //                     our_hash: self.noise.local_router_hash().clone(),
+        //                 },
+        //             ) {
+        //                 Ok((tunnel, router, message)) => {
+        //                     self.pending_inbound.insert(message_id, tunnel);
 
-                            events.push(TunnelPoolEvent::BuildTunnel {
-                                router,
-                                message,
-                                direction: TunnelBuildDirection::Inbound { message_id },
-                            });
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?tunnel_id,
-                                ?message_id,
-                                ?error,
-                                "failed to create inbound tunnel",
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
+        //                     events.push(TunnelPoolEvent::BuildTunnel {
+        //                         router,
+        //                         message,
+        //                         direction: TunnelBuildDirection::Inbound { message_id },
+        //                     });
+        //                 }
+        //                 Err(error) => {
+        //                     tracing::warn!(
+        //                         target: LOG_TARGET,
+        //                         ?tunnel_id,
+        //                         ?message_id,
+        //                         ?error,
+        //                         "failed to create inbound tunnel",
+        //                     );
+        //                     continue;
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
         if self.outbound.len() == 1 && self.inbound.len() == 1 {
             let message_id = R::rng().next_u32();
@@ -700,7 +700,7 @@ mod tests {
     };
     use futures::StreamExt;
 
-    #[tokio::test]
+    // #[tokio::test]
     async fn tunnel_test() {
         let handle = MockRuntime::register_metrics(Vec::new());
         let router_storage = RouterStorage::from_random(

@@ -21,13 +21,21 @@ use crate::{
     i2np::{tunnel::data::TunnelDataBuilder, HopRole, Message, MessageBuilder, MessageType},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
+    tunnel::hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
 };
 
 use rand_core::RngCore;
 
 use alloc::{vec, vec::Vec};
-use core::{iter, num::NonZeroUsize, time::Duration};
+use core::{
+    future::Future,
+    iter,
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
+use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::obgw";
@@ -35,19 +43,17 @@ const LOG_TARGET: &str = "emissary::tunnel::obgw";
 /// Outbound tunnel.
 #[derive(Debug)]
 pub struct OutboundTunnel {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
+
+    /// RX channel for receiving messages.
+    message_rx: Receiver<(RouterId, Vec<u8>)>,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
 }
 
 impl OutboundTunnel {
-    /// Create new [`OutboundTunnel`].
-    pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        Self { tunnel_id, hops }
-    }
-
     /// Send `message` to `router`
     pub fn send_to_router(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
         assert!(message.len() < 500, "fragmentation not supported");
@@ -60,7 +66,44 @@ impl OutboundTunnel {
             "router delivery",
         );
 
-        todo!();
+        // hop must exist since the tunnel is created by us
+        let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let router: Vec<u8> = router.into();
+
+        let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
+            .with_router_delivery(&router, &message)
+            .build::<R>();
+
+        // iterative decrypt the tunnel data message and aes iv
+        let (iv, ciphertext) = self.hops.iter().rev().fold(
+            (message[4..20].to_vec(), message[20..].to_vec()),
+            |(iv, message), hop| {
+                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                let iv = aes.decrypt(&iv);
+
+                let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                let ciphertext = aes.decrypt(message);
+
+                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                let iv = aes.decrypt(iv);
+
+                (iv, ciphertext)
+            },
+        );
+
+        message[4..20].copy_from_slice(&iv);
+        message[20..].copy_from_slice(&ciphertext);
+
+        let message_id = R::rng().next_u32();
+
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::TunnelData)
+            .with_message_id(message_id)
+            .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_payload(&message)
+            .build();
+
+        (next_hop.router.clone(), message)
     }
 
     /// Send `message` to tunnel identified by the (`router`, `gateway`) tuple.
@@ -138,8 +181,12 @@ impl OutboundTunnel {
 }
 
 impl Tunnel for OutboundTunnel {
-    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        OutboundTunnel::new(tunnel_id, hops)
+    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+        OutboundTunnel {
+            hops,
+            message_rx: receiver.outbound(),
+            tunnel_id,
+        }
     }
 
     fn tunnel_id(&self) -> &TunnelId {
@@ -159,6 +206,24 @@ impl Tunnel for OutboundTunnel {
 
     fn direction() -> TunnelDirection {
         TunnelDirection::Outbound
+    }
+}
+
+impl Future for OutboundTunnel {
+    type Output = TunnelId;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
+            match event {
+                None => return Poll::Ready(self.tunnel_id),
+                Some((router, message)) => {
+                    tracing::error!("not implemented");
+                    todo!();
+                }
+            }
+        }
+
+        Poll::Pending
     }
 }
 

@@ -18,12 +18,13 @@
 
 use crate::{
     crypto::StaticPublicKey,
-    i2np::HopRole,
+    i2np::{HopRole, Message},
     primitives::{MessageId, RouterId, TunnelId},
     tunnel::new_noise::{NoiseContext, OutboundSession},
 };
 
 use bytes::Bytes;
+use thingbuf::mpsc::Receiver;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{iter, marker::PhantomData, num::NonZeroUsize};
@@ -61,7 +62,7 @@ pub enum TunnelDirection {
 /// Common interface for local tunnels (initiated by us).
 pub trait Tunnel: Send {
     /// Create new [`Tunnel`].
-    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self;
+    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self;
 
     /// Get an iterator of hop roles for the tunnel participants.
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole>;
@@ -75,11 +76,14 @@ pub trait Tunnel: Send {
 
 /// Tunnel builder.
 pub struct TunnelBuilder<T: Tunnel> {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-
     /// Hops.
     hops: VecDeque<TunnelHop>,
+
+    /// Message receiver for the tunnel.
+    receiver: ReceiverKind,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
 
     /// Marker for `Tunnel`
     _tunnel: PhantomData<T>,
@@ -87,10 +91,11 @@ pub struct TunnelBuilder<T: Tunnel> {
 
 impl<T: Tunnel> TunnelBuilder<T> {
     /// Create new [`TunnelBuilder`].
-    pub fn new(tunnel_id: TunnelId) -> Self {
+    pub fn new(tunnel_id: TunnelId, receiver: ReceiverKind) -> Self {
         Self {
-            tunnel_id,
             hops: VecDeque::new(),
+            receiver,
+            tunnel_id,
             _tunnel: Default::default(),
         }
     }
@@ -103,7 +108,88 @@ impl<T: Tunnel> TunnelBuilder<T> {
 
     // Build new tunnel from provided hops.
     pub fn build(self) -> T {
-        T::new(self.tunnel_id, self.hops.into_iter().rev().collect())
+        T::new(
+            self.tunnel_id,
+            self.receiver,
+            self.hops.into_iter().rev().collect(),
+        )
+    }
+}
+
+/// Receiver type for the tunnel.
+///
+/// Messages to outbound tunnels (destined to network) are not routed through [`RoutingTable`] as
+/// they must carry additional information (delivery instructions) and thus the receiver types must
+/// be differentiated by the tunnel type.
+#[derive(Debug)]
+pub enum ReceiverKind {
+    /// Outbound tunnel.
+    Outbound {
+        /// RX channel for receiving messages from users of the tunnel pools.
+        message_rx: Receiver<(RouterId, Vec<u8>)>,
+    },
+
+    /// Inbound tunnel.
+    Inbound {
+        /// RX channel for receiving messages from the network.
+        message_rx: Receiver<Message>,
+    },
+}
+
+impl ReceiverKind {
+    /// Destruct [`ReceiverKind`] into an RX channel for an outbound tunnel.
+    pub fn outbound(self) -> Receiver<(RouterId, Vec<u8>)> {
+        match self {
+            Self::Outbound { message_rx } => message_rx,
+            _ => panic!("state mismatch"),
+        }
+    }
+
+    /// Destruct [`ReceiverKind`] into an RX channel for an inbound tunnel.
+    pub fn inbound(self) -> Receiver<Message> {
+        match self {
+            Self::Inbound { message_rx } => message_rx,
+            _ => panic!("state mismatch"),
+        }
+    }
+}
+
+/// Tunnel information for tunnel builds.
+#[derive(Debug)]
+pub enum TunnelInfo {
+    /// Outbound tunnel build.
+    Outbound {
+        /// ID of the tunnel that's used to receive the outbound tunnel build response.
+        ///
+        /// It's a tunnel ID of one of following kinds:
+        ///  a) ID of an inbound tunnel from the same pool
+        ///  b) ID of an inbound tunnel from the exploratory pool (client pools only)
+        ///  c) ID of a fake 0-hop inbound tunnel (if no inbound tunnel exist)
+        receive_tunnel_id: TunnelId,
+
+        /// ID of the pending outbound tunnel.
+        tunnel_id: TunnelId,
+    },
+
+    // Inbound tunnel build.
+    Inbound {
+        tunnel_id: TunnelId,
+    },
+}
+
+impl TunnelInfo {
+    /// Destruct [`TunnelInfo`] into reception `TunnelId` and the tunnel's actual `TunnelId`.
+    ///
+    /// For inbound tunnels the `TunnelId` is the same because the reply is not received
+    /// via an inbound tunnel.
+    pub fn destruct(self) -> (TunnelId, TunnelId) {
+        match self {
+            Self::Outbound {
+                receive_tunnel_id,
+                tunnel_id,
+            } => (receive_tunnel_id, tunnel_id),
+            Self::Inbound { tunnel_id } => (tunnel_id, tunnel_id),
+        }
     }
 }
 
@@ -118,14 +204,13 @@ pub struct TunnelBuildParameters {
     /// Message ID used in the build message.
     pub message_id: MessageId,
 
-    /// ID of the created endpoint/gateway.
+    /// Tunnel information.
+    pub tunnel_info: TunnelInfo,
+
+    /// Message receiver for the pending tunnel.
     ///
-    /// Tunnel creator (tunnel pool) selects the ID of the tunnel endpoint/gateway they
-    /// created but rest of the hops will get assigned a random tunnel ID generated by
-    /// [`InboundTunnel`]/[`OutboundTunnel`].
-    //
-    // TODO: rewrite this comment, `tunnel_id` is the destination inbound tunnel
-    pub tunnel_id: TunnelId,
+    /// See documentation of [`ReceiverKind`] for more details.
+    pub receiver: ReceiverKind,
 
     /// Local router hash.
     pub our_hash: Bytes,

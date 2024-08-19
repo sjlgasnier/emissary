@@ -24,36 +24,44 @@ use crate::{
     error::{RejectionReason, TunnelError},
     i2np::{
         tunnel::data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
-        HopRole,
+        HopRole, Message,
     },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
+    tunnel::hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
     Error,
 };
 
+use thingbuf::mpsc::Receiver;
+
 use alloc::{vec, vec::Vec};
-use core::{iter, num::NonZeroUsize};
+use core::{
+    future::Future,
+    iter,
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::ibep";
 
 /// Inbound tunnel.
+//
+// TODO: add timer for tunnel expiration
 #[derive(Debug)]
 pub struct InboundTunnel {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
+
+    /// RX channel for receiving messages.
+    message_rx: Receiver<Message>,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
 }
 
 impl InboundTunnel {
-    /// Create new [`InboundTunnel`].
-    pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        Self { tunnel_id, hops }
-    }
-
     /// Get gateway information of the inbound tunnel.
     ///
     /// Returns a `(RouterId, TunnelId)` tuple, allowing OBEP to route the message correctly.
@@ -184,8 +192,12 @@ impl InboundTunnel {
 }
 
 impl Tunnel for InboundTunnel {
-    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        InboundTunnel::new(tunnel_id, hops)
+    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+        InboundTunnel {
+            hops,
+            message_rx: receiver.inbound(),
+            tunnel_id,
+        }
     }
 
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole> {
@@ -204,5 +216,29 @@ impl Tunnel for InboundTunnel {
 
     fn tunnel_id(&self) -> &TunnelId {
         &self.tunnel_id
+    }
+}
+
+impl Future for InboundTunnel {
+    type Output = TunnelId;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
+            match event {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel_id = %self.tunnel_id,
+                        "message channel closed",
+                    );
+                    return Poll::Ready(self.tunnel_id);
+                }
+                Some(message) => {
+                    todo!();
+                }
+            }
+        }
+
+        Poll::Pending
     }
 }
