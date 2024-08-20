@@ -549,17 +549,19 @@ mod tests {
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_info: TunnelInfo::Outbound {
-                    receive_tunnel_id,
-                    tunnel_id,
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        receive_tunnel_id,
+                        tunnel_id,
+                    },
+                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    our_hash: local_hash,
                 },
-                receiver: ReceiverKind::Outbound { message_rx: rx },
-                our_hash: local_hash,
-            })
+            )
             .unwrap();
 
         let mut message = Message::parse_short(&message).unwrap();
@@ -649,17 +651,19 @@ mod tests {
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_info: TunnelInfo::Outbound {
-                    receive_tunnel_id,
-                    tunnel_id,
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        receive_tunnel_id,
+                        tunnel_id,
+                    },
+                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    our_hash: local_hash,
                 },
-                receiver: ReceiverKind::Outbound { message_rx: rx },
-                our_hash: local_hash,
-            })
+            )
             .unwrap();
 
         let message = (0..transit_managers.len() - 1).fold(
@@ -734,17 +738,19 @@ mod tests {
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_info: TunnelInfo::Outbound {
-                    receive_tunnel_id,
-                    tunnel_id,
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        receive_tunnel_id,
+                        tunnel_id,
+                    },
+                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    our_hash: local_hash.clone(),
                 },
-                receiver: ReceiverKind::Outbound { message_rx: rx },
-                our_hash: local_hash.clone(),
-            })
+            )
             .unwrap();
 
         let mut message = Message::parse_short(&message).unwrap();
@@ -811,17 +817,19 @@ mod tests {
         hops[0].1 = new_pubkey;
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_info: TunnelInfo::Outbound {
-                    receive_tunnel_id,
-                    tunnel_id,
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        receive_tunnel_id,
+                        tunnel_id,
+                    },
+                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    our_hash: local_hash,
                 },
-                receiver: ReceiverKind::Outbound { message_rx: rx },
-                our_hash: local_hash,
-            })
+            )
             .unwrap();
 
         let mut message = Message::parse_short(&message).unwrap();

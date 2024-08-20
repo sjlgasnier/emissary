@@ -25,24 +25,25 @@ use crate::{
 };
 
 use rand_core::RngCore;
+use thingbuf::mpsc::Receiver;
 
 use alloc::{vec, vec::Vec};
 use core::{
     future::Future,
     iter,
+    marker::PhantomData,
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
-use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::obgw";
 
 /// Outbound tunnel.
 #[derive(Debug)]
-pub struct OutboundTunnel {
+pub struct OutboundTunnel<R: Runtime> {
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
 
@@ -51,12 +52,19 @@ pub struct OutboundTunnel {
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
+
+    /// Marker for `Runtime`.
+    _marker: PhantomData<R>,
 }
 
-impl OutboundTunnel {
+impl<R: Runtime> OutboundTunnel<R> {
     /// Send `message` to `router`
     pub fn send_to_router(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
-        assert!(message.len() < 500, "fragmentation not supported");
+        assert!(
+            message.len() < 500,
+            "fragmentation not supported {}",
+            message.len()
+        );
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -107,7 +115,7 @@ impl OutboundTunnel {
     }
 
     /// Send `message` to tunnel identified by the (`router`, `gateway`) tuple.
-    pub fn send_to_tunnel<R: Runtime>(
+    pub fn send_to_tunnel(
         &self,
         router: RouterId,
         gateway: TunnelId,
@@ -180,12 +188,13 @@ impl OutboundTunnel {
     }
 }
 
-impl Tunnel for OutboundTunnel {
+impl<R: Runtime> Tunnel for OutboundTunnel<R> {
     fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
-        OutboundTunnel {
+        OutboundTunnel::<R> {
             hops,
             message_rx: receiver.outbound(),
             tunnel_id,
+            _marker: Default::default(),
         }
     }
 
@@ -209,7 +218,7 @@ impl Tunnel for OutboundTunnel {
     }
 }
 
-impl Future for OutboundTunnel {
+impl<R: Runtime> Future for OutboundTunnel<R> {
     type Output = TunnelId;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -217,8 +226,7 @@ impl Future for OutboundTunnel {
             match event {
                 None => return Poll::Ready(self.tunnel_id),
                 Some((router, message)) => {
-                    tracing::error!("not implemented");
-                    todo!();
+                    let (router, message) = self.send_to_router(router, message);
                 }
             }
         }
@@ -244,11 +252,8 @@ mod tests {
 
         let (gateway_router, gateway_tunnel) = inbound.gateway();
 
-        let (next_router, message) = outbound.send_to_tunnel::<MockRuntime>(
-            gateway_router,
-            gateway_tunnel,
-            b"hello, world".to_vec(),
-        );
+        let (next_router, message) =
+            outbound.send_to_tunnel(gateway_router, gateway_tunnel, b"hello, world".to_vec());
         assert_eq!(outbound_transit[0].router(), next_router);
 
         // first outbound hop (participant)

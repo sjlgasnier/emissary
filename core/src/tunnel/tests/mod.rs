@@ -181,7 +181,11 @@ impl Future for TestTransitTunnelManager {
 /// Build outbound tunnel.
 pub fn build_outbound_tunnel(
     num_hops: usize,
-) -> (Bytes, OutboundTunnel, Vec<TestTransitTunnelManager>) {
+) -> (
+    Bytes,
+    OutboundTunnel<MockRuntime>,
+    Vec<TestTransitTunnelManager>,
+) {
     let (hops, mut transit_managers): (
         Vec<(Bytes, StaticPublicKey)>,
         Vec<TestTransitTunnelManager>,
@@ -203,17 +207,19 @@ pub fn build_outbound_tunnel(
     let (tx, rx) = channel(64);
 
     let (pending_tunnel, next_router, message) =
-        PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-            hops: hops.clone(),
-            noise: local_noise,
-            message_id,
-            tunnel_info: TunnelInfo::Outbound {
-                receive_tunnel_id,
-                tunnel_id,
+        PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+            TunnelBuildParameters {
+                hops: hops.clone(),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    receive_tunnel_id,
+                    tunnel_id,
+                },
+                receiver: ReceiverKind::Outbound { message_rx: rx },
+                our_hash: local_hash.clone(),
             },
-            receiver: ReceiverKind::Outbound { message_rx: rx },
-            our_hash: local_hash.clone(),
-        })
+        )
         .unwrap();
 
     let mut message = Message::parse_short(&message).unwrap();

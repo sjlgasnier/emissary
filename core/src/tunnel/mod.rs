@@ -28,7 +28,7 @@ use crate::{
         garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         new_noise::NoiseContext,
-        pool::{new_pool::TunnelPoolNew, TunnelPoolConfig, TunnelPoolEvent},
+        pool::{ExploratorySelector, TunnelPoolConfig, TunnelPoolNew},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -36,7 +36,6 @@ use crate::{
 
 use futures::StreamExt;
 use hashbrown::{HashMap, HashSet};
-use pool::new_pool::ExploratorySelector;
 use thingbuf::mpsc::{channel, Receiver};
 
 use alloc::{vec, vec::Vec};
