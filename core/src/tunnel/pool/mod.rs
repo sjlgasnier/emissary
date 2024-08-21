@@ -30,6 +30,7 @@ use crate::{
         },
         metrics::*,
         new_noise::NoiseContext,
+        pool::zero_hop::ZeroHopInboundTunnel,
         routing_table::RoutingTable,
     },
     Error,
@@ -57,6 +58,8 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+
+mod zero_hop;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::pool";
@@ -326,92 +329,6 @@ impl Default for TunnelPoolConfig {
             num_outbound_hops: 2usize,
             destination: (),
         }
-    }
-}
-
-/// Fake 0-hop inbound tunnel.
-///
-/// These tunnels are used to receive one `TunnelGateway` message which contains a tunnel build
-/// response which it routes back to the installed listener (if it exists), after which the tunnel
-/// gets destructed.
-struct ZeroHopInboundTunnel {
-    /// RX channel for receiving a message.
-    message_rx: mpsc::Receiver<Message>,
-
-    /// Routing table.
-    routing_table: RoutingTable,
-
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-}
-
-impl ZeroHopInboundTunnel {
-    /// Create new [`ZeroHopInboundTunnel`].
-    pub fn new(routing_table: RoutingTable, rng: &mut impl RngCore) -> (TunnelId, Self) {
-        let (tunnel_id, message_rx) = routing_table.insert_tunnel::<1>(rng);
-
-        (
-            tunnel_id,
-            Self {
-                message_rx,
-                routing_table,
-                tunnel_id,
-            },
-        )
-    }
-
-    /// Handle receive I2NP message, presumably containing a tunnel build response.
-    fn on_message(&self, message: Message) {
-        tracing::trace!(
-            target: LOG_TARGET,
-            tunnel_id = %self.tunnel_id,
-            message_type = ?message.message_type,
-            "handle message",
-        );
-
-        let Some(TunnelGateway { tunnel_id, payload }) = TunnelGateway::parse(&message.payload)
-        else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                tunnel_id = %self.tunnel_id,
-                message_type = ?message.message_type,
-                "invalid message, expected `TunnelGateway`",
-            );
-            return;
-        };
-
-        let Some(message) = Message::parse_standard(&payload) else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                tunnel_id = %self.tunnel_id,
-                message_type = ?message.message_type,
-                "invalid message, expected standard i2np message",
-            );
-            return;
-        };
-
-        self.routing_table.route_message(message);
-    }
-}
-
-impl Future for ZeroHopInboundTunnel {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match futures::ready!(self.message_rx.poll_recv(cx)) {
-            None => tracing::debug!(
-                target: LOG_TARGET,
-                tunnel_id = %self.tunnel_id,
-                "channel closed while waiting for build response",
-            ),
-            Some(message) => self.on_message(message),
-        }
-
-        // remove the fake 0-hop tunnel from the routing table after processing the message because
-        // it's only used for processing of one build reply record
-        self.routing_table.remove_tunnel(&self.tunnel_id);
-
-        Poll::Ready(())
     }
 }
 
