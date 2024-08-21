@@ -47,9 +47,6 @@ pub struct OutboundTunnel<R: Runtime> {
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
 
-    /// RX channel for receiving messages.
-    message_rx: Receiver<(RouterId, Vec<u8>)>,
-
     /// Tunnel ID.
     tunnel_id: TunnelId,
 
@@ -61,7 +58,7 @@ impl<R: Runtime> OutboundTunnel<R> {
     /// Send `message` to `router`
     pub fn send_to_router(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
         assert!(
-            message.len() < 500,
+            message.len() < 950,
             "fragmentation not supported {}",
             message.len()
         );
@@ -121,7 +118,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         gateway: TunnelId,
         message: Vec<u8>,
     ) -> (RouterId, Vec<u8>) {
-        assert!(message.len() < 500, "fragmentation not supported");
+        assert!(message.len() < 950, "fragmentation not supported");
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -174,7 +171,7 @@ impl<R: Runtime> OutboundTunnel<R> {
 
     /// Send `message` to `router`
     pub fn send(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
-        assert!(message.len() < 500, "fragmentation not supported");
+        assert!(message.len() < 950, "fragmentation not supported");
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -192,7 +189,6 @@ impl<R: Runtime> Tunnel for OutboundTunnel<R> {
     fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
         OutboundTunnel::<R> {
             hops,
-            message_rx: receiver.outbound(),
             tunnel_id,
             _marker: Default::default(),
         }
@@ -215,23 +211,6 @@ impl<R: Runtime> Tunnel for OutboundTunnel<R> {
 
     fn direction() -> TunnelDirection {
         TunnelDirection::Outbound
-    }
-}
-
-impl<R: Runtime> Future for OutboundTunnel<R> {
-    type Output = TunnelId;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
-            match event {
-                None => return Poll::Ready(self.tunnel_id),
-                Some((router, message)) => {
-                    let (router, message) = self.send_to_router(router, message);
-                }
-            }
-        }
-
-        Poll::Pending
     }
 }
 

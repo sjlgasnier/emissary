@@ -66,7 +66,7 @@ pub struct PendingTunnel<T: Tunnel> {
     /// Tunnel ID.
     tunnel_id: TunnelId,
 
-    /// Marker for tunnel.
+    /// Marker for `Tunnel`.
     _tunnel: PhantomData<T>,
 }
 
@@ -416,7 +416,6 @@ mod test {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -428,7 +427,7 @@ mod test {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash,
                 },
             )
@@ -537,7 +536,6 @@ mod test {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -549,7 +547,7 @@ mod test {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash,
                 },
             )
@@ -630,7 +628,6 @@ mod test {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -642,7 +639,7 @@ mod test {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash,
                 },
             )

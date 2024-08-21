@@ -118,3 +118,8 @@ impl Future for ZeroHopInboundTunnel {
         Poll::Ready(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+}

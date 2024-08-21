@@ -121,13 +121,11 @@ impl<T: Tunnel> TunnelBuilder<T> {
 /// Messages to outbound tunnels (destined to network) are not routed through [`RoutingTable`] as
 /// they must carry additional information (delivery instructions) and thus the receiver types must
 /// be differentiated by the tunnel type.
+//
+// TODO: rewrite comment above
 #[derive(Debug)]
 pub enum ReceiverKind {
-    /// Outbound tunnel.
-    Outbound {
-        /// RX channel for receiving messages from users of the tunnel pools.
-        message_rx: Receiver<(RouterId, Vec<u8>)>,
-    },
+    Outbound,
 
     /// Inbound tunnel.
     Inbound {
@@ -137,14 +135,6 @@ pub enum ReceiverKind {
 }
 
 impl ReceiverKind {
-    /// Destruct [`ReceiverKind`] into an RX channel for an outbound tunnel.
-    pub fn outbound(self) -> Receiver<(RouterId, Vec<u8>)> {
-        match self {
-            Self::Outbound { message_rx } => message_rx,
-            _ => panic!("state mismatch"),
-        }
-    }
-
     /// Destruct [`ReceiverKind`] into an RX channel for an inbound tunnel.
     pub fn inbound(self) -> Receiver<Message> {
         match self {

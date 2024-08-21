@@ -546,7 +546,6 @@ mod tests {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -558,7 +557,7 @@ mod tests {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash,
                 },
             )
@@ -648,7 +647,6 @@ mod tests {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -660,7 +658,7 @@ mod tests {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash,
                 },
             )
@@ -735,7 +733,6 @@ mod tests {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -747,7 +744,7 @@ mod tests {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash.clone(),
                 },
             )
@@ -804,7 +801,6 @@ mod tests {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (tx, rx) = channel(64);
 
         // replace the first hop's public key with a random public key
         let new_pubkey = {
@@ -826,7 +822,7 @@ mod tests {
                         receive_tunnel_id,
                         tunnel_id,
                     },
-                    receiver: ReceiverKind::Outbound { message_rx: rx },
+                    receiver: ReceiverKind::Outbound,
                     our_hash: local_hash,
                 },
             )
