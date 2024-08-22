@@ -28,7 +28,7 @@ use crate::{
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::new_noise::NoiseContext,
+    tunnel::noise::NoiseContext,
     Error,
 };
 

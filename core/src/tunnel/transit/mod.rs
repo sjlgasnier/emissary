@@ -35,7 +35,7 @@ use crate::{
     primitives::{RouterId, TunnelId},
     runtime::{JoinSet, Runtime},
     tunnel::{
-        new_noise::{NoiseContext, TunnelKeys},
+        noise::{NoiseContext, TunnelKeys},
         routing_table::RoutingTable,
         transit::{inbound::InboundGateway, outbound::OutboundEndpoint, participant::Participant},
     },

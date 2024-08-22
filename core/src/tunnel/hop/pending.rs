@@ -384,7 +384,7 @@ mod test {
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
-            new_noise::NoiseContext,
+            noise::NoiseContext,
             pool::{TunnelPoolContext, TunnelPoolHandle},
             routing_table::RoutingTable,
             tests::{make_router, TestTransitTunnelManager},

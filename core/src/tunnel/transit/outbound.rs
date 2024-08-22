@@ -32,7 +32,7 @@ use crate::{
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
-        new_noise::TunnelKeys,
+        noise::TunnelKeys,
         routing_table::RoutingTable,
         transit::{TransitTunnel, TUNNEL_EXPIRATION},
     },

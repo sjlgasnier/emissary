@@ -32,7 +32,7 @@ use crate::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
             TunnelBuildParameters, TunnelInfo,
         },
-        new_noise::NoiseContext,
+        noise::NoiseContext,
         pool::{TunnelPoolContext, TunnelPoolHandle},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,

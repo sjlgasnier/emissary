@@ -30,7 +30,7 @@ use crate::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, Tunnel,
             TunnelBuildParameters,
         },
-        new_noise::NoiseContext,
+        noise::NoiseContext,
         pool::selector::{ClientSelector, ExploratorySelector, HopSelector, TunnelSelector},
     },
     Error,

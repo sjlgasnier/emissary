@@ -21,7 +21,7 @@ use crate::{
     i2np::{HopRole, Message},
     primitives::{MessageId, RouterId, TunnelId},
     tunnel::{
-        new_noise::{NoiseContext, OutboundSession},
+        noise::{NoiseContext, OutboundSession},
         pool::TunnelPoolHandle,
     },
 };
