@@ -20,7 +20,10 @@ use crate::{
     crypto::StaticPublicKey,
     i2np::{HopRole, Message},
     primitives::{MessageId, RouterId, TunnelId},
-    tunnel::new_noise::{NoiseContext, OutboundSession},
+    tunnel::{
+        new_noise::{NoiseContext, OutboundSession},
+        pool::TunnelPoolHandle,
+    },
 };
 
 use bytes::Bytes;
@@ -123,7 +126,6 @@ impl<T: Tunnel> TunnelBuilder<T> {
 /// be differentiated by the tunnel type.
 //
 // TODO: rewrite comment above
-#[derive(Debug)]
 pub enum ReceiverKind {
     Outbound,
 
@@ -131,14 +133,17 @@ pub enum ReceiverKind {
     Inbound {
         /// RX channel for receiving messages from the network.
         message_rx: Receiver<Message>,
+
+        /// Tunnel pool handle.
+        handle: TunnelPoolHandle,
     },
 }
 
 impl ReceiverKind {
     /// Destruct [`ReceiverKind`] into an RX channel for an inbound tunnel.
-    pub fn inbound(self) -> Receiver<Message> {
+    pub fn inbound(self) -> (Receiver<Message>, TunnelPoolHandle) {
         match self {
-            Self::Inbound { message_rx } => message_rx,
+            Self::Inbound { message_rx, handle } => (message_rx, handle),
             _ => panic!("state mismatch"),
         }
     }
@@ -155,7 +160,10 @@ pub enum TunnelInfo {
         ///  a) ID of an inbound tunnel from the same pool
         ///  b) ID of an inbound tunnel from the exploratory pool (client pools only)
         ///  c) ID of a fake 0-hop inbound tunnel (if no inbound tunnel exist)
-        receive_tunnel_id: TunnelId,
+        gateway: TunnelId,
+
+        /// ID of the gateway router.
+        router_id: Bytes,
 
         /// ID of the pending outbound tunnel.
         tunnel_id: TunnelId,
@@ -163,7 +171,11 @@ pub enum TunnelInfo {
 
     // Inbound tunnel build.
     Inbound {
+        /// ID of the pending tunnel.
         tunnel_id: TunnelId,
+
+        /// ID of the router where the reply should be sent.
+        router_id: Bytes,
     },
 }
 
@@ -172,13 +184,17 @@ impl TunnelInfo {
     ///
     /// For inbound tunnels the `TunnelId` is the same because the reply is not received
     /// via an inbound tunnel.
-    pub fn destruct(self) -> (TunnelId, TunnelId) {
+    pub fn destruct(self) -> (TunnelId, TunnelId, Bytes) {
         match self {
             Self::Outbound {
-                receive_tunnel_id,
+                gateway,
                 tunnel_id,
-            } => (receive_tunnel_id, tunnel_id),
-            Self::Inbound { tunnel_id } => (tunnel_id, tunnel_id),
+                router_id,
+            } => (gateway, tunnel_id, router_id),
+            Self::Inbound {
+                tunnel_id,
+                router_id,
+            } => (tunnel_id, tunnel_id, router_id),
         }
     }
 }
@@ -201,7 +217,4 @@ pub struct TunnelBuildParameters {
     ///
     /// See documentation of [`ReceiverKind`] for more details.
     pub receiver: ReceiverKind,
-
-    /// Local router hash.
-    pub our_hash: Bytes,
 }

@@ -221,7 +221,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
         // if the tunnel already exists in the routing table, the build request is rejected
         match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     target: LOG_TARGET,
                     %tunnel_id,
                     ?error,
@@ -351,7 +351,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
         // if the tunnel already exists in the routing table, the build request is rejected
         match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     target: LOG_TARGET,
                     %tunnel_id,
                     ?error,
@@ -510,6 +510,7 @@ mod tests {
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
             },
+            pool::TunnelPoolHandle,
             tests::make_router,
         },
     };
@@ -545,7 +546,7 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -554,11 +555,11 @@ mod tests {
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
-                        receive_tunnel_id,
+                        gateway,
                         tunnel_id,
+                        router_id: local_hash,
                     },
                     receiver: ReceiverKind::Outbound,
-                    our_hash: local_hash,
                 },
             )
             .unwrap();
@@ -598,6 +599,7 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let (handle, context) = TunnelPoolHandle::new();
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
@@ -605,9 +607,14 @@ mod tests {
                 hops: hops.clone(),
                 noise: local_noise,
                 message_id,
-                tunnel_info: TunnelInfo::Inbound { tunnel_id },
-                receiver: ReceiverKind::Inbound { message_rx: rx },
-                our_hash: local_hash,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash,
+                },
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
             })
             .unwrap();
 
@@ -646,7 +653,7 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -655,11 +662,11 @@ mod tests {
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
-                        receive_tunnel_id,
+                        gateway,
                         tunnel_id,
+                        router_id: local_hash,
                     },
                     receiver: ReceiverKind::Outbound,
-                    our_hash: local_hash,
                 },
             )
             .unwrap();
@@ -689,7 +696,7 @@ mod tests {
             payload,
         } = TunnelGateway::parse(&payload).unwrap();
 
-        assert_eq!(TunnelId::from(recv_tunnel_id), receive_tunnel_id);
+        assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
 
         let Some(Message {
             message_type: MessageType::OutboundTunnelBuildReply,
@@ -732,7 +739,7 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -741,11 +748,11 @@ mod tests {
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
-                        receive_tunnel_id,
+                        gateway,
                         tunnel_id,
+                        router_id: local_hash.clone(),
                     },
                     receiver: ReceiverKind::Outbound,
-                    our_hash: local_hash.clone(),
                 },
             )
             .unwrap();
@@ -800,7 +807,7 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         // replace the first hop's public key with a random public key
         let new_pubkey = {
@@ -819,11 +826,11 @@ mod tests {
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
-                        receive_tunnel_id,
+                        gateway,
                         tunnel_id,
+                        router_id: local_hash,
                     },
                     receiver: ReceiverKind::Outbound,
-                    our_hash: local_hash,
                 },
             )
             .unwrap();

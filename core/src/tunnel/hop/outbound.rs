@@ -225,14 +225,24 @@ mod tests {
 
     #[tokio::test]
     async fn send_tunnel_message() {
+        use tracing_subscriber::prelude::*;
+        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
+
         let (local_outbound_hash, mut outbound, mut outbound_transit) =
             build_outbound_tunnel(2usize);
         let (local_inbound_hash, mut inbound, mut inbound_transit) = build_inbound_tunnel(2usize);
 
         let (gateway_router, gateway_tunnel) = inbound.gateway();
 
+        let message = MessageBuilder::standard()
+            .with_message_type(MessageType::TunnelData)
+            .with_message_id(13371338u32)
+            .with_expiration((MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_payload(b"hello, world")
+            .build();
+
         let (next_router, message) =
-            outbound.send_to_tunnel(gateway_router, gateway_tunnel, b"hello, world".to_vec());
+            outbound.send_to_tunnel(gateway_router, gateway_tunnel, message);
         assert_eq!(outbound_transit[0].router(), next_router);
 
         // first outbound hop (participant)
@@ -280,18 +290,8 @@ mod tests {
         assert_eq!(RouterId::from(local_inbound_hash), next_router);
 
         // inbound endpoint
-        let Some(Message {
-            message_type: MessageType::TunnelData,
-            message_id,
-            expiration,
-            payload,
-        }) = Message::parse_short(&message)
-        else {
-            panic!("invalid message");
-        };
-
-        let message = EncryptedTunnelData::parse(&payload).unwrap();
+        let message = Message::parse_short(&message).unwrap();
         let message = inbound.handle_tunnel_data(&message).unwrap();
-        assert_eq!(message, b"hello, world".to_vec());
+        assert_eq!(message.payload, b"hello, world".to_vec());
     }
 }

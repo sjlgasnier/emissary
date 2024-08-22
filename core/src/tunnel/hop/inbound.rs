@@ -28,7 +28,10 @@ use crate::{
     },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
+    tunnel::{
+        hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
+        pool::TunnelPoolHandle,
+    },
     Error,
 };
 
@@ -49,8 +52,10 @@ const LOG_TARGET: &str = "emissary::tunnel::ibep";
 /// Inbound tunnel.
 //
 // TODO: add timer for tunnel expiration
-#[derive(Debug)]
 pub struct InboundTunnel {
+    /// Tunnel pool handle.
+    handle: TunnelPoolHandle,
+
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
 
@@ -122,10 +127,18 @@ impl InboundTunnel {
     }
 
     /// Handle tunnel data.
-    pub fn handle_tunnel_data<'a>(
-        &mut self,
-        tunnel_data: &EncryptedTunnelData<'a>,
-    ) -> crate::Result<Vec<u8>> {
+    pub fn handle_tunnel_data<'a>(&self, message: &Message) -> crate::Result<Message> {
+        let tunnel_data = EncryptedTunnelData::parse(&message.payload).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                tunnel_id = %self.tunnel_id,
+                message_id = %message.message_id,
+                "malformed tunnel data message",
+            );
+
+            Error::InvalidData
+        })?;
+
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -170,7 +183,16 @@ impl InboundTunnel {
                 MessageKind::Unfragmented {
                     delivery_instructions,
                 } => match delivery_instructions {
-                    DeliveryInstructions::Local => return Ok(message.message.to_vec()),
+                    DeliveryInstructions::Local =>
+                        return Message::parse_standard(&message.message).ok_or_else(|| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                "malformed i2np message inside tunnel data",
+                            );
+
+                            Error::InvalidData
+                        }),
                     delivery_instructions => {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -193,9 +215,12 @@ impl InboundTunnel {
 
 impl Tunnel for InboundTunnel {
     fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+        let (message_rx, handle) = receiver.inbound();
+
         InboundTunnel {
+            handle,
             hops,
-            message_rx: receiver.inbound(),
+            message_rx,
             tunnel_id,
         }
     }
@@ -233,9 +258,23 @@ impl Future for InboundTunnel {
                     );
                     return Poll::Ready(self.tunnel_id);
                 }
-                Some(message) => {
-                    todo!();
-                }
+                Some(message) => match self.handle_tunnel_data(&message) {
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel = %self.tunnel_id,
+                        ?error,
+                        "failed to handle tunnel data",
+                    ),
+                    Ok(message) =>
+                        if let Err(error) = self.handle.route_message(message) {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                tunnel = %self.tunnel_id,
+                                ?error,
+                                "failed to route message",
+                            );
+                        },
+                },
             }
         }
 

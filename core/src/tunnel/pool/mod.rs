@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::StaticPublicKey,
-    error::ChannelError,
+    error::{ChannelError, RoutingError},
     i2np::{tunnel::gateway::TunnelGateway, Message, MessageBuilder},
     primitives::{MessageId, RouterId, TunnelId},
     router_storage::RouterStorage,
@@ -92,13 +92,13 @@ pub trait TunnelSelector: Send + Unpin {
     /// Attempt to select an inbound tunnel for reception of an outbound tunnel build reply.
     ///
     /// Returns `None` if there are no inbound tunnels available.
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)>;
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)>;
 
     /// Add a new tunnel into the set of active outbound tunnels.
     fn add_outbound_tunnel(&self, tunnel_id: TunnelId);
 
     /// Add a new tunnel into the set of active inbound tunnels.
-    fn add_inbound_tunnel(&self, tunnel_id: TunnelId);
+    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId);
 
     /// Remove tunnel from the set of active outbound tunnels.
     fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId);
@@ -129,7 +129,7 @@ pub struct ExploratorySelector {
     handle: TunnelPoolHandle,
 
     /// Active inbound tunnels.
-    inbound: Arc<RwLock<HashSet<TunnelId>>>,
+    inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
 
     /// Active outbound tunnels.
     outbound: Arc<RwLock<HashSet<TunnelId>>>,
@@ -165,16 +165,20 @@ impl TunnelSelector for ExploratorySelector {
         self.outbound.read().iter().next().map(|tunnel_id| (*tunnel_id, &self.handle))
     }
 
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)> {
-        self.inbound.read().iter().next().map(|tunnel_id| (*tunnel_id, &self.handle))
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)> {
+        self.inbound
+            .read()
+            .iter()
+            .next()
+            .map(|(tunnel_id, router_id)| (*tunnel_id, router_id.clone(), &self.handle))
     }
 
     fn add_outbound_tunnel(&self, tunnel_id: TunnelId) {
         self.outbound.write().insert(tunnel_id);
     }
 
-    fn add_inbound_tunnel(&self, tunnel_id: TunnelId) {
-        self.inbound.write().insert(tunnel_id);
+    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId) {
+        self.inbound.write().insert(tunnel_id, router_id);
     }
 
     fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId) {
@@ -227,7 +231,7 @@ pub struct ClientSelector {
     handle: TunnelPoolHandle,
 
     /// Active inbound tunnels.
-    inbound: Arc<RwLock<HashSet<TunnelId>>>,
+    inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
 
     /// Active outbound tunnels.
     outbound: Arc<RwLock<HashSet<TunnelId>>>,
@@ -253,10 +257,10 @@ impl TunnelSelector for ClientSelector {
         )
     }
 
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)> {
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)> {
         self.inbound.read().iter().next().map_or_else(
             || self.exploratory.select_inbound_tunnel(),
-            |tunnel_id| Some((*tunnel_id, &self.handle)),
+            |(tunnel_id, router_id)| Some((*tunnel_id, router_id.clone(), &self.handle)),
         )
     }
 
@@ -264,8 +268,8 @@ impl TunnelSelector for ClientSelector {
         self.outbound.write().insert(tunnel_id);
     }
 
-    fn add_inbound_tunnel(&self, tunnel_id: TunnelId) {
-        self.inbound.write().insert(tunnel_id);
+    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId) {
+        self.inbound.write().insert(tunnel_id, router_id);
     }
 
     fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId) {
@@ -374,6 +378,20 @@ impl TunnelPoolHandle {
         Ok(())
     }
 
+    pub fn route_message(&self, message: Message) -> Result<(), RoutingError> {
+        let mut listeners = self.listeners.write();
+
+        match listeners.remove(&MessageId::from(message.message_id)) {
+            Some(listener) =>
+                listener.send(message).map_err(|message| RoutingError::ChannelClosed(message)),
+            None => {
+                // TODO: no unwraps
+                self.tx.try_send(TunnelMessage::Inbound { message }).unwrap();
+                Ok(())
+            }
+        }
+    }
+
     /// Allocate new (`MessageId`, `oneshot::Receiver<Message>)` tuple for an inbound build
     /// response.
     pub fn add_listener(&self, rng: &mut impl RngCore) -> (MessageId, oneshot::Receiver<Message>) {
@@ -452,6 +470,14 @@ impl TunnelPoolContext {
         match listeners.remove(&MessageId::from(message.message_id)) {
             Some(listener) => listener.send(message),
             None => Err(message),
+        }
+    }
+
+    /// Allocate new [`TunnelPoolHandle`] for the context.
+    pub fn handle(&self) -> TunnelPoolHandle {
+        TunnelPoolHandle {
+            listeners: self.listeners.clone(),
+            tx: self.tx.clone(),
         }
     }
 }
@@ -648,7 +674,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                 // it'll be received by the `TunnelPool`
                 None => {
                     // the fake 0-hop tunnel routes the build response via `RoutingTable`
-                    let (receive_tunnel_id, zero_hop_tunnel) =
+                    let (gateway, zero_hop_tunnel) =
                         ZeroHopInboundTunnel::new(self.routing_table.clone(), &mut R::rng());
 
                     // generate message id for the build request and optimistically insert
@@ -662,7 +688,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                     tracing::trace!(
                         target: LOG_TARGET,
                         %tunnel_id,
-                        %receive_tunnel_id,
+                        %gateway,
                         %message_id,
                         num_hops = ?hops.len(),
                         "build outbound tunnel via 0-hop tunnel",
@@ -672,13 +698,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                         TunnelBuildParameters {
                             hops,
                             tunnel_info: TunnelInfo::Outbound {
-                                receive_tunnel_id,
+                                gateway,
                                 tunnel_id,
+                                router_id: self.noise.local_router_hash().clone(),
                             },
                             receiver: ReceiverKind::Outbound,
                             message_id,
                             noise: self.noise.clone(),
-                            our_hash: self.noise.local_router_hash().clone(),
                         },
                     ) {
                         Ok((tunnel, router_id, message)) => {
@@ -704,7 +730,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                                 "failed to create outbound tunnel",
                             );
 
-                            self.routing_table.remove_tunnel(&receive_tunnel_id);
+                            self.routing_table.remove_tunnel(&gateway);
                             self.routing_table.remove_listener(&message_id);
                         }
                     }
@@ -716,9 +742,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                 // once the tunnel build reply is received into the selected inbound tunnel (which
                 // could be a different pool), it'll be received by the selected tunnel's
                 // `TunnelPool` which routes the message to the listener
-                //
-                // TODO: this needs to return gateway, not endpoint!
-                Some((receive_tunnel_id, handle)) => {
+                Some((gateway, router_id, handle)) => {
                     // if an inbound tunnel exists, the reply is routed through it and received
                     // by its `TunnelPool` which routes the message to the listener
                     let (message_id, message_rx) = handle.add_listener(&mut R::rng());
@@ -726,7 +750,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                     tracing::trace!(
                         target: LOG_TARGET,
                         %tunnel_id,
-                        %receive_tunnel_id,
+                        %gateway,
+                        %router_id,
                         %message_id,
                         num_hops = ?hops.len(),
                         "build outbound tunnel via existing inbound tunnel",
@@ -736,13 +761,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                         TunnelBuildParameters {
                             hops,
                             tunnel_info: TunnelInfo::Outbound {
-                                receive_tunnel_id,
+                                gateway,
+                                router_id: Bytes::from(Into::<Vec<u8>>::into(router_id)),
                                 tunnel_id,
                             },
                             receiver: ReceiverKind::Outbound,
                             message_id,
                             noise: self.noise.clone(),
-                            our_hash: self.noise.local_router_hash().clone(),
                         },
                     ) {
                         Ok((tunnel, router_id, message)) => {
@@ -810,13 +835,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
 
             match PendingTunnel::<InboundTunnel>::create_tunnel::<R>(TunnelBuildParameters {
                 hops,
-                tunnel_info: TunnelInfo::Inbound { tunnel_id },
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: self.noise.local_router_hash().clone(),
+                },
                 receiver: ReceiverKind::Inbound {
                     message_rx: tunnel_rx,
+                    handle: self.context.handle(),
                 },
                 message_id,
                 noise: self.noise.clone(),
-                our_hash: self.noise.local_router_hash().clone(),
             }) {
                 Ok((tunnel, router, message)) => {
                     // add pending tunnel into outbound tunnel build listener and send
@@ -900,7 +928,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPoolNew<R, S>
                 Ok(tunnel) => {
                     tracing::debug!(
                         target: LOG_TARGET,
-                        inbound_tunnel_id = %tunnel.tunnel_id(),
+                        outbound_tunnel_id = %tunnel.tunnel_id(),
                         "outbound tunnel built",
                     );
 
@@ -932,7 +960,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPoolNew<R, S>
                         "inbound tunnel built",
                     );
 
-                    self.selector.add_inbound_tunnel(*tunnel.tunnel_id());
+                    // TODO: explain
+                    let (router_id, tunnel_id) = tunnel.gateway();
+                    self.selector.add_inbound_tunnel(tunnel_id, router_id);
+
                     self.inbound.push(tunnel);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).increment(1);
                     self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).decrement(1);
@@ -1228,7 +1259,7 @@ mod tests {
         routing_table.route_message(message);
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
-        // assert_eq!(tunnel_pool.inbound.len(), 1);
+        assert_eq!(tunnel_pool.inbound.len(), 1);
         assert_eq!(tunnel_pool.pending_inbound.len(), 0);
     }
 
@@ -1306,16 +1337,10 @@ mod tests {
         // assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1))
     }
 
-    // #[tokio::test]
-    async fn outbound_build_reply_received_late() {}
-
-    // #[tokio::test]
-    async fn inbound_build_reply_received_late() {}
-
     #[tokio::test]
     async fn build_inbound_client_tunnel() {
-        use tracing_subscriber::prelude::*;
-        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
+        // use tracing_subscriber::prelude::*;
+        // let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
 
         // create 10 routers and add them to local `RouterStorage`
         let mut routers = (0..10)
@@ -1352,7 +1377,8 @@ mod tests {
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table =
+            RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
         let (pool_handle, context) = TunnelPoolHandle::new();
         let (client_pool_handle, client_context) = TunnelPoolHandle::new();
         let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
@@ -1363,7 +1389,7 @@ mod tests {
             exploratory_selector.clone(),
             context,
             routing_table.clone(),
-            noise,
+            noise.clone(),
             handle.clone(),
         );
 
@@ -1409,18 +1435,6 @@ mod tests {
                 num_outbound: 0usize,
                 num_outbound_hops: 0usize,
                 destination: (),
-            };
-            let our_hash = {
-                let mut our_hash = vec![0u8; 32];
-                MockRuntime::rng().fill_bytes(&mut our_hash);
-
-                Bytes::from(our_hash)
-            };
-            let noise = {
-                let mut key_bytes = vec![0u8; 32];
-                MockRuntime::rng().fill_bytes(&mut key_bytes);
-
-                NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
             };
             let mut client_pool = TunnelPoolNew::<MockRuntime, _>::new(
                 pool_config,
@@ -1519,4 +1533,206 @@ mod tests {
             assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
         }
     }
+
+    #[tokio::test]
+    async fn build_outbound_client_tunnel() {
+        // use tracing_subscriber::prelude::*;
+        // let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
+
+        // create 10 routers and add them to local `RouterStorage`
+        let mut routers = (0..10)
+            .map(|_| {
+                let transit = TestTransitTunnelManager::new();
+                let router_id = transit.router();
+
+                (transit.router(), transit)
+            })
+            .collect::<HashMap<_, _>>();
+        let router_storage = RouterStorage::from_random(
+            routers.iter().map(|(_, transit)| transit.router_info()).collect(),
+        );
+
+        let pool_config = TunnelPoolConfig {
+            num_inbound: 1usize,
+            num_inbound_hops: 3usize,
+            num_outbound: 0usize,
+            num_outbound_hops: 0usize,
+            destination: (),
+        };
+        let our_hash = {
+            let mut our_hash = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut our_hash);
+
+            Bytes::from(our_hash)
+        };
+        let noise = {
+            let mut key_bytes = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut key_bytes);
+
+            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+        };
+        let handle = MockRuntime::register_metrics(Vec::new());
+        let (manager_tx, manager_rx) = mpsc::channel(64);
+        let (transit_tx, transit_rx) = mpsc::channel(64);
+        let routing_table =
+            RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
+        let (pool_handle, context) = TunnelPoolHandle::new();
+        let (client_pool_handle, client_context) = TunnelPoolHandle::new();
+        let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
+        let client_selector = ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
+
+        let mut exploratory_pool = TunnelPoolNew::<MockRuntime, _>::new(
+            pool_config,
+            exploratory_selector.clone(),
+            context,
+            routing_table.clone(),
+            noise.clone(),
+            handle.clone(),
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), &mut exploratory_pool)
+                .await
+                .is_err()
+        );
+        assert_eq!(exploratory_pool.pending_inbound.len(), 1);
+
+        // 1st outbound hop (ibgw)
+        let (router, message) = manager_rx.try_recv().unwrap();
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // 2nd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // 3rd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // route tunnel build response to the tunnel build response listener
+        let message = Message::parse_short(&message).unwrap();
+        routing_table.route_message(message);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), &mut exploratory_pool)
+                .await
+                .is_err()
+        );
+        assert_eq!(exploratory_pool.inbound.len(), 1);
+        assert_eq!(exploratory_pool.pending_inbound.len(), 0);
+
+        {
+            let pool_config = TunnelPoolConfig {
+                num_inbound: 0usize,
+                num_inbound_hops: 0usize,
+                num_outbound: 1usize,
+                num_outbound_hops: 3usize,
+                destination: (),
+            };
+            let mut client_pool = TunnelPoolNew::<MockRuntime, _>::new(
+                pool_config,
+                exploratory_selector,
+                client_context,
+                routing_table.clone(),
+                noise,
+                handle.clone(),
+            );
+
+            let future = async {
+                tokio::select! {
+                    _ = &mut client_pool => {}
+                    _ = &mut exploratory_pool => {}
+                }
+            };
+
+            assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
+
+            let (router_id, message) = manager_rx.try_recv().unwrap();
+
+            // outbound build 1st hop (participant)
+            let (router_id, message) = {
+                let message = Message::parse_short(&message).unwrap();
+                let mut router = routers.get_mut(&router_id).unwrap();
+
+                router.routing_table().route_message(message).unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                router.message_rx().try_recv().unwrap()
+            };
+
+            // outbound build 2nd hop (participant)
+            let (router_id, message) = {
+                let message = Message::parse_short(&message).unwrap();
+                let mut router = routers.get_mut(&router_id).unwrap();
+
+                router.routing_table().route_message(message).unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                router.message_rx().try_recv().unwrap()
+            };
+
+            // outbound build 3rd hop (obep)
+            let (router_id, message) = {
+                let message = Message::parse_short(&message).unwrap();
+                let mut router = routers.get_mut(&router_id).unwrap();
+
+                router.routing_table().route_message(message).unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                router.message_rx().try_recv().unwrap()
+            };
+
+            // build reply 1st hop (ibgw)
+            let (router_id, message) = {
+                let message = Message::parse_short(&message).unwrap();
+                let mut router = routers.get_mut(&router_id).unwrap();
+
+                router.routing_table().route_message(message).unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                router.message_rx().try_recv().unwrap()
+            };
+
+            // build reply 2nd hop (participant)
+            let (router_id, message) = {
+                let message = Message::parse_short(&message).unwrap();
+                let mut router = routers.get_mut(&router_id).unwrap();
+
+                router.routing_table().route_message(message).unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                router.message_rx().try_recv().unwrap()
+            };
+
+            // build reply 3rd hop (participant)
+            let (router_id, message) = {
+                let message = Message::parse_short(&message).unwrap();
+                let mut router = routers.get_mut(&router_id).unwrap();
+
+                router.routing_table().route_message(message).unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                router.message_rx().try_recv().unwrap()
+            };
+            assert_eq!(router_id, RouterId::from(our_hash));
+
+            let message = Message::parse_short(&message).unwrap();
+            routing_table.route_message(message);
+
+            tracing::info!("outbound tunnel built, route reply");
+
+            let future = async {
+                tokio::select! {
+                    _ = &mut client_pool => {}
+                    _ = &mut exploratory_pool => {}
+                }
+            };
+
+            assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
+        }
+    }
+
+    // #[tokio::test]
+    async fn exploratory_outbound_build_reply_received_late() {}
+
+    // #[tokio::test]
+    async fn exploratory_inbound_build_reply_received_late() {}
 }

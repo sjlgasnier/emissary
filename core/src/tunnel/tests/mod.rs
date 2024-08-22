@@ -33,6 +33,7 @@ use crate::{
             TunnelBuildParameters, TunnelInfo,
         },
         new_noise::NoiseContext,
+        pool::TunnelPoolHandle,
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -203,7 +204,7 @@ pub fn build_outbound_tunnel(
     let (local_hash, local_pk, local_noise, _router_info) = make_router();
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-    let receive_tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+    let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
     let (pending_tunnel, next_router, message) =
         PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
@@ -212,11 +213,11 @@ pub fn build_outbound_tunnel(
                 noise: local_noise,
                 message_id,
                 tunnel_info: TunnelInfo::Outbound {
-                    receive_tunnel_id,
+                    gateway,
                     tunnel_id,
+                    router_id: local_hash.clone(),
                 },
                 receiver: ReceiverKind::Outbound,
-                our_hash: local_hash.clone(),
             },
         )
         .unwrap();
@@ -262,15 +263,21 @@ pub fn build_inbound_tunnel(
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let (tx, rx) = channel(64);
+    let (handle, context) = TunnelPoolHandle::new();
 
     let (pending_tunnel, next_router, message) =
         PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
             hops: hops.clone(),
             noise: local_noise,
             message_id,
-            tunnel_info: TunnelInfo::Inbound { tunnel_id },
-            receiver: ReceiverKind::Inbound { message_rx: rx },
-            our_hash: local_hash.clone(),
+            tunnel_info: TunnelInfo::Inbound {
+                tunnel_id,
+                router_id: local_hash.clone(),
+            },
+            receiver: ReceiverKind::Inbound {
+                message_rx: rx,
+                handle,
+            },
         })
         .unwrap();
 
