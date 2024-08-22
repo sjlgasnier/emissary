@@ -1040,7 +1040,6 @@ mod tests {
         tunnel::tests::TestTransitTunnelManager,
     };
     use futures::StreamExt;
-    use tracing_subscriber::prelude::*;
 
     #[tokio::test]
     async fn build_outbound_exploratory_tunnel() {
@@ -1115,8 +1114,9 @@ mod tests {
         routing_table.route_message(message);
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
-        // assert_eq!(tunnel_pool.outbound.len(), 1);
+        assert_eq!(tunnel_pool.outbound.len(), 1);
         assert_eq!(tunnel_pool.pending_outbound.len(), 0);
+        assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));
     }
 
     #[tokio::test]
@@ -1189,8 +1189,7 @@ mod tests {
 
         // don't route the response which causes the build request to expire
         assert!(tokio::time::timeout(TUNNEL_BUILD_EXPIRATION, &mut tunnel_pool).await.is_err());
-        // assert_eq!(tunnel_pool.outbound.len(), 0);
-        // assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1))
+        assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1));
     }
 
     #[tokio::test]
@@ -1268,6 +1267,7 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
         assert_eq!(tunnel_pool.inbound.len(), 1);
         assert_eq!(tunnel_pool.pending_inbound.len(), 0);
+        assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
     }
 
     #[tokio::test]
@@ -1341,14 +1341,11 @@ mod tests {
         // don't route the response which causes the build request to expire
         assert!(tokio::time::timeout(TUNNEL_BUILD_EXPIRATION, &mut tunnel_pool).await.is_err());
         assert_eq!(tunnel_pool.inbound.len(), 0);
-        // assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1))
+        assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1))
     }
 
     #[tokio::test]
     async fn build_inbound_client_tunnel() {
-        // use tracing_subscriber::prelude::*;
-        // let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         // create 10 routers and add them to local `RouterStorage`
         let mut routers = (0..10)
             .map(|_| {
@@ -1434,6 +1431,7 @@ mod tests {
         );
         assert_eq!(exploratory_pool.outbound.len(), 1);
         assert_eq!(exploratory_pool.pending_outbound.len(), 0);
+        assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));
 
         {
             let pool_config = TunnelPoolConfig {
@@ -1528,8 +1526,6 @@ mod tests {
             let message = Message::parse_short(&message).unwrap();
             routing_table.route_message(message);
 
-            tracing::info!("inbound tunnel built, route reply");
-
             let future = async {
                 tokio::select! {
                     _ = &mut client_pool => {}
@@ -1539,13 +1535,13 @@ mod tests {
 
             assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
         }
+
+        assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));
+        assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
     }
 
     #[tokio::test]
     async fn build_outbound_client_tunnel() {
-        // use tracing_subscriber::prelude::*;
-        // let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         // create 10 routers and add them to local `RouterStorage`
         let mut routers = (0..10)
             .map(|_| {
@@ -1631,6 +1627,7 @@ mod tests {
         );
         assert_eq!(exploratory_pool.inbound.len(), 1);
         assert_eq!(exploratory_pool.pending_inbound.len(), 0);
+        assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
 
         {
             let pool_config = TunnelPoolConfig {
@@ -1724,8 +1721,6 @@ mod tests {
             let message = Message::parse_short(&message).unwrap();
             routing_table.route_message(message);
 
-            tracing::info!("outbound tunnel built, route reply");
-
             let future = async {
                 tokio::select! {
                     _ = &mut client_pool => {}
@@ -1735,6 +1730,9 @@ mod tests {
 
             assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
         }
+
+        assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));
+        assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
     }
 
     // #[tokio::test]

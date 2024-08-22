@@ -225,9 +225,6 @@ mod tests {
 
     #[tokio::test]
     async fn send_tunnel_message() {
-        use tracing_subscriber::prelude::*;
-        let _ = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         let (local_outbound_hash, mut outbound, mut outbound_transit) =
             build_outbound_tunnel(2usize);
         let (local_inbound_hash, mut inbound, mut inbound_transit) = build_inbound_tunnel(2usize);

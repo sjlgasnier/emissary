@@ -28,6 +28,7 @@ use rand_core::{CryptoRng, RngCore};
 use tokio::task;
 
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     future::{pending, Future},
     marker::PhantomData,
@@ -87,8 +88,13 @@ impl TcpListener<MockTcpStream> for MockTcpListener {
     }
 }
 
-/// Counters and their values.
-static COUNTERS: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+thread_local! {
+    /// Counters and their values.
+    static COUNTERS: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+
+    /// Gauges and their values.
+    static GAUGES: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+}
 
 pub struct MockMetricsCounter {
     name: &'static str,
@@ -96,16 +102,31 @@ pub struct MockMetricsCounter {
 
 impl Counter for MockMetricsCounter {
     fn increment(&mut self, value: usize) {
-        let mut inner = COUNTERS.write();
-        *inner.entry(self.name).or_default() += value;
+        COUNTERS.with(|v| {
+            let mut inner = v.write();
+            *inner.entry(self.name).or_default() += value;
+        });
     }
 }
 
-pub struct MockMetricsGauge {}
+pub struct MockMetricsGauge {
+    name: &'static str,
+}
 
 impl Gauge for MockMetricsGauge {
-    fn increment(&mut self, value: usize) {}
-    fn decrement(&mut self, value: usize) {}
+    fn increment(&mut self, value: usize) {
+        GAUGES.with(|v| {
+            let mut inner = v.write();
+            *inner.entry(self.name).or_default() += value;
+        });
+    }
+
+    fn decrement(&mut self, value: usize) {
+        GAUGES.with(|v| {
+            let mut inner = v.write();
+            *inner.entry(self.name).or_default() -= value;
+        });
+    }
 }
 
 pub struct MockMetricsHistogram {}
@@ -123,7 +144,7 @@ impl MetricsHandle for MockMetricsHandle {
     }
 
     fn gauge(&self, name: &'static str) -> impl Gauge {
-        MockMetricsGauge {}
+        MockMetricsGauge { name }
     }
 
     fn histogram(&self, name: &'static str) -> impl Histogram {
@@ -172,7 +193,11 @@ pub struct MockRuntime {}
 
 impl MockRuntime {
     pub fn get_counter_value(name: &'static str) -> Option<usize> {
-        COUNTERS.read().get(name).copied()
+        COUNTERS.with(|v| v.read().get(name).copied())
+    }
+
+    pub fn get_gauge_value(name: &'static str) -> Option<usize> {
+        GAUGES.with(|v| v.read().get(name).copied())
     }
 }
 
