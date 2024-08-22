@@ -367,28 +367,41 @@ impl TunnelPoolHandle {
         router_id: RouterId,
         message: Vec<u8>,
     ) -> Result<(), ChannelError> {
-        // TODO: no unwraps
         self.tx
             .try_send(TunnelMessage::Outbound {
                 gateway,
                 router_id,
                 message,
             })
-            .unwrap();
-        Ok(())
+            .map_err(From::from)
     }
 
+    /// Route `message` received into an inbound tunnel of the tunnel pool.
+    ///
+    /// Message is routed to an existing listener if one exists for the message and if there are no
+    /// installed listeners, the message is routed to `TunnelPool` for further processing.
     pub fn route_message(&self, message: Message) -> Result<(), RoutingError> {
         let mut listeners = self.listeners.write();
 
         match listeners.remove(&MessageId::from(message.message_id)) {
             Some(listener) =>
                 listener.send(message).map_err(|message| RoutingError::ChannelClosed(message)),
-            None => {
-                // TODO: no unwraps
-                self.tx.try_send(TunnelMessage::Inbound { message }).unwrap();
-                Ok(())
-            }
+            None =>
+                self.tx
+                    .try_send(TunnelMessage::Inbound { message })
+                    .map_err(|error| match error {
+                        mpsc::errors::TrySendError::Full(message) => match message {
+                            TunnelMessage::Inbound { message } =>
+                                RoutingError::ChannelFull(message),
+                            _ => unreachable!(),
+                        },
+                        mpsc::errors::TrySendError::Closed(message) => match message {
+                            TunnelMessage::Inbound { message } =>
+                                RoutingError::ChannelClosed(message),
+                            _ => unreachable!(),
+                        },
+                        _ => unreachable!(),
+                    }),
         }
     }
 
@@ -885,7 +898,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                                 .with_payload(&payload)
                                 .build();
 
-                            handle.send_message(send_tunnel_id, router, message);
+                            if let Err(error) = handle.send_message(send_tunnel_id, router, message)
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %tunnel_id,
+                                    %send_tunnel_id,
+                                    ?error,
+                                    "failed to send message to outbound tunnel"
+                                );
+                            }
                         }
                     }
                 }

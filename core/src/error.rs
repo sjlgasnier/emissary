@@ -210,3 +210,25 @@ impl From<chacha20poly1305::Error> for Error {
         Error::Chacha20Poly1305(value)
     }
 }
+
+impl<T> From<thingbuf::mpsc::errors::TrySendError<T>> for ChannelError {
+    fn from(value: thingbuf::mpsc::errors::TrySendError<T>) -> Self {
+        match value {
+            thingbuf::mpsc::errors::TrySendError::Full(_) => ChannelError::Full,
+            thingbuf::mpsc::errors::TrySendError::Closed(_) => ChannelError::Closed,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<thingbuf::mpsc::errors::TrySendError<Message>> for RoutingError {
+    fn from(value: thingbuf::mpsc::errors::TrySendError<Message>) -> Self {
+        match value {
+            thingbuf::mpsc::errors::TrySendError::Full(message) =>
+                RoutingError::ChannelFull(message),
+            thingbuf::mpsc::errors::TrySendError::Closed(message) =>
+                RoutingError::ChannelClosed(message),
+            _ => unreachable!(),
+        }
+    }
+}

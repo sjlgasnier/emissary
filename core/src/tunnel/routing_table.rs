@@ -173,11 +173,7 @@ impl RoutingTable {
             ));
         };
 
-        sender.try_send(message).map_err(|error| match error {
-            TrySendError::Full(message) => RoutingError::ChannelFull(message),
-            TrySendError::Closed(message) => RoutingError::ChannelClosed(message),
-            _ => unreachable!(),
-        })
+        sender.try_send(message).map_err(From::from)
     }
 
     /// Attempt to route message to an installed listener, if the listener exists.
@@ -192,11 +188,7 @@ impl RoutingTable {
             None => {
                 drop(listeners);
 
-                self.transit.try_send(message).map_err(|error| match error {
-                    TrySendError::Full(message) => RoutingError::ChannelFull(message),
-                    TrySendError::Closed(message) => RoutingError::ChannelClosed(message),
-                    _ => unreachable!(),
-                })
+                self.transit.try_send(message).map_err(From::from)
             }
         }
     }
