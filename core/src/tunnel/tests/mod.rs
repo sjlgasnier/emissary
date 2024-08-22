@@ -222,7 +222,6 @@ pub fn build_outbound_tunnel(
         )
         .unwrap();
 
-    let mut message = Message::parse_short(&message).unwrap();
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
         |acc, ((router_hash, _), transit_manager)| {
@@ -280,8 +279,6 @@ pub fn build_inbound_tunnel(
             },
         })
         .unwrap();
-
-    let mut message = Message::parse_short(&message).unwrap();
 
     assert_eq!(message.message_id, message_id.into());
     assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));

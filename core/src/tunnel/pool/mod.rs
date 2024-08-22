@@ -730,7 +730,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                             self.pending_outbound.add_pending_tunnel(tunnel, message_rx);
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
 
-                            self.routing_table.send_message(router_id, message);
+                            self.routing_table.send_message(router_id, message.serialize_short());
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -787,7 +787,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                             self.pending_outbound.add_pending_tunnel(tunnel, message_rx);
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
 
-                            self.routing_table.send_message(router_id, message);
+                            self.routing_table.send_message(router_id, message.serialize_short());
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -870,7 +870,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                                 %tunnel_id,
                                 "no outbound tunnel available, send build request directly",
                             );
-                            self.routing_table.send_message(router, message);
+                            self.routing_table.send_message(router, message.serialize_short());
                         }
                         Some((send_tunnel_id, handle)) => {
                             tracing::trace!(
@@ -880,24 +880,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPoolNew<R, S> {
                                 "send tunnel build request to local outbound tunnel",
                             );
 
-                            // TODO: this is not correct
-                            // TODO: it's correct but not the correct way to do it
-                            let Message {
-                                message_type,
-                                message_id,
-                                expiration,
-                                payload,
-                            } = Message::parse_short(&message).unwrap();
-
-                            let message = MessageBuilder::standard()
-                                .with_message_type(message_type)
-                                .with_expiration(expiration)
-                                .with_message_id(message_id)
-                                .with_payload(&payload)
-                                .build();
-
-                            if let Err(error) = handle.send_message(send_tunnel_id, router, message)
-                            {
+                            if let Err(error) = handle.send_message(
+                                send_tunnel_id,
+                                router,
+                                message.serialize_standard(),
+                            ) {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     %tunnel_id,

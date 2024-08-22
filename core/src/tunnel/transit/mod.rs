@@ -564,8 +564,6 @@ mod tests {
             )
             .unwrap();
 
-        let mut message = Message::parse_short(&message).unwrap();
-
         assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
     }
 
@@ -618,8 +616,6 @@ mod tests {
             })
             .unwrap();
 
-        let mut message = Message::parse_short(&message).unwrap();
-
         assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
     }
 
@@ -671,14 +667,11 @@ mod tests {
             )
             .unwrap();
 
-        let message = (0..transit_managers.len() - 1).fold(
-            Message::parse_short(&message).unwrap(),
-            |message, i| {
-                let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
+        let message = (0..transit_managers.len() - 1).fold(message, |message, i| {
+            let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
 
-                Message::parse_short(&msg).unwrap()
-            },
-        );
+            Message::parse_short(&msg).unwrap()
+        });
 
         let (_, msg) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
 
@@ -757,8 +750,6 @@ mod tests {
             )
             .unwrap();
 
-        let mut message = Message::parse_short(&message).unwrap();
-
         // make new router which is not part of the tunnel build request
         let (_, _, noise, _) = make_router();
         let (transit_tx, transit_rx) = channel(16);
@@ -834,8 +825,6 @@ mod tests {
                 },
             )
             .unwrap();
-
-        let mut message = Message::parse_short(&message).unwrap();
 
         match transit_managers[0].handle_short_tunnel_build(message).unwrap_err() {
             Error::Chacha20Poly1305(_) => {}

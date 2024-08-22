@@ -78,7 +78,7 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// Create new [`PendingTunnel`].
     pub fn create_tunnel<R: Runtime>(
         parameters: TunnelBuildParameters,
-    ) -> Result<(Self, RouterId, Vec<u8>), TunnelError> {
+    ) -> Result<(Self, RouterId, Message), TunnelError> {
         let TunnelBuildParameters {
             hops,
             noise,
@@ -224,14 +224,12 @@ impl<T: Tunnel> PendingTunnel<T> {
                 _tunnel: Default::default(),
             },
             RouterId::from(router_hashes[0].clone().to_vec()),
-            MessageBuilder::short()
-                .with_expiration(build_expiration)
-                .with_message_type(MessageType::ShortTunnelBuild)
-                .with_message_id(message_id)
-                .with_payload(&short::TunnelBuildReplyBuilder::from_records(
-                    encrypted_records,
-                ))
-                .build(),
+            Message {
+                message_id: *message_id,
+                expiration: build_expiration as u64,
+                message_type: MessageType::ShortTunnelBuild,
+                payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
+            },
         ))
     }
 
@@ -432,8 +430,6 @@ mod test {
             )
             .unwrap();
 
-        let mut message = Message::parse_short(&message).unwrap();
-
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
         assert_eq!(message.payload[0], 4u8);
@@ -510,8 +506,6 @@ mod test {
             })
             .unwrap();
 
-        let mut message = Message::parse_short(&message).unwrap();
-
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
         assert_eq!(message.payload[0], 4u8);
@@ -558,12 +552,12 @@ mod test {
             )
             .unwrap();
 
-        let Some(Message {
+        let Message {
             message_type: MessageType::ShortTunnelBuild,
             message_id: parsed_message_id,
             expiration,
             mut payload,
-        }) = Message::parse_short(&message)
+        } = message
         else {
             panic!("invalid message");
         };
@@ -649,8 +643,6 @@ mod test {
                 },
             )
             .unwrap();
-
-        let message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
