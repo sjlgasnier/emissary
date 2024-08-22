@@ -510,7 +510,7 @@ mod tests {
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
             },
-            pool::TunnelPoolHandle,
+            pool::{TunnelPoolContext, TunnelPoolHandle},
             tests::make_router,
         },
     };
@@ -599,7 +599,7 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (handle, context) = TunnelPoolHandle::new();
+        let (context, handle) = TunnelPoolContext::new();
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =

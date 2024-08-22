@@ -33,7 +33,7 @@ use crate::{
             TunnelBuildParameters, TunnelInfo,
         },
         new_noise::NoiseContext,
-        pool::TunnelPoolHandle,
+        pool::{TunnelPoolContext, TunnelPoolHandle},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -263,7 +263,7 @@ pub fn build_inbound_tunnel(
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let (tx, rx) = channel(64);
-    let (handle, context) = TunnelPoolHandle::new();
+    let (context, handle) = TunnelPoolContext::new();
 
     let (pending_tunnel, next_router, message) =
         PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
