@@ -393,6 +393,17 @@ pub struct Message {
     pub payload: Vec<u8>,
 }
 
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            message_type: MessageType::Data,
+            message_id: 0u32,
+            expiration: 0u64,
+            payload: Vec::new(),
+        }
+    }
+}
+
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Message")
@@ -480,7 +491,28 @@ impl Message {
             _ => SubsystemKind::Tunnel,
         }
     }
+
+    /// Serialize `self` into an I2NP message with short header.
+    pub fn serialize_short(self) -> Vec<u8> {
+        MessageBuilder::short()
+            .with_expiration(self.expiration)
+            .with_message_type(self.message_type)
+            .with_message_id(self.message_id)
+            .with_payload(&self.payload)
+            .build()
+    }
+
+    /// Serialize `self` into an I2NP message with standard header.
+    pub fn serialize_standard(self) -> Vec<u8> {
+        MessageBuilder::standard()
+            .with_expiration(self.expiration)
+            .with_message_type(self.message_type)
+            .with_message_id(self.message_id)
+            .with_payload(&self.payload)
+            .build()
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

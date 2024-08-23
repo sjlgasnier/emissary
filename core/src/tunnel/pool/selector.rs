@@ -16,80 +16,142 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+//! Tunnel/hop selector for exploratory/client tunnels.
+
 use crate::{
     crypto::StaticPublicKey,
-    primitives::TunnelId,
+    primitives::{RouterId, TunnelId},
     router_storage::RouterStorage,
-    runtime::Runtime,
-    tunnel::{
-        hop::{inbound::InboundTunnel, outbound::OutboundTunnel},
-        pool::TunnelPool,
-    },
+    runtime::JoinSet,
+    tunnel::pool::TunnelPoolHandle,
 };
 
-use alloc::vec::Vec;
 use bytes::Bytes;
+use futures::{FutureExt, StreamExt};
+use hashbrown::{HashMap, HashSet};
 
-/// Tunnel selector.
+#[cfg(feature = "std")]
+use parking_lot::RwLock;
+#[cfg(feature = "no_std")]
+use spin::rwlock::RwLock;
+
+use alloc::{sync::Arc, vec::Vec};
+
+/// Tunnel selector for a tunnel pool.
 ///
-/// Used to select inbound tunnels for outbound builds and vice versa.
-pub trait TunnelSelector {
-    /// Try to select inbound tunnel for an outbound tunnel build.
+/// This trait has two implementations: [`ExploratorySelector`] for exploratory tunnel pools and
+/// [`ClientSelector`] for client tunnel pools.
+///
+/// [`ClientSelector`] takes [`ExploratorySelector`] in its constructor, allowing it to utilize
+/// exploratory tunnels for tunnel building.
+pub trait TunnelSelector: Send + Unpin {
+    /// Attempt to select an outbound tunnel for delivery of an inbound tunnel build request.
     ///
-    /// Returns `None` if there are no available inbound tunnels.
-    fn select_inbound_tunnel<'a>(
-        &'a self,
-        inbound_tunnels: impl Iterator<Item = (&'a TunnelId, &'a InboundTunnel)>,
-    ) -> Option<(&'a TunnelId, &'a InboundTunnel)>;
+    /// Returns `None` if there are no outbound tunnels available.
+    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)>;
 
-    /// Try to select outbound tunnel for an inbound tunnel build.
+    /// Attempt to select an inbound tunnel for reception of an outbound tunnel build reply.
     ///
-    /// Returns `None` if there are no available outbound tunnels.
-    fn select_outbound_tunnel<'a>(
-        &'a self,
-        outbound_tunnels: impl Iterator<Item = (&'a TunnelId, &'a OutboundTunnel)>,
-    ) -> Option<(&'a TunnelId, &'a OutboundTunnel)>;
+    /// Returns `None` if there are no inbound tunnels available.
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)>;
+
+    /// Add a new tunnel into the set of active outbound tunnels.
+    fn add_outbound_tunnel(&self, tunnel_id: TunnelId);
+
+    /// Add a new tunnel into the set of active inbound tunnels.
+    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId);
+
+    /// Remove tunnel from the set of active outbound tunnels.
+    fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId);
+
+    /// Remove tunnel from the set of active inbound tunnels.
+    fn remove_inbound_tunnel(&self, tunnel_id: &TunnelId);
 }
 
-/// Hop selector.
-pub trait HopSelector {
-    /// Select `num_hops` many routers from router storage and return their router hash and static
-    /// key to the caller.
-    ///
-    /// This function returns `None` if it's able to to fullfil the request for `num_hops` many
-    /// routers.
+/// Hop selector for a tunnel pool.
+///
+/// This trait has two implementations: [`ExploratorySelector`] for exploratory tunnel pools and
+/// [`ClientSelector`] for client tunnel pools.
+pub trait HopSelector: Send + Unpin {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>>;
 }
 
-/// Tunnel selector for the exploratory tunnel pool.
-pub struct ExploratorySelector<'a> {
-    router_storage: &'a RouterStorage,
+/// Tunnel/hop selector for the exploratory tunnel pool.
+///
+/// For inbound tunnel builds, an active outbound tunnel from the same pool is used
+/// to deliver the build request. For outbound tunnel builds, an active inbound
+/// tunnel is selected for the reception of the tunnel build reply.
+///
+/// If there are no active tunnels, a fake 0-hop inbound/outbound tunnel is used for
+/// reception/delivery.
+#[derive(Clone)]
+pub struct ExploratorySelector {
+    /// Exploratory tunnel pool handle.
+    handle: TunnelPoolHandle,
+
+    /// Active inbound tunnels.
+    inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
+
+    /// Active outbound tunnels.
+    outbound: Arc<RwLock<HashSet<TunnelId>>>,
+
+    /// Router storage for selecting hops.
+    router_storage: RouterStorage,
 }
 
-impl<'a> ExploratorySelector<'a> {
+impl ExploratorySelector {
     /// Create new [`ExploratorySelector`].
-    pub fn new(router_storage: &'a RouterStorage) -> Self {
-        Self { router_storage }
+    pub fn new(router_storage: RouterStorage, handle: TunnelPoolHandle) -> Self {
+        Self {
+            handle,
+            inbound: Default::default(),
+            outbound: Default::default(),
+            router_storage,
+        }
+    }
+
+    /// Get reference to [`RouterStorage`].
+    pub fn router_storage(&self) -> &RouterStorage {
+        &self.router_storage
+    }
+
+    /// Get reference to exploratory tunnel pool's [`TunnePoolHandle`].
+    pub fn handle(&self) -> &TunnelPoolHandle {
+        &self.handle
     }
 }
 
-impl<'a> TunnelSelector for ExploratorySelector<'a> {
-    fn select_inbound_tunnel<'b>(
-        &'b self,
-        mut inbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b InboundTunnel)>,
-    ) -> Option<(&'b TunnelId, &'b InboundTunnel)> {
-        inbound_tunnels.next()
+impl TunnelSelector for ExploratorySelector {
+    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)> {
+        self.outbound.read().iter().next().map(|tunnel_id| (*tunnel_id, &self.handle))
     }
 
-    fn select_outbound_tunnel<'b>(
-        &'b self,
-        mut outbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b OutboundTunnel)>,
-    ) -> Option<(&'b TunnelId, &'b OutboundTunnel)> {
-        outbound_tunnels.next()
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)> {
+        self.inbound
+            .read()
+            .iter()
+            .next()
+            .map(|(tunnel_id, router_id)| (*tunnel_id, router_id.clone(), &self.handle))
+    }
+
+    fn add_outbound_tunnel(&self, tunnel_id: TunnelId) {
+        self.outbound.write().insert(tunnel_id);
+    }
+
+    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId) {
+        self.inbound.write().insert(tunnel_id, router_id);
+    }
+
+    fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId) {
+        self.outbound.write().remove(tunnel_id);
+    }
+
+    fn remove_inbound_tunnel(&self, tunnel_id: &TunnelId) {
+        self.inbound.write().remove(tunnel_id);
     }
 }
 
-impl<'a> HopSelector for ExploratorySelector<'a> {
+impl HopSelector for ExploratorySelector {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
         let routers = self.router_storage.get_routers(num_hops, |_, _| true);
 
@@ -111,44 +173,93 @@ impl<'a> HopSelector for ExploratorySelector<'a> {
     }
 }
 
-/// Tunnel selector for client tunnel pools.
-pub struct ClientSelector<'a, R> {
-    /// Reference to exploratory tunnel pool which is used as a backup in case
-    /// the client tunnel pool doesn't have any pools.
-    exploratory: &'a TunnelPool<R>,
+/// Tunnel/hop selector for a client tunnel pool.
+///
+/// For inbound tunnel builds, an active outbound tunnel from the same pool is selected for build
+/// request delivery. For outbound tunnel builds, an active inbound tunnel is selected for reception
+/// of the tunnel build reply.
+///
+/// If there are no active inbound/outbound tunnels, a tunnel from the exploratory tunnel pool is
+/// selected for reception/delivery.
+///
+/// If there are no active tunnels in the exploratory pool, a fake 0-hop tunnel is used instead.
+#[derive(Clone)]
+pub struct ClientSelector {
+    /// Exploratory tunnel pool selector.
+    exploratory: ExploratorySelector,
 
-    /// Router storage.
-    router_storage: &'a RouterStorage,
+    /// Client tunnel pool handle.
+    handle: TunnelPoolHandle,
+
+    /// Active inbound tunnels.
+    inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
+
+    /// Active outbound tunnels.
+    outbound: Arc<RwLock<HashSet<TunnelId>>>,
 }
 
-impl<'a, R: Runtime> ClientSelector<'a, R> {
+impl ClientSelector {
     /// Create new [`ClientSelector`].
-    pub fn new(exploratory: &'a TunnelPool<R>, router_storage: &'a RouterStorage) -> Self {
+    pub fn new(exploratory: ExploratorySelector, handle: TunnelPoolHandle) -> Self {
         Self {
             exploratory,
-            router_storage,
+            handle,
+            inbound: Default::default(),
+            outbound: Default::default(),
         }
     }
 }
 
-impl<'a, R: Runtime> TunnelSelector for ClientSelector<'a, R> {
-    fn select_inbound_tunnel<'b>(
-        &'b self,
-        inbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b InboundTunnel)>,
-    ) -> Option<(&'b TunnelId, &'b InboundTunnel)> {
-        inbound_tunnels.chain(self.exploratory.inbound().iter()).next()
+impl TunnelSelector for ClientSelector {
+    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)> {
+        self.outbound.read().iter().next().map_or_else(
+            || self.exploratory.select_outbound_tunnel(),
+            |tunnel_id| Some((*tunnel_id, &self.handle)),
+        )
     }
 
-    fn select_outbound_tunnel<'b>(
-        &'b self,
-        mut outbound_tunnels: impl Iterator<Item = (&'b TunnelId, &'b OutboundTunnel)>,
-    ) -> Option<(&'b TunnelId, &'b OutboundTunnel)> {
-        outbound_tunnels.chain(self.exploratory.outbound().iter()).next()
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)> {
+        self.inbound.read().iter().next().map_or_else(
+            || self.exploratory.select_inbound_tunnel(),
+            |(tunnel_id, router_id)| Some((*tunnel_id, router_id.clone(), &self.handle)),
+        )
+    }
+
+    fn add_outbound_tunnel(&self, tunnel_id: TunnelId) {
+        self.outbound.write().insert(tunnel_id);
+    }
+
+    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId) {
+        self.inbound.write().insert(tunnel_id, router_id);
+    }
+
+    fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId) {
+        self.outbound.write().remove(tunnel_id);
+    }
+
+    fn remove_inbound_tunnel(&self, tunnel_id: &TunnelId) {
+        self.inbound.write().remove(tunnel_id);
     }
 }
 
-impl<'a, R: Runtime> HopSelector for ClientSelector<'a, R> {
+impl HopSelector for ClientSelector {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        None
+        let routers = self.exploratory.router_storage().get_routers(num_hops, |_, _| true);
+
+        if routers.len() != num_hops {
+            return None;
+        }
+
+        Some(
+            routers
+                .into_iter()
+                .map(|info| {
+                    (
+                        info.identity().hash().clone(),
+                        info.identity().static_key().clone(),
+                    )
+                })
+                .collect(),
+        )
     }
 }

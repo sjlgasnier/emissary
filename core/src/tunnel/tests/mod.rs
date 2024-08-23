@@ -17,68 +17,124 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
+    crypto::{
+        base64_encode, EphemeralPublicKey, SigningPrivateKey, SigningPublicKey, StaticPrivateKey,
+        StaticPublicKey,
+    },
     i2np::{
         tunnel::{build::short, data, gateway},
         Message,
     },
-    primitives::{MessageId, RouterId, TunnelId},
+    primitives::{MessageId, RouterId, RouterInfo, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
-            TunnelBuildParameters,
+            TunnelBuildParameters, TunnelInfo,
         },
-        new_noise::NoiseContext,
+        noise::NoiseContext,
+        pool::{TunnelPoolContext, TunnelPoolHandle},
+        routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
 };
 
 use bytes::Bytes;
+use futures::FutureExt;
 use rand_core::RngCore;
+use thingbuf::mpsc::{channel, Receiver, Sender};
+
+use core::{
+    fmt,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+use super::hop::ReceiverKind;
 
 /// Make new router.
-pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext) {
-    let mut key_bytes = vec![0u8; 32];
-    let mut router_hash = vec![0u8; 32];
+pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
+    let mut static_key_bytes = vec![0u8; 32];
+    let mut signing_key_bytes = vec![0u8; 32];
 
-    MockRuntime::rng().fill_bytes(&mut key_bytes);
-    MockRuntime::rng().fill_bytes(&mut router_hash);
+    MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+    MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-    let sk = StaticPrivateKey::from(key_bytes);
+    let sk = StaticPrivateKey::from(static_key_bytes.clone());
     let pk = sk.public();
+
+    let router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+    let router_hash: Vec<u8> = router_info.identity().id().into();
     let router_hash = Bytes::from(router_hash);
 
-    (router_hash.clone(), pk, NoiseContext::new(sk, router_hash))
+    (
+        router_hash.clone(),
+        pk,
+        NoiseContext::new(sk.clone(), router_hash),
+        router_info,
+    )
 }
 
+/// [`TransitTunnelManager`] for testing.
 pub struct TestTransitTunnelManager {
     /// Transit tunnel manager.
     manager: TransitTunnelManager<MockRuntime>,
 
-    /// Router hash.
-    router_hash: Bytes,
+    /// RX channel for receiving messages from local tunnels.
+    message_rx: Receiver<(RouterId, Vec<u8>)>,
 
     /// Static public key.
     public_key: StaticPublicKey,
 
     /// Router ID.
     router: RouterId,
+
+    /// Router hash.
+    router_hash: Bytes,
+
+    /// Routing table.
+    routing_table: RoutingTable,
+
+    /// Router info.
+    router_info: RouterInfo,
+}
+
+impl fmt::Debug for TestTransitTunnelManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestTransitTunnelManager")
+            .field("router", &self.router)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TestTransitTunnelManager {
     pub fn new() -> Self {
-        let (router_hash, public_key, noise) = make_router();
+        let (router_hash, public_key, noise, router_info) = make_router();
+        let (transit_tx, transit_rx) = channel(64);
+        let (message_tx, message_rx) = channel(64);
+        let routing_table =
+            RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
 
         Self {
-            router_hash: router_hash.clone(),
-            router: RouterId::from(router_hash),
-            public_key,
             manager: TransitTunnelManager::<MockRuntime>::new(
                 noise,
+                routing_table.clone(),
+                transit_rx,
                 MockRuntime::register_metrics(vec![]),
             ),
+            message_rx,
+            public_key,
+            router_hash: router_hash.clone(),
+            router: RouterId::from(router_hash),
+            routing_table,
+            router_info,
         }
+    }
+
+    /// Get copy of [`RouterInfo`].
+    pub fn router_info(&self) -> RouterInfo {
+        self.router_info.clone()
     }
 
     /// Get hash of the router.
@@ -104,26 +160,33 @@ impl TestTransitTunnelManager {
         self.manager.handle_short_tunnel_build(message)
     }
 
-    /// Handle tunnel data.
-    pub fn handle_tunnel_data(
-        &mut self,
-        message: &data::EncryptedTunnelData,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        self.manager.handle_tunnel_data(message)
+    /// Get mutable reference to the message RX channel.
+    pub fn message_rx(&mut self) -> &mut Receiver<(RouterId, Vec<u8>)> {
+        &mut self.message_rx
     }
 
-    pub fn handle_tunnel_gateway(
-        &mut self,
-        message: &gateway::TunnelGateway,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
-        self.manager.handle_tunnel_gateway(message)
+    /// Get reference to [`RoutingTable`].
+    pub fn routing_table(&self) -> &RoutingTable {
+        &self.routing_table
+    }
+}
+
+impl Future for TestTransitTunnelManager {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.manager.poll_unpin(cx)
     }
 }
 
 /// Build outbound tunnel.
 pub fn build_outbound_tunnel(
     num_hops: usize,
-) -> (Bytes, OutboundTunnel, Vec<TestTransitTunnelManager>) {
+) -> (
+    Bytes,
+    OutboundTunnel<MockRuntime>,
+    Vec<TestTransitTunnelManager>,
+) {
     let (hops, mut transit_managers): (
         Vec<(Bytes, StaticPublicKey)>,
         Vec<TestTransitTunnelManager>,
@@ -138,21 +201,27 @@ pub fn build_outbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise) = make_router();
+    let (local_hash, local_pk, local_noise, _router_info) = make_router();
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+    let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
     let (pending_tunnel, next_router, message) =
-        PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-            hops: hops.clone(),
-            noise: local_noise,
-            message_id,
-            tunnel_id,
-            our_hash: local_hash.clone(),
-        })
+        PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+            TunnelBuildParameters {
+                hops: hops.clone(),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash.clone(),
+                },
+                receiver: ReceiverKind::Outbound,
+            },
+        )
         .unwrap();
 
-    let mut message = Message::parse_short(&message).unwrap();
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
         |acc, ((router_hash, _), transit_manager)| {
@@ -189,21 +258,27 @@ pub fn build_inbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise) = make_router();
+    let (local_hash, local_pk, local_noise, _router_info) = make_router();
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+    let (tx, rx) = channel(64);
+    let (context, handle) = TunnelPoolContext::new();
 
     let (pending_tunnel, next_router, message) =
         PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
             hops: hops.clone(),
             noise: local_noise,
             message_id,
-            tunnel_id,
-            our_hash: local_hash.clone(),
+            tunnel_info: TunnelInfo::Inbound {
+                tunnel_id,
+                router_id: local_hash.clone(),
+            },
+            receiver: ReceiverKind::Inbound {
+                message_rx: rx,
+                handle,
+            },
         })
         .unwrap();
-
-    let mut message = Message::parse_short(&message).unwrap();
 
     assert_eq!(message.message_id, message_id.into());
     assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));

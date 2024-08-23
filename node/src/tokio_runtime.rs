@@ -20,7 +20,7 @@ use emissary::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, JoinSet, MetricType, MetricsHandle, Runtime,
     TcpListener, TcpStream,
 };
-use futures::{future::BoxFuture, AsyncRead as _, AsyncWrite as _, Stream};
+use futures::{AsyncRead as _, AsyncWrite as _, Stream};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use rand_core::{CryptoRng, RngCore};
@@ -140,6 +140,10 @@ pub struct TokioJoinSet<T>(task::JoinSet<T>, Option<Waker>);
 impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
     fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
     }
 
     fn push<F>(&mut self, future: F)
@@ -273,7 +277,7 @@ impl Runtime for TokioRuntime {
         TokioMetricsHandle {}
     }
 
-    fn delay(duration: Duration) -> BoxFuture<'static, ()> {
-        Box::pin(tokio::time::sleep(duration))
+    fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
+        tokio::time::sleep(duration)
     }
 }

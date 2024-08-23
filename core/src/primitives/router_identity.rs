@@ -35,7 +35,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 /// Short router identity hash.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RouterId(Arc<String>);
 
 impl fmt::Display for RouterId {

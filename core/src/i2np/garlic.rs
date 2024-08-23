@@ -193,7 +193,7 @@ impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
                 .field("delivery_instructions", &delivery_instructions)
                 .finish_non_exhaustive(),
             Self::Padding { .. } =>
-                f.debug_struct("DeliveryInstructions::Padding").finish_non_exhaustive(),
+                f.debug_struct("GarlicMessageBlock::Padding").finish_non_exhaustive(),
             _ => f.debug_struct("Unknown").finish_non_exhaustive(),
         }
     }

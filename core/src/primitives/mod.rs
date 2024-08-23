@@ -36,7 +36,7 @@ mod router_info;
 mod string;
 
 /// Tunnel ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TunnelId(u32);
 
 impl From<u32> for TunnelId {

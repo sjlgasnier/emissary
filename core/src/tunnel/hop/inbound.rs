@@ -24,36 +24,49 @@ use crate::{
     error::{RejectionReason, TunnelError},
     i2np::{
         tunnel::data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
-        HopRole,
+        HopRole, Message,
     },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::hop::{Tunnel, TunnelDirection, TunnelHop},
+    tunnel::{
+        hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
+        pool::TunnelPoolHandle,
+    },
     Error,
 };
 
+use thingbuf::mpsc::Receiver;
+
 use alloc::{vec, vec::Vec};
-use core::{iter, num::NonZeroUsize};
+use core::{
+    future::Future,
+    iter,
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::ibep";
 
 /// Inbound tunnel.
-#[derive(Debug)]
+//
+// TODO: add timer for tunnel expiration
 pub struct InboundTunnel {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
+    /// Tunnel pool handle.
+    handle: TunnelPoolHandle,
 
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
+
+    /// RX channel for receiving messages.
+    message_rx: Receiver<Message>,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
 }
 
 impl InboundTunnel {
-    /// Create new [`InboundTunnel`].
-    pub fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        Self { tunnel_id, hops }
-    }
-
     /// Get gateway information of the inbound tunnel.
     ///
     /// Returns a `(RouterId, TunnelId)` tuple, allowing OBEP to route the message correctly.
@@ -114,10 +127,18 @@ impl InboundTunnel {
     }
 
     /// Handle tunnel data.
-    pub fn handle_tunnel_data<'a>(
-        &mut self,
-        tunnel_data: &EncryptedTunnelData<'a>,
-    ) -> crate::Result<Vec<u8>> {
+    pub fn handle_tunnel_data<'a>(&self, message: &Message) -> crate::Result<Message> {
+        let tunnel_data = EncryptedTunnelData::parse(&message.payload).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                tunnel_id = %self.tunnel_id,
+                message_id = %message.message_id,
+                "malformed tunnel data message",
+            );
+
+            Error::InvalidData
+        })?;
+
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -162,7 +183,16 @@ impl InboundTunnel {
                 MessageKind::Unfragmented {
                     delivery_instructions,
                 } => match delivery_instructions {
-                    DeliveryInstructions::Local => return Ok(message.message.to_vec()),
+                    DeliveryInstructions::Local =>
+                        return Message::parse_standard(&message.message).ok_or_else(|| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                "malformed i2np message inside tunnel data",
+                            );
+
+                            Error::InvalidData
+                        }),
                     delivery_instructions => {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -184,8 +214,15 @@ impl InboundTunnel {
 }
 
 impl Tunnel for InboundTunnel {
-    fn new(tunnel_id: TunnelId, hops: Vec<TunnelHop>) -> Self {
-        InboundTunnel::new(tunnel_id, hops)
+    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+        let (message_rx, handle) = receiver.inbound();
+
+        InboundTunnel {
+            handle,
+            hops,
+            message_rx,
+            tunnel_id,
+        }
     }
 
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole> {
@@ -204,5 +241,43 @@ impl Tunnel for InboundTunnel {
 
     fn tunnel_id(&self) -> &TunnelId {
         &self.tunnel_id
+    }
+}
+
+impl Future for InboundTunnel {
+    type Output = TunnelId;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
+            match event {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel_id = %self.tunnel_id,
+                        "message channel closed",
+                    );
+                    return Poll::Ready(self.tunnel_id);
+                }
+                Some(message) => match self.handle_tunnel_data(&message) {
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        tunnel = %self.tunnel_id,
+                        ?error,
+                        "failed to handle tunnel data",
+                    ),
+                    Ok(message) =>
+                        if let Err(error) = self.handle.route_message(message) {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                tunnel = %self.tunnel_id,
+                                ?error,
+                                "failed to route message",
+                            );
+                        },
+                },
+            }
+        }
+
+        Poll::Pending
     }
 }

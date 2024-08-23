@@ -61,9 +61,12 @@ pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
 }
 
-pub trait JoinSet<T>: Stream<Item = T> + Unpin {
+pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
     /// Returns whether the `JoinSet` is empty.
     fn is_empty(&self) -> bool;
+
+    /// Get the number of elements in `JoinSet`.
+    fn len(&self) -> usize;
 
     /// Pushes `future` to `JoinSet`.
     fn push<F>(&mut self, future: F)
@@ -153,5 +156,5 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle;
 
     /// Return future which blocks for `duration` before returning.
-    fn delay(duration: Duration) -> BoxFuture<'static, ()>;
+    fn delay(duration: Duration) -> impl Future<Output = ()> + Send;
 }

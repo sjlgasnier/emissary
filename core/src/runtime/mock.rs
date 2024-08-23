@@ -22,14 +22,20 @@ use crate::runtime::{
 };
 
 use futures::{future::BoxFuture, Stream};
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use rand_core::{CryptoRng, RngCore};
+use tokio::task;
 
 use std::{
+    borrow::Borrow,
+    collections::HashMap,
     future::{pending, Future},
     marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
-    task::{Context, Poll},
+    sync::Arc,
+    task::{Context, Poll, Waker},
     time::{Duration, SystemTime},
 };
 
@@ -82,19 +88,45 @@ impl TcpListener<MockTcpStream> for MockTcpListener {
     }
 }
 
-pub struct MockMetricsCounter {}
+thread_local! {
+    /// Counters and their values.
+    static COUNTERS: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+
+    /// Gauges and their values.
+    static GAUGES: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+}
+
+pub struct MockMetricsCounter {
+    name: &'static str,
+}
 
 impl Counter for MockMetricsCounter {
     fn increment(&mut self, value: usize) {
-        todo!();
+        COUNTERS.with(|v| {
+            let mut inner = v.write();
+            *inner.entry(self.name).or_default() += value;
+        });
     }
 }
 
-pub struct MockMetricsGauge {}
+pub struct MockMetricsGauge {
+    name: &'static str,
+}
 
 impl Gauge for MockMetricsGauge {
-    fn increment(&mut self, value: usize) {}
-    fn decrement(&mut self, value: usize) {}
+    fn increment(&mut self, value: usize) {
+        GAUGES.with(|v| {
+            let mut inner = v.write();
+            *inner.entry(self.name).or_default() += value;
+        });
+    }
+
+    fn decrement(&mut self, value: usize) {
+        GAUGES.with(|v| {
+            let mut inner = v.write();
+            *inner.entry(self.name).or_default() -= value;
+        });
+    }
 }
 
 pub struct MockMetricsHistogram {}
@@ -108,11 +140,11 @@ pub struct MockMetricsHandle {}
 
 impl MetricsHandle for MockMetricsHandle {
     fn counter(&self, name: &'static str) -> impl Counter {
-        MockMetricsCounter {}
+        MockMetricsCounter { name }
     }
 
     fn gauge(&self, name: &'static str) -> impl Gauge {
-        MockMetricsGauge {}
+        MockMetricsGauge { name }
     }
 
     fn histogram(&self, name: &'static str) -> impl Histogram {
@@ -120,21 +152,24 @@ impl MetricsHandle for MockMetricsHandle {
     }
 }
 
-pub struct MockJoinSet<T> {
-    _futures: Vec<BoxFuture<'static, T>>,
-}
+pub struct MockJoinSet<T>(task::JoinSet<T>, Option<Waker>);
 
 impl<T: Send + 'static> JoinSet<T> for MockJoinSet<T> {
     fn is_empty(&self) -> bool {
-        true
+        self.0.is_empty()
     }
 
-    fn push<F>(&mut self, _future: F)
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn push<F>(&mut self, future: F)
     where
         F: Future<Output = T> + Send + 'static,
         F::Output: Send,
     {
-        drop(_future);
+        let _ = self.0.spawn(future);
+        self.1.as_mut().map(|waker| waker.wake_by_ref());
     }
 }
 
@@ -142,12 +177,29 @@ impl<T: Send + 'static> Stream for MockJoinSet<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Pending
+        match self.0.poll_join_next(cx) {
+            Poll::Pending | Poll::Ready(None) => {
+                self.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Poll::Ready(Some(Err(_))) => Poll::Ready(None),
+            Poll::Ready(Some(Ok(value))) => Poll::Ready(Some(value)),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MockRuntime {}
+
+impl MockRuntime {
+    pub fn get_counter_value(name: &'static str) -> Option<usize> {
+        COUNTERS.with(|v| v.read().get(name).copied())
+    }
+
+    pub fn get_gauge_value(name: &'static str) -> Option<usize> {
+        GAUGES.with(|v| v.read().get(name).copied())
+    }
+}
 
 impl Runtime for MockRuntime {
     type TcpStream = MockTcpStream;
@@ -161,7 +213,7 @@ impl Runtime for MockRuntime {
         F: Future + Send + 'static,
         F::Output: Send,
     {
-        todo!();
+        tokio::spawn(future);
     }
 
     /// Return duration since Unix epoch.
@@ -180,7 +232,7 @@ impl Runtime for MockRuntime {
     /// For `tokio` this would be `tokio::task::join_set::JoinSet` and
     /// for `futures` this would be `future::stream::FuturesUnordered`
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T> {
-        todo!();
+        MockJoinSet(task::JoinSet::<T>::new(), None)
     }
 
     /// Register `metrics` and return handle for registering metrics.
@@ -189,7 +241,7 @@ impl Runtime for MockRuntime {
     }
 
     /// Return future which blocks for `duration` before returning.
-    fn delay(duration: Duration) -> BoxFuture<'static, ()> {
-        Box::pin(tokio::time::sleep(duration))
+    fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
+        tokio::time::sleep(duration)
     }
 }

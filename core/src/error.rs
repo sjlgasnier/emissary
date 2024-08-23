@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{MessageId, TunnelId};
+use crate::{
+    i2np::Message,
+    primitives::{MessageId, TunnelId},
+};
 
 use alloc::string::String;
 use core::fmt;
@@ -104,6 +107,59 @@ impl fmt::Display for TunnelError {
     }
 }
 
+/// Route kind for [`RoutingError::RouteNotFound`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum RouteKind {
+    /// Tunnel not found.
+    Tunnel(TunnelId),
+
+    /// Listener for message not found.
+    Message(MessageId),
+}
+
+impl fmt::Display for RouteKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tunnel(tunnel_id) => write!(f, "{tunnel_id:?}"),
+            Self::Message(message_id) => write!(f, "{message_id:?}"),
+        }
+    }
+}
+
+/// Message routing error.
+#[derive(Debug)]
+pub enum RoutingError {
+    /// Route not found.
+    RouteNotFound(Message, RouteKind),
+
+    /// Failed to parse route from message.
+    ///
+    /// Message is invalid and doesn't contain a route.
+    FailedToParseRoute(Message),
+
+    /// Channel full.
+    ChannelFull(Message),
+
+    /// Channel closed.
+    ChannelClosed(Message),
+
+    /// Tunnel already exists in the routing table.
+    TunnelExists(TunnelId),
+}
+
+impl fmt::Display for RoutingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RouteNotFound(_, route) => write!(f, "route not found: {route}"),
+            Self::FailedToParseRoute(message) => write!(f, "failed to parse route"),
+            Self::ChannelFull(_) => write!(f, "channel full"),
+            Self::ChannelClosed(_) => write!(f, "channel closed"),
+            Self::TunnelExists(tunnel_id) =>
+                write!(f, "tunnel ({tunnel_id}) exists in the routing table"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
@@ -119,6 +175,7 @@ pub enum Error {
     DialFailure,
     Tunnel(TunnelError),
     Channel(ChannelError),
+    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -137,6 +194,7 @@ impl fmt::Display for Error {
             Self::DialFailure => write!(f, "dial failure"),
             Self::Tunnel(error) => write!(f, "tunnel error: {error}"),
             Self::Channel(error) => write!(f, "channel error: {error}"),
+            Self::Timeout => write!(f, "operation timed out"),
         }
     }
 }
@@ -150,5 +208,27 @@ impl From<ed25519_dalek::ed25519::Error> for Error {
 impl From<chacha20poly1305::Error> for Error {
     fn from(value: chacha20poly1305::Error) -> Self {
         Error::Chacha20Poly1305(value)
+    }
+}
+
+impl<T> From<thingbuf::mpsc::errors::TrySendError<T>> for ChannelError {
+    fn from(value: thingbuf::mpsc::errors::TrySendError<T>) -> Self {
+        match value {
+            thingbuf::mpsc::errors::TrySendError::Full(_) => ChannelError::Full,
+            thingbuf::mpsc::errors::TrySendError::Closed(_) => ChannelError::Closed,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<thingbuf::mpsc::errors::TrySendError<Message>> for RoutingError {
+    fn from(value: thingbuf::mpsc::errors::TrySendError<Message>) -> Self {
+        match value {
+            thingbuf::mpsc::errors::TrySendError::Full(message) =>
+                RoutingError::ChannelFull(message),
+            thingbuf::mpsc::errors::TrySendError::Closed(message) =>
+                RoutingError::ChannelClosed(message),
+            _ => unreachable!(),
+        }
     }
 }

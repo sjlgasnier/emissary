@@ -29,12 +29,9 @@ use crate::{
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
-    tunnel::{
-        hop::{
-            inbound::InboundTunnel, outbound::OutboundTunnel, Tunnel, TunnelBuildParameters,
-            TunnelBuilder, TunnelDirection, TunnelHop,
-        },
-        LOG_TARGET,
+    tunnel::hop::{
+        inbound::InboundTunnel, outbound::OutboundTunnel, ReceiverKind, Tunnel,
+        TunnelBuildParameters, TunnelBuilder, TunnelDirection, TunnelHop, TunnelInfo,
     },
     Error,
 };
@@ -44,6 +41,10 @@ use rand_core::RngCore;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{iter, marker::PhantomData, num::NonZeroUsize, time::Duration};
+use thingbuf::mpsc::Receiver;
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::pending";
 
 /// How many build records should a `ShortTunnelBuildRequest` contain.
 ///
@@ -54,29 +55,54 @@ const NUM_BUILD_RECORDS: usize = 4;
 const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(10);
 
 /// Outbound tunnel.
-#[derive(Debug)]
 pub struct PendingTunnel<T: Tunnel> {
-    /// Tunnel ID.
-    tunnel_id: TunnelId,
-
     /// Pending tunnel hops.
     hops: VecDeque<TunnelHop>,
 
-    /// Marker for tunnel.
+    /// Message receiver for the tunnel.
+    receiver: ReceiverKind,
+
+    /// Tunnel ID.
+    tunnel_id: TunnelId,
+
+    /// Marker for `Tunnel`.
     _tunnel: PhantomData<T>,
 }
 
 impl<T: Tunnel> PendingTunnel<T> {
+    /// Get reference to [`PendingTunnel`]'s `TunnelId`.
+    pub fn tunnel_id(&self) -> &TunnelId {
+        &self.tunnel_id
+    }
+
+    /// Create new [`PendingTunnel`].
     pub fn create_tunnel<R: Runtime>(
         parameters: TunnelBuildParameters,
-    ) -> Result<(Self, RouterId, Vec<u8>), TunnelError> {
+    ) -> Result<(Self, RouterId, Message), TunnelError> {
         let TunnelBuildParameters {
             hops,
             noise,
             message_id,
-            tunnel_id,
-            our_hash,
+            tunnel_info,
+            receiver,
         } = parameters;
+
+        if hops.len() > NUM_BUILD_RECORDS {
+            return Err(TunnelError::TooManyHops(hops.len()));
+        }
+
+        // extract pending tunnel's id and id of the tunnel that's used for reception of the reply
+        //
+        // inbound tunnel build responses don't come through a tunnel so those build requests can
+        // use the same tunnel id that's used for the actual tunnel
+        //
+        // outbound tunnel build responses are received through a channel which is different from
+        // the actual tunnel that is being created and will thus have a different tunnel id
+        let (gateway, tunnel_id, router_id) = match (tunnel_info, T::direction()) {
+            (info @ TunnelInfo::Outbound { .. }, TunnelDirection::Outbound) => info.destruct(),
+            (info @ TunnelInfo::Inbound { .. }, TunnelDirection::Inbound) => info.destruct(),
+            (_, _) => unreachable!(),
+        };
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -86,10 +112,6 @@ impl<T: Tunnel> PendingTunnel<T> {
             num_hops = ?hops.len(),
             "create tunnel",
         );
-
-        if hops.len() > NUM_BUILD_RECORDS {
-            return Err(TunnelError::TooManyHops(hops.len()));
-        }
 
         // set build record to expire 10 seconds from now
         let time_now = R::time_since_epoch();
@@ -103,7 +125,7 @@ impl<T: Tunnel> PendingTunnel<T> {
         let (tunnel_ids, router_hashes): (Vec<_>, Vec<_>) = hops
             .iter()
             .map(|(router_hash, _)| (TunnelId::from(R::rng().next_u32()), router_hash.clone()))
-            .chain(iter::once((tunnel_id, our_hash)))
+            .chain(iter::once((gateway, router_id)))
             .unzip();
 
         // create build records and generate key contexts for each hop
@@ -196,19 +218,18 @@ impl<T: Tunnel> PendingTunnel<T> {
 
         Ok((
             Self {
-                tunnel_id,
                 hops: tunnel_hops,
+                receiver,
+                tunnel_id,
                 _tunnel: Default::default(),
             },
             RouterId::from(router_hashes[0].clone().to_vec()),
-            MessageBuilder::short()
-                .with_expiration(build_expiration)
-                .with_message_type(MessageType::ShortTunnelBuild)
-                .with_message_id(message_id)
-                .with_payload(&short::TunnelBuildReplyBuilder::from_records(
-                    encrypted_records,
-                ))
-                .build(),
+            Message {
+                message_id: *message_id,
+                expiration: build_expiration as u64,
+                message_type: MessageType::ShortTunnelBuild,
+                payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
+            },
         ))
     }
 
@@ -294,8 +315,9 @@ impl<T: Tunnel> PendingTunnel<T> {
             .enumerate()
             .rev()
             .try_fold(
-                TunnelBuilder::new(self.tunnel_id),
+                TunnelBuilder::new(self.tunnel_id, self.receiver),
                 |builder, (hop_idx, hop)| {
+                    // TODO: ensure `payload` is long enough
                     let mut record =
                         payload[1 + (hop_idx * 218)..1 + ((1 + hop_idx) * 218)].to_vec();
 
@@ -319,7 +341,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                                 target: LOG_TARGET,
                                 tunnel_id = ?self.tunnel_id,
                                 hop_tunnel_id = ?hop.tunnel_id,
-                                "outbound tunnel accepted",
+                                direction = ?T::direction(),
+                                "tunnel accepted",
                             );
                         }
                         reason => {
@@ -327,8 +350,9 @@ impl<T: Tunnel> PendingTunnel<T> {
                                 target: LOG_TARGET,
                                 tunnel_id = ?self.tunnel_id,
                                 hop_tunnel_id = ?hop.tunnel_id,
+                                direction = ?T::direction(),
                                 ?reason,
-                                "outbound tunnel rejected",
+                                "tunnel rejected",
                             );
 
                             return Err(Error::Tunnel(TunnelError::TunnelRejected(reason)));
@@ -360,15 +384,18 @@ mod test {
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
-            new_noise::NoiseContext,
+            noise::NoiseContext,
+            pool::{TunnelPoolContext, TunnelPoolHandle},
+            routing_table::RoutingTable,
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
         },
     };
     use bytes::Bytes;
+    use thingbuf::mpsc::channel;
 
-    #[test]
-    fn create_outbound_tunnel() {
+    #[tokio::test]
+    async fn create_outbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
@@ -382,21 +409,26 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_id,
-                our_hash: local_hash,
-            })
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
             .unwrap();
-
-        let mut message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
@@ -417,14 +449,14 @@ mod test {
             payload,
         } = TunnelGateway::parse(&message.payload).unwrap();
 
-        assert_eq!(TunnelId::from(recv_tunnel_id), tunnel_id);
+        assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
 
         let message = Message::parse_standard(&payload).unwrap();
         assert!(pending_tunnel.try_build_tunnel(message).is_ok());
     }
 
-    #[test]
-    fn create_inbound_tunnel() {
+    #[tokio::test]
+    async fn create_inbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
@@ -433,29 +465,46 @@ mod test {
         ) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| {
+            .map(|(router_hash, pk, noise_context, _)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, manager_rx) = channel(16);
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(noise_context, handle.clone()),
+                    TransitTunnelManager::new(
+                        noise_context,
+                        routing_table,
+                        transit_rx,
+                        handle.clone(),
+                    ),
                 )
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let (context, handle) = TunnelPoolContext::new();
+        let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
                 noise: local_noise,
                 message_id,
-                tunnel_id,
-                our_hash: local_hash,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash,
+                },
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
             })
             .unwrap();
-
-        let mut message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
@@ -479,29 +528,36 @@ mod test {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_id,
-                our_hash: local_hash,
-            })
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
             .unwrap();
 
-        let Some(Message {
+        let Message {
             message_type: MessageType::ShortTunnelBuild,
             message_id: parsed_message_id,
             expiration,
             mut payload,
-        }) = Message::parse_short(&message)
+        } = message
         else {
             panic!("invalid message");
         };
@@ -564,24 +620,29 @@ mod test {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|_| make_router())
             .into_iter()
-            .map(|(router_hash, pk, noise_context)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: hops.clone(),
-                noise: local_noise,
-                message_id,
-                tunnel_id,
-                our_hash: local_hash,
-            })
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
             .unwrap();
-
-        let message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
