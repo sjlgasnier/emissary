@@ -53,6 +53,19 @@ fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
                 .with_payload(&values.3)
                 .build();
 
+            // verify that two different ways of serializing results in the message
+            if !values.3.is_empty() {
+                let message2 = Message {
+                    message_type: values.0.into(),
+                    message_id: values.1,
+                    expiration: values.2,
+                    payload: values.3.clone(),
+                }
+                .serialize_standard();
+
+                assert_eq!(message, message2);
+            }
+
             Message::parse_standard(&message)
         };
 
@@ -63,6 +76,19 @@ fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
                 .with_expiration(values.2)
                 .with_payload(&values.3)
                 .build();
+
+            // verify that two different ways of serializing results in the message
+            if !values.3.is_empty() {
+                let message2 = Message {
+                    message_type: values.0.into(),
+                    message_id: values.1,
+                    expiration: values.2,
+                    payload: values.3.clone(),
+                }
+                .serialize_short();
+
+                assert_eq!(message, message2);
+            }
 
             Message::parse_short(&message)
         };
