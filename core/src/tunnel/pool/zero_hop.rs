@@ -16,15 +16,14 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-/// Logging target for the file:
-const LOG_TARGET: &str = "emissary::tunnel::pool::zero-hop";
-
 use crate::{
     i2np::{tunnel::gateway::TunnelGateway, Message},
     primitives::TunnelId,
-    tunnel::routing_table::RoutingTable,
+    runtime::Runtime,
+    tunnel::{pool::TUNNEL_BUILD_EXPIRATION, routing_table::RoutingTable},
 };
 
+use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
@@ -33,6 +32,9 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+
+/// Logging target for the file:
+const LOG_TARGET: &str = "emissary::tunnel::pool::zero-hop";
 
 /// Fake 0-hop inbound tunnel.
 ///
@@ -48,16 +50,20 @@ pub struct ZeroHopInboundTunnel {
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
+
+    /// Expiration timer.
+    expiration_timer: BoxFuture<'static, ()>,
 }
 
 impl ZeroHopInboundTunnel {
     /// Create new [`ZeroHopInboundTunnel`].
-    pub fn new(routing_table: RoutingTable, rng: &mut impl RngCore) -> (TunnelId, Self) {
-        let (tunnel_id, message_rx) = routing_table.insert_tunnel::<1>(rng);
+    pub fn new<R: Runtime>(routing_table: RoutingTable) -> (TunnelId, Self) {
+        let (tunnel_id, message_rx) = routing_table.insert_tunnel::<1>(&mut R::rng());
 
         (
             tunnel_id,
             Self {
+                expiration_timer: Box::pin(R::delay(TUNNEL_BUILD_EXPIRATION)),
                 message_rx,
                 routing_table,
                 tunnel_id,
@@ -101,21 +107,38 @@ impl ZeroHopInboundTunnel {
 impl Future for ZeroHopInboundTunnel {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match futures::ready!(self.message_rx.poll_recv(cx)) {
-            None => tracing::debug!(
-                target: LOG_TARGET,
-                tunnel_id = %self.tunnel_id,
-                "channel closed while waiting for build response",
-            ),
-            Some(message) => self.on_message(message),
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.message_rx.poll_recv(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    zero_hop_tunnel = %self.tunnel_id,
+                    "channel closed while waiting for build response",
+                );
+
+                self.routing_table.remove_tunnel(&self.tunnel_id);
+                return Poll::Ready(());
+            }
+            Poll::Ready(Some(message)) => {
+                self.on_message(message);
+                self.routing_table.remove_tunnel(&self.tunnel_id);
+                return Poll::Ready(());
+            }
         }
 
-        // remove the fake 0-hop tunnel from the routing table after processing the message because
-        // it's only used for processing of one build reply record
-        self.routing_table.remove_tunnel(&self.tunnel_id);
+        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+            tracing::trace!(
+                target: LOG_TARGET,
+                zero_hop_tunnel = %self.tunnel_id,
+                "zero-hop tunnel expired before reply",
+            );
 
-        Poll::Ready(())
+            self.routing_table.remove_tunnel(&self.tunnel_id);
+            return Poll::Ready(());
+        }
+
+        Poll::Pending
     }
 }
 

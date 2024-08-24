@@ -49,6 +49,7 @@ use futures::{
 };
 use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
+use listener::ReceiveKind;
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
@@ -257,8 +258,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             metrics,
             noise,
             outbound: HashMap::new(),
-            pending_inbound: TunnelBuildListener::new(),
-            pending_outbound: TunnelBuildListener::new(),
+            pending_inbound: TunnelBuildListener::new(routing_table.clone()),
+            pending_outbound: TunnelBuildListener::new(routing_table.clone()),
             routing_table,
             selector,
             tunnel_timers: TunnelTimer::new(),
@@ -319,7 +320,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 None => {
                     // the fake 0-hop tunnel routes the build response via `RoutingTable`
                     let (gateway, zero_hop_tunnel) =
-                        ZeroHopInboundTunnel::new(self.routing_table.clone(), &mut R::rng());
+                        ZeroHopInboundTunnel::new::<R>(self.routing_table.clone());
 
                     // generate message id for the build request and optimistically insert
                     // a listener tx channel for it in the routing table
@@ -360,7 +361,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                             // add pending tunnel into outbound tunnel build listener
                             // and send tunnel build request to the first hop
-                            self.pending_outbound.add_pending_tunnel(tunnel, message_rx);
+                            self.pending_outbound.add_pending_tunnel(
+                                tunnel,
+                                ReceiveKind::RoutingTable { message_id },
+                                message_rx,
+                            );
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
 
                             self.routing_table.send_message(router_id, message.serialize_short());
@@ -417,7 +422,14 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         Ok((tunnel, router_id, message)) => {
                             // add pending tunnel into outbound tunnel build listener
                             // and send tunnel build request to the first hop
-                            self.pending_outbound.add_pending_tunnel(tunnel, message_rx);
+                            self.pending_outbound.add_pending_tunnel(
+                                tunnel,
+                                ReceiveKind::Tunnel {
+                                    handle: handle.clone(),
+                                    message_id,
+                                },
+                                message_rx,
+                            );
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
 
                             self.routing_table.send_message(router_id, message.serialize_short());
@@ -494,7 +506,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 Ok((tunnel, router, message)) => {
                     // add pending tunnel into outbound tunnel build listener and send
                     // tunnel build request to the first hop
-                    self.pending_inbound.add_pending_tunnel(tunnel, message_rx);
+                    self.pending_inbound.add_pending_tunnel(
+                        tunnel,
+                        ReceiveKind::RoutingTable { message_id },
+                        message_rx,
+                    );
                     self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).increment(1);
 
                     match send_tunnel_id {
@@ -562,7 +578,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "failed to build outbound tunnel",
                     );
 
-                    self.routing_table.remove_tunnel(&tunnel_id);
+                    // TODO: remove message listener
+
                     self.metrics.counter(NUM_BUILD_FAILURES).increment(1);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                 }
@@ -623,6 +640,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "inbound tunnel exited",
                     );
                     self.expiring_inbound.remove(&tunnel_id);
+                    self.routing_table.remove_tunnel(&tunnel_id);
                 }
             }
         }
@@ -651,6 +669,18 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
             }
         }
 
+        // poll tunnel timers
+        //
+        // both inbound and outbound tunnels emit `Rebuild` events which indicate that the tunnel is
+        // about to expire and tunnel pool should build a replacement for the expiring tunnel
+        //
+        // as outbound tunnels do not have an asynchronous event loop but are instead stored in
+        // tunnel pool, `TunnelTimer` also emits a `Destroy` event for them so tunnel pool knows
+        // when to remove them from `outbound`
+        //
+        // inbound tunnels have their own event loops which track when the tunnel should be
+        // destroyed and thus tunnel pool doesn't need an explicit signal from `TunnelTimer` for
+        // inbound tunnel destruction
         while let Poll::Ready(event) = self.tunnel_timers.poll_next_unpin(cx) {
             match event {
                 None => return Poll::Ready(()),
@@ -1407,11 +1437,167 @@ mod tests {
 
     #[tokio::test]
     async fn exploratory_outbound_build_reply_received_late() {
-        todo!();
+        // create 10 routers and add them to local `RouterStorage`
+        let mut routers = (0..10)
+            .map(|_| {
+                let transit = TestTransitTunnelManager::new();
+                let router_id = transit.router();
+
+                (transit.router(), transit)
+            })
+            .collect::<HashMap<_, _>>();
+        let router_storage = RouterStorage::from_random(
+            routers.iter().map(|(_, transit)| transit.router_info()).collect(),
+        );
+
+        let pool_config = TunnelPoolConfig {
+            num_inbound: 0usize,
+            num_inbound_hops: 0usize,
+            num_outbound: 1usize,
+            num_outbound_hops: 3usize,
+            destination: (),
+        };
+        let our_hash = {
+            let mut our_hash = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut our_hash);
+
+            Bytes::from(our_hash)
+        };
+        let noise = {
+            let mut key_bytes = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut key_bytes);
+
+            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+        };
+        let handle = MockRuntime::register_metrics(Vec::new());
+        let (manager_tx, manager_rx) = mpsc::channel(64);
+        let (transit_tx, transit_rx) = mpsc::channel(64);
+        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let (context, pool_handle) = TunnelPoolContext::new();
+
+        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
+            pool_config,
+            ExploratorySelector::new(router_storage.clone(), pool_handle),
+            context,
+            routing_table.clone(),
+            noise,
+            handle.clone(),
+        );
+
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
+        assert_eq!(tunnel_pool.pending_outbound.len(), 1);
+
+        // 1st outbound hop (participant)
+        let (router, message) = manager_rx.try_recv().unwrap();
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // 2nd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // 3rd outbound hop (obep)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // don't route the response which causes the build request to expire
+        assert!(tokio::time::timeout(Duration::from_secs(8), &mut tunnel_pool).await.is_err());
+        assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1));
+
+        // route message to listener after timeout
+        let message = Message::parse_short(&message).unwrap();
+        match routing_table.route_message(message).unwrap_err() {
+            RoutingError::RouteNotFound(_, _) => {}
+            error => panic!("invalid error: {error:?}"),
+        }
+
+        assert!(tokio::time::timeout(TUNNEL_BUILD_EXPIRATION, &mut tunnel_pool).await.is_err());
+        assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1));
     }
 
     #[tokio::test]
     async fn exploratory_inbound_build_reply_received_late() {
-        todo!();
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
+
+        // create 10 routers and add them to local `RouterStorage`
+        let mut routers = (0..10)
+            .map(|_| {
+                let transit = TestTransitTunnelManager::new();
+                let router_id = transit.router();
+
+                (transit.router(), transit)
+            })
+            .collect::<HashMap<_, _>>();
+        let router_storage = RouterStorage::from_random(
+            routers.iter().map(|(_, transit)| transit.router_info()).collect(),
+        );
+
+        let pool_config = TunnelPoolConfig {
+            num_inbound: 1usize,
+            num_inbound_hops: 3usize,
+            num_outbound: 0usize,
+            num_outbound_hops: 0usize,
+            destination: (),
+        };
+        let our_hash = {
+            let mut our_hash = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut our_hash);
+
+            Bytes::from(our_hash)
+        };
+        let noise = {
+            let mut key_bytes = vec![0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut key_bytes);
+
+            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+        };
+        let handle = MockRuntime::register_metrics(Vec::new());
+        let (manager_tx, manager_rx) = mpsc::channel(64);
+        let (transit_tx, transit_rx) = mpsc::channel(64);
+        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let (context, pool_handle) = TunnelPoolContext::new();
+
+        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
+            pool_config,
+            ExploratorySelector::new(router_storage.clone(), pool_handle),
+            context,
+            routing_table.clone(),
+            noise,
+            handle.clone(),
+        );
+
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
+        assert_eq!(tunnel_pool.pending_inbound.len(), 1);
+
+        // 1st outbound hop (ibgw)
+        let (router, message) = manager_rx.try_recv().unwrap();
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // 2nd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // 3rd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+
+        // don't route the response which causes the build request to expire
+        assert!(tokio::time::timeout(Duration::from_secs(8), &mut tunnel_pool).await.is_err());
+        assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1));
+
+        // route message to listener after timeout
+        let message = Message::parse_short(&message).unwrap();
+        let _ = routing_table.route_message(message);
+
+        // verify it's routed to transit manager which'll reject it
+        assert!(transit_rx.try_recv().is_ok());
     }
 }
