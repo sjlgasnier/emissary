@@ -235,7 +235,7 @@ pub fn build_outbound_tunnel(
     } = gateway::TunnelGateway::parse(&message.payload).unwrap();
 
     let message = Message::parse_standard(&payload).unwrap();
-    let tunnel = pending_tunnel.try_build_tunnel(message).unwrap();
+    let tunnel = pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
 
     (local_hash, tunnel, transit_managers)
 }
@@ -293,7 +293,7 @@ pub fn build_inbound_tunnel(
         },
     );
 
-    let tunnel = pending_tunnel.try_build_tunnel(message).unwrap();
+    let tunnel = pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
 
     (local_hash, tunnel, transit_managers)
 }

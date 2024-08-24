@@ -73,7 +73,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                     Err(Error::Channel(ChannelError::Closed)),
                 ),
                 Either::Left((Ok(message), _)) =>
-                    (*tunnel.tunnel_id(), tunnel.try_build_tunnel(message)),
+                    (*tunnel.tunnel_id(), tunnel.try_build_tunnel::<R>(message)),
             }
         });
     }

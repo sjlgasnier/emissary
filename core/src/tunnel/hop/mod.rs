@@ -20,6 +20,7 @@ use crate::{
     crypto::StaticPublicKey,
     i2np::{HopRole, Message},
     primitives::{MessageId, RouterId, TunnelId},
+    runtime::Runtime,
     tunnel::{
         noise::{NoiseContext, OutboundSession},
         pool::TunnelPoolHandle,
@@ -65,7 +66,7 @@ pub enum TunnelDirection {
 /// Common interface for local tunnels (initiated by us).
 pub trait Tunnel: Send {
     /// Create new [`Tunnel`].
-    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self;
+    fn new<R: Runtime>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self;
 
     /// Get an iterator of hop roles for the tunnel participants.
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole>;
@@ -110,8 +111,8 @@ impl<T: Tunnel> TunnelBuilder<T> {
     }
 
     // Build new tunnel from provided hops.
-    pub fn build(self) -> T {
-        T::new(
+    pub fn build<R: Runtime>(self) -> T {
+        T::new::<R>(
             self.tunnel_id,
             self.receiver,
             self.hops.into_iter().rev().collect(),

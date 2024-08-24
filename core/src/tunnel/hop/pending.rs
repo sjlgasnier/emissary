@@ -238,7 +238,7 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn try_build_tunnel(self, mut message: Message) -> crate::Result<T> {
+    pub fn try_build_tunnel<R: Runtime>(self, mut message: Message) -> crate::Result<T> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -371,7 +371,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                     Ok(builder.with_hop(hop))
                 },
             )
-            .map(|builder| builder.build())
+            .map(|builder| builder.build::<R>())
     }
 }
 
@@ -452,7 +452,7 @@ mod test {
         assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
 
         let message = Message::parse_standard(&payload).unwrap();
-        assert!(pending_tunnel.try_build_tunnel(message).is_ok());
+        assert!(pending_tunnel.try_build_tunnel::<MockRuntime>(message).is_ok());
     }
 
     #[tokio::test]
@@ -520,7 +520,7 @@ mod test {
         );
 
         assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
-        assert!(pending_tunnel.try_build_tunnel(message).is_ok());
+        assert!(pending_tunnel.try_build_tunnel::<MockRuntime>(message).is_ok());
     }
 
     #[test]
@@ -609,7 +609,7 @@ mod test {
             payload,
         };
 
-        match pending_tunnel.try_build_tunnel(message).unwrap_err() {
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {
             Error::Tunnel(TunnelError::TunnelRejected(0x30)) => {}
             _ => panic!("invalid error"),
         }
@@ -650,7 +650,7 @@ mod test {
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
-        match pending_tunnel.try_build_tunnel(message).unwrap_err() {
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {
             Error::Tunnel(TunnelError::InvalidMessage) => {}
             _ => panic!("invalid error"),
         }
