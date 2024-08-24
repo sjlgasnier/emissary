@@ -31,13 +31,15 @@ use crate::{
     tunnel::{
         hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
         pool::TunnelPoolHandle,
+        TUNNEL_EXPIRATION,
     },
     Error,
 };
 
+use futures::{future::BoxFuture, FutureExt};
 use thingbuf::mpsc::Receiver;
 
-use alloc::{vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     future::Future,
     iter,
@@ -50,9 +52,10 @@ use core::{
 const LOG_TARGET: &str = "emissary::tunnel::ibep";
 
 /// Inbound tunnel.
-//
-// TODO: add timer for tunnel expiration
 pub struct InboundTunnel {
+    /// Tunnel expiration timer.
+    expiration_timer: BoxFuture<'static, TunnelId>,
+
     /// Tunnel pool handle.
     handle: TunnelPoolHandle,
 
@@ -214,10 +217,14 @@ impl InboundTunnel {
 }
 
 impl Tunnel for InboundTunnel {
-    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+    fn new<R: Runtime>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
         let (message_rx, handle) = receiver.inbound();
 
         InboundTunnel {
+            expiration_timer: Box::pin(async move {
+                R::delay(TUNNEL_EXPIRATION).await;
+                tunnel_id
+            }),
             handle,
             hops,
             message_rx,
@@ -247,7 +254,7 @@ impl Tunnel for InboundTunnel {
 impl Future for InboundTunnel {
     type Output = TunnelId;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
             match event {
                 None => {
@@ -278,6 +285,6 @@ impl Future for InboundTunnel {
             }
         }
 
-        Poll::Pending
+        self.expiration_timer.poll_unpin(cx)
     }
 }

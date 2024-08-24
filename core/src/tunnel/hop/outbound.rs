@@ -186,7 +186,7 @@ impl<R: Runtime> OutboundTunnel<R> {
 }
 
 impl<R: Runtime> Tunnel for OutboundTunnel<R> {
-    fn new(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+    fn new<U>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
         OutboundTunnel::<R> {
             hops,
             tunnel_id,

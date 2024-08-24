@@ -26,9 +26,7 @@ use crate::{
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
-        noise::TunnelKeys,
-        routing_table::RoutingTable,
-        transit::{TransitTunnel, TUNNEL_EXPIRATION},
+        noise::TunnelKeys, routing_table::RoutingTable, transit::TransitTunnel, TUNNEL_EXPIRATION,
     },
     Error,
 };

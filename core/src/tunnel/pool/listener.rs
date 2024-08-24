@@ -19,11 +19,12 @@
 use crate::{
     error::ChannelError,
     i2np::Message,
-    primitives::TunnelId,
+    primitives::{MessageId, TunnelId},
     runtime::{JoinSet, Runtime},
     tunnel::{
         hop::{pending::PendingTunnel, Tunnel},
-        pool::TUNNEL_BUILD_EXPIRATION,
+        pool::{context::TunnelPoolHandle, TUNNEL_BUILD_EXPIRATION},
+        routing_table::RoutingTable,
     },
     Error,
 };
@@ -40,17 +41,39 @@ use core::{
     task::{Context, Poll},
 };
 
+/// Receive kind.
+pub enum ReceiveKind {
+    /// Message is received through the routing table.
+    RoutingTable {
+        /// Message ID.
+        message_id: MessageId,
+    },
+
+    /// Message is received through a tunnel.
+    Tunnel {
+        /// Message ID.
+        message_id: MessageId,
+
+        /// Tunnel pool handle.
+        handle: TunnelPoolHandle,
+    },
+}
+
 /// Tunnel build listener.
 pub struct TunnelBuildListener<R: Runtime, T: Tunnel + 'static> {
     /// Pending tunnels.
     pending: R::JoinSet<(TunnelId, crate::Result<T>)>,
+
+    /// Routing table.
+    routing_table: RoutingTable,
 }
 
 impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
     /// Create new [`TunnelBuildListener`].
-    pub fn new() -> Self {
+    pub fn new(routing_table: RoutingTable) -> Self {
         Self {
             pending: R::join_set(),
+            routing_table,
         }
     }
 
@@ -63,17 +86,38 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
     pub fn add_pending_tunnel(
         &mut self,
         tunnel: PendingTunnel<T>,
+        receive_kind: ReceiveKind,
         message_rx: oneshot::Receiver<Message>,
     ) {
+        let routing_table = self.routing_table.clone();
+
         self.pending.push(async move {
             match select(message_rx, Box::pin(R::delay(TUNNEL_BUILD_EXPIRATION))).await {
-                Either::Right((_, _)) => (*tunnel.tunnel_id(), Err(Error::Timeout)),
-                Either::Left((Err(_), _)) => (
-                    *tunnel.tunnel_id(),
-                    Err(Error::Channel(ChannelError::Closed)),
-                ),
+                Either::Right((_, _)) => {
+                    match receive_kind {
+                        ReceiveKind::RoutingTable { message_id } =>
+                            routing_table.remove_listener(&message_id),
+                        ReceiveKind::Tunnel { message_id, handle } =>
+                            handle.remove_listener(&message_id),
+                    }
+
+                    (*tunnel.tunnel_id(), Err(Error::Timeout))
+                }
+                Either::Left((Err(_), _)) => {
+                    match receive_kind {
+                        ReceiveKind::RoutingTable { message_id } =>
+                            routing_table.remove_listener(&message_id),
+                        ReceiveKind::Tunnel { message_id, handle } =>
+                            handle.remove_listener(&message_id),
+                    }
+
+                    (
+                        *tunnel.tunnel_id(),
+                        Err(Error::Channel(ChannelError::Closed)),
+                    )
+                }
                 Either::Left((Ok(message), _)) =>
-                    (*tunnel.tunnel_id(), tunnel.try_build_tunnel(message)),
+                    (*tunnel.tunnel_id(), tunnel.try_build_tunnel::<R>(message)),
             }
         });
     }
