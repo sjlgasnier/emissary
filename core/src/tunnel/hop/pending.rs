@@ -38,10 +38,10 @@ use crate::{
 
 use aes::cipher::Key;
 use rand_core::RngCore;
+use thingbuf::mpsc::Receiver;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{iter, marker::PhantomData, num::NonZeroUsize, time::Duration};
-use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::pending";

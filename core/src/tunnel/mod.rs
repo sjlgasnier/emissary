@@ -43,6 +43,7 @@ use core::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 mod garlic;
@@ -61,6 +62,9 @@ const LOG_TARGET: &str = "emissary::tunnel";
 
 /// Default channel size.
 const DEFAULT_CHANNEL_SIZE: usize = 512;
+
+/// Tunnel expiration, 10 minutes.
+const TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
 /// Router state.
 #[derive(Debug)]

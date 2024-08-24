@@ -76,9 +76,6 @@ const PUBLIC_KEY_OFFSET: Range<usize> = 16..48;
 /// Start offset for the build request record payload.
 const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 
-/// Tunnel expiration, 10 minutes.
-const TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60);
-
 /// Transit tunnel channel size.
 const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 

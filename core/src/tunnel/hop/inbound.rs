@@ -278,6 +278,8 @@ impl Future for InboundTunnel {
             }
         }
 
+        // TODO: add expiration timer
+
         Poll::Pending
     }
 }

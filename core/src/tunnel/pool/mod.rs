@@ -34,6 +34,7 @@ use crate::{
             context::TunnelMessage,
             listener::TunnelBuildListener,
             selector::{ClientSelector, HopSelector, TunnelSelector},
+            timer::{TunnelKind, TunnelTimer, TunnelTimerEvent},
             zero_hop::ZeroHopInboundTunnel,
         },
         routing_table::RoutingTable,
@@ -70,6 +71,7 @@ pub use selector::ExploratorySelector;
 mod context;
 mod listener;
 mod selector;
+mod timer;
 mod zero_hop;
 
 /// Logging target for the file.
@@ -85,6 +87,13 @@ const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(8);
 
 /// Tunnel channel size.
 const TUNNEL_CHANNEL_SIZE: usize = 64usize;
+
+/// Tunnel rebuild timeout.
+///
+/// Tunnel of a pool needs to be rebuilt before it expires as otherwise the pool may be not have any
+/// tunnels of that type. Start building a new tunnel to replace to old one 2 minutes before the old
+/// tunnel expires.
+const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 10);
 
 /// Tunnel pool configuration.
 pub struct TunnelPoolConfig {
@@ -191,6 +200,12 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     /// Tunne pool context.
     context: TunnelPoolContext,
 
+    /// Expiring inbound tunnels.
+    expiring_inbound: HashSet<TunnelId>,
+
+    /// Expiring outbound tunnels.
+    expiring_outbound: HashSet<TunnelId>,
+
     /// Active inbound tunnels.
     inbound: R::JoinSet<TunnelId>,
 
@@ -219,7 +234,7 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     selector: S,
 
     /// Expiration timers for inbound/outbound tunnels.
-    tunnel_timers: R::JoinSet<TunnelId>,
+    tunnel_timers: TunnelTimer<R>,
 }
 
 impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
@@ -235,6 +250,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
         Self {
             config,
             context,
+            expiring_inbound: HashSet::new(),
+            expiring_outbound: HashSet::new(),
             inbound: R::join_set(),
             maintenance_timer: Box::pin(R::delay(Duration::from_secs(0))),
             metrics,
@@ -244,7 +261,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             pending_outbound: TunnelBuildListener::new(),
             routing_table,
             selector,
-            tunnel_timers: R::join_set(),
+            tunnel_timers: TunnelTimer::new(),
         }
     }
 
@@ -264,7 +281,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             .config
             .num_outbound
             .saturating_sub(self.outbound.len())
-            .saturating_sub(self.pending_outbound.len());
+            .saturating_sub(self.pending_outbound.len())
+            .saturating_add(self.expiring_outbound.len());
 
         for _ in 0..num_outbound_to_build {
             // attempt to select hops for the outbound tunnel
@@ -430,7 +448,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             .config
             .num_inbound
             .saturating_sub(self.inbound.len())
-            .saturating_sub(self.pending_inbound.len());
+            .saturating_sub(self.pending_inbound.len())
+            .saturating_add(self.expiring_inbound.len());
 
         for _ in 0..num_inbound_to_build {
             // tunnel that's used to deliver the tunnel build request message
@@ -480,7 +499,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                     match send_tunnel_id {
                         None => {
-                            tracing::info!(
+                            tracing::debug!(
                                 target: LOG_TARGET,
                                 %tunnel_id,
                                 "no outbound tunnel available, send build request directly",
@@ -540,7 +559,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     tracing::warn!(
                         target: LOG_TARGET,
                         ?error,
-                        "failed to build outbound channel",
+                        "failed to build outbound tunnel",
                     );
 
                     self.routing_table.remove_tunnel(&tunnel_id);
@@ -567,6 +586,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Err(error) => {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        %tunnel_id,
                         ?error,
                         "failed to build inbound channel",
                     );
@@ -602,6 +622,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         %tunnel_id,
                         "inbound tunnel exited",
                     );
+                    self.expiring_inbound.remove(&tunnel_id);
                 }
             }
         }
@@ -621,13 +642,47 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         let (router_id, message) = tunnel.send_to_router(router_id, message);
                         self.routing_table.send_message(router_id, message).unwrap();
                     }
-                    TunnelMessage::Inbound { message } => match self.context.try_route(message) {
-                        Ok(()) => {}
-                        Err(message) => {
-                            tracing::error!("what to do with message??");
-                        }
-                    },
+                    TunnelMessage::Inbound { message } => tracing::warn!(
+                        target: LOG_TARGET,
+                        message_type = ?message.message_type,
+                        "unhandled message"
+                    ),
                 },
+            }
+        }
+
+        while let Poll::Ready(event) = self.tunnel_timers.poll_next_unpin(cx) {
+            match event {
+                None => return Poll::Ready(()),
+                Some(TunnelTimerEvent::Destroy { tunnel_id }) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %tunnel_id,
+                        "outbound tunnel expired",
+                    );
+                    self.outbound.remove(&tunnel_id);
+                    self.expiring_outbound.remove(&tunnel_id);
+                }
+                Some(TunnelTimerEvent::Rebuild {
+                    kind: TunnelKind::Outbound { tunnel_id },
+                }) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %tunnel_id,
+                        "outbound tunnel about to expire",
+                    );
+                    self.expiring_outbound.insert(tunnel_id);
+                }
+                Some(TunnelTimerEvent::Rebuild {
+                    kind: TunnelKind::Inbound { tunnel_id },
+                }) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %tunnel_id,
+                        "inbound tunnel about to expire",
+                    );
+                    self.expiring_inbound.insert(tunnel_id);
+                }
             }
         }
 
@@ -1350,9 +1405,13 @@ mod tests {
         assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
     }
 
-    // #[tokio::test]
-    async fn exploratory_outbound_build_reply_received_late() {}
+    #[tokio::test]
+    async fn exploratory_outbound_build_reply_received_late() {
+        todo!();
+    }
 
-    // #[tokio::test]
-    async fn exploratory_inbound_build_reply_received_late() {}
+    #[tokio::test]
+    async fn exploratory_inbound_build_reply_received_late() {
+        todo!();
+    }
 }
