@@ -1534,9 +1534,6 @@ mod tests {
 
     #[tokio::test]
     async fn exploratory_inbound_build_reply_received_late() {
-        use tracing_subscriber::prelude::*;
-        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         // create 10 routers and add them to local `RouterStorage`
         let mut routers = (0..10)
             .map(|_| {

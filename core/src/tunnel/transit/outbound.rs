@@ -84,7 +84,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
     /// Find paylod start by locating the 0x00 byte at the end of the padding section and verify
     /// the checksum of the message before returning the index where the payload section starts.
     ///
-    /// TODO: spec
+    /// https://geti2p.net/spec/tunnel-message#tunnel-message-decrypted
     fn find_payload_start(&self, ciphertext: &[u8], iv: &[u8]) -> crate::Result<usize> {
         let padding_end =
             ciphertext[4..].iter().enumerate().find(|(_, byte)| byte == &&0x0).ok_or_else(

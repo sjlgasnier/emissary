@@ -286,13 +286,6 @@ mod tests {
         let message_id = MessageId::from(1337);
         let mut handler = FragmentHandler::new();
 
-        println!(
-            "len = {}, split = {}, rem = {}",
-            message.len(),
-            message.len() / 2,
-            message.len() % 2
-        );
-
         let mut fragments = split(2, message);
 
         assert_eq!(fragments.len(), 2);

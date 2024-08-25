@@ -80,7 +80,9 @@ impl<R: Runtime> OutboundTunnel<R> {
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_router_delivery(&router, &message)
-            .build::<R>(&self.padding_bytes);
+            .build::<R>(&self.padding_bytes)
+            .next()
+            .unwrap(); // TODO: fix
 
         // iterative decrypt the tunnel data message and aes iv
         let (iv, ciphertext) = self.hops.iter().rev().fold(
@@ -138,7 +140,9 @@ impl<R: Runtime> OutboundTunnel<R> {
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(&router, gateway, &message)
-            .build::<R>(&self.padding_bytes);
+            .build::<R>(&self.padding_bytes)
+            .next()
+            .unwrap(); // TODO: fix
 
         // iteratively decrypt the tunnel data message and aes iv
         let (iv, ciphertext) = self.hops.iter().rev().fold(
@@ -322,7 +326,7 @@ mod tests {
 
         // inbound endpoint
         let message = Message::parse_short(&message).unwrap();
-        let message = inbound.handle_tunnel_data(&message).unwrap().collect::<Vec<_>>();
-        assert_eq!(message[0].payload, b"hello, world".to_vec());
+        let message = inbound.handle_tunnel_data(&message).unwrap();
+        assert_eq!(message.payload, b"hello, world".to_vec());
     }
 }
