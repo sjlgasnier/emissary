@@ -219,14 +219,9 @@ impl<R: Runtime> Tunnel for OutboundTunnel<R> {
     }
 
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole> {
-        match num_hops.get() == 1 {
-            true => vec![HopRole::OutboundEndpoint].into_iter(),
-            false => (0..num_hops.get() - 1)
-                .map(|_| HopRole::Participant)
-                .chain(iter::once(HopRole::OutboundEndpoint))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        }
+        (0..num_hops.get() - 1)
+            .map(|_| HopRole::Participant)
+            .chain(iter::once(HopRole::OutboundEndpoint))
     }
 
     fn direction() -> TunnelDirection {
@@ -242,6 +237,25 @@ mod tests {
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
     };
+
+    #[test]
+    fn hop_roles() {
+        assert_eq!(
+            OutboundTunnel::<MockRuntime>::hop_roles(NonZeroUsize::new(1).unwrap())
+                .collect::<Vec<_>>(),
+            vec![HopRole::OutboundEndpoint]
+        );
+
+        assert_eq!(
+            OutboundTunnel::<MockRuntime>::hop_roles(NonZeroUsize::new(3).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                HopRole::Participant,
+                HopRole::Participant,
+                HopRole::OutboundEndpoint
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn send_tunnel_message() {
@@ -308,7 +322,7 @@ mod tests {
 
         // inbound endpoint
         let message = Message::parse_short(&message).unwrap();
-        let message = inbound.handle_tunnel_data(&message).unwrap();
-        assert_eq!(message.payload, b"hello, world".to_vec());
+        let message = inbound.handle_tunnel_data(&message).unwrap().collect::<Vec<_>>();
+        assert_eq!(message[0].payload, b"hello, world".to_vec());
     }
 }

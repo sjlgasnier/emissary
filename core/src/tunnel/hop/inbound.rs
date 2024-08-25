@@ -113,7 +113,7 @@ impl InboundTunnel {
         }
 
         // zero byte is not considered part of the payload (+1)
-        // TODO: explain +4
+        // checksum is also not part of the checksum (+4)
         let payload_start = padding_end.0 + 1 + 4;
 
         if payload_start >= ciphertext.len() {
@@ -233,13 +233,8 @@ impl Tunnel for InboundTunnel {
     }
 
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole> {
-        match num_hops.get() == 1 {
-            true => vec![HopRole::InboundGateway].into_iter(),
-            false => iter::once(HopRole::InboundGateway)
-                .chain((0..num_hops.get() - 1).map(|_| HopRole::Participant))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        }
+        iter::once(HopRole::InboundGateway)
+            .chain((0..num_hops.get() - 1).map(|_| HopRole::Participant))
     }
 
     fn direction() -> TunnelDirection {
@@ -286,5 +281,27 @@ impl Future for InboundTunnel {
         }
 
         self.expiration_timer.poll_unpin(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hop_roles() {
+        assert_eq!(
+            InboundTunnel::hop_roles(NonZeroUsize::new(1).unwrap()).collect::<Vec<_>>(),
+            vec![HopRole::InboundGateway]
+        );
+
+        assert_eq!(
+            InboundTunnel::hop_roles(NonZeroUsize::new(3).unwrap()).collect::<Vec<_>>(),
+            vec![
+                HopRole::InboundGateway,
+                HopRole::Participant,
+                HopRole::Participant,
+            ]
+        );
     }
 }
