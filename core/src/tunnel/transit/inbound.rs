@@ -23,7 +23,10 @@ use crate::{
     },
     error::{RejectionReason, TunnelError},
     i2np::{
-        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        tunnel::{
+            data::{EncryptedTunnelData, TunnelDataBuilder},
+            gateway::TunnelGateway,
+        },
         HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
@@ -43,6 +46,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,
+    ops::{Range, RangeFrom},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -50,6 +54,12 @@ use core::{
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::transit::ibgw";
+
+/// AES IV offset inside the `TunnelData` message.
+const AES_IV_OFFSET: Range<usize> = 4..20;
+
+/// Payload offset inside the `TunnelData` message.
+const PAYLOAD_OFFSET: RangeFrom<usize> = 20..;
 
 /// Inbound gateway.
 pub struct InboundGateway<R: Runtime> {
@@ -98,84 +108,43 @@ impl<R: Runtime> InboundGateway<R> {
         )))
     }
 
-    fn handle_tunnel_gateway(
-        &mut self,
-        tunnel_gateway: &TunnelGateway,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
+    fn handle_tunnel_gateway<'a>(
+        &'a self,
+        tunnel_gateway: &'a TunnelGateway,
+    ) -> crate::Result<(RouterId, impl Iterator<Item = Vec<u8>> + 'a)> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel_id = %self.tunnel_id,
             gateway_tunnel_id = %tunnel_gateway.tunnel_id,
-            message_type = ?MessageType::from_u8(tunnel_gateway.payload[0]),
             "tunnel gateway",
         );
 
-        // TODO: explain calculation
-        if tunnel_gateway.payload.len() >= 1028 - 16 - 4 - 1 - 4 - 3 {
-            tracing::warn!(
-                target: LOG_TARGET,
-                tunnel_id = %self.tunnel_id,
-                gateway_tunnel_id = %tunnel_gateway.tunnel_id,
-                "fragmentation not supported"
-            );
+        let messages = TunnelDataBuilder::new(self.next_tunnel_id)
+            .with_local_delivery(&tunnel_gateway.payload)
+            .build::<R>(&self.padding_bytes)
+            .into_iter()
+            .map(|mut message| {
+                let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
+                let iv = aes.encrypt(&message[AES_IV_OFFSET]);
 
-            return Err(Error::Tunnel(TunnelError::MessageRejected(
-                RejectionReason::NotSupported,
-            )));
-        }
+                let mut aes = cbc::Aes::new_encryptor(&self.tunnel_keys.layer_key(), &iv);
+                let ciphertext = aes.encrypt(&message[PAYLOAD_OFFSET]);
 
-        // construct `TunnelData` message
-        //
-        // generate random aes iv, fill in next tunnel id, create delivery instructions for local
-        // delivery, calculate checksum for the message and fill in random bytes as padding
-        let mut out = BytesMut::with_capacity(1028);
+                let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
+                let iv = aes.encrypt(iv);
 
-        // total message size - tunnel id - aes iv - checksum - flag - delivery instructions -
-        // payload
-        let padding_size = 1028 - 4 - 16 - 4 - 1 - 3 - tunnel_gateway.payload.len();
-        let offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
-        let aes_iv = {
-            let mut iv = [0u8; 16];
-            R::rng().fill_bytes(&mut iv);
+                message[AES_IV_OFFSET].copy_from_slice(&iv);
+                message[PAYLOAD_OFFSET].copy_from_slice(&ciphertext);
 
-            iv
-        };
-        let checksum = Sha256::new()
-            .update(&[0x00]) // local delivery
-            .update((tunnel_gateway.payload.len() as u16).to_be_bytes())
-            .update(&tunnel_gateway.payload)
-            .update(&aes_iv)
-            .finalize();
+                MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelData)
+                    .with_message_id(R::rng().next_u32())
+                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_payload(&message)
+                    .build()
+            });
 
-        out.put_u32(self.next_tunnel_id.into());
-        out.put_slice(&aes_iv);
-        out.put_slice(&checksum[..4]);
-        out.put_slice(&self.padding_bytes[offset..offset + padding_size]);
-        out.put_u8(0x00); // zero byte (end of padding)
-        out.put_u8(0x00); // local delivery
-        out.put_u16(tunnel_gateway.payload.len() as u16);
-        out.put_slice(tunnel_gateway.payload);
-
-        let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
-        let iv = aes.encrypt(&out[4..20]);
-
-        let mut aes = cbc::Aes::new_encryptor(&self.tunnel_keys.layer_key(), &iv);
-        let ciphertext = aes.encrypt(&out[20..]);
-
-        let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
-        let iv = aes.encrypt(iv);
-
-        out[4..20].copy_from_slice(&iv);
-        out[20..].copy_from_slice(&ciphertext);
-
-        let message = MessageBuilder::short()
-            .with_message_type(MessageType::TunnelData)
-            .with_message_id(R::rng().next_u32())
-            .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(&out)
-            .build();
-
-        Ok((self.next_router.clone(), message))
+        Ok((self.next_router.clone(), messages))
     }
 }
 
@@ -240,8 +209,9 @@ impl<R: Runtime> Future for InboundGateway<R> {
                 Some(message) => match message.message_type {
                     MessageType::TunnelGateway => match TunnelGateway::parse(&message.payload) {
                         Some(message) => match self.handle_tunnel_gateway(&message) {
-                            Ok((router, message)) => {
-                                if let Err(error) = self.routing_table.send_message(router, message)
+                            Ok((router, messages)) => messages.into_iter().for_each(|message| {
+                                if let Err(error) =
+                                    self.routing_table.send_message(router.clone(), message)
                                 {
                                     tracing::error!(
                                         target: LOG_TARGET,
@@ -250,7 +220,7 @@ impl<R: Runtime> Future for InboundGateway<R> {
                                         "failed to send message",
                                     )
                                 }
-                            }
+                            }),
                             Err(error) => tracing::warn!(
                                 target: LOG_TARGET,
                                 tunnel_id = %self.tunnel_id,

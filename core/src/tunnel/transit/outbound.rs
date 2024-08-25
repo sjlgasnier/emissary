@@ -29,10 +29,14 @@ use crate::{
         },
         HopRole, Message, MessageBuilder, MessageType,
     },
-    primitives::{RouterId, TunnelId},
+    primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
-        noise::TunnelKeys, routing_table::RoutingTable, transit::TransitTunnel, TUNNEL_EXPIRATION,
+        fragment::{FragmentHandler, OwnedDeliveryInstructions},
+        noise::TunnelKeys,
+        routing_table::RoutingTable,
+        transit::TransitTunnel,
+        TUNNEL_EXPIRATION,
     },
     Error,
 };
@@ -57,6 +61,9 @@ const LOG_TARGET: &str = "emissary::tunnel::transit::obep";
 pub struct OutboundEndpoint<R: Runtime> {
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, ()>,
+
+    /// Fragment handler.
+    fragment: FragmentHandler,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -84,7 +91,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
     /// Find paylod start by locating the 0x00 byte at the end of the padding section and verify
     /// the checksum of the message before returning the index where the payload section starts.
     ///
-    /// TODO: spec
+    /// https://geti2p.net/spec/tunnel-message#tunnel-message-decrypted
     fn find_payload_start(&self, ciphertext: &[u8], iv: &[u8]) -> crate::Result<usize> {
         let padding_end =
             ciphertext[4..].iter().enumerate().find(|(_, byte)| byte == &&0x0).ok_or_else(
@@ -117,8 +124,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
             )));
         }
 
-        // zero byte is not considered part of the payload (+1)
-        // TODO: explain +4
+        // neither checksum (+4) nor zero byte (+1) are part of the checksum
         let payload_start = padding_end.0 + 1 + 4;
 
         if payload_start >= ciphertext.len() {
@@ -141,7 +147,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
     fn handle_tunnel_data(
         &mut self,
         tunnel_data: &EncryptedTunnelData,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
+    ) -> crate::Result<impl Iterator<Item = (RouterId, Vec<u8>)>> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel_id = %self.tunnel_id,
@@ -164,47 +170,84 @@ impl<R: Runtime> OutboundEndpoint<R> {
             Error::Tunnel(TunnelError::InvalidMessage)
         })?;
 
-        for message in message.messages {
-            if let MessageKind::Unfragmented {
-                delivery_instructions,
-            } = message.message_kind
-            {
-                match delivery_instructions {
-                    DeliveryInstructions::Router { hash } => {
-                        let Message {
-                            message_type,
-                            message_id,
-                            expiration,
-                            payload,
-                        } = Message::parse_standard(&message.message).ok_or_else(|| {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                tunnel_id = %self.tunnel_id,
-                                "fragment router delivery: invalid message",
-                            );
+        // parse messages and fragments and return an iterator of ready messages
+        let messages = TunnelData::parse(&ciphertext[payload_start..].to_vec())
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    tunnel_id = %self.tunnel_id,
+                    "malformed tunnel data message",
+                );
 
-                            Error::Tunnel(TunnelError::InvalidMessage)
-                        })?;
+                Error::Tunnel(TunnelError::InvalidMessage)
+            })?
+            .messages
+            .into_iter()
+            .filter_map(|message| {
+                let (message, delivery_instructions) = match message.message_kind {
+                    MessageKind::Unfragmented {
+                        delivery_instructions,
+                    } => (
+                        Message::parse_standard(message.message)?,
+                        OwnedDeliveryInstructions::from(&delivery_instructions),
+                    ),
+                    MessageKind::FirstFragment {
+                        message_id,
+                        delivery_instructions,
+                    } => self.fragment.first_fragment(
+                        MessageId::from(message_id),
+                        &delivery_instructions,
+                        message.message,
+                    )?,
+                    MessageKind::MiddleFragment {
+                        message_id,
+                        sequence_number,
+                    } => self.fragment.middle_fragment(
+                        MessageId::from(message_id),
+                        sequence_number,
+                        message.message,
+                    )?,
+                    MessageKind::LastFragment {
+                        message_id,
+                        sequence_number,
+                    } => self.fragment.last_fragment(
+                        MessageId::from(message_id),
+                        sequence_number,
+                        message.message,
+                    )?,
+                };
+
+                match delivery_instructions {
+                    OwnedDeliveryInstructions::Local => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            "local delivery not supported",
+                        );
+
+                        None
+                    }
+                    OwnedDeliveryInstructions::Router { hash } => {
                         let router = RouterId::from(hash);
 
                         tracing::trace!(
                             target: LOG_TARGET,
                             tunnel_id = %self.tunnel_id,
                             ?router,
-                            ?message_type,
+                            message_type = ?message.message_type,
                             "fragment router delivery",
                         );
 
                         let message = MessageBuilder::short()
-                            .with_message_type(message_type)
-                            .with_message_id(message_id)
-                            .with_expiration(expiration)
-                            .with_payload(&payload)
+                            .with_message_type(message.message_type)
+                            .with_message_id(message.message_id)
+                            .with_expiration(message.expiration)
+                            .with_payload(&message.payload)
                             .build();
 
-                        return Ok((router, message));
+                        Some((router, message))
                     }
-                    DeliveryInstructions::Tunnel { hash, tunnel_id } => {
+                    OwnedDeliveryInstructions::Tunnel { tunnel_id, hash } => {
                         let router = RouterId::from(hash);
 
                         tracing::trace!(
@@ -217,7 +260,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
 
                         let payload = TunnelGateway {
                             tunnel_id: TunnelId::from(tunnel_id),
-                            payload: &message.message,
+                            payload: &message.serialize_standard(),
                         }
                         .serialize();
 
@@ -230,20 +273,13 @@ impl<R: Runtime> OutboundEndpoint<R> {
                             .with_payload(&payload)
                             .build();
 
-                        return Ok((RouterId::from(hash), message));
+                        Some((router, message))
                     }
-                    DeliveryInstructions::Local => tracing::warn!(
-                        target: LOG_TARGET,
-                        tunnel_id = %self.tunnel_id,
-                        "local delivery not supported",
-                    ),
                 }
-            }
-        }
+            })
+            .collect::<Vec<(RouterId, Vec<u8>)>>();
 
-        Err(Error::Tunnel(TunnelError::MessageRejected(
-            RejectionReason::NotSupported,
-        )))
+        Ok(messages.into_iter())
     }
 }
 
@@ -260,6 +296,7 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
     ) -> Self {
         OutboundEndpoint {
             expiration_timer: Box::pin(R::delay(TUNNEL_EXPIRATION)),
+            fragment: FragmentHandler::new(),
             message_rx,
             metrics_handle,
             next_router,
@@ -292,7 +329,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                 Some(message) => match message.message_type {
                     MessageType::TunnelData => match EncryptedTunnelData::parse(&message.payload) {
                         Some(message) => match self.handle_tunnel_data(&message) {
-                            Ok((router, message)) => {
+                            Ok(messages) => messages.into_iter().for_each(|(router, message)| {
                                 if let Err(error) = self.routing_table.send_message(router, message)
                                 {
                                     tracing::error!(
@@ -302,7 +339,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                                         "failed to send message",
                                     )
                                 }
-                            }
+                            }),
                             Err(error) => tracing::warn!(
                                 target: LOG_TARGET,
                                 tunnel_id = %self.tunnel_id,
@@ -310,7 +347,11 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                                 "failed to handle tunnel data",
                             ),
                         },
-                        None => todo!(),
+                        None => tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            "malformed `TunnelData` message",
+                        ),
                     },
                     message_type => tracing::warn!(
                         target: LOG_TARGET,

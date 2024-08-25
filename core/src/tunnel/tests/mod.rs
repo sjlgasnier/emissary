@@ -29,7 +29,7 @@ use crate::{
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
         hop::{
-            inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
+            inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
             TunnelBuildParameters, TunnelInfo,
         },
         noise::NoiseContext,
@@ -50,8 +50,6 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-
-use super::hop::ReceiverKind;
 
 /// Make new router.
 pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {

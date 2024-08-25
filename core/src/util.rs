@@ -145,3 +145,13 @@ impl<T: AsyncWrite + Unpin> AsyncWriteExt for T {
         Close::new(self)
     }
 }
+
+#[cfg(test)]
+pub fn init_logger() {
+    use tracing_subscriber::prelude::*;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .try_init()
+        .unwrap();
+}

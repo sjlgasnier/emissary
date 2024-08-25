@@ -46,6 +46,7 @@ use core::{
     time::Duration,
 };
 
+mod fragment;
 mod garlic;
 mod hop;
 mod metrics;

@@ -27,6 +27,7 @@ use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
+use alloc::boxed::Box;
 use core::{
     future::Future,
     pin::Pin,

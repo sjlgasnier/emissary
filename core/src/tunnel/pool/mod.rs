@@ -94,7 +94,7 @@ const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 /// Tunnel of a pool needs to be rebuilt before it expires as otherwise the pool may be not have any
 /// tunnels of that type. Start building a new tunnel to replace to old one 2 minutes before the old
 /// tunnel expires.
-const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 10);
+const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
 /// Tunnel pool configuration.
 pub struct TunnelPoolConfig {
@@ -367,7 +367,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                 message_rx,
                             );
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
-
                             self.routing_table.send_message(router_id, message.serialize_short());
                         }
                         Err(error) => {
@@ -389,7 +388,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 // add message listener for selected tunnel's tunnel pool and send the build request
                 //
                 // once the tunnel build reply is received into the selected inbound tunnel (which
-                // could be a different pool), it'll be received by the selected tunnel's
+                // could be in a different pool), it'll be received by the selected tunnel's
                 // `TunnelPool` which routes the message to the listener
                 Some((gateway, router_id, handle)) => {
                     // if an inbound tunnel exists, the reply is routed through it and received
@@ -431,7 +430,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                 message_rx,
                             );
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
-
                             self.routing_table.send_message(router_id, message.serialize_short());
                         }
                         Err(error) => {
@@ -578,8 +576,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "failed to build outbound tunnel",
                     );
 
-                    // TODO: remove message listener
-
                     self.metrics.counter(NUM_BUILD_FAILURES).increment(1);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                 }
@@ -661,17 +657,20 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             "cannot send message, outbound tunnel doesn't exist",
                         ),
                         Some(tunnel) => {
-                            let (router_id, message) = tunnel.send_to_router(router_id, message);
+                            let (router_id, messages) = tunnel.send_to_router(router_id, message);
 
-                            if let Err(error) = self.routing_table.send_message(router_id, message)
-                            {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    %gateway,
-                                    ?error,
-                                    "failed to send tunnel message to router",
-                                );
-                            }
+                            messages.into_iter().for_each(|message| {
+                                if let Err(error) =
+                                    self.routing_table.send_message(router_id.clone(), message)
+                                {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        %gateway,
+                                        ?error,
+                                        "failed to send tunnel message to router",
+                                    );
+                                }
+                            });
                         }
                     },
                     TunnelMessage::Inbound { message } => tracing::warn!(
@@ -1534,9 +1533,6 @@ mod tests {
 
     #[tokio::test]
     async fn exploratory_inbound_build_reply_received_late() {
-        use tracing_subscriber::prelude::*;
-        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).try_init();
-
         // create 10 routers and add them to local `RouterStorage`
         let mut routers = (0..10)
             .map(|_| {
