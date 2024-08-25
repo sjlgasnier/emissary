@@ -33,6 +33,7 @@ use core::{
     iter,
     marker::PhantomData,
     num::NonZeroUsize,
+    ops::{Range, RangeFrom},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -40,6 +41,12 @@ use core::{
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::obgw";
+
+/// AES IV offset inside the `TunnelData` message.
+const AES_IV_OFFSET: Range<usize> = 4..20;
+
+/// Payload offset inside the `TunnelData` message.
+const PAYLOAD_OFFSET: RangeFrom<usize> = 20..;
 
 /// Outbound tunnel.
 #[derive(Debug)]
@@ -59,13 +66,11 @@ pub struct OutboundTunnel<R: Runtime> {
 
 impl<R: Runtime> OutboundTunnel<R> {
     /// Send `message` to `router`
-    pub fn send_to_router(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
-        assert!(
-            message.len() < 950,
-            "fragmentation not supported {}",
-            message.len()
-        );
-
+    pub fn send_to_router(
+        &self,
+        router: RouterId,
+        message: Vec<u8>,
+    ) -> (RouterId, impl Iterator<Item = Vec<u8>> + '_) {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -78,42 +83,46 @@ impl<R: Runtime> OutboundTunnel<R> {
         let next_hop = self.hops.iter().next().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
-        let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
+        // split `message` into one or more i2np message fragments
+        // and iteratively decrypt each fragment with each hop's tunnel keys
+        let messages = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_router_delivery(&router, &message)
             .build::<R>(&self.padding_bytes)
-            .next()
-            .unwrap(); // TODO: fix
+            .into_iter()
+            .map(|mut message| {
+                let (iv, ciphertext) = self.hops.iter().rev().fold(
+                    (
+                        message[AES_IV_OFFSET].to_vec(),
+                        message[PAYLOAD_OFFSET].to_vec(),
+                    ),
+                    |(iv, message), hop| {
+                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let iv = aes.decrypt(&iv);
 
-        // iterative decrypt the tunnel data message and aes iv
-        let (iv, ciphertext) = self.hops.iter().rev().fold(
-            (message[4..20].to_vec(), message[20..].to_vec()),
-            |(iv, message), hop| {
-                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
-                let iv = aes.decrypt(&iv);
+                        let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                        let ciphertext = aes.decrypt(message);
 
-                let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
-                let ciphertext = aes.decrypt(message);
+                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let iv = aes.decrypt(iv);
 
-                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
-                let iv = aes.decrypt(iv);
+                        (iv, ciphertext)
+                    },
+                );
 
-                (iv, ciphertext)
-            },
-        );
+                message[AES_IV_OFFSET].copy_from_slice(&iv);
+                message[PAYLOAD_OFFSET].copy_from_slice(&ciphertext);
 
-        message[4..20].copy_from_slice(&iv);
-        message[20..].copy_from_slice(&ciphertext);
+                let message_id = R::rng().next_u32();
 
-        let message_id = R::rng().next_u32();
+                MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelData)
+                    .with_message_id(message_id)
+                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_payload(&message)
+                    .build()
+            });
 
-        let message = MessageBuilder::short()
-            .with_message_type(MessageType::TunnelData)
-            .with_message_id(message_id)
-            .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(&message)
-            .build();
-
-        (next_hop.router.clone(), message)
+        (next_hop.router.clone(), messages)
     }
 
     /// Send `message` to tunnel identified by the (`router`, `gateway`) tuple.
@@ -122,9 +131,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         router: RouterId,
         gateway: TunnelId,
         message: Vec<u8>,
-    ) -> (RouterId, Vec<u8>) {
-        assert!(message.len() < 950, "fragmentation not supported");
-
+    ) -> (RouterId, impl Iterator<Item = Vec<u8>> + '_) {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -138,42 +145,46 @@ impl<R: Runtime> OutboundTunnel<R> {
         let next_hop = self.hops.iter().next().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
-        let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
+        // split `message` into one or more i2np message fragments
+        // and iteratively decrypt each fragment with each hop's tunnel keys
+        let messages = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(&router, gateway, &message)
             .build::<R>(&self.padding_bytes)
-            .next()
-            .unwrap(); // TODO: fix
+            .into_iter()
+            .map(|mut message| {
+                let (iv, ciphertext) = self.hops.iter().rev().fold(
+                    (
+                        message[AES_IV_OFFSET].to_vec(),
+                        message[PAYLOAD_OFFSET].to_vec(),
+                    ),
+                    |(iv, message), hop| {
+                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let iv = aes.decrypt(&iv);
 
-        // iteratively decrypt the tunnel data message and aes iv
-        let (iv, ciphertext) = self.hops.iter().rev().fold(
-            (message[4..20].to_vec(), message[20..].to_vec()),
-            |(iv, message), hop| {
-                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
-                let iv = aes.decrypt(&iv);
+                        let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                        let ciphertext = aes.decrypt(message);
 
-                let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
-                let ciphertext = aes.decrypt(message);
+                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let iv = aes.decrypt(iv);
 
-                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
-                let iv = aes.decrypt(iv);
+                        (iv, ciphertext)
+                    },
+                );
 
-                (iv, ciphertext)
-            },
-        );
+                message[AES_IV_OFFSET].copy_from_slice(&iv);
+                message[PAYLOAD_OFFSET].copy_from_slice(&ciphertext);
 
-        message[4..20].copy_from_slice(&iv);
-        message[20..].copy_from_slice(&ciphertext);
+                let message_id = R::rng().next_u32();
 
-        let message_id = R::rng().next_u32();
+                MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelData)
+                    .with_message_id(message_id)
+                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_payload(&message)
+                    .build()
+            });
 
-        let message = MessageBuilder::short()
-            .with_message_type(MessageType::TunnelData)
-            .with_message_id(message_id)
-            .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
-            .with_payload(&message)
-            .build();
-
-        (next_hop.router.clone(), message)
+        (next_hop.router.clone(), messages)
     }
 
     /// Send `message` to `router`
@@ -240,6 +251,7 @@ mod tests {
         i2np::tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
+        util::init_logger,
     };
 
     #[test]
@@ -276,12 +288,12 @@ mod tests {
             .with_payload(b"hello, world")
             .build();
 
-        let (next_router, message) =
+        let (next_router, mut messages) =
             outbound.send_to_tunnel(gateway_router, gateway_tunnel, message);
         assert_eq!(outbound_transit[0].router(), next_router);
 
         // first outbound hop (participant)
-        let message = Message::parse_short(&message).unwrap();
+        let message = Message::parse_short(&messages.next().unwrap()).unwrap();
         assert!(outbound_transit[0].routing_table().route_message(message).is_ok());
         assert!(
             tokio::time::timeout(Duration::from_millis(200), &mut outbound_transit[0])
@@ -328,5 +340,181 @@ mod tests {
         let message = Message::parse_short(&message).unwrap();
         let message = inbound.handle_tunnel_data(&message).unwrap().collect::<Vec<_>>();
         assert_eq!(message[0].payload, b"hello, world".to_vec());
+    }
+
+    #[tokio::test]
+    async fn send_tunnel_message_fragmented() {
+        init_logger();
+
+        let original = (0..4 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+        let (local_outbound_hash, mut outbound, mut outbound_transit) =
+            build_outbound_tunnel(3usize);
+        let (local_inbound_hash, mut inbound, mut inbound_transit) = build_inbound_tunnel(3usize);
+
+        let (gateway_router, gateway_tunnel) = inbound.gateway();
+
+        let message = MessageBuilder::standard()
+            .with_message_type(MessageType::Data)
+            .with_message_id(13371338u32)
+            .with_expiration((MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_payload(&original)
+            .build();
+
+        // 1st outbound hop (participant)
+        let (next_router, mut messages) =
+            outbound.send_to_tunnel(gateway_router, gateway_tunnel, message);
+        assert_eq!(outbound_transit[0].router(), next_router);
+
+        for message in messages {
+            let message = Message::parse_short(&message).unwrap();
+            assert!(outbound_transit[0].routing_table().route_message(message).is_ok());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut outbound_transit[0])
+                .await
+                .is_err()
+        );
+        let messages = {
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = outbound_transit[0].message_rx().try_recv() {
+                assert_eq!(outbound_transit[1].router(), router);
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 5);
+
+        // 2nd outbound hop (participant)
+        for (router, message) in messages {
+            let message = Message::parse_short(&message).unwrap();
+            assert!(outbound_transit[1].routing_table().route_message(message).is_ok());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut outbound_transit[1])
+                .await
+                .is_err()
+        );
+        let messages = {
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = outbound_transit[1].message_rx().try_recv() {
+                assert_eq!(outbound_transit[2].router(), router);
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 5);
+
+        // 3rd outbound hop (obep)
+        for (router, message) in messages {
+            let message = Message::parse_short(&message).unwrap();
+            assert!(outbound_transit[2].routing_table().route_message(message).is_ok());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut outbound_transit[2])
+                .await
+                .is_err()
+        );
+        let messages = {
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = outbound_transit[2].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+
+        // reconstructed message
+        assert_eq!(messages.len(), 1);
+        let (next_router, message) = messages.first().unwrap();
+
+        // first hop is inbound gateway
+        assert_eq!(&inbound_transit[0].router(), next_router);
+
+        // 1st inbound hop (ibgw)
+        let message = Message::parse_short(&message).unwrap();
+        assert!(inbound_transit[0].routing_table().route_message(message).is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut inbound_transit[0])
+                .await
+                .is_err()
+        );
+        let messages = {
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = inbound_transit[0].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 5);
+
+        // 2nd inbound hop (participant)
+        for (router, message) in messages {
+            let message = Message::parse_short(&message).unwrap();
+            assert!(inbound_transit[1].routing_table().route_message(message).is_ok());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut inbound_transit[1])
+                .await
+                .is_err()
+        );
+        let messages = {
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = inbound_transit[1].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 5);
+
+        // 3rd inbound hop (participant)
+        for (router, message) in messages {
+            let message = Message::parse_short(&message).unwrap();
+            assert!(inbound_transit[2].routing_table().route_message(message).is_ok());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut inbound_transit[2])
+                .await
+                .is_err()
+        );
+        let messages = {
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = inbound_transit[2].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 5);
+
+        let messages = messages
+            .into_iter()
+            .map(|(_, message)| Message::parse_short(&message).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(inbound.handle_tunnel_data(&messages[0]).unwrap().count(), 0);
+        assert_eq!(inbound.handle_tunnel_data(&messages[1]).unwrap().count(), 0);
+        assert_eq!(inbound.handle_tunnel_data(&messages[2]).unwrap().count(), 0);
+        assert_eq!(inbound.handle_tunnel_data(&messages[3]).unwrap().count(), 0);
+
+        let Message {
+            message_type: MessageType::Data,
+            payload,
+            ..
+        } = inbound.handle_tunnel_data(&messages[4]).unwrap().next().unwrap()
+        else {
+            panic!("invalid message");
+        };
+
+        assert_eq!(payload, original);
     }
 }

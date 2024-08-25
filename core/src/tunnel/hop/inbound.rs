@@ -116,8 +116,7 @@ impl InboundTunnel {
             )));
         }
 
-        // zero byte is not considered part of the payload (+1)
-        // checksum is also not part of the checksum (+4)
+        // neither checksum (+4) nor zero byte (+1) are part of the checksum
         let payload_start = padding_end.0 + 1 + 4;
 
         if payload_start >= ciphertext.len() {

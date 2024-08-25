@@ -657,17 +657,20 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             "cannot send message, outbound tunnel doesn't exist",
                         ),
                         Some(tunnel) => {
-                            let (router_id, message) = tunnel.send_to_router(router_id, message);
+                            let (router_id, messages) = tunnel.send_to_router(router_id, message);
 
-                            if let Err(error) = self.routing_table.send_message(router_id, message)
-                            {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    %gateway,
-                                    ?error,
-                                    "failed to send tunnel message to router",
-                                );
-                            }
+                            messages.into_iter().for_each(|message| {
+                                if let Err(error) =
+                                    self.routing_table.send_message(router_id.clone(), message)
+                                {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        %gateway,
+                                        ?error,
+                                        "failed to send tunnel message to router",
+                                    );
+                                }
+                            });
                         }
                     },
                     TunnelMessage::Inbound { message } => tracing::warn!(
