@@ -393,8 +393,7 @@ impl<'a> TunnelDataBuilder<'a> {
     /// Serialize message fragments into a `TunnelData` message.
     //
     // TODO: return iterator of messages
-    // TODO: take padding bytes as input
-    pub fn build<R: Runtime>(mut self) -> Vec<u8> {
+    pub fn build<R: Runtime>(mut self, padding: &[u8; 1028]) -> Vec<u8> {
         assert_eq!(self.messages.len(), 1);
 
         let mut out = BytesMut::with_capacity(1028);
@@ -425,19 +424,22 @@ impl<'a> TunnelDataBuilder<'a> {
             _ => todo!("fragments not supported"),
         };
 
-        // total message size - tunnel id - aes iv - checksum - flag - delivery instructions -
-        // payload
-        let padding_size =
-            1028 - 4 - 16 - 4 - 1 - 2 - delivery_instructions.len() - message.message.len();
-        // TODO: remove offset
-        let _offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
+        // calculate padding size
+        let padding_size = 1028usize
+            .saturating_sub(4usize) // tunnel id
+            .saturating_sub(16usize) // aes iv
+            .saturating_sub(4usize) // checksum
+            .saturating_sub(1) // flag
+            .saturating_sub(2) // length
+            .saturating_sub(delivery_instructions.len())
+            .saturating_sub(message.message.len());
+        let offset = (R::rng().next_u32() % (1028u32 - padding_size as u32)) as usize;
         let aes_iv = {
             let mut iv = [0u8; 16];
             R::rng().fill_bytes(&mut iv);
 
             iv
         };
-        let padding = vec![3u8; padding_size];
         let checksum = Sha256::new()
             .update(&delivery_instructions)
             .update((message.message.len() as u16).to_be_bytes())
@@ -448,7 +450,7 @@ impl<'a> TunnelDataBuilder<'a> {
         out.put_u32(self.next_tunnel_id.into());
         out.put_slice(&aes_iv);
         out.put_slice(&checksum[..4]);
-        out.put_slice(&padding);
+        out.put_slice(&padding[offset..offset + padding_size]);
         out.put_u8(0x00); // zero byte (end of padding)
         out.put_slice(&delivery_instructions);
         out.put_u16(message.message.len() as u16);

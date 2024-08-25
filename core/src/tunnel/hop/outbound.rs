@@ -44,14 +44,17 @@ const LOG_TARGET: &str = "emissary::tunnel::obgw";
 /// Outbound tunnel.
 #[derive(Debug)]
 pub struct OutboundTunnel<R: Runtime> {
+    /// Marker for `Runtime`.
+    _marker: PhantomData<R>,
+
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
 
+    /// Random bytes used for tunnel data padding.
+    padding_bytes: [u8; 1028],
+
     /// Tunnel ID.
     tunnel_id: TunnelId,
-
-    /// Marker for `Runtime`.
-    _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> OutboundTunnel<R> {
@@ -77,7 +80,7 @@ impl<R: Runtime> OutboundTunnel<R> {
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_router_delivery(&router, &message)
-            .build::<R>();
+            .build::<R>(&self.padding_bytes);
 
         // iterative decrypt the tunnel data message and aes iv
         let (iv, ciphertext) = self.hops.iter().rev().fold(
@@ -135,9 +138,9 @@ impl<R: Runtime> OutboundTunnel<R> {
 
         let mut message = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(&router, gateway, &message)
-            .build::<R>();
+            .build::<R>(&self.padding_bytes);
 
-        // iterative decrypt the tunnel data message and aes iv
+        // iteratively decrypt the tunnel data message and aes iv
         let (iv, ciphertext) = self.hops.iter().rev().fold(
             (message[4..20].to_vec(), message[20..].to_vec()),
             |(iv, message), hop| {
@@ -187,10 +190,27 @@ impl<R: Runtime> OutboundTunnel<R> {
 
 impl<R: Runtime> Tunnel for OutboundTunnel<R> {
     fn new<U>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+        // generate random padding bytes used in `TunnelData` messages
+        let padding_bytes = {
+            let mut padding_bytes = [0u8; 1028];
+            R::rng().fill_bytes(&mut padding_bytes);
+
+            padding_bytes = TryInto::<[u8; 1028]>::try_into(
+                padding_bytes
+                    .into_iter()
+                    .map(|byte| if byte == 0 { 1u8 } else { byte })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("to succeed");
+
+            padding_bytes
+        };
+
         OutboundTunnel::<R> {
-            hops,
-            tunnel_id,
             _marker: Default::default(),
+            hops,
+            padding_bytes,
+            tunnel_id,
         }
     }
 

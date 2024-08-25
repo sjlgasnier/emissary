@@ -244,7 +244,7 @@ mod tests {
         let message = {
             let message = TunnelDataBuilder::new(TunnelId::from(MockRuntime::rng().next_u32()))
                 .with_local_delivery(&vec![1, 3, 3, 7])
-                .build::<MockRuntime>();
+                .build::<MockRuntime>(&[0u8; 1028]);
 
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelData)
@@ -276,7 +276,7 @@ mod tests {
         let message = {
             let message = TunnelDataBuilder::new(TunnelId::from(tunnel_id))
                 .with_local_delivery(&vec![1, 3, 3, 7])
-                .build::<MockRuntime>();
+                .build::<MockRuntime>(&[0u8; 1028]);
 
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelData)
@@ -385,7 +385,7 @@ mod tests {
             let message = {
                 let message = TunnelDataBuilder::new(TunnelId::from(tunnel_id))
                     .with_local_delivery(&vec![1, 3, 3, 7])
-                    .build::<MockRuntime>();
+                    .build::<MockRuntime>(&[0u8; 1028]);
 
                 let message = MessageBuilder::short()
                     .with_message_type(MessageType::TunnelData)
@@ -404,7 +404,7 @@ mod tests {
         let message = {
             let message = TunnelDataBuilder::new(TunnelId::from(tunnel_id))
                 .with_local_delivery(&vec![1, 3, 3, 7])
-                .build::<MockRuntime>();
+                .build::<MockRuntime>(&[0u8; 1028]);
 
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelData)
