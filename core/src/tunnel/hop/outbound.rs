@@ -326,7 +326,7 @@ mod tests {
 
         // inbound endpoint
         let message = Message::parse_short(&message).unwrap();
-        let message = inbound.handle_tunnel_data(&message).unwrap();
-        assert_eq!(message.payload, b"hello, world".to_vec());
+        let message = inbound.handle_tunnel_data(&message).unwrap().collect::<Vec<_>>();
+        assert_eq!(message[0].payload, b"hello, world".to_vec());
     }
 }

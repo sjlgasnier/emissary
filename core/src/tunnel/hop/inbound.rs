@@ -29,6 +29,7 @@ use crate::{
     primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
+        fragment::{FragmentHandler, OwnedDeliveryInstructions},
         hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
         pool::TunnelPoolHandle,
         TUNNEL_EXPIRATION,
@@ -39,7 +40,7 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt};
 use thingbuf::mpsc::Receiver;
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     iter,
@@ -55,6 +56,9 @@ const LOG_TARGET: &str = "emissary::tunnel::ibep";
 pub struct InboundTunnel {
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, TunnelId>,
+
+    /// Fragment handler.
+    fragment: FragmentHandler,
 
     /// Tunnel pool handle.
     handle: TunnelPoolHandle,
@@ -130,7 +134,10 @@ impl InboundTunnel {
     }
 
     /// Handle tunnel data.
-    pub fn handle_tunnel_data<'a>(&self, message: &Message) -> crate::Result<Message> {
+    pub fn handle_tunnel_data<'a>(
+        &mut self,
+        message: &Message,
+    ) -> crate::Result<impl Iterator<Item = Message>> {
         let tunnel_data = EncryptedTunnelData::parse(&message.payload).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -170,49 +177,83 @@ impl InboundTunnel {
         // find where the payload starts and verify the checksum
         let payload_start = self.find_payload_start(&ciphertext, &iv)?;
 
-        let our_message = ciphertext[payload_start..].to_vec();
-        let message = TunnelData::parse(&our_message).ok_or_else(|| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                tunnel_id = %self.tunnel_id,
-                "malformed tunnel data message",
-            );
+        // parse messages and fragments and return an iterator of ready messages
+        let messages = TunnelData::parse(&ciphertext[payload_start..].to_vec())
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    tunnel_id = %self.tunnel_id,
+                    "malformed tunnel data message",
+                );
 
-            Error::Tunnel(TunnelError::InvalidMessage)
-        })?;
-
-        for message in message.messages {
-            match message.message_kind {
-                MessageKind::Unfragmented {
+                Error::Tunnel(TunnelError::InvalidMessage)
+            })?
+            .messages
+            .into_iter()
+            .filter_map(|message| {
+                if let MessageKind::Unfragmented {
                     delivery_instructions,
-                } => match delivery_instructions {
-                    DeliveryInstructions::Local =>
-                        return Message::parse_standard(&message.message).ok_or_else(|| {
+                } = message.message_kind
+                {
+                    match delivery_instructions {
+                        DeliveryInstructions::Local =>
+                            return Message::parse_standard(&message.message),
+                        delivery_instructions => {
                             tracing::warn!(
                                 target: LOG_TARGET,
-                                tunnel_id = %self.tunnel_id,
-                                "malformed i2np message inside tunnel data",
+                                tunnel = %self.tunnel_id,
+                                ?delivery_instructions,
+                                "unsupported delivery instructions",
                             );
+                            return None;
+                        }
+                    }
+                }
 
-                            Error::InvalidData
-                        }),
+                let (message, delivery_instructions) = match message.message_kind {
+                    MessageKind::FirstFragment {
+                        message_id,
+                        delivery_instructions,
+                    } => self.fragment.first_fragment(
+                        MessageId::from(message_id),
+                        &delivery_instructions,
+                        message.message,
+                    )?,
+                    MessageKind::MiddleFragment {
+                        message_id,
+                        sequence_number,
+                    } => self.fragment.middle_fragment(
+                        MessageId::from(message_id),
+                        sequence_number,
+                        message.message,
+                    )?,
+                    MessageKind::LastFragment {
+                        message_id,
+                        sequence_number,
+                    } => self.fragment.last_fragment(
+                        MessageId::from(message_id),
+                        sequence_number,
+                        message.message,
+                    )?,
+                    MessageKind::Unfragmented { .. } => unreachable!(),
+                };
+
+                match delivery_instructions {
+                    OwnedDeliveryInstructions::Local => Some(message),
                     delivery_instructions => {
                         tracing::warn!(
                             target: LOG_TARGET,
                             tunnel = %self.tunnel_id,
+                            ?delivery_instructions,
+                            "unsupported delivery instructions",
                         );
+                        None
                     }
-                },
-                fragment => tracing::warn!(
-                    target: LOG_TARGET,
-                    tunnel = %self.tunnel_id,
-                    ?fragment,
-                    "fragments not supported",
-                ),
-            }
-        }
+                }
+            })
+            .collect::<Vec<Message>>();
 
-        Err(Error::NotSupported)
+        Ok(messages.into_iter())
     }
 }
 
@@ -225,6 +266,7 @@ impl Tunnel for InboundTunnel {
                 R::delay(TUNNEL_EXPIRATION).await;
                 tunnel_id
             }),
+            fragment: FragmentHandler::new(),
             handle,
             hops,
             message_rx,
@@ -267,7 +309,7 @@ impl Future for InboundTunnel {
                         ?error,
                         "failed to handle tunnel data",
                     ),
-                    Ok(message) =>
+                    Ok(messages) => messages.for_each(|message| {
                         if let Err(error) = self.handle.route_message(message) {
                             tracing::error!(
                                 target: LOG_TARGET,
@@ -275,7 +317,8 @@ impl Future for InboundTunnel {
                                 ?error,
                                 "failed to route message",
                             );
-                        },
+                        }
+                    }),
                 },
             }
         }
@@ -287,6 +330,13 @@ impl Future for InboundTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        i2np::{tunnel::gateway::TunnelGateway, MessageBuilder, MessageType},
+        runtime::{mock::MockRuntime, Runtime},
+        tunnel::tests::build_inbound_tunnel,
+    };
+    use core::time::Duration;
+    use rand_core::RngCore;
 
     #[test]
     fn hop_roles() {
@@ -303,5 +353,106 @@ mod tests {
                 HopRole::Participant,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn fragment_reception_works() {
+        let (_, mut tunnel, mut hops) = build_inbound_tunnel(3usize);
+        let original = (0..3 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+
+        let message = MessageBuilder::standard()
+            .with_expiration((MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_message_type(MessageType::Data)
+            .with_message_id(MessageId::from(MockRuntime::rng().next_u32()))
+            .with_payload(&original)
+            .build();
+
+        let message = TunnelGateway {
+            tunnel_id: tunnel.gateway().1,
+            payload: &message,
+        }
+        .serialize();
+
+        let message = Message {
+            message_type: MessageType::TunnelGateway,
+            message_id: MockRuntime::rng().next_u32(),
+            expiration: (MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs(),
+            payload: message,
+        };
+
+        // 1st hop (ibgw)
+        let messages = {
+            let _ = hops[0].routing_table().route_message(message).unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(1), &mut hops[0]).await.is_err());
+
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = hops[0].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 4);
+
+        // 2nd hop (participant)
+        let messages = {
+            for (router, message) in messages {
+                assert_eq!(router, RouterId::from(hops[1].router_hash()));
+                let message = Message::parse_short(&message).unwrap();
+
+                let _ = hops[1].routing_table().route_message(message).unwrap();
+            }
+            assert!(tokio::time::timeout(Duration::from_secs(1), &mut hops[1]).await.is_err());
+
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = hops[1].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 4);
+
+        // 3rd hop (participant)
+        let messages = {
+            for (router, message) in messages {
+                assert_eq!(router, RouterId::from(hops[2].router_hash()));
+                let message = Message::parse_short(&message).unwrap();
+
+                let _ = hops[2].routing_table().route_message(message).unwrap();
+            }
+            assert!(tokio::time::timeout(Duration::from_secs(1), &mut hops[2]).await.is_err());
+
+            let mut messages = vec![];
+
+            while let Ok((router, message)) = hops[2].message_rx().try_recv() {
+                messages.push((router, message));
+            }
+
+            messages
+        };
+        assert_eq!(messages.len(), 4);
+
+        let messages = messages
+            .into_iter()
+            .map(|(_, message)| Message::parse_short(&message).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(tunnel.handle_tunnel_data(&messages[0]).unwrap().count(), 0);
+        assert_eq!(tunnel.handle_tunnel_data(&messages[1]).unwrap().count(), 0);
+        assert_eq!(tunnel.handle_tunnel_data(&messages[2]).unwrap().count(), 0);
+
+        let Message {
+            message_type: MessageType::Data,
+            payload,
+            ..
+        } = tunnel.handle_tunnel_data(&messages[3]).unwrap().next().unwrap()
+        else {
+            panic!("invalid message");
+        };
+
+        assert_eq!(payload, original);
     }
 }
