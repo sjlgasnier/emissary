@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    error::{RouteKind, RoutingError},
+    error::{ChannelError, RouteKind, RoutingError},
     i2np::{
         tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         Message, MessageType,
@@ -36,6 +36,9 @@ use parking_lot::RwLock;
 use spin::rwlock::RwLock;
 
 use alloc::{sync::Arc, vec::Vec};
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::routing-table";
 
 /// Routing table.
 #[derive(Debug, Clone)]
@@ -173,7 +176,19 @@ impl RoutingTable {
             ));
         };
 
-        sender.try_send(message).map_err(From::from)
+        match sender.try_send(message).map_err(From::from) {
+            error @ Err(RoutingError::ChannelClosed(_)) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %tunnel_id,
+                    "tunnel exist in the routing table but is closed",
+                );
+                debug_assert!(false);
+
+                error
+            }
+            result => result,
+        }
     }
 
     /// Attempt to route message to an installed listener, if the listener exists.
@@ -183,8 +198,16 @@ impl RoutingTable {
         let mut listeners = self.listeners.write();
 
         match listeners.remove(&MessageId::from(message.message_id)) {
-            Some(listener) =>
-                listener.send(message).map_err(|message| RoutingError::ChannelClosed(message)),
+            Some(listener) => listener.send(message).map_err(|message| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    message_id = %message.message_id,
+                    "listener exist in the routing table but is closed",
+                );
+                debug_assert!(false);
+
+                RoutingError::ChannelClosed(message)
+            }),
             None => {
                 drop(listeners);
 
@@ -345,6 +368,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn channel_closed() {
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
