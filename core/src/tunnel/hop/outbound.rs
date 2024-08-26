@@ -251,7 +251,6 @@ mod tests {
         i2np::tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         runtime::mock::MockRuntime,
         tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
-        util::init_logger,
     };
 
     #[test]
@@ -344,8 +343,6 @@ mod tests {
 
     #[tokio::test]
     async fn send_tunnel_message_fragmented() {
-        init_logger();
-
         let original = (0..4 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
         let (local_outbound_hash, mut outbound, mut outbound_transit) =
             build_outbound_tunnel(3usize);

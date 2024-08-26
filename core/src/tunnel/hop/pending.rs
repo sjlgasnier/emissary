@@ -36,7 +36,6 @@ use crate::{
     Error,
 };
 
-use aes::cipher::Key;
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 

@@ -185,6 +185,8 @@ impl TunnelPoolContext {
     /// Try sending `message` to an installed listener.
     ///
     /// If the listener doesn't exist, the message is returned in `Result::Err`.
+    //
+    // TODO: remove?
     pub fn try_route(&self, message: Message) -> Result<(), Message> {
         let mut listeners = self.listeners.write();
 
@@ -192,6 +194,28 @@ impl TunnelPoolContext {
             Some(listener) => listener.send(message),
             None => Err(message),
         }
+    }
+
+    /// Allocate new (`MessageId`, `oneshot::Receiver<Message>)` tuple for an inbound build
+    /// response.
+    pub fn add_listener(&self, rng: &mut impl RngCore) -> (MessageId, oneshot::Receiver<Message>) {
+        let mut listeners = self.listeners.write();
+        let (tx, rx) = oneshot::channel();
+
+        loop {
+            let message_id = MessageId::from(rng.next_u32());
+
+            if !listeners.contains_key(&message_id) {
+                listeners.insert(message_id, tx);
+
+                return (message_id, rx);
+            }
+        }
+    }
+
+    /// Remove listener for `message_id` from listeners.
+    pub fn remove_listener(&self, message_id: &MessageId) {
+        self.listeners.write().remove(message_id);
     }
 
     /// Allocate new [`TunnelPoolHandle`] for the context.

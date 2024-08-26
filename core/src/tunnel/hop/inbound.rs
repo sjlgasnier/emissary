@@ -55,7 +55,7 @@ const LOG_TARGET: &str = "emissary::tunnel::ibep";
 /// Inbound tunnel.
 pub struct InboundTunnel {
     /// Tunnel expiration timer.
-    expiration_timer: BoxFuture<'static, TunnelId>,
+    expiration_timer: BoxFuture<'static, (TunnelId, TunnelId)>,
 
     /// Fragment handler.
     fragment: FragmentHandler,
@@ -260,10 +260,13 @@ impl Tunnel for InboundTunnel {
     fn new<R: Runtime>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
         let (message_rx, handle) = receiver.inbound();
 
+        // hop must exist since it was created by us
+        let gateway_tunnel_id = hops.first().expect("hop to exist").tunnel_id;
+
         InboundTunnel {
             expiration_timer: Box::pin(async move {
                 R::delay(TUNNEL_EXPIRATION).await;
-                tunnel_id
+                (tunnel_id, gateway_tunnel_id)
             }),
             fragment: FragmentHandler::new(),
             handle,
@@ -288,7 +291,7 @@ impl Tunnel for InboundTunnel {
 }
 
 impl Future for InboundTunnel {
-    type Output = TunnelId;
+    type Output = (TunnelId, TunnelId);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
@@ -299,7 +302,7 @@ impl Future for InboundTunnel {
                         tunnel_id = %self.tunnel_id,
                         "message channel closed",
                     );
-                    return Poll::Ready(self.tunnel_id);
+                    return Poll::Ready((self.tunnel_id, self.gateway().1));
                 }
                 Some(message) => match self.handle_tunnel_data(&message) {
                     Err(error) => tracing::warn!(

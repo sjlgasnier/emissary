@@ -26,6 +26,8 @@ pub const NUM_PENDING_OUTBOUND_TUNNELS: &str = "pending_outbound_tunnel_count";
 pub const NUM_INBOUND_TUNNELS: &str = "inbound_tunnel_count";
 pub const NUM_OUTBOUND_TUNNELS: &str = "outbound_tunnel_count";
 pub const NUM_BUILD_FAILURES: &str = "build_failure_count";
+pub const NUM_TEST_FAILURES: &str = "tunnel_test_failure_count";
+pub const NUM_TEST_SUCCESSES: &str = "tunnel_test_success_count";
 
 /// Register tunnel metrics.
 pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
@@ -52,6 +54,14 @@ pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
     metrics.push(MetricType::Counter {
         name: NUM_BUILD_FAILURES,
         description: "number of tunnel build failures",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_TEST_FAILURES,
+        description: "number of failed tunnel tests",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_TEST_SUCCESSES,
+        description: "number of succeeded tunnel tests",
     });
 
     metrics
