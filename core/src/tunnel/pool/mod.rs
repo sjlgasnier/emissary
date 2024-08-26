@@ -138,7 +138,10 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     expiring_outbound: HashSet<TunnelId>,
 
     /// Active inbound tunnels.
-    inbound: R::JoinSet<TunnelId>,
+    ///
+    /// After the inbound tunnel expires, it returns a `(TunnelId, TunnelId)` tuple where the first
+    /// `TunnelId` is the ID of the inbound tunnel and second ID if the id of the gateway.
+    inbound: R::JoinSet<(TunnelId, TunnelId)>,
 
     /// Inbound tunnels.
     inbound_tunnels: HashMap<TunnelId, RouterId>,
@@ -631,7 +634,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "inbound tunnel built",
                     );
 
-                    // TODO: explain
+                    // fetch the newly created inbound tunnel's gateway information
+                    //
+                    // in order for the inbound tunnel to be usable, it's gateway information must
+                    // be stored in selector/routing table, as opposed to the endpoint information,
+                    // because the gateway is used to receive messages
                     let (router_id, tunnel_id) = tunnel.gateway();
                     self.selector.add_inbound_tunnel(tunnel_id, router_id.clone());
                     self.inbound_tunnels.insert(tunnel_id, router_id);
@@ -647,16 +654,17 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         while let Poll::Ready(event) = self.inbound.poll_next_unpin(cx) {
             match event {
                 None => return Poll::Ready(()),
-                Some(tunnel_id) => {
+                Some((tunnel_id, gateway_tunnel_id)) => {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %tunnel_id,
+                        %gateway_tunnel_id,
                         "inbound tunnel exited",
                     );
 
-                    // TODO: remove from selector
                     self.expiring_inbound.remove(&tunnel_id);
                     self.routing_table.remove_tunnel(&tunnel_id);
+                    self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
                 }
             }
         }
@@ -757,8 +765,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         // inbound tunnels have their own event loops which track when the tunnel should be
         // destroyed and thus tunnel pool doesn't need an explicit signal from `TunnelTimer` for
         // inbound tunnel destruction
-        //
-        // TODO: selector
         while let Poll::Ready(event) = self.tunnel_timers.poll_next_unpin(cx) {
             match event {
                 None => return Poll::Ready(()),
@@ -770,6 +776,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     );
                     self.outbound.remove(&tunnel_id);
                     self.expiring_outbound.remove(&tunnel_id);
+                    self.selector.remove_outbound_tunnel(&tunnel_id);
                 }
                 Some(TunnelTimerEvent::Rebuild {
                     kind: TunnelKind::Outbound { tunnel_id },
