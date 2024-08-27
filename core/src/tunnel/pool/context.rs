@@ -19,12 +19,13 @@
 //! Tunnel pool context.
 
 use crate::{
-    error::{ChannelError, RoutingError},
-    i2np::Message,
+    error::{ChannelError, RouteKind, RoutingError},
+    i2np::{Message, MessageType},
     primitives::{MessageId, RouterId, TunnelId},
     tunnel::pool::TUNNEL_CHANNEL_SIZE,
 };
 
+use bytes::Bytes;
 use futures::Stream;
 use futures_channel::oneshot;
 use hashbrown::HashMap;
@@ -42,11 +43,30 @@ use core::{
     task::{Context, Poll},
 };
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::context";
+
+/// Message listeners.
+///
+/// The two additional mappings (garlic <-> `MessageId`) are used associate encrypted/unecrypted
+/// outbound tunnel build responses with correct message listener.
+#[derive(Default)]
+struct MessageListeners {
+    /// Message listeners.
+    listeners: HashMap<MessageId, oneshot::Sender<Message>>,
+
+    /// Garlic tag -> `MessageId` mappings.
+    garlic_tags: HashMap<Bytes, MessageId>,
+
+    /// `MessageId` -> garlic tag mappings.
+    message_ids: HashMap<MessageId, Bytes>,
+}
+
 /// Tunnel pool handle.
 #[derive(Clone)]
 pub struct TunnelPoolHandle {
     /// Message listeners.
-    listeners: Arc<RwLock<HashMap<MessageId, oneshot::Sender<Message>>>>,
+    listeners: Arc<RwLock<MessageListeners>>,
 
     /// TX channel for sending messages via one of the pool's outbound tunnels to remote routers.
     tx: mpsc::Sender<TunnelMessage>,
@@ -74,9 +94,48 @@ impl TunnelPoolHandle {
     /// Message is routed to an existing listener if one exists for the message and if there are no
     /// installed listeners, the message is routed to `TunnelPool` for further processing.
     pub fn route_message(&self, message: Message) -> Result<(), RoutingError> {
-        let mut listeners = self.listeners.write();
+        let mut inner = self.listeners.write();
+        let message_id = MessageId::from(message.message_id);
 
-        match listeners.remove(&MessageId::from(message.message_id)) {
+        // if the message is a garlic message, try to associate the garlic message with a pending
+        // tunnel build
+        //
+        // if the message is an unecrypted tunnel build reply, remove garlic tag <-> message id
+        // association context
+        let message_id = match message.message_type {
+            MessageType::Garlic => {
+                let garlic_tag = Bytes::from(message.payload[4..12].to_vec());
+
+                let Some(message_id) = inner.garlic_tags.remove(&garlic_tag) else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?message_id,
+                        ?garlic_tag,
+                        "listener doesn't exist for a garlic message",
+                    );
+                    return Err(RoutingError::RouteNotFound(
+                        message,
+                        RouteKind::Message(message_id),
+                    ));
+                };
+
+                let _value = inner.message_ids.remove(&message_id);
+                debug_assert!(_value == Some(garlic_tag));
+
+                message_id
+            }
+            MessageType::OutboundTunnelBuildReply => {
+                inner
+                    .message_ids
+                    .remove(&message_id)
+                    .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
+
+                message_id
+            }
+            _ => message_id,
+        };
+
+        match inner.listeners.remove(&message_id) {
             Some(listener) =>
                 listener.send(message).map_err(|message| RoutingError::ChannelClosed(message)),
             None =>
@@ -98,26 +157,48 @@ impl TunnelPoolHandle {
         }
     }
 
-    /// Allocate new (`MessageId`, `oneshot::Receiver<Message>)` tuple for an inbound build
-    /// response.
+    /// Allocate new (MessageId, Receiver<Message>)` tuple for an inbound build response.
     pub fn add_listener(&self, rng: &mut impl RngCore) -> (MessageId, oneshot::Receiver<Message>) {
-        let mut listeners = self.listeners.write();
+        let mut inner = self.listeners.write();
         let (tx, rx) = oneshot::channel();
 
         loop {
             let message_id = MessageId::from(rng.next_u32());
 
-            if !listeners.contains_key(&message_id) {
-                listeners.insert(message_id, tx);
+            if !inner.listeners.contains_key(&message_id) {
+                inner.listeners.insert(message_id, tx);
 
                 return (message_id, rx);
             }
         }
     }
 
+    /// Associate `garlic_tag` with `message_id`.
+    ///
+    /// This is needed for outbound tunnel build responses which may be garlic encrypted, meaning
+    /// the `MessageId` of the garlic message has a different `MessageId` than then one that has a
+    /// listener installed for it.
+    ///
+    /// Since the router is free to either encrypt the message or not, `TunnelHandle` must be
+    /// prepared to reply the tunnel build response in either form.
+    pub fn add_garlic_listener(&self, message_id: MessageId, garlic_tag: Bytes) {
+        let mut inner = self.listeners.write();
+
+        debug_assert!(inner.listeners.contains_key(&message_id));
+
+        inner.garlic_tags.insert(garlic_tag.clone(), message_id);
+        inner.message_ids.insert(message_id, garlic_tag);
+    }
+
     /// Remove listener for `message_id` from listeners.
     pub fn remove_listener(&self, message_id: &MessageId) {
-        self.listeners.write().remove(message_id);
+        let mut inner = self.listeners.write();
+
+        inner.listeners.remove(message_id);
+        inner
+            .message_ids
+            .remove(message_id)
+            .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
     }
 }
 
@@ -156,7 +237,7 @@ impl Default for TunnelMessage {
 /// Tunnel pool context.
 pub struct TunnelPoolContext {
     /// Message listeners.
-    listeners: Arc<RwLock<HashMap<MessageId, oneshot::Sender<Message>>>>,
+    listeners: Arc<RwLock<MessageListeners>>,
 
     /// RX channel for receiving messages destined to remote routers.
     rx: mpsc::Receiver<TunnelMessage>,
@@ -169,7 +250,7 @@ pub struct TunnelPoolContext {
 impl TunnelPoolContext {
     /// Create new [`TunnelPoolContext`].
     pub fn new() -> (Self, TunnelPoolHandle) {
-        let listeners = Arc::new(RwLock::new(HashMap::new()));
+        let listeners = Arc::new(RwLock::new(MessageListeners::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
 
         (
@@ -182,31 +263,17 @@ impl TunnelPoolContext {
         )
     }
 
-    /// Try sending `message` to an installed listener.
-    ///
-    /// If the listener doesn't exist, the message is returned in `Result::Err`.
-    //
-    // TODO: remove?
-    pub fn try_route(&self, message: Message) -> Result<(), Message> {
-        let mut listeners = self.listeners.write();
-
-        match listeners.remove(&MessageId::from(message.message_id)) {
-            Some(listener) => listener.send(message),
-            None => Err(message),
-        }
-    }
-
     /// Allocate new (`MessageId`, `oneshot::Receiver<Message>)` tuple for an inbound build
     /// response.
     pub fn add_listener(&self, rng: &mut impl RngCore) -> (MessageId, oneshot::Receiver<Message>) {
-        let mut listeners = self.listeners.write();
+        let mut inner = self.listeners.write();
         let (tx, rx) = oneshot::channel();
 
         loop {
             let message_id = MessageId::from(rng.next_u32());
 
-            if !listeners.contains_key(&message_id) {
-                listeners.insert(message_id, tx);
+            if !inner.listeners.contains_key(&message_id) {
+                inner.listeners.insert(message_id, tx);
 
                 return (message_id, rx);
             }
@@ -215,7 +282,13 @@ impl TunnelPoolContext {
 
     /// Remove listener for `message_id` from listeners.
     pub fn remove_listener(&self, message_id: &MessageId) {
-        self.listeners.write().remove(message_id);
+        let mut inner = self.listeners.write();
+
+        inner.listeners.remove(message_id);
+        inner
+            .message_ids
+            .remove(message_id)
+            .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
     }
 
     /// Allocate new [`TunnelPoolHandle`] for the context.

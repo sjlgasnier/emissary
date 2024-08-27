@@ -24,6 +24,7 @@ use crate::{
 };
 
 use futures::{future::BoxFuture, FutureExt};
+use futures_channel::oneshot;
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
@@ -43,37 +44,45 @@ const LOG_TARGET: &str = "emissary::tunnel::pool::zero-hop";
 /// response which it routes back to the installed listener (if it exists), after which the tunnel
 /// gets destructed.
 pub struct ZeroHopInboundTunnel {
+    /// Expiration timer.
+    expiration_timer: BoxFuture<'static, ()>,
+
     /// RX channel for receiving a message.
     message_rx: mpsc::Receiver<Message>,
+
+    /// TX channel for sending reply to the listener.
+    reply_tx: Option<oneshot::Sender<Message>>,
 
     /// Routing table.
     routing_table: RoutingTable,
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
-
-    /// Expiration timer.
-    expiration_timer: BoxFuture<'static, ()>,
 }
 
 impl ZeroHopInboundTunnel {
     /// Create new [`ZeroHopInboundTunnel`].
-    pub fn new<R: Runtime>(routing_table: RoutingTable) -> (TunnelId, Self) {
+    pub fn new<R: Runtime>(
+        routing_table: RoutingTable,
+    ) -> (TunnelId, Self, oneshot::Receiver<Message>) {
         let (tunnel_id, message_rx) = routing_table.insert_tunnel::<1>(&mut R::rng());
+        let (tx, rx) = oneshot::channel();
 
         (
             tunnel_id,
             Self {
                 expiration_timer: Box::pin(R::delay(TUNNEL_BUILD_EXPIRATION)),
                 message_rx,
+                reply_tx: Some(tx),
                 routing_table,
                 tunnel_id,
             },
+            rx,
         )
     }
 
     /// Handle receive I2NP message, presumably containing a tunnel build response.
-    fn on_message(&self, message: Message) {
+    fn on_message(&mut self, message: Message) {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel_id = %self.tunnel_id,
@@ -101,7 +110,7 @@ impl ZeroHopInboundTunnel {
             return;
         };
 
-        self.routing_table.route_message(message);
+        self.reply_tx.take().map(|tx| tx.send(message));
     }
 }
 

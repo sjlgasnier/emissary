@@ -43,6 +43,9 @@ use core::{
 
 /// Receive kind.
 pub enum ReceiveKind {
+    /// Reply is received through a fake 0-hop inbound tunnel.
+    ZeroHop,
+
     /// Message is received through the routing table.
     RoutingTable {
         /// Message ID.
@@ -99,6 +102,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                             routing_table.remove_listener(&message_id),
                         ReceiveKind::Tunnel { message_id, handle } =>
                             handle.remove_listener(&message_id),
+                        ReceiveKind::ZeroHop => {}
                     }
 
                     (*tunnel.tunnel_id(), Err(Error::Timeout))
@@ -109,6 +113,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                             routing_table.remove_listener(&message_id),
                         ReceiveKind::Tunnel { message_id, handle } =>
                             handle.remove_listener(&message_id),
+                        ReceiveKind::ZeroHop => {}
                     }
 
                     (

@@ -460,7 +460,10 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                 Some(message) => match message.message_type {
                     MessageType::ShortTunnelBuild => self.handle_short_tunnel_build(message),
                     MessageType::VariableTunnelBuild => self.handle_variable_tunnel_build(message),
-                    message_type => todo!("{message_type:?} not supported"),
+                    message_type => {
+                        tracing::warn!(?message_type, "unsupported message type");
+                        continue;
+                    }
                 },
             };
 

@@ -260,16 +260,17 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 // it'll be received by the `TunnelPool`
                 None => {
                     // the fake 0-hop tunnel routes the build response via `RoutingTable`
-                    let (gateway, zero_hop_tunnel) =
+                    //
+                    // `ZeroHopInboundTunnel::new()` also returns a `oneshot::Receiver<Message>`
+                    // which is used to receive the build response, if it's received in time
+                    let (gateway, zero_hop_tunnel, message_rx) =
                         ZeroHopInboundTunnel::new::<R>(self.routing_table.clone());
 
-                    // generate message id for the build request and optimistically insert
-                    // a listener tx channel for it in the routing table
+                    // allocate random message id for the build request
                     //
-                    // if the building the build request fails, the listener must be removed
-                    // from the routing table
-                    let (message_id, message_rx) =
-                        self.routing_table.insert_listener(&mut R::rng());
+                    // since the reply is not routed through routing table,
+                    // message id collisions are not a concern and this can just be a random number
+                    let message_id = MessageId::from(R::rng().next_u32());
 
                     tracing::trace!(
                         target: LOG_TARGET,
@@ -304,7 +305,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                             // and send tunnel build request to the first hop
                             self.pending_outbound.add_pending_tunnel(
                                 tunnel,
-                                ReceiveKind::RoutingTable { message_id },
+                                ReceiveKind::ZeroHop,
                                 message_rx,
                             );
                             self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
@@ -332,6 +333,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 // could be in a different pool), it'll be received by the selected tunnel's
                 // `TunnelPool` which routes the message to the listener
                 Some((gateway, router_id, handle)) => {
+                    // TODO: rewrite this comment
+                    //
                     // if an inbound tunnel exists, the reply is routed through it and received
                     // by its `TunnelPool` which routes the message to the listener
                     let (message_id, message_rx) = handle.add_listener(&mut R::rng());
@@ -360,6 +363,19 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         },
                     ) {
                         Ok((tunnel, router_id, message)) => {
+                            // listening for outbound tunnel build responses through an existing
+                            // inbound tunnel is more complex than listening through a fake 0-hop
+                            // inbound tunnel since the inbound tunnel is not expecting to receive
+                            // just one message and because the selected OBEP has freedom to choose
+                            // whether to garlic encrypt the tunnel build response or not
+                            //
+                            // if the response is not garlic encrypted, it'll be identified by the
+                            // generated message id and if it is garlic encrypted, it'll be
+                            // identified by the garlic tag which means that the inbound tunnel must
+                            // have two listener types, one for the unecrypted response and one for
+                            // the encrypted response
+                            handle.add_garlic_listener(message_id, tunnel.garlic_tag());
+
                             // add pending tunnel into outbound tunnel build listener
                             // and send tunnel build request to the first hop
                             self.pending_outbound.add_pending_tunnel(
@@ -457,7 +473,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 %tunnel_id,
-                                "no outbound tunnel available, send build request directly",
+                                "no outbound tunnel available, send build request to router",
                             );
                             self.routing_table.send_message(router, message.serialize_short());
                         }
@@ -1603,7 +1619,7 @@ mod tests {
             error => panic!("invalid error: {error:?}"),
         }
 
-        assert!(tokio::time::timeout(TUNNEL_BUILD_EXPIRATION, &mut tunnel_pool).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
         assert_eq!(MockRuntime::get_counter_value(NUM_BUILD_FAILURES), Some(1));
     }
 

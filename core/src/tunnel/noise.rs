@@ -69,7 +69,7 @@ pub struct TunnelKeys {
     /// Garlic tag.
     ///
     /// Only available for OBEP.
-    garlic_tag: Option<Vec<u8>>,
+    garlic_tag: Option<Bytes>,
 
     /// IV key.
     iv_key: Vec<u8>,
@@ -86,12 +86,12 @@ pub struct TunnelKeys {
 impl TunnelKeys {
     /// Get reference to Garlic key.
     pub fn garlic_key(&self) -> &[u8] {
-        self.garlic_key.as_ref().expect("to exist").as_ref()
+        self.garlic_key.as_ref().expect("garlic key to exist").as_ref()
     }
 
     /// Get reference to Garlic tag.
     pub fn garlic_tag(&self) -> &[u8] {
-        self.garlic_tag.as_ref().expect("to exist").as_ref()
+        self.garlic_tag.as_ref().expect("garlic tag to exist").as_ref()
     }
 
     /// Get reference to IV key.
@@ -179,8 +179,7 @@ impl TunnelKeys {
                     .update(&b"RGarlicKeyAndTag")
                     .update(&[0x02])
                     .finalize();
-
-                let garlic_tag = ck[..8].to_vec();
+                let garlic_tag = Bytes::from(ck[..8].to_vec());
 
                 temp_key.zeroize();
                 chaining_key.zeroize();
@@ -606,6 +605,12 @@ impl OutboundSession {
     /// Get reference to Garlic tag.
     pub fn garlic_tag(&self) -> &[u8] {
         &self.tunnel_keys.garlic_tag()
+    }
+
+    /// Get owned garlic tag.
+    pub fn garlic_tag_owned(&self) -> Bytes {
+        // tag must exist since this is an outbound session
+        self.tunnel_keys.garlic_tag.clone().expect("garlic tag to exist")
     }
 
     /// Get reference to IV key.

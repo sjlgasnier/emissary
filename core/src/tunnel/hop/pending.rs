@@ -36,6 +36,7 @@ use crate::{
     Error,
 };
 
+use bytes::Bytes;
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
@@ -66,6 +67,14 @@ pub struct PendingTunnel<T: Tunnel> {
 
     /// Marker for `Tunnel`.
     _tunnel: PhantomData<T>,
+}
+
+impl<R: Runtime> PendingTunnel<OutboundTunnel<R>> {
+    /// Get garlic tag of the outbound endpoint.
+    pub fn garlic_tag(&self) -> Bytes {
+        // obep must exist since it was created by us
+        self.hops.back().expect("tunnel to exist").key_context.garlic_tag_owned()
+    }
 }
 
 impl<T: Tunnel> PendingTunnel<T> {
