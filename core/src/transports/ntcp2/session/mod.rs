@@ -352,18 +352,14 @@ impl<R: Runtime> SessionManager<R> {
             stream.read_exact(&mut message).await?;
 
             match responder.finalize(message) {
-                Ok((key_context, router)) => {
-                    tracing::info!(%router);
-
-                    Ok(Ntcp2Session::new(
-                        Role::Responder,
-                        router,
-                        runtime.clone(),
-                        stream,
-                        key_context,
-                        subsystem_handle,
-                    ))
-                }
+                Ok((key_context, router)) => Ok(Ntcp2Session::new(
+                    Role::Responder,
+                    router,
+                    runtime.clone(),
+                    stream,
+                    key_context,
+                    subsystem_handle,
+                )),
                 Err(error) => {
                     tracing::warn!(
                         target: LOG_TARGET,
