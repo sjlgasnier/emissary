@@ -34,6 +34,7 @@ tracing = { version = "0.1.40", default-features = false }
 x25519-dalek = { version = "2.0.1", features = ["reusable_secrets", "static_secrets", "zeroize"], default-features = false }
 zerocopy = { version = "0.7.35", features = ["derive"], default-features = false }
 zeroize = { version = "1.8.1", features = ["alloc"], default-features = false }
+zune-inflate = { version = "0.2.54", default-features = false, features = ["gzip"] }
 
 [dev-dependencies]
 tokio = { version = "1.38.0", features = ["full"] }

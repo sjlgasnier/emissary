@@ -19,3 +19,6 @@
 pub mod lookup;
 pub mod search_reply;
 pub mod store;
+
+/// Database lookup key length (SHA256 digest).
+const DATABASE_KEY_SIZE: usize = 32;
