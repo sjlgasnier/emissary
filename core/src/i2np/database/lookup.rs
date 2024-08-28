@@ -15,3 +15,209 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
+
+use crate::{
+    i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
+    primitives::{RouterId, RouterInfo, TunnelId},
+};
+
+use hashbrown::HashSet;
+use nom::{
+    bytes::complete::take,
+    error::{make_error, ErrorKind},
+    number::complete::{be_u16, be_u32, be_u8},
+    Err, IResult,
+};
+use zune_inflate::DeflateDecoder;
+
+use alloc::vec::Vec;
+
+/// Maximum number of routers to ignore.
+const MAX_ROUTERS_TO_IGNORE: usize = 512;
+
+/// Lookup type.
+pub enum LookupType {
+    /// Normal lookup.
+    ///
+    /// Not supported
+    Normal,
+
+    /// Lease set lookup.
+    Leaseset,
+
+    /// Router lookup.
+    Router,
+
+    /// Exploration.
+    Exploration,
+}
+
+impl LookupType {
+    /// Try to convert `lookup_type` into `StoreType`.
+    fn from_u8(lookup_type: u8) -> Option<Self> {
+        match (lookup_type >> 2) & 0x3 {
+            0x00 => Some(Self::Normal),
+            0x01 => Some(Self::Leaseset),
+            0x02 => Some(Self::Router),
+            0x03 => Some(Self::Exploration),
+            lookup_type => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?lookup_type,
+                    "unsupported lookup type",
+                );
+
+                None
+            }
+        }
+    }
+}
+
+/// Reply type.
+pub enum ReplyType {
+    /// Send reply to tunnel.
+    Tunnel {
+        /// Tunnel ID of the gateway.
+        tunnel_id: TunnelId,
+
+        /// Router ID of the gateway.
+        router_id: RouterId,
+    },
+
+    /// Send reply to router.
+    Router {
+        /// ID of the router expecting the reply
+        router_id: RouterId,
+    },
+}
+
+/// Database store message.
+pub struct DatabaseLookup {
+    /// Routers to ignore from reply.
+    ignore: HashSet<RouterId>,
+
+    /// Key.
+    key: Vec<u8>,
+
+    /// Lookup type.
+    lookup: LookupType,
+
+    /// Reply type.
+    reply: ReplyType,
+}
+
+impl DatabaseLookup {
+    /// Attempt to parse [`DatabaseLookup`] from `input`.
+    ///
+    /// Returns the parsed message and rest of `input` on success.
+    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Self> {
+        let (rest, key) = take(DATABASE_KEY_SIZE)(input)?;
+        let (rest, router) = take(ROUTER_HASH_LEN)(rest)?;
+        let (rest, flag) = be_u8(rest)?;
+        let lookup = LookupType::from_u8(flag)
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        let (rest, reply) = match flag & 1 == 1 {
+            true => {
+                let (rest, tunnel_id) = be_u32(rest)?;
+                (
+                    rest,
+                    ReplyType::Tunnel {
+                        tunnel_id: TunnelId::from(tunnel_id),
+                        router_id: RouterId::from(&router),
+                    },
+                )
+            }
+            false => (
+                rest,
+                ReplyType::Router {
+                    router_id: RouterId::from(&router),
+                },
+            ),
+        };
+
+        let (rest, num_routers_to_ignore) = be_u16(rest)?;
+
+        if num_routers_to_ignore as usize > MAX_ROUTERS_TO_IGNORE {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?num_routers_to_ignore,
+                "too many routers to ignore",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        let (rest, ignore) = (0..num_routers_to_ignore)
+            .try_fold(
+                (rest, HashSet::<RouterId>::new()),
+                |(rest, mut routers), _| {
+                    take::<usize, &[u8], ()>(ROUTER_HASH_LEN)(rest).ok().map(|(rest, router)| {
+                        routers.insert(RouterId::from(&router));
+
+                        (rest, routers)
+                    })
+                },
+            )
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to parse router ignore list",
+                );
+
+                Err::Error(make_error(input, ErrorKind::Fail))
+            })?;
+
+        if (flag >> 1) & 1 == 1 || (flag >> 4) & 1 == 1 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?num_routers_to_ignore,
+                "database lookup encryption not supported",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        Ok((
+            rest,
+            Self {
+                ignore,
+                key: key.to_vec(),
+                lookup,
+                reply,
+            },
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_database_lookup() {
+        let payloads = vec![
+            vec![
+                215, 46, 105, 162, 17, 97, 42, 165, 17, 19, 74, 252, 149, 245, 47, 140, 84, 126,
+                138, 213, 149, 64, 2, 186, 2, 217, 194, 66, 237, 92, 144, 129, 187, 212, 29, 79,
+                47, 234, 7, 8, 124, 50, 183, 31, 173, 202, 175, 121, 175, 12, 58, 35, 102, 106,
+                242, 239, 240, 138, 56, 93, 11, 12, 12, 120, 8, 0, 0,
+            ],
+            vec![
+                75, 242, 209, 197, 159, 177, 182, 35, 184, 57, 69, 43, 40, 122, 205, 225, 213, 60,
+                49, 250, 106, 197, 227, 189, 150, 172, 251, 84, 19, 209, 39, 113, 187, 212, 29, 79,
+                47, 234, 7, 8, 124, 50, 183, 31, 173, 202, 175, 121, 175, 12, 58, 35, 102, 106,
+                242, 239, 240, 138, 56, 93, 11, 12, 12, 120, 8, 0, 0,
+            ],
+            vec![
+                24, 179, 37, 69, 217, 247, 36, 218, 158, 69, 110, 11, 12, 161, 127, 61, 193, 102,
+                232, 197, 85, 43, 151, 247, 119, 192, 90, 37, 167, 230, 26, 95, 187, 212, 29, 79,
+                47, 234, 7, 8, 124, 50, 183, 31, 173, 202, 175, 121, 175, 12, 58, 35, 102, 106,
+                242, 239, 240, 138, 56, 93, 11, 12, 12, 120, 8, 0, 0,
+            ],
+        ];
+
+        for payload in &payloads {
+            let _ = DatabaseLookup::parse_frame(&payloads[0]).unwrap();
+            println!("");
+        }
+    }
+}

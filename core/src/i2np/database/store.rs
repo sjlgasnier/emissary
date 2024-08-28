@@ -53,7 +53,7 @@ enum StoreType {
 }
 
 impl StoreType {
-    /// Try to convert `message_type` into `StoreType`.
+    /// Try to convert `store_type` into `StoreType`.
     fn from_u8(store_type: u8) -> Option<Self> {
         match store_type & 1 {
             0 => Some(Self::RouterInfo),
@@ -79,7 +79,7 @@ enum ReplyType {
         tunnel_id: TunnelId,
 
         /// Router ID of the gateway tunnel.
-        gateway: RouterId,
+        router_id: RouterId,
     },
 
     /// Reply should be sent to router.
@@ -88,7 +88,7 @@ enum ReplyType {
         reply_token: u32,
 
         /// Router ID of the gateway tunnel.
-        gateway: RouterId,
+        router_id: RouterId,
     },
 
     /// No reply required.
@@ -138,7 +138,7 @@ impl DatabaseStore {
                         rest,
                         ReplyType::Router {
                             reply_token,
-                            gateway: RouterId::from(gateway_router),
+                            router_id: RouterId::from(gateway_router),
                         },
                     ),
                     false => (
@@ -146,7 +146,7 @@ impl DatabaseStore {
                         ReplyType::Tunnel {
                             reply_token,
                             tunnel_id: TunnelId::from(gateway_tunnel),
-                            gateway: RouterId::from(gateway_router),
+                            router_id: RouterId::from(gateway_router),
                         },
                     ),
                 }
