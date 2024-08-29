@@ -96,7 +96,7 @@ pub struct DatabaseLookup {
     /// Routers to ignore from reply.
     ignore: HashSet<RouterId>,
 
-    /// Key.
+    /// Search Key.
     key: Vec<u8>,
 
     /// Lookup type.
@@ -185,6 +185,11 @@ impl DatabaseLookup {
                 reply,
             },
         ))
+    }
+
+    /// Attempt to parse `input` into [`DatabaseLookup`].
+    pub fn parse(input: &[u8]) -> Option<Self> {
+        Self::parse_frame(input).ok().map(|(_, message)| message)
     }
 }
 

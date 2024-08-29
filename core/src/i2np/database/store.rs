@@ -106,7 +106,7 @@ pub enum DatabaseStorePayload {
 
 /// Database store message.
 pub struct DatabaseStore {
-    /// Key.
+    /// Search key.
     key: Vec<u8>,
 
     /// Payload contained within the `DatabaseStore` message.
@@ -189,6 +189,11 @@ impl DatabaseStore {
             }
             _ => todo!(),
         }
+    }
+
+    /// Attempt to parse `input` into [`DatabaseStore`].
+    pub fn parse(input: &[u8]) -> Option<Self> {
+        Self::parse_frame(input).ok().map(|(_, message)| message)
     }
 }
 
