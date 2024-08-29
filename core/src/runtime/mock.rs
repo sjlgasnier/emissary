@@ -17,8 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::runtime::{
-    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, JoinSet, MetricsHandle, Runtime, TcpListener,
-    TcpStream,
+    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricsHandle,
+    Runtime, TcpListener, TcpStream,
 };
 
 use futures::{future::BoxFuture, Stream};
@@ -36,7 +36,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub struct MockTcpStream {}
@@ -188,6 +188,14 @@ impl<T: Send + 'static> Stream for MockJoinSet<T> {
     }
 }
 
+pub struct MockInstant(Instant);
+
+impl InstantT for MockInstant {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MockRuntime {}
 
@@ -206,6 +214,7 @@ impl Runtime for MockRuntime {
     type TcpListener = MockTcpListener;
     type JoinSet<T: Send + 'static> = MockJoinSet<T>;
     type MetricsHandle = MockMetricsHandle;
+    type Instant = MockInstant;
 
     /// Spawn `future` in the background.
     fn spawn<F>(future: F)
@@ -219,6 +228,11 @@ impl Runtime for MockRuntime {
     /// Return duration since Unix epoch.
     fn time_since_epoch() -> Duration {
         SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("to succeed")
+    }
+
+    /// Get current time.
+    fn now() -> Self::Instant {
+        MockInstant(Instant::now())
     }
 
     /// Return opaque type for generating random bytes.

@@ -17,8 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use emissary::runtime::{
-    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, JoinSet, MetricType, MetricsHandle, Runtime,
-    TcpListener, TcpStream,
+    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
+    MetricsHandle, Runtime, TcpListener, TcpStream,
 };
 use futures::{AsyncRead as _, AsyncWrite as _, Stream};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
@@ -32,7 +32,7 @@ use std::{
     net::SocketAddr,
     pin::{pin, Pin},
     task::{Context, Poll, Waker},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[derive(Clone)]
@@ -171,6 +171,14 @@ impl<T: Send + 'static> Stream for TokioJoinSet<T> {
     }
 }
 
+pub struct TokioInstant(Instant);
+
+impl InstantT for TokioInstant {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
 #[derive(Clone)]
 struct TokioMetricsCounter(&'static str);
 
@@ -224,6 +232,7 @@ impl Runtime for TokioRuntime {
     type TcpListener = TokioTcpListener;
     type JoinSet<T: Send + 'static> = TokioJoinSet<T>;
     type MetricsHandle = TokioMetricsHandle;
+    type Instant = TokioInstant;
 
     fn spawn<F>(future: F)
     where
@@ -235,6 +244,10 @@ impl Runtime for TokioRuntime {
 
     fn time_since_epoch() -> Duration {
         SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("to succeed")
+    }
+
+    fn now() -> Self::Instant {
+        TokioInstant(Instant::now())
     }
 
     fn rng() -> impl RngCore + CryptoRng {
