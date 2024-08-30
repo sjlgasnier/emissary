@@ -97,7 +97,7 @@ impl RouterInfo {
 
         let ntcp2 = RouterAddress::new_published(ntcp2_key, ntcp2_iv, ntcp2_port, ntcp2_host);
         let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
-        let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
+        let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("f").unwrap());
         let router_version = Mapping::new(
             Str::from_str("router.version").unwrap(),
             Str::from_str("0.9.62").unwrap(),
@@ -207,6 +207,13 @@ impl RouterInfo {
     /// Get reference to router's publish date.
     pub fn date(&self) -> &Date {
         &self.published
+    }
+
+    /// Returns `true` if the router is a floodfill router.
+    pub fn is_floodfill(&self) -> bool {
+        self.options
+            .get(&Str::from_str("caps").expect("valid string"))
+            .map_or_else(|| false, |caps| caps.contains("f"))
     }
 }
 
@@ -415,5 +422,19 @@ mod tests {
     fn parse_router_3() {
         let router_info_bytes = include_bytes!("../../test-vectors/router3.dat");
         assert!(RouterInfo::from_bytes(router_info_bytes).is_none());
+    }
+
+    #[test]
+    fn is_not_floodfill() {
+        let router_info_bytes = include_bytes!("../../test-vectors/router2.dat");
+
+        assert!(!RouterInfo::from_bytes(router_info_bytes).unwrap().is_floodfill())
+    }
+
+    #[test]
+    fn is_floodfill() {
+        let router_info_bytes = include_bytes!("../../test-vectors/router4.dat");
+
+        assert!(RouterInfo::from_bytes(router_info_bytes).unwrap().is_floodfill())
     }
 }
