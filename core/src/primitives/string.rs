@@ -105,15 +105,20 @@ impl Str {
     pub fn serialized_len(&self) -> usize {
         self.string.len() + 1
     }
+
+    /// Returns `true` if `self` contains `substring`.
+    pub fn contains(&self, substring: &str) -> bool {
+        core::str::from_utf8(&self.string)
+            .ok()
+            .map_or_else(|| false, |string| string.contains(&substring))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
-    use nom::AsBytes;
-
     use super::*;
+    use nom::AsBytes;
+    use std::collections::VecDeque;
 
     #[test]
     fn empty_string() {
@@ -186,5 +191,25 @@ mod tests {
                 string: "hello, world!".as_bytes().to_vec()
             })
         );
+    }
+
+    #[test]
+    fn contains_substring() {
+        let mut string: VecDeque<u8> =
+            String::from("hello, world!").as_bytes().to_vec().try_into().unwrap();
+        string.push_front(string.len() as u8);
+        let string: Vec<u8> = string.into();
+
+        assert!(Str::from_bytes(string).unwrap().contains("world"));
+    }
+
+    #[test]
+    fn doesnt_contain_substring() {
+        let mut string: VecDeque<u8> =
+            String::from("hello, world!").as_bytes().to_vec().try_into().unwrap();
+        string.push_front(string.len() as u8);
+        let string: Vec<u8> = string.into();
+
+        assert!(!Str::from_bytes(string).unwrap().contains("goodbye"));
     }
 }
