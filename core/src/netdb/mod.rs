@@ -18,9 +18,10 @@
 
 use crate::{
     i2np::{Message, MessageType},
+    netdb::metrics::*,
     primitives::{RouterId, RouterInfo},
     router_storage::RouterStorage,
-    runtime::{MetricType, Runtime},
+    runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
 };
@@ -34,6 +35,8 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+
+mod metrics;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb";
@@ -60,7 +63,7 @@ pub struct NetDb<R: Runtime> {
     floodfills: HashMap<RouterId, FloodFillState>,
 
     /// Metrics handle.
-    metrics_handle: R::MetricsHandle,
+    metrics: R::MetricsHandle,
 
     /// Router storage.
     router_storage: RouterStorage,
@@ -74,7 +77,7 @@ impl<R: Runtime> NetDb<R> {
     pub fn new(
         service: TransportService,
         router_storage: RouterStorage,
-        metrics_handle: R::MetricsHandle,
+        metrics: R::MetricsHandle,
     ) -> Self {
         let floodfills = router_storage
             .routers()
@@ -84,6 +87,8 @@ impl<R: Runtime> NetDb<R> {
             })
             .collect::<HashMap<_, _>>();
 
+        metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
+
         tracing::trace!(
             target: LOG_TARGET,
             num_floodfills = ?floodfills.len(),
@@ -92,15 +97,15 @@ impl<R: Runtime> NetDb<R> {
 
         Self {
             floodfills,
-            metrics_handle,
+            metrics,
             router_storage,
             service,
         }
     }
 
     /// Collect `NetDb`-related metric counters, gauges and histograms.
-    pub fn metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
-        metrics
+    pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
+        metrics::register_metrics(metrics)
     }
 
     /// Handle established connection to `router`.
@@ -112,10 +117,12 @@ impl<R: Runtime> NetDb<R> {
                         tracing::debug!(
                             target: LOG_TARGET,
                             %router_id,
-                            "floodfill connected",
+                            "new floodfill connected",
                         );
 
                         self.floodfills.insert(router_id, FloodFillState::Connected);
+                        self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+                        self.metrics.counter(NUM_FLOODFILLS).increment(1);
                     }
                     false => {
                         tracing::trace!(
@@ -129,10 +136,11 @@ impl<R: Runtime> NetDb<R> {
                 tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
-                    "floodfill connected",
+                    "known floodfill connected",
                 );
 
                 self.floodfills.insert(router_id, FloodFillState::Connected);
+                self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
             }
         }
     }
@@ -153,7 +161,9 @@ impl<R: Runtime> NetDb<R> {
                     %router_id,
                     "floodfill disconnected",
                 );
+
                 self.floodfills.insert(router_id, FloodFillState::Disconnected);
+                self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
             }
         }
     }
