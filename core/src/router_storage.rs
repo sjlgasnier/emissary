@@ -20,9 +20,9 @@ use crate::primitives::{RouterId, RouterInfo};
 
 use hashbrown::HashMap;
 #[cfg(feature = "std")]
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 #[cfg(feature = "no_std")]
-use spin::rwlock::RwLock;
+use spin::rwlock::{RwLock, RwLockReadGuard};
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -80,6 +80,11 @@ impl RouterStorage {
             .filter_map(|(router, info)| filter(router, info).then_some(info.clone()))
             .take(num_routers)
             .collect()
+    }
+
+    // TODO: zzz
+    pub fn routers<'a>(&'a self) -> RwLockReadGuard<'_, HashMap<RouterId, RouterInfo>> {
+        self.routers.read()
     }
 
     /// Create new [`RouterStorage`] from random `routers`.

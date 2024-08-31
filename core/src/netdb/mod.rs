@@ -17,12 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    primitives::RouterInfo,
+    i2np::{Message, MessageType},
+    primitives::{RouterId, RouterInfo},
+    router_storage::RouterStorage,
     runtime::{MetricType, Runtime},
+    subsystem::SubsystemEvent,
     transports::TransportService,
 };
 
 use futures::{FutureExt, StreamExt};
+use hashbrown::HashMap;
 
 use alloc::vec::Vec;
 use core::{
@@ -34,26 +38,63 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb";
 
+/// Floodfill state.
+#[derive(Debug)]
+pub enum FloodFillState {
+    /// Disconnected.
+    Disconnected,
+
+    /// FloodFill is connected.
+    Connected,
+
+    /// FloodFill is being dialed.
+    Dialing {
+        /// Pending messages.
+        pending_messages: Vec<Vec<u8>>,
+    },
+}
+
 /// Network database (NetDB).
 pub struct NetDb<R: Runtime> {
-    /// Transport service.
-    service: TransportService,
+    /// Known floodfills.
+    floodfills: HashMap<RouterId, FloodFillState>,
 
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
+
+    /// Router storage.
+    router_storage: RouterStorage,
+
+    /// Transport service.
+    service: TransportService,
 }
 
 impl<R: Runtime> NetDb<R> {
     /// Create new [`NetDb`].
-    pub fn new(service: TransportService, metrics_handle: R::MetricsHandle) -> Self {
+    pub fn new(
+        service: TransportService,
+        router_storage: RouterStorage,
+        metrics_handle: R::MetricsHandle,
+    ) -> Self {
+        let floodfills = router_storage
+            .routers()
+            .iter()
+            .filter_map(|(id, router)| {
+                router.is_floodfill().then_some((id.clone(), FloodFillState::Disconnected))
+            })
+            .collect::<HashMap<_, _>>();
+
         tracing::trace!(
             target: LOG_TARGET,
+            num_floodfills = ?floodfills.len(),
             "starting netdb",
         );
 
         Self {
-            service,
+            floodfills,
             metrics_handle,
+            router_storage,
+            service,
         }
     }
 
@@ -62,16 +103,79 @@ impl<R: Runtime> NetDb<R> {
         metrics
     }
 
-    fn on_connection_established(&mut self) -> crate::Result<()> {
-        Ok(())
+    /// Handle established connection to `router`.
+    fn on_connection_established(&mut self, router_id: RouterId) {
+        match self.floodfills.remove(&router_id) {
+            None =>
+                match self.router_storage.get(&router_id).expect("router to exist").is_floodfill() {
+                    true => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "floodfill connected",
+                        );
+
+                        self.floodfills.insert(router_id, FloodFillState::Connected);
+                    }
+                    false => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "connection established",
+                        );
+                    }
+                },
+            Some(state) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "floodfill connected",
+                );
+
+                self.floodfills.insert(router_id, FloodFillState::Connected);
+            }
+        }
     }
 
-    fn on_connection_close(&mut self) -> crate::Result<()> {
-        Ok(())
+    /// Handle closed connection to `router`.
+    fn on_connection_closed(&mut self, router_id: RouterId) {
+        match self.floodfills.remove(&router_id) {
+            None => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "connection closed",
+                );
+            }
+            Some(_) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "floodfill disconnected",
+                );
+                self.floodfills.insert(router_id, FloodFillState::Disconnected);
+            }
+        }
     }
 
-    fn on_message(&mut self, message: ()) -> crate::Result<()> {
-        Ok(())
+    /// Handle I2NP message.
+    fn on_message(&mut self, message: Message) {
+        match message.message_type {
+            MessageType::DatabaseStore => {
+                tracing::trace!("database store");
+            }
+            MessageType::DatabaseLookup => {
+                tracing::trace!("database lookup");
+            }
+            MessageType::DatabaseSearchReply => {
+                tracing::trace!("database search reply");
+            }
+            message_type => tracing::warn!(
+                target: LOG_TARGET,
+                ?message_type,
+                "unsupported message",
+            ),
+        }
     }
 }
 
@@ -82,12 +186,13 @@ impl<R: Runtime> Future for NetDb<R> {
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(event)) => tracing::trace!(
-                    target: LOG_TARGET,
-                    ?event,
-                    "unhandled event",
-                ),
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
+                    messages.into_iter().for_each(|message| self.on_message(message)),
+                Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
+                    self.on_connection_established(router),
+                Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
+                    self.on_connection_closed(router),
+                _ => {}
             }
         }
     }
