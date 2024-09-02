@@ -244,6 +244,6 @@ mod tests {
             26, 246, 141, 69, 9, 132, 119, 99, 190, 128, 2, 0, 0,
         ];
 
-        let _ = DatabaseStore::parse_frame(&buffer);
+        let _ = DatabaseStore::parse(&buffer).unwrap();
     }
 }

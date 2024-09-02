@@ -21,6 +21,7 @@ use crate::{
     primitives::{RouterId, RouterInfo, TunnelId},
 };
 
+use bytes::{BufMut, BytesMut};
 use hashbrown::HashSet;
 use nom::{
     bytes::complete::take,
@@ -36,6 +37,7 @@ use alloc::vec::Vec;
 const MAX_ROUTERS_TO_IGNORE: usize = 512;
 
 /// Lookup type.
+#[derive(Debug, PartialEq, Eq)]
 pub enum LookupType {
     /// Normal lookup.
     ///
@@ -69,6 +71,16 @@ impl LookupType {
 
                 None
             }
+        }
+    }
+
+    /// Serialize `self` into an `u8`.
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Normal => 0x00 << 2,
+            Self::Leaseset => 0x01 << 2,
+            Self::Router => 0x02 << 2,
+            Self::Exploration => 0x03 << 2,
         }
     }
 }
@@ -193,6 +205,62 @@ impl DatabaseLookup {
     }
 }
 
+/// [`DatabaseLookup`] message builder.
+pub struct DatabaseLookupBuilder {
+    /// Search key.
+    key: Vec<u8>,
+
+    /// Lookup type.
+    lookup: LookupType,
+
+    /// ID of the router who is asking or
+    /// ID of the gateway where the reply should be sent to.
+    router_id: RouterId,
+
+    /// IDs of the routers that should be ignored.
+    routers_to_ignore: Vec<RouterId>,
+}
+
+impl DatabaseLookupBuilder {
+    /// Create new [`DatabaseLookupBuilder`].
+    pub fn new(key: Vec<u8>, router_id: RouterId, lookup: LookupType) -> Self {
+        Self {
+            key,
+            lookup,
+            router_id,
+            routers_to_ignore: Vec::new(),
+        }
+    }
+
+    /// Specify which routers should be ignored in the reply.
+    pub fn with_ignored_routers(mut self, routers_to_ignore: Vec<RouterId>) -> Self {
+        self.routers_to_ignore = routers_to_ignore;
+        self
+    }
+
+    /// Serialize `self` into [`DatabaseLookup`] message.
+    pub fn build(self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(
+            DATABASE_KEY_SIZE
+                + ROUTER_HASH_LEN
+                + 1usize // flag
+                + 2usize // ignore list size
+                + self.routers_to_ignore.len() * ROUTER_HASH_LEN,
+        );
+
+        out.put_slice(&self.key);
+        out.put_slice(&Into::<Vec<u8>>::into(self.router_id));
+        out.put_u8(self.lookup.as_u8());
+        out.put_u16(self.routers_to_ignore.len() as u16);
+
+        self.routers_to_ignore.into_iter().for_each(|router| {
+            out.put_slice(&Into::<Vec<u8>>::into(router));
+        });
+
+        out.freeze().to_vec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,8 +289,112 @@ mod tests {
         ];
 
         for payload in &payloads {
-            let _ = DatabaseLookup::parse_frame(&payloads[0]).unwrap();
-            println!("");
+            let _ = DatabaseLookup::parse(&payloads[0]).unwrap();
+        }
+    }
+
+    #[test]
+    fn normal_lookup() {
+        let mut message = DatabaseLookupBuilder::new(
+            vec![1u8; 32],
+            RouterId::from(vec![0u8; 32]),
+            LookupType::Normal,
+        )
+        .build();
+
+        let message = DatabaseLookup::parse(&message).unwrap();
+        assert_eq!(message.lookup, LookupType::Normal);
+        assert_eq!(message.key, vec![1u8; 32]);
+
+        match message.reply {
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![0u8; 32])),
+            _ => panic!("invalid reply type"),
+        }
+    }
+
+    #[test]
+    fn leaseset_lookup() {
+        let mut message = DatabaseLookupBuilder::new(
+            vec![2u8; 32],
+            RouterId::from(vec![1u8; 32]),
+            LookupType::Leaseset,
+        )
+        .build();
+
+        let message = DatabaseLookup::parse(&message).unwrap();
+        assert_eq!(message.lookup, LookupType::Leaseset);
+        assert_eq!(message.key, vec![2u8; 32]);
+
+        match message.reply {
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![1u8; 32])),
+            _ => panic!("invalid reply type"),
+        }
+    }
+
+    #[test]
+    fn router_lookup() {
+        let mut message = DatabaseLookupBuilder::new(
+            vec![3u8; 32],
+            RouterId::from(vec![2u8; 32]),
+            LookupType::Router,
+        )
+        .build();
+
+        let message = DatabaseLookup::parse(&message).unwrap();
+        assert_eq!(message.lookup, LookupType::Router);
+        assert_eq!(message.key, vec![3u8; 32]);
+
+        match message.reply {
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![2u8; 32])),
+            _ => panic!("invalid reply type"),
+        }
+    }
+
+    #[test]
+    fn router_lookup_with_ignore_list() {
+        let mut ignored =
+            (5..10).map(|id| RouterId::from(vec![id as u8; 32])).collect::<HashSet<_>>();
+
+        let mut message = DatabaseLookupBuilder::new(
+            vec![3u8; 32],
+            RouterId::from(vec![2u8; 32]),
+            LookupType::Router,
+        )
+        .with_ignored_routers(ignored.clone().into_iter().collect())
+        .build();
+
+        let message = DatabaseLookup::parse(&message).unwrap();
+        assert_eq!(message.lookup, LookupType::Router);
+        assert_eq!(message.key, vec![3u8; 32]);
+
+        match message.reply {
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![2u8; 32])),
+            _ => panic!("invalid reply type"),
+        }
+
+        assert_eq!(ignored.len(), 5);
+        for router in message.ignore {
+            ignored.remove(&router);
+        }
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn exploration_lookup() {
+        let mut message = DatabaseLookupBuilder::new(
+            vec![4u8; 32],
+            RouterId::from(vec![3u8; 32]),
+            LookupType::Exploration,
+        )
+        .build();
+
+        let message = DatabaseLookup::parse(&message).unwrap();
+        assert_eq!(message.lookup, LookupType::Exploration);
+        assert_eq!(message.key, vec![4u8; 32]);
+
+        match message.reply {
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![3u8; 32])),
+            _ => panic!("invalid reply type"),
         }
     }
 }
