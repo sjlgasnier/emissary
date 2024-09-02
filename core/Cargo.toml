@@ -15,6 +15,7 @@ bytes = { version = "1.6.1", default-features = false }
 cbc = { version = "0.1.2", features = ["alloc"], default-features = false }
 chacha20 = { version = "0.9.1", features = ["zeroize"], default-features = false }
 chacha20poly1305 = { version = "0.10.1", features = ["alloc"], default-features = false }
+chrono = { version = "0.4.38", default-features = false, features = ["alloc"] }
 data-encoding = { version = "2.6.0", features = ["alloc"], default-features = false }
 ecb = { version = "0.1.2", features = ["alloc"], default-features = false }
 ed25519-dalek = { version = "2.1.1", features = ["alloc"], default-features = false }
@@ -31,6 +32,7 @@ siphasher = { version = "1.0.1", default-features = false }
 spin = { version = "0.9.8", features = ["rwlock"], default-features = false, optional = true }
 thingbuf = { version = "0.1.6", features = ["alloc"], default-features = false }
 tracing = { version = "0.1.40", default-features = false }
+uint = { version = "0.9.5", default-features = false }
 x25519-dalek = { version = "2.0.1", features = ["reusable_secrets", "static_secrets", "zeroize"], default-features = false }
 zerocopy = { version = "0.7.35", features = ["derive"], default-features = false }
 zeroize = { version = "1.8.1", features = ["alloc"], default-features = false }
@@ -41,6 +43,7 @@ tokio = { version = "1.38.0", features = ["full"] }
 rand_core = { version = "0.6.4", features = ["getrandom"], default-features = false }
 tracing-subscriber = { version = "0.3.18", features = ["chrono", "env-filter", "time"] }
 once_cell = "1.19.0"
+rand = "0.8.5"
 
 [features]
 default = ["std"]

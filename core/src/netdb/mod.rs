@@ -36,7 +36,10 @@ use core::{
     task::{Context, Poll},
 };
 
+mod bucket;
 mod metrics;
+mod routing_table;
+mod types;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb";

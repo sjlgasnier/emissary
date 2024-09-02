@@ -23,6 +23,7 @@ use rand_core::{CryptoRng, RngCore};
 
 use alloc::{string::String, vec::Vec};
 use core::{
+    fmt,
     future::Future,
     net::SocketAddr,
     pin::Pin,
@@ -75,7 +76,7 @@ pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
         F::Output: Send;
 }
 
-pub trait Instant {
+pub trait Instant: fmt::Debug + Clone {
     /// Return much time has passed since an `Instant` was created.
     fn elapsed(&self) -> Duration;
 }

@@ -188,7 +188,16 @@ impl<T: Send + 'static> Stream for MockJoinSet<T> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MockInstant(Instant);
+
+impl MockInstant {
+    /// Subtract `value` from inner `Instant`.
+    pub fn subtract(mut self, value: Duration) -> Self {
+        self.0 = self.0.checked_sub(value).unwrap();
+        self
+    }
+}
 
 impl InstantT for MockInstant {
     fn elapsed(&self) -> Duration {
@@ -196,7 +205,7 @@ impl InstantT for MockInstant {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockRuntime {}
 
 impl MockRuntime {
