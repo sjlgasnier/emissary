@@ -26,6 +26,8 @@ use crate::{
 use chrono::{DateTime, NaiveTime, TimeZone, Utc};
 use hashbrown::HashSet;
 
+use alloc::string::{String, ToString};
+
 /// Kademlia DHT implementation.
 pub struct Dht<R: Runtime> {
     /// Kademlia routing table.

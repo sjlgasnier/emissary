@@ -32,6 +32,7 @@ use sha2::{
 };
 use uint::construct_uint;
 
+use alloc::vec::Vec;
 use core::{
     borrow::Borrow,
     fmt,

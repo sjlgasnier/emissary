@@ -21,13 +21,14 @@
 
 //! Kademlia k-bucket implementation.
 
-use core::time::Duration;
-
 use crate::{
     netdb::types::{FloodFill, Key},
     primitives::RouterId,
     runtime::{Instant, Runtime},
 };
+
+use alloc::vec::Vec;
+use core::time::Duration;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb::k-bucket";

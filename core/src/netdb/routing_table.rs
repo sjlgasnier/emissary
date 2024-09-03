@@ -30,6 +30,7 @@ use crate::{
     runtime::Runtime,
 };
 
+use alloc::vec::Vec;
 use core::ops::Deref;
 
 /// Logging target for the file.
