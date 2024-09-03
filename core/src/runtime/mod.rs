@@ -76,7 +76,7 @@ pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
         F::Output: Send;
 }
 
-pub trait Instant: fmt::Debug + Clone {
+pub trait Instant: fmt::Debug + Clone + Send + Unpin {
     /// Return much time has passed since an `Instant` was created.
     fn elapsed(&self) -> Duration;
 }

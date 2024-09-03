@@ -108,11 +108,11 @@ impl<R: Runtime> KBucket<R> {
 
     /// Get iterator over the k-bucket, sorting the k-bucket entries in increasing order
     /// by distance.
-    pub fn closest_iter<K: Clone>(&self, target: &Key<K>) -> impl Iterator<Item = FloodFill<R>> {
+    pub fn closest_iter<K: Clone>(&self, target: &Key<K>) -> impl Iterator<Item = RouterId> {
         let mut floodfills = self.floodfills.clone();
 
         floodfills.sort_by(|a, b| target.distance(&a.key).cmp(&target.distance(&b.key)));
-        floodfills.into_iter()
+        floodfills.into_iter().map(|router| router.key.preimage().clone())
     }
 }
 
@@ -139,12 +139,12 @@ mod tests {
         let mut iter = bucket.closest_iter(&target);
         let mut prev = None;
 
-        while let Some(node) = iter.next() {
+        while let Some(router_id) = iter.next() {
             if let Some(distance) = prev {
-                assert!(distance < target.distance(&node.key));
+                assert!(distance < target.distance(&Key::from(router_id.clone())));
             }
 
-            prev = Some(target.distance(&node.key));
+            prev = Some(target.distance(&Key::from(router_id)));
         }
     }
 

@@ -18,7 +18,7 @@
 
 use crate::{
     i2np::{Message, MessageType},
-    netdb::metrics::*,
+    netdb::{dht::Dht, metrics::*},
     primitives::{RouterId, RouterInfo},
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
@@ -27,7 +27,7 @@ use crate::{
 };
 
 use futures::{FutureExt, StreamExt};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use alloc::vec::Vec;
 use core::{
@@ -37,6 +37,7 @@ use core::{
 };
 
 mod bucket;
+mod dht;
 mod metrics;
 mod routing_table;
 mod types;
@@ -46,10 +47,7 @@ const LOG_TARGET: &str = "emissary::netdb";
 
 /// Floodfill state.
 #[derive(Debug)]
-pub enum FloodFillState {
-    /// Disconnected.
-    Disconnected,
-
+pub enum RouterState {
     /// FloodFill is connected.
     Connected,
 
@@ -62,14 +60,17 @@ pub enum FloodFillState {
 
 /// Network database (NetDB).
 pub struct NetDb<R: Runtime> {
-    /// Known floodfills.
-    floodfills: HashMap<RouterId, FloodFillState>,
+    /// Kademlia DHT implementation.
+    dht: Dht<R>,
 
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
     /// Router storage.
     router_storage: RouterStorage,
+
+    /// Connected floodfills.
+    routers: HashMap<RouterId, RouterState>,
 
     /// Transport service.
     service: TransportService,
@@ -78,6 +79,7 @@ pub struct NetDb<R: Runtime> {
 impl<R: Runtime> NetDb<R> {
     /// Create new [`NetDb`].
     pub fn new(
+        local_router_id: RouterId,
         service: TransportService,
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
@@ -85,10 +87,8 @@ impl<R: Runtime> NetDb<R> {
         let floodfills = router_storage
             .routers()
             .iter()
-            .filter_map(|(id, router)| {
-                router.is_floodfill().then_some((id.clone(), FloodFillState::Disconnected))
-            })
-            .collect::<HashMap<_, _>>();
+            .filter_map(|(id, router)| router.is_floodfill().then_some(id.clone()))
+            .collect::<HashSet<_>>();
 
         metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
 
@@ -99,8 +99,9 @@ impl<R: Runtime> NetDb<R> {
         );
 
         Self {
-            floodfills,
+            dht: Dht::new(local_router_id, floodfills, metrics.clone()),
             metrics,
+            routers: HashMap::new(),
             router_storage,
             service,
         }
@@ -113,7 +114,7 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle established connection to `router`.
     fn on_connection_established(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
+        match self.routers.remove(&router_id) {
             None =>
                 match self.router_storage.get(&router_id).expect("router to exist").is_floodfill() {
                     true => {
@@ -123,7 +124,10 @@ impl<R: Runtime> NetDb<R> {
                             "new floodfill connected",
                         );
 
-                        self.floodfills.insert(router_id, FloodFillState::Connected);
+                        // insert new floodfills into `Dht` as well
+                        self.dht.add_floodfill(router_id.clone());
+
+                        self.routers.insert(router_id, RouterState::Connected);
                         self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
                         self.metrics.counter(NUM_FLOODFILLS).increment(1);
                     }
@@ -142,7 +146,10 @@ impl<R: Runtime> NetDb<R> {
                     "known floodfill connected",
                 );
 
-                self.floodfills.insert(router_id, FloodFillState::Connected);
+                // "insert" floodfill into `Dht` so their "last active" status gets updated
+                self.dht.add_floodfill(router_id.clone());
+
+                self.routers.insert(router_id, RouterState::Connected);
                 self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
             }
         }
@@ -150,7 +157,7 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle closed connection to `router`.
     fn on_connection_closed(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
+        match self.routers.remove(&router_id) {
             None => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -165,7 +172,7 @@ impl<R: Runtime> NetDb<R> {
                     "floodfill disconnected",
                 );
 
-                self.floodfills.insert(router_id, FloodFillState::Disconnected);
+                self.routers.remove(&router_id);
                 self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
             }
         }

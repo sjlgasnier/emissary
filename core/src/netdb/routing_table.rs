@@ -99,7 +99,9 @@ impl<R: Runtime> RoutingTable<R> {
         );
 
         match self.entry(Key::from(router_id.clone())) {
-            KBucketEntry::Occupied(entry) => {}
+            KBucketEntry::Occupied(entry) => {
+                entry.last_update = R::now();
+            }
             mut entry @ KBucketEntry::Vacant(_) => {
                 entry.insert(FloodFill::new(router_id));
             }
@@ -117,12 +119,15 @@ impl<R: Runtime> RoutingTable<R> {
     }
 
     /// Get `limit` closests floodfill routers to `target` from the k-buckets.
-    pub fn closest<K: Clone>(&mut self, target: Key<K>, limit: usize) -> Vec<FloodFill<R>> {
+    pub fn closest<'a, K: Clone + 'a>(
+        &'a mut self,
+        target: Key<K>,
+        limit: usize,
+    ) -> impl Iterator<Item = RouterId> + 'a {
         ClosestBucketsIter::new(self.local_key.distance(&target))
-            .map(|index| self.buckets[*index].closest_iter(&target))
+            .map(move |index| self.buckets[*index].closest_iter(&target))
             .flatten()
             .take(limit)
-            .collect()
     }
 }
 
@@ -237,12 +242,12 @@ mod tests {
         let closest = table.closest(target.clone(), 60usize);
         let mut prev = None;
 
-        for router in &closest {
+        for router_id in closest {
             if let Some(value) = prev {
-                assert!(value < target.distance(&router.key));
+                assert!(value < target.distance(&Key::from(router_id.clone())));
             }
 
-            prev = Some(target.distance(&router.key));
+            prev = Some(target.distance(&Key::from(router_id)));
         }
     }
 
