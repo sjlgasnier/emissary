@@ -31,10 +31,25 @@ pub const NUM_TEST_SUCCESSES: &str = "tunnel_test_success_count";
 
 /// Register tunnel metrics.
 pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
+    // counters
     metrics.push(MetricType::Counter {
         name: NUM_TUNNEL_MESSAGES,
         description: "number of i2np messaged received to tunnel subsystem",
     });
+    metrics.push(MetricType::Counter {
+        name: NUM_BUILD_FAILURES,
+        description: "number of tunnel build failures",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_TEST_FAILURES,
+        description: "number of failed tunnel tests",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_TEST_SUCCESSES,
+        description: "number of succeeded tunnel tests",
+    });
+
+    // gauges
     metrics.push(MetricType::Gauge {
         name: NUM_PENDING_INBOUND_TUNNELS,
         description: "number of pending inbound tunnels",
@@ -50,18 +65,6 @@ pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
     metrics.push(MetricType::Gauge {
         name: NUM_OUTBOUND_TUNNELS,
         description: "number of outbound tunnels",
-    });
-    metrics.push(MetricType::Counter {
-        name: NUM_BUILD_FAILURES,
-        description: "number of tunnel build failures",
-    });
-    metrics.push(MetricType::Counter {
-        name: NUM_TEST_FAILURES,
-        description: "number of failed tunnel tests",
-    });
-    metrics.push(MetricType::Counter {
-        name: NUM_TEST_SUCCESSES,
-        description: "number of succeeded tunnel tests",
     });
 
     metrics

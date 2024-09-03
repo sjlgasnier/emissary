@@ -35,12 +35,20 @@ pub mod siphash;
 // Taken from `ire` which is licensed under MIT
 //
 // Credits to str4d
+//
+// TODO: move to separate file?
+// TODO: oncecell?
 lazy_static! {
     pub static ref I2P_BASE64: Encoding = {
         let mut spec = Specification::new();
         spec.symbols
             .push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~");
         spec.padding = Some('=');
+        spec.encoding().unwrap()
+    };
+    pub static ref I2P_BASE32: Encoding = {
+        let mut spec = Specification::new();
+        spec.symbols.push_str("abcdefghijklmnopqrstuvwxyz234567");
         spec.encoding().unwrap()
     };
 }
@@ -51,8 +59,20 @@ pub fn base64_encode<T: AsRef<[u8]>>(data: T) -> String {
 }
 
 /// Base64 decode `data`
+//
+// TODO: no unwraps
 pub fn base64_decode<T: AsRef<[u8]>>(data: T) -> Vec<u8> {
     I2P_BASE64.decode(data.as_ref()).unwrap()
+}
+
+/// Base32 decode `data`.
+pub fn base32_encode(data: impl AsRef<[u8]>) -> String {
+    I2P_BASE32.encode(data.as_ref())
+}
+
+/// Base32 decode `data`.
+pub fn base32_decode(data: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+    I2P_BASE32.decode(data.as_ref()).ok()
 }
 
 // TODO: add tests

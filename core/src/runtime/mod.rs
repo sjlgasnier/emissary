@@ -23,6 +23,7 @@ use rand_core::{CryptoRng, RngCore};
 
 use alloc::{string::String, vec::Vec};
 use core::{
+    fmt,
     future::Future,
     net::SocketAddr,
     pin::Pin,
@@ -73,6 +74,11 @@ pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
     where
         F: Future<Output = T> + Send + 'static,
         F::Output: Send;
+}
+
+pub trait Instant: fmt::Debug + Clone + Send + Unpin {
+    /// Return much time has passed since an `Instant` was created.
+    fn elapsed(&self) -> Duration;
 }
 
 pub trait Counter {
@@ -132,6 +138,7 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     type TcpListener: TcpListener<Self::TcpStream>;
     type JoinSet<T: Send + 'static>: JoinSet<T>;
     type MetricsHandle: MetricsHandle;
+    type Instant: Instant;
 
     /// Spawn `future` in the background.
     fn spawn<F>(future: F)
@@ -141,6 +148,9 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
 
     /// Return duration since Unix epoch.
     fn time_since_epoch() -> Duration;
+
+    /// Get current time.
+    fn now() -> Self::Instant;
 
     /// Return opaque type for generating random bytes.
     fn rng() -> impl RngCore + CryptoRng;

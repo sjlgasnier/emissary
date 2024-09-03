@@ -150,8 +150,7 @@ impl<T: AsyncWrite + Unpin> AsyncWriteExt for T {
 pub fn init_logger() {
     use tracing_subscriber::prelude::*;
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .try_init()
-        .unwrap();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
 }

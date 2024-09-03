@@ -38,6 +38,16 @@ use core::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RouterId(Arc<String>);
 
+impl RouterId {
+    #[cfg(test)]
+    pub fn random() -> RouterId {
+        use rand::Rng;
+
+        let bytes = rand::thread_rng().gen::<[u8; 32]>();
+        RouterId::from(bytes)
+    }
+}
+
 impl fmt::Display for RouterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", &self.0[..8])

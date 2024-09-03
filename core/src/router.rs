@@ -107,7 +107,12 @@ impl<R: Runtime> Router<R> {
         // initialize and start netdb
         {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
-            let netdb = NetDb::<R>::new(transport_service, metrics_handle.clone());
+            let netdb = NetDb::<R>::new(
+                local_router_id,
+                transport_service,
+                router_storage.clone(),
+                metrics_handle.clone(),
+            );
 
             R::spawn(netdb);
         }

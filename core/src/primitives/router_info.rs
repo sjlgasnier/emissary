@@ -208,6 +208,13 @@ impl RouterInfo {
     pub fn date(&self) -> &Date {
         &self.published
     }
+
+    /// Returns `true` if the router is a floodfill router.
+    pub fn is_floodfill(&self) -> bool {
+        self.options
+            .get(&Str::from_str("caps").expect("valid string"))
+            .map_or_else(|| false, |caps| caps.contains("f"))
+    }
 }
 
 #[cfg(test)]
@@ -415,5 +422,19 @@ mod tests {
     fn parse_router_3() {
         let router_info_bytes = include_bytes!("../../test-vectors/router3.dat");
         assert!(RouterInfo::from_bytes(router_info_bytes).is_none());
+    }
+
+    #[test]
+    fn is_not_floodfill() {
+        let router_info_bytes = include_bytes!("../../test-vectors/router2.dat");
+
+        assert!(!RouterInfo::from_bytes(router_info_bytes).unwrap().is_floodfill())
+    }
+
+    #[test]
+    fn is_floodfill() {
+        let router_info_bytes = include_bytes!("../../test-vectors/router4.dat");
+
+        assert!(RouterInfo::from_bytes(router_info_bytes).unwrap().is_floodfill())
     }
 }

@@ -16,9 +16,26 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-pub mod lookup;
-pub mod search_reply;
-pub mod store;
+use crate::runtime::MetricType;
 
-/// Database lookup key length (SHA256 digest).
-const DATABASE_KEY_SIZE: usize = 32;
+use alloc::vec::Vec;
+
+pub const NUM_FLOODFILLS: &str = "floodfill_count";
+pub const NUM_CONNECTED_FLOODFILLS: &str = "connected_floodfill_count";
+
+/// Register NetDB metrics.
+pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
+    // counters
+    metrics.push(MetricType::Counter {
+        name: NUM_FLOODFILLS,
+        description: "total number of know floodfills",
+    });
+
+    // gauges
+    metrics.push(MetricType::Gauge {
+        name: NUM_CONNECTED_FLOODFILLS,
+        description: "number of connected floodfills",
+    });
+
+    metrics
+}
