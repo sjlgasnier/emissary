@@ -163,6 +163,16 @@ impl LeaseSet2 {
                 Err::Error(make_error(input, ErrorKind::Fail))
             })?;
 
+        // for now, emissary only supports curve25519-based crypto
+        if public_keys.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "destination uses unsupported crypto",
+            );
+
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
         let (rest, num_leases) = be_u8(rest)?;
 
         if num_leases > 16 {
