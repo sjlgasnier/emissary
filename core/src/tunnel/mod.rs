@@ -58,6 +58,8 @@ mod transit;
 #[cfg(test)]
 mod tests;
 
+pub use pool::TunnelPoolHandle;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
 
@@ -112,13 +114,15 @@ pub struct TunnelManager<R: Runtime> {
 
 impl<R: Runtime> TunnelManager<R> {
     /// Create new [`TunnelManager`].
+    ///
+    /// Returns a [`TunnelManager`] object and a handle for the exploratory tunnel pool.
     pub fn new(
         service: TransportService,
         router_info: RouterInfo,
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
-    ) -> Self {
+    ) -> (Self, TunnelPoolHandle) {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",
@@ -147,7 +151,7 @@ impl<R: Runtime> TunnelManager<R> {
         // start exploratory tunnel pool
         //
         // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
-        {
+        let pool_handle = {
             let (pool_context, pool_handle) = TunnelPoolContext::new();
             let selector = ExploratorySelector::new(router_storage.clone(), pool_handle.clone());
 
@@ -159,19 +163,24 @@ impl<R: Runtime> TunnelManager<R> {
                 noise.clone(),
                 metrics_handle.clone(),
             ));
-        }
 
-        Self {
-            garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
-            message_rx,
-            metrics_handle: metrics_handle.clone(),
-            pending_inbound: HashSet::new(),
-            pending_outbound: HashSet::new(),
-            router_info,
-            routers: HashMap::new(),
-            routing_table,
-            service,
-        }
+            pool_handle
+        };
+
+        (
+            Self {
+                garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
+                message_rx,
+                metrics_handle: metrics_handle.clone(),
+                pending_inbound: HashSet::new(),
+                pending_outbound: HashSet::new(),
+                router_info,
+                routers: HashMap::new(),
+                routing_table,
+                service,
+            },
+            pool_handle,
+        )
     }
 
     /// Collect tunnel-related metric counters, gauges and histograms.

@@ -24,6 +24,7 @@ use crate::{
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
+    tunnel::TunnelPoolHandle,
 };
 
 use futures::{FutureExt, StreamExt};
@@ -74,6 +75,9 @@ pub struct NetDb<R: Runtime> {
 
     /// Transport service.
     service: TransportService,
+
+    /// Exploratory tunnel pool handle.
+    exploratory_pool_handle: TunnelPoolHandle,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -83,6 +87,7 @@ impl<R: Runtime> NetDb<R> {
         service: TransportService,
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
+        exploratory_pool_handle: TunnelPoolHandle,
     ) -> Self {
         let floodfills = router_storage
             .routers()
@@ -99,6 +104,7 @@ impl<R: Runtime> NetDb<R> {
         );
 
         Self {
+            exploratory_pool_handle,
             dht: Dht::new(local_router_id, floodfills, metrics.clone()),
             metrics,
             routers: HashMap::new(),
