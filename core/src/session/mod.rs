@@ -16,5 +16,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+//! ECIES-X25519-AEAD-Ratchet implementation.
+//!
+//! https://geti2p.net/spec/ecies
+
 mod context;
 mod message;
