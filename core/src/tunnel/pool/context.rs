@@ -74,16 +74,33 @@ pub struct TunnelPoolHandle {
 
 impl TunnelPoolHandle {
     /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
-    pub fn send_message(
+    pub fn send_to_router(
         &self,
         gateway: TunnelId,
         router_id: RouterId,
         message: Vec<u8>,
     ) -> Result<(), ChannelError> {
         self.tx
-            .try_send(TunnelMessage::Outbound {
+            .try_send(TunnelMessage::RouterDelivery {
                 gateway,
                 router_id,
+                message,
+            })
+            .map_err(From::from)
+    }
+
+    /// Send `message `via one of the tunnel pool's outbound tunnels to remote tunnel identified by
+    /// (`gateway`, `tunnel_id`) tuple.
+    pub fn send_to_tunnel(
+        &self,
+        gateway: RouterId,
+        tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError> {
+        self.tx
+            .try_send(TunnelMessage::TunnelDelivery {
+                gateway,
+                tunnel_id,
                 message,
             })
             .map_err(From::from)
@@ -213,13 +230,25 @@ pub enum TunnelMessage {
         message: Message,
     },
 
-    ///
-    Outbound {
+    /// Send message to remote router via an outbound tunnel of the pool.
+    RouterDelivery {
         /// Outbound gateway through which `message` should be sent.
         gateway: TunnelId,
 
         /// ID of the router to whom the message should be sent.
         router_id: RouterId,
+
+        /// Serialize I2NP message.
+        message: Vec<u8>,
+    },
+
+    /// Send message to remote inbound tunnel via one of the outbound tunnels of the pool.
+    TunnelDelivery {
+        /// Outbound gateway through which `message` should be sent.
+        gateway: RouterId,
+
+        /// ID of the inbound tunnel gateway.
+        tunnel_id: TunnelId,
 
         /// Serialize I2NP message.
         message: Vec<u8>,

@@ -485,7 +485,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                 "send tunnel build request to local outbound tunnel",
                             );
 
-                            if let Err(error) = handle.send_message(
+                            if let Err(error) = handle.send_to_router(
                                 send_tunnel_id,
                                 router,
                                 message.serialize_standard(),
@@ -703,7 +703,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 None => return Poll::Ready(()),
                 Some(event) => match event {
                     TunnelMessage::Dummy => unreachable!(),
-                    TunnelMessage::Outbound {
+                    TunnelMessage::RouterDelivery {
                         gateway,
                         router_id,
                         message,
@@ -730,6 +730,42 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             });
                         }
                     },
+                    TunnelMessage::TunnelDelivery {
+                        gateway,
+                        tunnel_id,
+                        message,
+                    } => {
+                        // TODO: needs to be fairer
+                        let Some((outbound_gateway, tunnel)) = self.outbound.iter().next() else {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                "failed to send tunnel message, no outbound tunnel available",
+                            );
+                            continue;
+                        };
+
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            %outbound_gateway,
+                            "send tunnel message to remote destination",
+                        );
+
+                        let (router_id, messages) =
+                            tunnel.send_to_tunnel(gateway.clone(), tunnel_id, message);
+
+                        messages.into_iter().for_each(|message| {
+                            if let Err(error) =
+                                self.routing_table.send_message(router_id.clone(), message)
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %gateway,
+                                    ?error,
+                                    "failed to send tunnel message to router",
+                                );
+                            }
+                        });
+                    }
                     TunnelMessage::Inbound { message } => tracing::warn!(
                         target: LOG_TARGET,
                         message_type = ?message.message_type,
