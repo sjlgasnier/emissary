@@ -19,7 +19,7 @@
 use crate::{
     error::{ChannelError, Error},
     i2np::{MessageBuilder, MessageType},
-    primitives::{MessageId, RouterId, TunnelId},
+    primitives::{Lease2, MessageId, RouterId, TunnelId},
     runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
@@ -36,6 +36,7 @@ use crate::{
             zero_hop::ZeroHopInboundTunnel,
         },
         routing_table::RoutingTable,
+        TUNNEL_EXPIRATION,
     },
 };
 
@@ -657,7 +658,18 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     // because the gateway is used to receive messages
                     let (router_id, tunnel_id) = tunnel.gateway();
                     self.selector.add_inbound_tunnel(tunnel_id, router_id.clone());
-                    self.inbound_tunnels.insert(tunnel_id, router_id);
+                    self.inbound_tunnels.insert(tunnel_id, router_id.clone());
+
+                    // store lease of the new inbound tunnel into `TunnelPoolHandle` so client code
+                    // can query available leases when it's creating new sessions
+                    self.context.add_lease(
+                        *tunnel.tunnel_id(),
+                        Lease2 {
+                            router_id,
+                            tunnel_id,
+                            expires: (R::time_since_epoch() + TUNNEL_EXPIRATION).as_secs() as u32,
+                        },
+                    );
 
                     self.inbound.push(tunnel);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).increment(1);
@@ -680,6 +692,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                     self.expiring_inbound.remove(&tunnel_id);
                     self.routing_table.remove_tunnel(&tunnel_id);
+                    self.context.remove_lease(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
                 }
             }

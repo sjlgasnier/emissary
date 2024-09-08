@@ -21,7 +21,7 @@
 use crate::{
     error::{ChannelError, RouteKind, RoutingError},
     i2np::{Message, MessageType},
-    primitives::{MessageId, RouterId, TunnelId},
+    primitives::{Lease2, MessageId, RouterId, TunnelId},
     tunnel::pool::TUNNEL_CHANNEL_SIZE,
 };
 
@@ -65,6 +65,9 @@ struct MessageListeners {
 /// Tunnel pool handle.
 #[derive(Clone)]
 pub struct TunnelPoolHandle {
+    /// Leases of the tunnel pool.
+    leases: Arc<RwLock<HashMap<TunnelId, Lease2>>>,
+
     /// Message listeners.
     listeners: Arc<RwLock<MessageListeners>>,
 
@@ -217,6 +220,12 @@ impl TunnelPoolHandle {
             .remove(message_id)
             .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
     }
+
+    /// Attempt to get a [`Lease2`] for the tunnel pool.
+    pub fn lease(&self) -> Option<Lease2> {
+        // TODO: distribute more evently
+        self.leases.read().values().next().cloned()
+    }
 }
 
 #[derive(Clone)]
@@ -265,6 +274,9 @@ impl Default for TunnelMessage {
 
 /// Tunnel pool context.
 pub struct TunnelPoolContext {
+    /// Leases of the tunnel pool.
+    leases: Arc<RwLock<HashMap<TunnelId, Lease2>>>,
+
     /// Message listeners.
     listeners: Arc<RwLock<MessageListeners>>,
 
@@ -280,15 +292,21 @@ impl TunnelPoolContext {
     /// Create new [`TunnelPoolContext`].
     pub fn new() -> (Self, TunnelPoolHandle) {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
+        let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
 
         (
             Self {
-                listeners: listeners.clone(),
+                leases: Arc::clone(&leases),
+                listeners: Arc::clone(&listeners),
                 rx,
                 tx: tx.clone(),
             },
-            TunnelPoolHandle { listeners, tx },
+            TunnelPoolHandle {
+                leases,
+                listeners,
+                tx,
+            },
         )
     }
 
@@ -320,10 +338,23 @@ impl TunnelPoolContext {
             .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
     }
 
+    /// Add new [`Lease2`] for the tunnel pool.
+    pub fn add_lease(&self, tunnel_id: TunnelId, lease: Lease2) {
+        let mut inner = self.leases.write();
+
+        inner.insert(tunnel_id, lease);
+    }
+
+    /// Remove [`Lease2`] from the tunnel pool.
+    pub fn remove_lease(&self, tunnel_id: &TunnelId) {
+        self.leases.write().remove(tunnel_id);
+    }
+
     /// Allocate new [`TunnelPoolHandle`] for the context.
     pub fn handle(&self) -> TunnelPoolHandle {
         TunnelPoolHandle {
-            listeners: self.listeners.clone(),
+            leases: Arc::clone(&self.leases),
+            listeners: Arc::clone(&self.listeners),
             tx: self.tx.clone(),
         }
     }
