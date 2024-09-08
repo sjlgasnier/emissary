@@ -17,11 +17,13 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{sha256::Sha256, StaticPrivateKey, StaticPublicKey},
+    crypto::{
+        chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
+    },
     runtime::Runtime,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use rand_core::RngCore;
 use x25519_dalek::PublicKey;
@@ -33,6 +35,12 @@ const LOG_TARGET: &str = "emissary::session::context";
 
 /// Noise protocol name.
 const PROTOCOL_NAME: &str = "Noise_IKelg2+hs2_25519_ChaChaPoly_SHA256";
+
+/// Outbound session.
+pub struct OutboundSession {
+    /// AEAD state.
+    state: Bytes,
+}
 
 /// Key context for an ECIES-X25519-AEAD-Ratchet session.
 #[derive(Clone)]
@@ -92,7 +100,7 @@ impl<R: Runtime> KeyContext<R> {
             let mut private = [0u8; 32];
             rng.fill_bytes(&mut private);
 
-            if let Some(_) = Randomized::to_representative(&private, tweak).into_option() {
+            if Randomized::to_representative(&private, tweak).into_option().is_some() {
                 return (private, tweak);
             }
         }
@@ -101,9 +109,11 @@ impl<R: Runtime> KeyContext<R> {
     /// Create new outbound session.
     ///
     /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
-    //
-    // TODO: leaseset
-    pub fn create_oubound_session(&self, pubkey: StaticPublicKey) -> [u8; 32] {
+    pub fn create_oubound_session(
+        &mut self,
+        pubkey: StaticPublicKey,
+        payload: &[u8],
+    ) -> (OutboundSession, Vec<u8>) {
         let (private_key, tweak) = Self::generate_ephemeral_keypair();
         let sk = StaticPrivateKey::from(private_key.clone().to_vec());
         let public_key =
@@ -117,19 +127,81 @@ impl<R: Runtime> KeyContext<R> {
         let state = Sha256::new().update(&state).update(&public_key).finalize();
         let shared = sk.diffie_hellman(&pubkey);
 
-        println!("create_outbound_session(): state  {state:?}");
-        println!("create_outbound_session(): shared {shared:?}");
+        let representative = Randomized::to_representative(&private_key, tweak).unwrap();
 
-        Randomized::to_representative(&private_key, tweak).unwrap()
-        // println!("public key = {public_key:?}");
-        // println!("test public key = {:?}", PublicKey::from(private_key));
-        // println!("representative = {representative:?}");
-        // let new_pubkey =
-        // Randomized::from_representative(&representative).unwrap().to_montgomery();
-        // println!("new public key = {new_pubkey:?}");
-        // let state = Sha256::new().update(&state).update(&public_key).finalize();
-        // println!("state = {state:?}");
-        // let new_pubkey = Randomized::from_representative(&representative).unwrap();
+        // derive keys for encrypting initiator's static key
+        let (chaining_key, static_key_ciphertext) = {
+            let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
+            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let cipher_key = Hmac::new(&temp_key)
+                .update(&chaining_key)
+                .update(&b"")
+                .update(&[0x02])
+                .finalize();
+
+            // encrypt initiator's static public key
+            //
+            // `encrypt_with_ad()` must succeed as it's called with valid parameters
+            let mut static_key = {
+                let mut out = BytesMut::with_capacity(32 + 16);
+                out.put_slice(&self.public_key.as_ref());
+
+                out.freeze().to_vec()
+            };
+
+            ChaChaPoly::with_nonce(&cipher_key, 0)
+                .encrypt_with_ad_new(&state, &mut static_key)
+                .expect("to succeed");
+
+            (chaining_key, static_key)
+        };
+
+        // state for payload section
+        let state = Sha256::new().update(&state).update(&static_key_ciphertext).finalize();
+
+        // encrypt payload section
+        let payload_ciphertext = {
+            let shared = self.private_key.diffie_hellman(&pubkey);
+            let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let cipher_key = Hmac::new(&temp_key)
+                .update(&chaining_key)
+                .update(&b"")
+                .update(&[0x02])
+                .finalize();
+
+            // create buffer with 16 extra bytes for poly1305 auth tag
+            //
+            // TODO: optimize?
+            let mut payload = {
+                let mut out = BytesMut::with_capacity(payload.len() + 16);
+                out.put_slice(&payload);
+
+                out.freeze().to_vec()
+            };
+
+            // `encrypt_with_ad()` must succeed as it's called with valid parameters
+            ChaChaPoly::with_nonce(&cipher_key, 0)
+                .encrypt_with_ad_new(&state, &mut payload)
+                .expect("to succeed");
+
+            payload
+        };
+
+        // state for new session reply kdf
+        let state =
+            Bytes::from(Sha256::new().update(&state).update(&payload_ciphertext).finalize());
+
+        let payload = {
+            let mut out = BytesMut::with_capacity(32 + 32 + 16 + 128 + 16);
+            out.put_slice(&representative);
+            out.put_slice(&static_key_ciphertext);
+            out.put_slice(&payload_ciphertext);
+
+            out.freeze().to_vec()
+        };
+
+        (OutboundSession { state }, payload)
     }
 
     /// Create inbound session.
@@ -148,49 +220,4 @@ impl<R: Runtime> KeyContext<R> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::mock::MockRuntime;
-    use x25519_dalek::{PublicKey, StaticSecret};
-
-    #[test]
-    fn ellig() {
-        print!("alice ");
-        let alice = KeyContext::<MockRuntime>::new();
-        print!("bob ");
-        let bob = KeyContext::<MockRuntime>::new();
-        println!("");
-
-        let repr = alice.create_oubound_session(bob.public_key.clone());
-        println!("");
-
-        bob.create_inbound_session(repr);
-
-        // let ctx = KeyContext::<MockRuntime>::new();
-        // let _ = ctx.create_oubound_session();
-
-        // use curve25519_elligator2::{
-        //     EdwardsPoint, MapToPointVariant, MontgomeryPoint, Randomized, RFC9380,
-        // };
-        // use rand::RngCore;
-
-        // let keypair = StaticSecret::random_from_rng(MockRuntime::rng());
-        // let pubkey = PublicKey::from(&keypair);
-
-        // // Montgomery Points can be mapped to and from elligator representatives
-        // // using any algorithm variant.
-        // let tweak = rand::thread_rng().next_u32() as u8;
-        // let mont_point = MontgomeryPoint::default(); // example point known to be representable
-        // let r = mont_point.to_representative::<Randomized>(tweak).unwrap();
-
-        // let test = StaticSecret::from(mont_point.0);
-        // let shared1 = test.diffie_hellman(&pubkey);
-
-        // let value = MontgomeryPoint::from_representative::<Randomized>(&r).unwrap();
-        // let pubkey2 = PublicKey::from(value.0);
-
-        // let shared2 = keypair.diffie_hellman(&pubkey2);
-
-        // println!("{:?}\n{:?}", shared1.to_bytes(), shared2.to_bytes());
-    }
-}
+mod tests {}

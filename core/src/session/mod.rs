@@ -22,3 +22,5 @@
 
 mod context;
 mod message;
+
+pub use context::{KeyContext, OutboundSession};

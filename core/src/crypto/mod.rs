@@ -202,6 +202,14 @@ impl From<Vec<u8>> for StaticPrivateKey {
     }
 }
 
+impl AsRef<[u8; 32]> for StaticPrivateKey {
+    fn as_ref(&self) -> &[u8; 32] {
+        match self {
+            Self::X25519(key) => key.as_bytes(),
+        }
+    }
+}
+
 /// Ephemeral private key.
 pub enum EphemeralPrivateKey {
     X25519(x25519_dalek::ReusableSecret),
