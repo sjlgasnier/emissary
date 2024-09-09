@@ -293,6 +293,57 @@ impl LeaseSet2 {
 
         out
     }
+
+    #[cfg(test)]
+    pub fn random() -> LeaseSet2 {
+        use crate::crypto::StaticPrivateKey;
+        use rand::{Rng, RngCore};
+
+        let mut rng = rand::thread_rng();
+
+        let public_key = {
+            let sk = StaticPrivateKey::new(&mut rng);
+
+            sk.public()
+        };
+
+        let destination = {
+            let mut static_key = [0u8; 32];
+            let mut signing_key = [0u8; 32];
+
+            rng.fill_bytes(&mut static_key);
+            rng.fill_bytes(&mut signing_key);
+
+            RouterIdentity::from_keys(static_key.to_vec(), signing_key.to_vec()).unwrap()
+        };
+
+        let mut leases = (0..rng.gen_range(1..16))
+            .map(|_| {
+                let router_id = RouterId::random();
+                let tunnel_id = TunnelId::from(rng.next_u32());
+                let expires = rng.next_u32();
+
+                Lease2 {
+                    router_id: RouterId::random(),
+                    tunnel_id: TunnelId::from(rng.next_u32()),
+                    expires: rng.next_u32(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let published = rng.next_u32();
+        let expires = rng.next_u32() / 10;
+
+        LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                published,
+                expires: published + expires,
+            },
+            public_keys: vec![public_key],
+            leases,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +487,11 @@ mod tests {
         .serialize();
 
         assert!(LeaseSet2::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn serialize_and_parse_random() {
+        assert!(LeaseSet2::parse(&LeaseSet2::random().serialize()).is_some());
     }
 
     #[test]
