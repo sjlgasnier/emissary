@@ -34,15 +34,16 @@ use alloc::vec::Vec;
 /// Header for [`LeaseSet2`].
 ///
 /// https://geti2p.net/spec/common-structures#leaseset2header
+#[derive(Clone)]
 pub struct LeaseSet2Header {
     /// Destination for [`LeaseSet2`].
-    destination: RouterIdentity,
+    pub destination: RouterIdentity,
 
     /// When [`LeaseSet2`] was published.
-    published: u32,
+    pub published: u32,
 
     /// When [`LeaseSet2`] expires.
-    expires: u32,
+    pub expires: u32,
 }
 
 impl LeaseSet2Header {
@@ -143,6 +144,7 @@ impl Lease2 {
 /// LeaseSet2
 ///
 /// https://geti2p.net/spec/common-structures#struct-leaseset2
+#[derive(Clone)]
 pub struct LeaseSet2 {
     /// Header.
     pub header: LeaseSet2Header,

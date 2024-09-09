@@ -21,6 +21,7 @@ use crate::{
     primitives::{LeaseSet2, RouterId, RouterInfo, TunnelId},
 };
 
+use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -66,6 +67,17 @@ impl StoreType {
             },
         }
     }
+
+    /// Serialize [`StoreType`].
+    fn as_u8(&self) -> u8 {
+        match self {
+            Self::RouterInfo => 0u8,
+            Self::LeaseSet => 1u8,
+            Self::LeaseSet2 => 1u8 | (1u8 << 1),
+            Self::EncryptedLeaseSet => 1u8 | (2u8 << 1),
+            Self::MetaLeaseSet => 1u8 | (3u8 << 1),
+        }
+    }
 }
 
 /// Reply type.
@@ -95,6 +107,18 @@ pub enum ReplyType {
     None,
 }
 
+impl ReplyType {
+    fn serialized_len(&self) -> usize {
+        match self {
+            Self::Tunnel { .. } | Self::Router { .. } => {
+                // reply token + tunnel id + router hash length
+                4usize + 4usize + ROUTER_HASH_LEN
+            }
+            Self::None => 4usize,
+        }
+    }
+}
+
 /// Payload contained within the `DatabaseStore` message.
 pub enum DatabaseStorePayload {
     /// Router info.
@@ -108,6 +132,16 @@ pub enum DatabaseStorePayload {
         /// Lease set.
         leaseset: LeaseSet2,
     },
+}
+
+impl DatabaseStorePayload {
+    fn serialized_len(&self) -> usize {
+        match self {
+            // TODO: calculate actual size
+            Self::RouterInfo { router_info } => 2048usize,
+            Self::LeaseSet2 { leaseset } => leaseset.serialized_len(),
+        }
+    }
 }
 
 /// Database store message.
@@ -215,9 +249,90 @@ impl DatabaseStore {
     }
 }
 
+/// [`DatabaseStore`] builder.
+pub struct DatabaseStoreBuilder {
+    /// Store key.
+    key: Vec<u8>,
+
+    /// Payload.
+    payload: DatabaseStorePayload,
+
+    /// Reply type, if specified.
+    reply: Option<ReplyType>,
+}
+
+impl DatabaseStoreBuilder {
+    /// Create new [`DatabaseStoreBuilder`].
+    pub fn new(key: Vec<u8>, payload: DatabaseStorePayload) -> Self {
+        Self {
+            key,
+            payload,
+            reply: None,
+        }
+    }
+
+    /// Specify reply type.
+    pub fn with_reply_type(mut self, reply: ReplyType) -> Self {
+        self.reply = Some(reply);
+        self
+    }
+
+    /// Serialize [`DatabaseStore`] into a byte vector.
+    pub fn build(self) -> BytesMut {
+        let reply = self.reply.unwrap_or(ReplyType::None);
+        let mut out = BytesMut::with_capacity(
+            DATABASE_KEY_SIZE
+                .saturating_add(1usize) // store type
+                .saturating_add(reply.serialized_len())
+                .saturating_add(self.payload.serialized_len()),
+        );
+
+        out.put_slice(&self.key);
+
+        match &self.payload {
+            DatabaseStorePayload::RouterInfo { .. } => todo!("database store not supported"),
+            DatabaseStorePayload::LeaseSet2 { .. } => out.put_u8(StoreType::LeaseSet2.as_u8()),
+        }
+
+        match reply {
+            ReplyType::None => {
+                out.put_u32(NO_REPLY);
+            }
+            ReplyType::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => {
+                out.put_u32(reply_token);
+                out.put_u32(*tunnel_id);
+                out.put_slice(&Into::<Vec<u8>>::into(router_id));
+            }
+            ReplyType::Router {
+                reply_token,
+                router_id,
+            } => {
+                out.put_u32(reply_token);
+                out.put_u32(NO_REPLY);
+                out.put_slice(&Into::<Vec<u8>>::into(router_id));
+            }
+        }
+
+        match self.payload {
+            DatabaseStorePayload::RouterInfo { .. } =>
+                todo!("database store with routerinfo not supported"),
+            DatabaseStorePayload::LeaseSet2 { leaseset } => {
+                out.put_slice(&leaseset.serialize());
+            }
+        }
+
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng, RngCore};
 
     #[test]
     fn parse_database_store() {
@@ -321,5 +436,83 @@ mod tests {
         ];
 
         let _ = DatabaseStore::parse(&buffer).unwrap();
+    }
+
+    #[test]
+    fn serialize_and_parse_store_with_no_reply() {
+        let leaseset = LeaseSet2::random();
+        let mut key = vec![0u8; 32];
+
+        rand::thread_rng().fill_bytes(&mut key);
+
+        let serialized = DatabaseStoreBuilder::new(
+            key.clone(),
+            DatabaseStorePayload::LeaseSet2 {
+                leaseset: leaseset.clone(),
+            },
+        )
+        .build();
+
+        let store = DatabaseStore::parse(&serialized).unwrap();
+
+        assert_eq!(store.key, key);
+        assert!(std::matches!(store.reply, ReplyType::None));
+
+        match store.payload {
+            DatabaseStorePayload::LeaseSet2 { leaseset: parsed } => assert!(parsed
+                .leases
+                .iter()
+                .zip(leaseset.leases.iter())
+                .all(|(lease1, lease2)| lease1 == lease2)),
+            _ => panic!("invalid payload"),
+        }
+    }
+
+    #[test]
+    fn serialize_and_parse_store_with_reply() {
+        let leaseset = LeaseSet2::random();
+        let mut key = vec![0u8; 32];
+        let reply_router = RouterId::random();
+
+        rand::thread_rng().fill_bytes(&mut key);
+
+        let serialized = DatabaseStoreBuilder::new(
+            key.clone(),
+            DatabaseStorePayload::LeaseSet2 {
+                leaseset: leaseset.clone(),
+            },
+        )
+        .with_reply_type(ReplyType::Tunnel {
+            reply_token: 0x13371338,
+            tunnel_id: TunnelId::from(0x13351336),
+            router_id: reply_router.clone(),
+        })
+        .build();
+
+        let store = DatabaseStore::parse(&serialized).unwrap();
+
+        assert_eq!(store.key, key);
+
+        match store.reply {
+            ReplyType::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => {
+                assert_eq!(reply_token, 0x13371338);
+                assert_eq!(tunnel_id, TunnelId::from(0x13351336));
+                assert_eq!(router_id, reply_router);
+            }
+            _ => panic!("invalid reply type"),
+        }
+
+        match store.payload {
+            DatabaseStorePayload::LeaseSet2 { leaseset: parsed } => assert!(parsed
+                .leases
+                .iter()
+                .zip(leaseset.leases.iter())
+                .all(|(lease1, lease2)| lease1 == lease2)),
+            _ => panic!("invalid payload"),
+        }
     }
 }
