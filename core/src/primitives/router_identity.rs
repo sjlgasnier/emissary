@@ -206,6 +206,11 @@ impl RouterIdentity {
     pub fn id(&self) -> RouterId {
         self.router.clone()
     }
+
+    /// Get serialized length of [`RouterIdentity`].
+    pub fn serialized_len(&self) -> usize {
+        core::mem::size_of::<RouterIdentitySerialized>()
+    }
 }
 
 #[cfg(test)]

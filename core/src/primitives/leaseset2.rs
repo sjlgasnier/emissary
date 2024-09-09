@@ -21,6 +21,7 @@ use crate::{
     primitives::{Mapping, RouterId, RouterIdentity, TunnelId, LOG_TARGET},
 };
 
+use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -67,20 +68,39 @@ impl LeaseSet2Header {
             },
         ))
     }
+
+    /// Get serialized length of [`LeaseSet2Header`].
+    pub fn serialized_len(&self) -> usize {
+        // destination + published + expires + flags
+        self.destination.serialized_len() + 4usize + 2usize + 2usize
+    }
+
+    /// Serialize [`LeaseSet2Header`] into a byte vector.
+    pub fn serialize(self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(self.serialized_len());
+
+        out.put_slice(&self.destination.serialize());
+        out.put_u32(self.published);
+        out.put_u16(self.expires.saturating_sub(self.published) as u16);
+        out.put_u16(0u16); // flags
+
+        out
+    }
 }
 
 /// Lease2
 ///
 /// https://geti2p.net/spec/common-structures#struct-lease2
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease2 {
     /// ID of the gateway router.
-    router_id: RouterId,
+    pub router_id: RouterId,
 
     /// ID of the tunnel gateway.
-    tunnel_id: TunnelId,
+    pub tunnel_id: TunnelId,
 
     /// When the lease expires.
-    expires: u32,
+    pub expires: u32,
 }
 
 impl Lease2 {
@@ -101,6 +121,23 @@ impl Lease2 {
             },
         ))
     }
+
+    /// Get serialized length of [`Lease2`].
+    pub fn serialized_len(&self) -> usize {
+        // router hash length + tunnel id + expiration
+        32usize + 4usize + 4usize
+    }
+
+    /// Serialize [`Leaset2`] into a byte vector.
+    pub fn serialize(self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(32usize + 4 + 4);
+
+        out.put_slice(&Into::<Vec<u8>>::into(self.router_id));
+        out.put_u32(*self.tunnel_id);
+        out.put_u32(self.expires);
+
+        out.freeze().to_vec()
+    }
 }
 
 /// LeaseSet2
@@ -108,13 +145,13 @@ impl Lease2 {
 /// https://geti2p.net/spec/common-structures#struct-leaseset2
 pub struct LeaseSet2 {
     /// Header.
-    header: LeaseSet2Header,
+    pub header: LeaseSet2Header,
 
     /// Public keys.
-    public_keys: Vec<StaticPublicKey>,
+    pub public_keys: Vec<StaticPublicKey>,
 
     /// Leases.
-    leases: Vec<Lease2>,
+    pub leases: Vec<Lease2>,
 }
 
 impl LeaseSet2 {
@@ -175,11 +212,11 @@ impl LeaseSet2 {
 
         let (rest, num_leases) = be_u8(rest)?;
 
-        if num_leases > 16 {
+        if num_leases > 16 || num_leases == 0 {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?num_leases,
-                "leaseset2 contains too many leases",
+                "invalid number of leases",
             );
 
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
@@ -215,11 +252,219 @@ impl LeaseSet2 {
             },
         ))
     }
+
+    /// Attempt to parse `input` into [`LeaseSet2`].
+    pub fn parse(input: &[u8]) -> Option<Self> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    /// Get serialized length of [`LeaseSet2`].
+    pub fn serialized_len(&self) -> usize {
+        // header + no options + public keys + leases
+        self.header.serialized_len()
+            + 2usize
+            + self.public_keys.iter().fold(0usize, |acc, _| acc + 32)
+            + self.leases.iter().fold(0usize, |acc, x| acc + x.serialized_len())
+            + 64usize // signature
+    }
+
+    /// Serialize [`LeaseSet2`] into a byte vector.
+    pub fn serialize(self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(self.serialized_len());
+
+        out.put_slice(&self.header.serialize());
+        out.put_u16(0u16); // no options
+        out.put_u8(self.public_keys.len() as u8);
+
+        self.public_keys.into_iter().for_each(|key| {
+            out.put_u16(4); // x25519
+            out.put_u16(32u16); // x25519 public key length
+            out.put_slice(key.as_ref());
+        });
+
+        out.put_u8(self.leases.len() as u8);
+
+        self.leases.into_iter().for_each(|lease| {
+            out.put_slice(&lease.serialize());
+        });
+
+        // TODO: fix signature
+        out.put_slice(&vec![0u8; 64]);
+
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::RngCore;
+
     use super::*;
+    use crate::{
+        crypto::StaticPrivateKey,
+        runtime::{mock::MockRuntime, Runtime},
+    };
+
+    #[test]
+    fn serialize_and_parse_leaset() {
+        let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let id = destination.id();
+
+        let (router1, tunnel1, expires1, lease1) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = MockRuntime::rng().next_u32();
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease2 {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let (router2, tunnel2, expires2, lease2) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = MockRuntime::rng().next_u32();
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease2 {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let mut serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                published: 1337,
+                expires: 2 * 1337,
+            },
+            public_keys: vec![sk.public()],
+            leases: vec![lease1.clone(), lease2.clone()],
+        }
+        .serialize();
+
+        let leaseset = LeaseSet2::parse(&serialized).unwrap();
+
+        assert_eq!(leaseset.public_keys.len(), 1);
+        assert_eq!(leaseset.public_keys[0].to_bytes(), sk.public().to_bytes());
+        assert_eq!(leaseset.leases.len(), 2);
+        assert_eq!(leaseset.leases[0], lease1);
+        assert_eq!(leaseset.leases[1], lease2);
+        assert_eq!(leaseset.header.destination.id(), id);
+    }
+
+    #[test]
+    fn serialize_and_parse_leaset_no_leasesets() {
+        let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+
+        let mut serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                published: 1337,
+                expires: 2 * 1337,
+            },
+            public_keys: vec![sk.public()],
+            leases: vec![],
+        }
+        .serialize();
+
+        assert!(LeaseSet2::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn serialize_and_parse_leaset_no_public_keys() {
+        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let id = destination.id();
+
+        let (router1, tunnel1, expires1, lease1) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = MockRuntime::rng().next_u32();
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease2 {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let (router2, tunnel2, expires2, lease2) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = MockRuntime::rng().next_u32();
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease2 {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let mut serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                published: 1337,
+                expires: 2 * 1337,
+            },
+            public_keys: vec![],
+            leases: vec![lease1.clone(), lease2.clone()],
+        }
+        .serialize();
+
+        assert!(LeaseSet2::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn serialize_and_parse_leaset_too_many_leases() {
+        let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let id = destination.id();
+
+        let leases = (0..17)
+            .map(|_| Lease2 {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::from(MockRuntime::rng().next_u32()),
+                expires: MockRuntime::rng().next_u32(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                published: 1337,
+                expires: 2 * 1337,
+            },
+            public_keys: vec![sk.public()],
+            leases,
+        }
+        .serialize();
+
+        assert!(LeaseSet2::parse(&serialized).is_none());
+    }
 
     #[test]
     fn parse_leaseset2() {
