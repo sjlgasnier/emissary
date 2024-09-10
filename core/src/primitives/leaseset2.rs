@@ -240,10 +240,22 @@ impl LeaseSet2 {
                 Err::Error(make_error(input, ErrorKind::Fail))
             })?;
 
-        // TODO: verify signature
-        let (rest, _signature) = take(64usize)(rest)?;
+        // verify signature
+        //
+        // TODO: really inefficient
+        let mut bytes = BytesMut::with_capacity(input.len() + 1);
+        bytes.put_u8(3u8);
+        bytes.put_slice(&input[..input.len()]);
 
-        debug_assert!(rest.is_empty());
+        header.destination.signing_key().verify(&bytes, rest).or_else(|error| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "invalid signature for leaseset2",
+            );
+
+            Err(Err::Error(make_error(input, ErrorKind::Fail)))
+        })?;
 
         Ok((
             rest,
