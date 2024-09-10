@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::SigningPrivateKey,
     i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
     primitives::{LeaseSet2, RouterId, RouterInfo, TunnelId},
 };
@@ -278,7 +279,7 @@ impl DatabaseStoreBuilder {
     }
 
     /// Serialize [`DatabaseStore`] into a byte vector.
-    pub fn build(self) -> BytesMut {
+    pub fn build(self, signing_key: &SigningPrivateKey) -> BytesMut {
         let reply = self.reply.unwrap_or(ReplyType::None);
         let mut out = BytesMut::with_capacity(
             DATABASE_KEY_SIZE
@@ -321,7 +322,7 @@ impl DatabaseStoreBuilder {
             DatabaseStorePayload::RouterInfo { .. } =>
                 todo!("database store with routerinfo not supported"),
             DatabaseStorePayload::LeaseSet2 { leaseset } => {
-                out.put_slice(&leaseset.serialize());
+                out.put_slice(&leaseset.serialize(signing_key));
             }
         }
 
@@ -440,7 +441,7 @@ mod tests {
 
     #[test]
     fn serialize_and_parse_store_with_no_reply() {
-        let leaseset = LeaseSet2::random();
+        let (leaseset, signing_key) = LeaseSet2::random();
         let mut key = vec![0u8; 32];
 
         rand::thread_rng().fill_bytes(&mut key);
@@ -451,7 +452,7 @@ mod tests {
                 leaseset: leaseset.clone(),
             },
         )
-        .build();
+        .build(&signing_key);
 
         let store = DatabaseStore::parse(&serialized).unwrap();
 
@@ -470,7 +471,7 @@ mod tests {
 
     #[test]
     fn serialize_and_parse_store_with_reply() {
-        let leaseset = LeaseSet2::random();
+        let (leaseset, siging_key) = LeaseSet2::random();
         let mut key = vec![0u8; 32];
         let reply_router = RouterId::random();
 
@@ -487,7 +488,7 @@ mod tests {
             tunnel_id: TunnelId::from(0x13351336),
             router_id: reply_router.clone(),
         })
-        .build();
+        .build(&siging_key);
 
         let store = DatabaseStore::parse(&serialized).unwrap();
 

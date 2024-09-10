@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::StaticPublicKey,
+    crypto::{SigningPrivateKey, StaticPublicKey},
     primitives::{Mapping, RouterId, RouterIdentity, TunnelId, LOG_TARGET},
 };
 
@@ -283,9 +283,10 @@ impl LeaseSet2 {
     }
 
     /// Serialize [`LeaseSet2`] into a byte vector.
-    pub fn serialize(self) -> BytesMut {
-        let mut out = BytesMut::with_capacity(self.serialized_len());
+    pub fn serialize(self, signing_key: &SigningPrivateKey) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(self.serialized_len() + 1); // + 1 for signature
 
+        out.put_u8(3u8); // leaset2
         out.put_slice(&self.header.serialize());
         out.put_u16(0u16); // no options
         out.put_u8(self.public_keys.len() as u8);
@@ -302,14 +303,14 @@ impl LeaseSet2 {
             out.put_slice(&lease.serialize());
         });
 
-        // TODO: fix signature
-        out.put_slice(&vec![0u8; 64]);
+        let signature = signing_key.sign(&out[..out.len()]);
+        out.put_slice(&signature);
 
-        out
+        out[1..].to_vec()
     }
 
     #[cfg(test)]
-    pub fn random() -> LeaseSet2 {
+    pub fn random() -> (LeaseSet2, SigningPrivateKey) {
         use crate::crypto::StaticPrivateKey;
         use rand::{Rng, RngCore};
 
@@ -321,14 +322,18 @@ impl LeaseSet2 {
             sk.public()
         };
 
-        let destination = {
+        let (destination, signing_private_key) = {
             let mut static_key = [0u8; 32];
             let mut signing_key = [0u8; 32];
 
             rng.fill_bytes(&mut static_key);
             rng.fill_bytes(&mut signing_key);
 
-            RouterIdentity::from_keys(static_key.to_vec(), signing_key.to_vec()).unwrap()
+            (
+                RouterIdentity::from_keys(static_key.to_vec(), signing_key.clone().to_vec())
+                    .unwrap(),
+                SigningPrivateKey::new(&signing_key).unwrap(),
+            )
         };
 
         let mut leases = (0..rng.gen_range(1..16))
@@ -348,15 +353,18 @@ impl LeaseSet2 {
         let published = rng.next_u32();
         let expires = rng.next_u32() / 10;
 
-        LeaseSet2 {
-            header: LeaseSet2Header {
-                destination,
-                published,
-                expires: published + expires,
+        (
+            LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination,
+                    published,
+                    expires: published + expires,
+                },
+                public_keys: vec![public_key],
+                leases,
             },
-            public_keys: vec![public_key],
-            leases,
-        }
+            signing_private_key,
+        )
     }
 }
 
@@ -373,6 +381,7 @@ mod tests {
     #[test]
     fn serialize_and_parse_leaset() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
         let id = destination.id();
 
@@ -419,7 +428,7 @@ mod tests {
             public_keys: vec![sk.public()],
             leases: vec![lease1.clone(), lease2.clone()],
         }
-        .serialize();
+        .serialize(&sgk);
 
         let leaseset = LeaseSet2::parse(&serialized).unwrap();
 
@@ -434,6 +443,7 @@ mod tests {
     #[test]
     fn serialize_and_parse_leaset_no_leasesets() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
 
         let mut serialized = LeaseSet2 {
@@ -445,13 +455,14 @@ mod tests {
             public_keys: vec![sk.public()],
             leases: vec![],
         }
-        .serialize();
+        .serialize(&sgk);
 
         assert!(LeaseSet2::parse(&serialized).is_none());
     }
 
     #[test]
     fn serialize_and_parse_leaset_no_public_keys() {
+        let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
         let id = destination.id();
 
@@ -498,19 +509,21 @@ mod tests {
             public_keys: vec![],
             leases: vec![lease1.clone(), lease2.clone()],
         }
-        .serialize();
+        .serialize(&sgk);
 
         assert!(LeaseSet2::parse(&serialized).is_none());
     }
 
     #[test]
     fn serialize_and_parse_random() {
-        assert!(LeaseSet2::parse(&LeaseSet2::random().serialize()).is_some());
+        let (random, signing_key) = LeaseSet2::random();
+        assert!(LeaseSet2::parse(&random.serialize(&signing_key)).is_some());
     }
 
     #[test]
     fn serialize_and_parse_leaset_too_many_leases() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
         let id = destination.id();
 
@@ -531,7 +544,7 @@ mod tests {
             public_keys: vec![sk.public()],
             leases,
         }
-        .serialize();
+        .serialize(&sgk);
 
         assert!(LeaseSet2::parse(&serialized).is_none());
     }
