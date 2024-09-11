@@ -36,6 +36,54 @@ const LOG_TARGET: &str = "emissary::session::context";
 /// Noise protocol name.
 const PROTOCOL_NAME: &str = "Noise_IKelg2+hs2_25519_ChaChaPoly_SHA256";
 
+/// Session tag entry.
+pub struct TagSetEntry {
+    /// Index.
+    index: usize,
+
+    /// Session tag.
+    tag: Bytes,
+
+    /// Session key.
+    key: StaticPrivateKey,
+}
+
+/// Tag set.
+///
+/// https://geti2p.net/spec/ecies#sample-implementation
+pub struct TagSet {}
+
+impl TagSet {
+    /// Create new [`TagSet`].
+    pub fn new(key: StaticPrivateKey, num_tags: usize) -> Self {
+        Self {}
+    }
+
+    /// Extend [`TagSet`] with `num_tags` many tags.
+    pub fn extend(&mut self, num_tags: usize) {}
+
+    /// Remove tags and keys that are too old.
+    pub fn expire(&mut self) {}
+
+    /// Calculate next session tag based on the previous session tag.
+    pub fn ratchet_tag(&mut self) {}
+
+    /// Calculate next session key based on the previouis session key.
+    pub fn ratchet_key(&mut self) {}
+
+    /// Get next [`TagSetEntry`].
+    ///
+    /// Returns `None` if all tags have been used.
+    pub fn next_entry(&mut self) -> Option<TagSetEntry> {
+        None
+    }
+
+    /// Get session key for for a session `tag`.
+    pub fn session_key(&mut self, tag: Bytes) -> Option<StaticPrivateKey> {
+        None
+    }
+}
+
 /// Outbound session.
 pub struct OutboundSession {
     /// AEAD state.
