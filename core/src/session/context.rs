@@ -241,7 +241,12 @@ impl<R: Runtime> KeyContext<R> {
             Bytes::from(Sha256::new().update(&state).update(&payload_ciphertext).finalize());
 
         let payload = {
-            let mut out = BytesMut::with_capacity(32 + 32 + 16 + 128 + 16);
+            let mut out = BytesMut::with_capacity(
+                representative
+                    .len()
+                    .saturating_add(static_key_ciphertext.len())
+                    .saturating_add(payload_ciphertext.len()),
+            );
             out.put_slice(&representative);
             out.put_slice(&static_key_ciphertext);
             out.put_slice(&payload_ciphertext);
