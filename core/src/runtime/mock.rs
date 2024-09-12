@@ -21,6 +21,10 @@ use crate::runtime::{
     Runtime, TcpListener, TcpStream,
 };
 
+use flate2::{
+    write::{GzDecoder, GzEncoder},
+    Compression,
+};
 use futures::{future::BoxFuture, Stream};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -31,6 +35,7 @@ use std::{
     borrow::Borrow,
     collections::HashMap,
     future::{pending, Future},
+    io::Write,
     marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
@@ -266,5 +271,19 @@ impl Runtime for MockRuntime {
     /// Return future which blocks for `duration` before returning.
     fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
         tokio::time::sleep(duration)
+    }
+
+    fn gzip_compress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(bytes.as_ref()).ok()?;
+
+        e.finish().ok()
+    }
+
+    fn gzip_decompress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+        let mut e = GzDecoder::new(Vec::new());
+        e.write_all(bytes.as_ref()).ok()?;
+
+        e.finish().ok()
     }
 }

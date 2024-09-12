@@ -29,7 +29,6 @@ use nom::{
     number::complete::{be_u16, be_u32, be_u8},
     Err, IResult,
 };
-use zune_inflate::DeflateDecoder;
 
 use alloc::vec::Vec;
 

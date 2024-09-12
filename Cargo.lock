@@ -668,6 +668,7 @@ dependencies = [
  "data-encoding",
  "ecb",
  "ed25519-dalek",
+ "flate2",
  "futures-channel",
  "futures-util",
  "hashbrown",
@@ -689,7 +690,6 @@ dependencies = [
  "x25519-dalek",
  "zerocopy",
  "zeroize",
- "zune-inflate",
 ]
 
 [[package]]
@@ -700,6 +700,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "emissary-core",
+ "flate2",
  "futures",
  "home",
  "metrics",
@@ -2647,9 +2648,3 @@ dependencies = [
  "memchr",
  "thiserror",
 ]
-
-[[package]]
-name = "zune-inflate"
-version = "0.2.54"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73ab332fe2f6680068f3582b16a24f90ad7096d5d39b974d1c0aff0125116f02"

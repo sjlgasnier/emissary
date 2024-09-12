@@ -16,10 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use core::marker::PhantomData;
+
 use crate::{
     crypto::SigningPrivateKey,
     i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
     primitives::{LeaseSet2, RouterId, RouterInfo, TunnelId},
+    runtime::Runtime,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -29,7 +32,6 @@ use nom::{
     number::complete::{be_u16, be_u32, be_u8},
     Err, IResult,
 };
-use zune_inflate::DeflateDecoder;
 
 use alloc::vec::Vec;
 
@@ -146,7 +148,7 @@ impl DatabaseStorePayload {
 }
 
 /// Database store message.
-pub struct DatabaseStore {
+pub struct DatabaseStore<R: Runtime> {
     /// Search key.
     pub key: Vec<u8>,
 
@@ -155,9 +157,12 @@ pub struct DatabaseStore {
 
     /// Reply type.
     pub reply: ReplyType,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
 }
 
-impl DatabaseStore {
+impl<R: Runtime> DatabaseStore<R> {
     /// Attempt to parse [`DatabaseStore`] from `input`.
     ///
     /// Returns the parsed message and rest of `input` on success.
@@ -199,11 +204,9 @@ impl DatabaseStore {
                 let (rest, size) = be_u16(rest)?;
                 let (rest, data) = take(size)(rest)?;
 
-                let mut decoder = DeflateDecoder::new(&data);
-                let data = decoder.decode_gzip().map_err(|error| {
+                let data = R::gzip_decompress(data).ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
-                        ?error,
                         "failed to decompress gzip",
                     );
 
@@ -225,6 +228,7 @@ impl DatabaseStore {
                         key: key.to_vec(),
                         payload: DatabaseStorePayload::RouterInfo { router_info },
                         reply,
+                        _runtime: Default::default(),
                     },
                 ))
             }
@@ -237,6 +241,7 @@ impl DatabaseStore {
                         key: key.to_vec(),
                         payload: DatabaseStorePayload::LeaseSet2 { leaseset },
                         reply,
+                        _runtime: Default::default(),
                     },
                 ))
             }
@@ -333,6 +338,7 @@ impl DatabaseStoreBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{mock::MockRuntime, Runtime};
     use rand::{Rng, RngCore};
 
     #[test]
@@ -378,7 +384,7 @@ mod tests {
             26, 246, 141, 69, 9, 132, 119, 99, 190, 128, 2, 0, 0,
         ];
 
-        let _ = DatabaseStore::parse(&buffer).unwrap();
+        let _ = DatabaseStore::<MockRuntime>::parse(&buffer).unwrap();
     }
 
     #[test]
@@ -436,7 +442,7 @@ mod tests {
             46, 214, 11,
         ];
 
-        let _ = DatabaseStore::parse(&buffer).unwrap();
+        let _ = DatabaseStore::<MockRuntime>::parse(&buffer).unwrap();
     }
 
     #[test]
@@ -454,7 +460,7 @@ mod tests {
         )
         .build(&signing_key);
 
-        let store = DatabaseStore::parse(&serialized).unwrap();
+        let store = DatabaseStore::<MockRuntime>::parse(&serialized).unwrap();
 
         assert_eq!(store.key, key);
         assert!(std::matches!(store.reply, ReplyType::None));
@@ -490,7 +496,7 @@ mod tests {
         })
         .build(&siging_key);
 
-        let store = DatabaseStore::parse(&serialized).unwrap();
+        let store = DatabaseStore::<MockRuntime>::parse(&serialized).unwrap();
 
         assert_eq!(store.key, key);
 
