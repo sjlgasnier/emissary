@@ -18,6 +18,7 @@
 
 use crate::runtime::Runtime;
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 /// Gzip-encoder builder.

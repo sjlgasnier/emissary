@@ -28,6 +28,7 @@ use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use rand_core::RngCore;
 use x25519_dalek::PublicKey;
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 /// Logging target for the file.
@@ -126,8 +127,6 @@ impl<R: Runtime> KeyContext<R> {
         let outbound_state = Sha256::new().update(&chaining_key).finalize();
         let inbound_state =
             Sha256::new().update(&outbound_state).update(public_key.to_bytes()).finalize();
-
-        println!("inbound state: {inbound_state:?}");
 
         Self {
             chaining_key: Bytes::from(chaining_key),
@@ -266,9 +265,6 @@ impl<R: Runtime> KeyContext<R> {
 
         let state = Sha256::new().update(&self.inbound_state).update(&public_key).finalize();
         let shared = self.private_key.diffie_hellman(&public_key);
-
-        println!("create_inbound_session(): state  {state:?}");
-        println!("create_inbound_session(): shared {shared:?}");
     }
 }
 
