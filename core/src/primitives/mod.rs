@@ -19,6 +19,7 @@
 use core::{fmt, ops::Deref};
 
 pub use date::Date;
+pub use destination::Destination;
 pub use leaseset2::{Lease2, LeaseSet2, LeaseSet2Header};
 pub use mapping::Mapping;
 pub use router_address::{RouterAddress, TransportKind};
@@ -27,6 +28,7 @@ pub use router_info::RouterInfo;
 pub use string::Str;
 
 mod date;
+mod destination;
 mod leaseset2;
 mod mapping;
 mod router_address;
