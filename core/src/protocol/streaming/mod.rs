@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::runtime::Runtime;
+use crate::{primitives::RouterIdentity, runtime::Runtime};
 
 use bytes::{BufMut, BytesMut};
 use rand_core::RngCore;
@@ -33,7 +33,7 @@ pub struct Stream<R: Runtime> {
 }
 
 impl<R: Runtime> Stream<R> {
-    pub fn new_outbound() -> (Self, BytesMut) {
+    pub fn new_outbound(destination: RouterIdentity) -> (Self, BytesMut) {
         let mut payload = "GET / HTTP/1.1\r\n\n".as_bytes();
         let mut out = BytesMut::with_capacity(payload.len() + 22);
 
@@ -48,8 +48,10 @@ impl<R: Runtime> Stream<R> {
 
         // TODO: signature
         out.put_u8(10u8); // resend delay, in seconds
-        out.put_u16(1u16); // flags: syn
-        out.put_u16(0u16); // options
+        out.put_u16(0x1 | 0x20); // flags: `SYN` + `FROM_INCLUDED`
+
+        out.put_u16(destination.serialized_len() as u16);
+        out.put_slice(&destination.serialize());
         out.put_slice(&payload);
 
         (
