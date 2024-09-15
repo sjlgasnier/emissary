@@ -424,7 +424,7 @@ impl<'a> GarlicMessageBuilder<'a> {
             match clove {
                 GarlicMessageBlock::DateTime { timestamp } => {
                     out.put_u8(GarlicMessageType::DateTime.as_u8());
-                    out.put_u16(4u16);
+                    out.put_u16(4u16); // size of `timestamp`
                     out.put_u32(timestamp);
                 }
                 GarlicMessageBlock::GarlicClove {
@@ -435,6 +435,7 @@ impl<'a> GarlicMessageBuilder<'a> {
                     message_body,
                 } => {
                     out.put_u8(GarlicMessageType::GarlicClove.as_u8());
+                    // TODO: no hardcoded constants without comments
                     out.put_u16(
                         (delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len())
                             as u16,
@@ -450,15 +451,5 @@ impl<'a> GarlicMessageBuilder<'a> {
         }
 
         out.freeze().to_vec()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn serialize_deserialize_garlic_message() {
-        todo!();
     }
 }

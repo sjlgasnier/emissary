@@ -17,24 +17,40 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2np::{Message, MessageType},
+    crypto::{base32_decode, base64_decode, SigningPrivateKey, StaticPrivateKey},
+    i2np::{
+        database::{
+            lookup::{DatabaseLookupBuilder, LookupType},
+            store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStorePayload},
+        },
+        garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder},
+        Message, MessageBuilder, MessageType,
+    },
     netdb::{dht::Dht, metrics::*},
-    primitives::{RouterId, RouterInfo},
+    primitives::{
+        Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterId, RouterIdentity, RouterInfo,
+    },
+    protocol::{streaming::Stream, Protocol},
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
+    session::{KeyContext, OutboundSession},
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::TunnelPoolHandle,
+    util::gzip::GzipEncoderBuilder,
 };
 
+use bytes::{BufMut, BytesMut};
 use futures::{FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use rand_core::RngCore;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 mod bucket;
@@ -78,6 +94,11 @@ pub struct NetDb<R: Runtime> {
 
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
+
+    key: Vec<u8>,
+    timer: futures::future::BoxFuture<'static, ()>,
+    local_router_id: RouterId,
+    key_context: KeyContext<R>,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -103,9 +124,16 @@ impl<R: Runtime> NetDb<R> {
             "starting netdb",
         );
 
+        let key = "larnrirsp5fikx7n6fg3aczdxrurt5nyaaleqo4vqmnuo3xd5qeq";
+        let key = base32_decode(&key).unwrap();
+
         Self {
+            key_context: KeyContext::new(),
+            dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
             exploratory_pool_handle,
-            dht: Dht::new(local_router_id, floodfills, metrics.clone()),
+            timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
+            local_router_id,
+            key,
             metrics,
             routers: HashMap::new(),
             router_storage,
@@ -188,7 +216,112 @@ impl<R: Runtime> NetDb<R> {
     fn on_message(&mut self, message: Message) {
         match message.message_type {
             MessageType::DatabaseStore => {
+                let DatabaseStore {
+                    key,
+                    payload,
+                    reply,
+                    ..
+                } = DatabaseStore::<R>::parse(&message.payload).unwrap();
+
                 tracing::trace!("database store");
+
+                let leaseset = match payload {
+                    DatabaseStorePayload::RouterInfo { router_info } => {
+                        tracing::warn!("ignore routerinfo");
+                        return;
+                    }
+                    DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
+                };
+
+                tracing::info!("leases = {:?}", leaseset.leases);
+                tracing::info!("public keys = {:?}", leaseset.public_keys);
+
+                let lease = self.exploratory_pool_handle.lease().expect("to succeed");
+
+                let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+                let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+                let sk = StaticPrivateKey::new(&mut R::rng());
+
+                let local_leaseset = LeaseSet2 {
+                    header: LeaseSet2Header {
+                        destination: destination.clone(),
+                        published: R::time_since_epoch().as_secs() as u32,
+                        expires: (R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs()
+                            as u32,
+                    },
+                    public_keys: vec![sk.public()],
+                    leases: vec![lease],
+                };
+
+                let database_store = DatabaseStoreBuilder::new(
+                    Into::<Vec<u8>>::into(local_leaseset.header.destination.id()),
+                    DatabaseStorePayload::LeaseSet2 {
+                        leaseset: local_leaseset,
+                    },
+                )
+                .build(&signing_key);
+
+                tracing::error!("database_store: {database_store:?}");
+
+                let (stream, payload) = Stream::<R>::new_outbound(destination);
+
+                let mut payload = GarlicMessageBuilder::new()
+                    .with_date_time(R::time_since_epoch().as_secs() as u32)
+                    .with_garlic_clove(
+                        MessageType::DatabaseStore,
+                        MessageId::from(R::rng().next_u32()),
+                        (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                        GarlicDeliveryInstructions::Local,
+                        &database_store,
+                    )
+                    .with_garlic_clove(
+                        MessageType::Data,
+                        MessageId::from(R::rng().next_u32()),
+                        (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                        GarlicDeliveryInstructions::Local,
+                        &{
+                            let payload = GzipEncoderBuilder::<R>::new(&payload)
+                                .with_source_port(0)
+                                .with_destination_port(0)
+                                .with_protocol(Protocol::Streaming.as_u8())
+                                .build()
+                                .unwrap();
+
+                            let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                            out.put_u32(payload.len() as u32);
+                            out.put_slice(&payload);
+
+                            out.freeze().to_vec()
+                        },
+                    )
+                    .build();
+
+                let (session, payload) = self
+                    .key_context
+                    .create_oubound_session(leaseset.public_keys.get(0).unwrap().clone(), &payload);
+
+                let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
+                payload_new.put_u32(payload.len() as u32);
+                payload_new.put_slice(&payload);
+                let payload = payload_new.freeze().to_vec();
+
+                let payload = MessageBuilder::standard()
+                    .with_expiration((R::time_since_epoch() + Duration::from_secs(10)).as_secs())
+                    .with_message_id(R::rng().next_u32())
+                    .with_message_type(MessageType::Garlic)
+                    .with_payload(&payload)
+                    .build();
+
+                let Lease2 {
+                    router_id,
+                    tunnel_id,
+                    ..
+                } = leaseset.leases[0].clone();
+
+                self.exploratory_pool_handle.send_to_tunnel(router_id, tunnel_id, payload);
+
+                tracing::error!("message sent!");
             }
             MessageType::DatabaseLookup => {
                 tracing::trace!("database lookup");
@@ -209,6 +342,37 @@ impl<R: Runtime> Future for NetDb<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(_) = self.timer.poll_unpin(cx) {
+            let key = self.key.clone();
+            let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+
+            let message =
+                DatabaseLookupBuilder::new(key, self.local_router_id.clone(), LookupType::Leaseset)
+                    .build();
+
+            let message_id = R::rng().next_u32();
+            let message = MessageBuilder::short()
+                .with_expiration(
+                    (R::time_since_epoch() + core::time::Duration::from_secs(8)).as_secs(),
+                )
+                .with_message_type(MessageType::DatabaseLookup)
+                .with_message_id(message_id)
+                .with_payload(&message)
+                .build();
+
+            tracing::error!(
+                ?message_id,
+                "send query to closest floodfills = {floodfills:?}"
+            );
+
+            if let Err(error) = self.service.send(&floodfills[0], message) {
+                tracing::error!("failed to send message");
+            }
+
+            self.timer = Box::pin(R::delay(core::time::Duration::from_secs(15)));
+            let _ = self.timer.poll_unpin(cx);
+        }
+
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
