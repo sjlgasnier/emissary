@@ -18,3 +18,39 @@
 
 pub mod datagram;
 pub mod streaming;
+
+/// Protocol type.
+pub enum Protocol {
+    /// Streaming protocol.
+    Streaming,
+
+    /// Repliable datagrams.
+    Datagram,
+
+    /// Raw datagrams.
+    Anonymous,
+}
+
+impl Protocol {
+    /// Attempt to convert `protocol` into [`Protocol`].
+    pub fn from_u8(protocol: u8) -> Option<Self> {
+        match protocol {
+            6u8 => Some(Self::Streaming),
+            17u8 => Some(Self::Datagram),
+            18u8 => Some(Self::Anonymous),
+            _ => {
+                tracing::warn!(?protocol, "unknown i2cp protocol");
+                None
+            }
+        }
+    }
+
+    /// Serialize [`Protocol`].
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Streaming => 6u8,
+            Self::Datagram => 17u8,
+            Self::Anonymous => 18u8,
+        }
+    }
+}
