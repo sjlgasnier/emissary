@@ -139,7 +139,18 @@ impl TunnelPoolHandle {
 
                         message_id
                     }
-                    (None, TunnelPoolKind::Client(tx)) => todo!(),
+                    (None, TunnelPoolKind::Client(tx)) => {
+                        return tx.try_send(message).map_err(|error| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?message_id,
+                                ?error,
+                                "failed to route garlic message to client destination",
+                            );
+
+                            error.into()
+                        });
+                    }
                     (None, TunnelPoolKind::Exploratory) => {
                         tracing::warn!(
                             target: LOG_TARGET,

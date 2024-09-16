@@ -18,7 +18,7 @@
 
 use crate::{
     error::{ChannelError, Error},
-    i2np::{MessageBuilder, MessageType},
+    i2np::{Message, MessageBuilder, MessageType},
     primitives::{Lease2, MessageId, RouterId, TunnelId},
     runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
     tunnel::{
@@ -107,7 +107,7 @@ pub enum TunnelPoolKind {
     Exploratory,
 
     /// Client tunnel pool.
-    Client(mpsc::Sender<()>),
+    Client(mpsc::Sender<Message>),
 }
 
 /// Tunnel pool configuration.
