@@ -28,7 +28,9 @@ use crate::{
         garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         noise::NoiseContext,
-        pool::{ExploratorySelector, TunnelPool, TunnelPoolConfig, TunnelPoolContext},
+        pool::{
+            ExploratorySelector, TunnelPool, TunnelPoolConfig, TunnelPoolContext, TunnelPoolKind,
+        },
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -152,7 +154,7 @@ impl<R: Runtime> TunnelManager<R> {
         //
         // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
         let pool_handle = {
-            let (pool_context, pool_handle) = TunnelPoolContext::new();
+            let (pool_context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
             let selector = ExploratorySelector::new(router_storage.clone(), pool_handle.clone());
 
             R::spawn(TunnelPool::<R, _>::new(

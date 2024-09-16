@@ -48,6 +48,7 @@ use futures::{
 use hashbrown::{HashMap, HashSet};
 use listener::ReceiveKind;
 use rand_core::RngCore;
+use thingbuf::mpsc;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::{
@@ -91,6 +92,23 @@ const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 /// tunnels of that type. Start building a new tunnel to replace to old one 2 minutes before the old
 /// tunnel expires.
 const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+
+/// Tunnel pool kind.
+///
+/// There are two different kinds of tunnel pools:
+///  * exploratory tunnel pool
+///  * client tunnel pools
+///
+/// The distinction is made as client tunnel pools are crated for destinations and inbound tunnels
+/// of those pools must be able to route garlic cloves to the installed destination.
+#[derive(Clone)]
+pub enum TunnelPoolKind {
+    /// Exploratory tunnel pool.
+    Exploratory,
+
+    /// Client tunnel pool.
+    Client(mpsc::Sender<()>),
+}
 
 /// Tunnel pool configuration.
 pub struct TunnelPoolConfig {
@@ -933,7 +951,7 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1011,7 +1029,7 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1084,7 +1102,7 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1162,7 +1180,7 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1237,8 +1255,9 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
-        let (client_context, client_pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let (client_context, client_pool_handle) =
+            TunnelPoolContext::new(TunnelPoolKind::Exploratory);
         let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
         let client_selector = ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
 
@@ -1433,8 +1452,9 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
-        let (client_context, client_pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let (client_context, client_pool_handle) =
+            TunnelPoolContext::new(TunnelPoolKind::Exploratory);
         let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
         let client_selector = ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
 
@@ -1627,7 +1647,7 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1710,7 +1730,7 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1791,7 +1811,7 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
@@ -1959,7 +1979,7 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new();
+        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
 
         let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
             pool_config,
