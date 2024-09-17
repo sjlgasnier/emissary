@@ -35,7 +35,7 @@ pub struct Stream<R: Runtime> {
 impl<R: Runtime> Stream<R> {
     pub fn new_outbound(destination: RouterIdentity) -> (Self, BytesMut) {
         let mut payload = "GET / HTTP/1.1\r\n\n".as_bytes();
-        let mut out = BytesMut::with_capacity(payload.len() + 22);
+        let mut out = BytesMut::with_capacity(payload.len() + 22 + destination.serialized_len());
 
         let recv_stream_id = R::rng().next_u32();
         let seq_nro = 0u32;
