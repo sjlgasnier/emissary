@@ -124,7 +124,8 @@ impl<R: Runtime> TunnelManager<R> {
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
-    ) -> (Self, TunnelPoolHandle) {
+        // TODO: remove
+    ) -> (Self, TunnelPoolHandle, thingbuf::mpsc::Receiver<Message>) {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",
@@ -150,11 +151,17 @@ impl<R: Runtime> TunnelManager<R> {
             metrics_handle.clone(),
         ));
 
+        // TODO: remove
+        let (tx, rx) = thingbuf::mpsc::channel(64);
+
         // start exploratory tunnel pool
         //
         // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
         let pool_handle = {
-            let (pool_context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+            // TODO: convert back to `Exploratory`
+            // let (pool_context, pool_handle) =
+            // TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+            let (pool_context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Client(tx));
             let selector = ExploratorySelector::new(router_storage.clone(), pool_handle.clone());
 
             R::spawn(TunnelPool::<R, _>::new(
@@ -182,6 +189,8 @@ impl<R: Runtime> TunnelManager<R> {
                 service,
             },
             pool_handle,
+            // TODO: remove
+            rx,
         )
     }
 

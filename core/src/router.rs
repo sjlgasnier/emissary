@@ -107,9 +107,9 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         //
         // acquire handle to exploratory tunnel pool which is given to `NetDb`
-        let exploratory_pool_handle = {
+        let (exploratory_pool_handle, rx) = {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
-            let (tunnel_manager, pool_handle) = TunnelManager::<R>::new(
+            let (tunnel_manager, pool_handle, rx) = TunnelManager::<R>::new(
                 transport_service,
                 local_router_info.clone(), // TODO: should be cheap
                 local_key,
@@ -119,7 +119,7 @@ impl<R: Runtime> Router<R> {
 
             R::spawn(tunnel_manager);
 
-            pool_handle
+            (pool_handle, rx)
         };
 
         // initialize and start netdb
@@ -131,6 +131,7 @@ impl<R: Runtime> Router<R> {
                 router_storage.clone(),
                 metrics_handle.clone(),
                 exploratory_pool_handle,
+                rx,
             );
 
             R::spawn(netdb);

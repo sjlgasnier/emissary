@@ -48,11 +48,13 @@ impl<R: Runtime> Stream<R> {
 
         // TODO: signature
         out.put_u8(10u8); // resend delay, in seconds
-        out.put_u16(0x1 | 0x20); // flags: `SYN` + `FROM_INCLUDED`
+        out.put_u16(0x01 | 0x20); // flags: `SYN` + `FROM_INCLUDED`
 
         out.put_u16(destination.serialized_len() as u16);
         out.put_slice(&destination.serialize());
         out.put_slice(&payload);
+
+        // out.put_u16(0x01 | 0x03 | 0x20); // flags: `SYN` + `SIGNATURE_INCLUDED` + `FROM_INCLUDED`
 
         (
             Self {

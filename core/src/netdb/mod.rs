@@ -40,10 +40,11 @@ use crate::{
     util::gzip::GzipEncoderBuilder,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
+use thingbuf::mpsc;
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
@@ -99,6 +100,8 @@ pub struct NetDb<R: Runtime> {
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
     key_context: KeyContext<R>,
+    rx: mpsc::Receiver<Message>,
+    tmp: Option<(OutboundSession, Stream<R>)>,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -109,6 +112,7 @@ impl<R: Runtime> NetDb<R> {
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
+        rx: mpsc::Receiver<Message>,
     ) -> Self {
         let floodfills = router_storage
             .routers()
@@ -138,6 +142,8 @@ impl<R: Runtime> NetDb<R> {
             routers: HashMap::new(),
             router_storage,
             service,
+            rx,
+            tmp: None,
         }
     }
 
@@ -240,7 +246,7 @@ impl<R: Runtime> NetDb<R> {
 
                 let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
                 let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
-                let sk = StaticPrivateKey::new(&mut R::rng());
+                let sk = StaticPrivateKey::from([0u8; 32]);
 
                 let local_leaseset = LeaseSet2 {
                     header: LeaseSet2Header {
@@ -278,7 +284,7 @@ impl<R: Runtime> NetDb<R> {
                         MessageType::Data,
                         MessageId::from(R::rng().next_u32()),
                         (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                        GarlicDeliveryInstructions::Local,
+                        GarlicDeliveryInstructions::Destination { hash: &self.key },
                         &{
                             let payload = GzipEncoderBuilder::<R>::new(&payload)
                                 .with_source_port(0)
@@ -320,6 +326,7 @@ impl<R: Runtime> NetDb<R> {
                 } = leaseset.leases[0].clone();
 
                 self.exploratory_pool_handle.send_to_tunnel(router_id, tunnel_id, payload);
+                self.tmp = Some((session, stream));
 
                 tracing::error!("message sent!");
             }
@@ -335,6 +342,12 @@ impl<R: Runtime> NetDb<R> {
                 "unsupported message",
             ),
         }
+    }
+
+    fn handle_garlic_response(&mut self, message: Message) {
+        let garlic_tag = Bytes::from(message.payload[..8].to_vec());
+
+        tracing::info!("garlic tag = {garlic_tag:?}");
     }
 }
 
@@ -371,6 +384,14 @@ impl<R: Runtime> Future for NetDb<R> {
 
             self.timer = Box::pin(R::delay(core::time::Duration::from_secs(15)));
             let _ = self.timer.poll_unpin(cx);
+        }
+
+        loop {
+            match self.rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(message)) => self.handle_garlic_response(message),
+            }
         }
 
         loop {

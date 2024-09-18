@@ -214,7 +214,7 @@ impl SubsystemHandle {
                 .try_send(InnerSubsystemEvent::I2Np {
                     messages: netdb_messages,
                 })
-                .map_err(|_| Error::NotSupported)
+                .map_err(|error| Error::NotSupported)
                 .unwrap();
         }
 
