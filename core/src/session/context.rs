@@ -209,7 +209,7 @@ impl<R: Runtime> KeyContext<R> {
         let state = Sha256::new().update(&state).update(&static_key_ciphertext).finalize();
 
         // encrypt payload section
-        let payload_ciphertext = {
+        let (chaining_key, payload_ciphertext) = {
             let shared = self.private_key.diffie_hellman(&pubkey);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
             let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
@@ -234,7 +234,7 @@ impl<R: Runtime> KeyContext<R> {
                 .encrypt_with_ad_new(&state, &mut payload)
                 .expect("to succeed");
 
-            payload
+            (chaining_key, payload)
         };
 
         // state for new session reply kdf
@@ -254,6 +254,31 @@ impl<R: Runtime> KeyContext<R> {
 
             out.freeze().to_vec()
         };
+
+        // tagset key
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let tagset_key =
+            Hmac::new(&temp_key).update(&b"SessionReplyTags").update(&[0x01]).finalize();
+
+        // DH_INITIALIZE (chaining key, tagset key)
+        let mut temp_key = Hmac::new(&chaining_key).update(&tagset_key).finalize();
+        let next_root_key =
+            Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
+        let chaining_key = Hmac::new(&temp_key)
+            .update(&next_root_key)
+            .update(&b"KDFDHRatchetStep")
+            .update(&[0x02])
+            .finalize();
+
+        // tagset key
+        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let session_tag_ck =
+            Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
+        let symmetric_key_ck = Hmac::new(&temp_key)
+            .update(&session_tag_ck)
+            .update(&b"TagAndKeyGenKeys")
+            .update(&[0x02])
+            .finalize();
 
         (OutboundSession { state }, payload)
     }
