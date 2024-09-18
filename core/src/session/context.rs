@@ -270,13 +270,21 @@ impl<R: Runtime> KeyContext<R> {
             .update(&[0x02])
             .finalize();
 
-        // tagset key
         let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
         let session_tag_ck =
             Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
         let symmetric_key_ck = Hmac::new(&temp_key)
             .update(&session_tag_ck)
             .update(&b"TagAndKeyGenKeys")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&session_tag_ck).update(&[]).finalize();
+        let session_key_data =
+            Hmac::new(&temp_key).update(&b"STInitialization").update(&[0x01]).finalize();
+        let session_tag_constant = Hmac::new(&temp_key)
+            .update(&session_key_data)
+            .update(&b"STInitialization")
             .update(&[0x02])
             .finalize();
 
