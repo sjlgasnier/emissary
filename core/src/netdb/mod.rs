@@ -41,6 +41,7 @@ use crate::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
+use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use futures::{FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
@@ -345,9 +346,9 @@ impl<R: Runtime> NetDb<R> {
     }
 
     fn handle_garlic_response(&mut self, message: Message) {
-        let garlic_tag = Bytes::from(message.payload[..8].to_vec());
-
-        tracing::info!("garlic tag = {garlic_tag:?}");
+        let garlic_tag = message.payload[4..12].to_vec();
+        let public_key = TryInto::<[u8; 32]>::try_into(&message.payload[12..44]).unwrap();
+        let new_pubkey = Randomized::from_representative(&public_key).unwrap().to_montgomery();
     }
 }
 
