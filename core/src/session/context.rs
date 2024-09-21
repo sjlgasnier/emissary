@@ -88,7 +88,9 @@ impl TagSet {
 /// Outbound session.
 pub struct OutboundSession {
     /// AEAD state.
-    state: Bytes,
+    pub state: Bytes,
+    pub private_key: StaticPrivateKey,
+    pub chaining_key: Vec<u8>,
 }
 
 /// Key context for an ECIES-X25519-AEAD-Ratchet session.
@@ -208,6 +210,8 @@ impl<R: Runtime> KeyContext<R> {
         // state for payload section
         let state = Sha256::new().update(&state).update(&static_key_ciphertext).finalize();
 
+        tracing::error!("first chaining key = {chaining_key:?}");
+
         // encrypt payload section
         let (chaining_key, payload_ciphertext) = {
             let shared = self.private_key.diffie_hellman(&pubkey);
@@ -264,13 +268,13 @@ impl<R: Runtime> KeyContext<R> {
         let mut temp_key = Hmac::new(&chaining_key).update(&tagset_key).finalize();
         let next_root_key =
             Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
-        let chaining_key = Hmac::new(&temp_key)
+        let ratchet_key = Hmac::new(&temp_key)
             .update(&next_root_key)
             .update(&b"KDFDHRatchetStep")
             .update(&[0x02])
             .finalize();
 
-        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let mut temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
         let session_tag_ck =
             Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
         let symmetric_key_ck = Hmac::new(&temp_key)
@@ -288,7 +292,16 @@ impl<R: Runtime> KeyContext<R> {
             .update(&[0x02])
             .finalize();
 
-        (OutboundSession { state }, payload)
+        tracing::error!("chaining key = {chaining_key:?}");
+
+        (
+            OutboundSession {
+                state,
+                private_key: sk,
+                chaining_key,
+            },
+            payload,
+        )
     }
 
     /// Create inbound session.
