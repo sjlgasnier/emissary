@@ -54,12 +54,43 @@ pub struct TagSetEntry {
 /// Tag set.
 ///
 /// https://geti2p.net/spec/ecies#sample-implementation
-pub struct TagSet {}
+pub struct TagSet {
+    /// Next root key.
+    next_root_key: Vec<u8>,
+
+    /// Session tag key.
+    session_tag_key: Vec<u8>,
+
+    /// Symmetric key.
+    symmetric_key: Vec<u8>,
+}
 
 impl TagSet {
     /// Create new [`TagSet`].
-    pub fn new(key: StaticPrivateKey, num_tags: usize) -> Self {
-        Self {}
+    pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
+        let mut temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
+        let next_root_key =
+            Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
+        let ratchet_key = Hmac::new(&temp_key)
+            .update(&next_root_key)
+            .update(&b"KDFDHRatchetStep")
+            .update(&[0x02])
+            .finalize();
+
+        let mut temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
+        let session_tag_key =
+            Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
+        let symmetric_key = Hmac::new(&temp_key)
+            .update(&session_tag_key)
+            .update(&b"TagAndKeyGenKeys")
+            .update(&[0x02])
+            .finalize();
+
+        Self {
+            next_root_key,
+            session_tag_key,
+            symmetric_key,
+        }
     }
 
     /// Extend [`TagSet`] with `num_tags` many tags.
@@ -133,6 +164,7 @@ impl OutboundSession {
 
         ChaChaPoly::new(&keydata).decrypt_with_ad(&state, &mut ciphertext)?;
 
+        // TODO: ugly
         let state = new_state;
 
         // split
@@ -140,8 +172,11 @@ impl OutboundSession {
         let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
         let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
 
-        // TODO: `DH_INITIALIZE` send keys
-        // TODO: `DH_INITIALIZE` recv keys
+        // initialize send and receive tag sets
+        tracing::error!("send keys");
+        let send_tag_set = TagSet::new(&chaining_key, send_key);
+        tracing::error!("recv keys");
+        let recv_tag_set = TagSet::new(chaining_key, &recv_key);
 
         let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
         let mut payload_key =
@@ -318,41 +353,6 @@ impl<R: Runtime> KeyContext<R> {
 
             out.freeze().to_vec()
         };
-
-        // tagset key
-        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-        let tagset_key =
-            Hmac::new(&temp_key).update(&b"SessionReplyTags").update(&[0x01]).finalize();
-
-        // DH_INITIALIZE (chaining key, tagset key)
-        let mut temp_key = Hmac::new(&chaining_key).update(&tagset_key).finalize();
-        let next_root_key =
-            Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
-        let ratchet_key = Hmac::new(&temp_key)
-            .update(&next_root_key)
-            .update(&b"KDFDHRatchetStep")
-            .update(&[0x02])
-            .finalize();
-
-        let mut temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
-        let session_tag_ck =
-            Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
-        let symmetric_key_ck = Hmac::new(&temp_key)
-            .update(&session_tag_ck)
-            .update(&b"TagAndKeyGenKeys")
-            .update(&[0x02])
-            .finalize();
-
-        let mut temp_key = Hmac::new(&session_tag_ck).update(&[]).finalize();
-        let session_key_data =
-            Hmac::new(&temp_key).update(&b"STInitialization").update(&[0x01]).finalize();
-        let session_tag_constant = Hmac::new(&temp_key)
-            .update(&session_key_data)
-            .update(&b"STInitialization")
-            .update(&[0x02])
-            .finalize();
-
-        tracing::error!("chaining key = {chaining_key:?}");
 
         (
             OutboundSession {
