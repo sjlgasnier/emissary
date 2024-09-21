@@ -26,7 +26,10 @@ use crate::{
             lookup::{DatabaseLookupBuilder, LookupType},
             store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStorePayload},
         },
-        garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder},
+        garlic::{
+            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
+            GarlicMessageBuilder,
+        },
         Message, MessageBuilder, MessageType,
     },
     netdb::{dht::Dht, metrics::*},
@@ -40,7 +43,7 @@ use crate::{
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::TunnelPoolHandle,
-    util::gzip::GzipEncoderBuilder,
+    util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -350,55 +353,34 @@ impl<R: Runtime> NetDb<R> {
 
     // TODO: move this to `OutboundSession::handle_session_reply()`
     fn handle_garlic_response(&mut self, message: Message) {
-        let garlic_tag = message.payload[4..12].to_vec();
-        let public_key = TryInto::<[u8; 32]>::try_into(&message.payload[12..44]).unwrap();
-        let mut ciphertext =
-            TryInto::<[u8; 16]>::try_into(&message.payload[44..60]).unwrap().to_vec();
-        let mut payload = message.payload[60..].to_vec();
-        let new_pubkey =
-            Randomized::from_representative(&public_key).unwrap().to_montgomery().to_bytes();
-        let pubkey = StaticPublicKey::from(new_pubkey);
-        let sk = StaticPrivateKey::from([0u8; 32]);
+        let message = self.tmp.as_mut().unwrap().0.handle_new_session_reply(message).unwrap();
+        let message = GarlicMessage::parse(&message).unwrap();
 
-        let state = self.tmp.as_ref().unwrap().0.state.to_vec();
+        for block in message.blocks {
+            match block {
+                GarlicMessageBlock::GarlicClove {
+                    message_type,
+                    message_id,
+                    expiration,
+                    delivery_instructions,
+                    message_body,
+                } => {
+                    let GzipPayload {
+                        dst_port,
+                        payload,
+                        protocol,
+                        src_port,
+                    } = GzipPayload::decompress::<R>(&message_body[4..]).unwrap();
 
-        let state = Sha256::new().update(&state).update(&garlic_tag).finalize();
-        let state = Sha256::new().update(&state).update(&new_pubkey).finalize();
+                    tracing::warn!("dst port = {dst_port:?}");
+                    tracing::warn!("src port = {src_port:?}");
+                    tracing::warn!("protocol = {protocol:?}");
 
-        let shared_secret = self.tmp.as_ref().unwrap().0.private_key.diffie_hellman(&pubkey);
-
-        let mut temp_key = Hmac::new(&self.tmp.as_ref().unwrap().0.chaining_key)
-            .update(&shared_secret)
-            .finalize();
-        let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-
-        let shared = sk.diffie_hellman(&pubkey);
-
-        let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-        let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-        let keydata = Hmac::new(&temp_key)
-            .update(&chaining_key)
-            .update(&b"")
-            .update(&[0x02])
-            .finalize();
-        let new_state = Sha256::new().update(&state).update(&ciphertext).finalize();
-
-        ChaChaPoly::new(&keydata).decrypt_with_ad(&state, &mut ciphertext).unwrap();
-
-        let state = new_state;
-
-        let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-        let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
-
-        // TODO: `DH_INITIALIZE` send keys
-        // TODO: `DH_INITIALIZE` recv keys
-
-        let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
-        let mut payload_key =
-            Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
-
-        ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload).unwrap();
+                    // TODO: call self.tmp.1
+                }
+                _ => {}
+            }
+        }
     }
 }
 

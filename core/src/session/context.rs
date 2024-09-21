@@ -20,7 +20,9 @@ use crate::{
     crypto::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
+    i2np::Message,
     runtime::Runtime,
+    Error,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -86,11 +88,69 @@ impl TagSet {
 }
 
 /// Outbound session.
+// TODO: pending outbound session
 pub struct OutboundSession {
     /// AEAD state.
     pub state: Bytes,
     pub private_key: StaticPrivateKey,
     pub chaining_key: Vec<u8>,
+}
+
+impl OutboundSession {
+    /// Handle `NewSessionReply` message.
+    pub fn handle_new_session_reply(&mut self, message: Message) -> crate::Result<Vec<u8>> {
+        let garlic_tag = message.payload[4..12].to_vec();
+        let public_key = TryInto::<[u8; 32]>::try_into(&message.payload[12..44])
+            .map_err(|_| Error::InvalidData)?;
+        let mut ciphertext =
+            TryInto::<[u8; 16]>::try_into(&message.payload[44..60]).unwrap().to_vec();
+        let mut payload = message.payload[60..].to_vec();
+        let new_pubkey =
+            Randomized::from_representative(&public_key).unwrap().to_montgomery().to_bytes();
+        let pubkey = StaticPublicKey::from(new_pubkey);
+        let sk = StaticPrivateKey::from([0u8; 32]);
+
+        let state = self.state.to_vec();
+
+        let state = Sha256::new().update(&state).update(&garlic_tag).finalize();
+        let state = Sha256::new().update(&state).update(&new_pubkey).finalize();
+
+        let shared_secret = self.private_key.diffie_hellman(&pubkey);
+
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+
+        let shared = sk.diffie_hellman(&pubkey);
+
+        let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+        let keydata = Hmac::new(&temp_key)
+            .update(&chaining_key)
+            .update(&b"")
+            .update(&[0x02])
+            .finalize();
+        let new_state = Sha256::new().update(&state).update(&ciphertext).finalize();
+
+        ChaChaPoly::new(&keydata).decrypt_with_ad(&state, &mut ciphertext)?;
+
+        let state = new_state;
+
+        // split
+        let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
+
+        // TODO: `DH_INITIALIZE` send keys
+        // TODO: `DH_INITIALIZE` recv keys
+
+        let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
+        let mut payload_key =
+            Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
+
+        ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload)?;
+
+        Ok(payload)
+    }
 }
 
 /// Key context for an ECIES-X25519-AEAD-Ratchet session.
