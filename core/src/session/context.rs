@@ -42,13 +42,13 @@ const PROTOCOL_NAME: &str = "Noise_IKelg2+hs2_25519_ChaChaPoly_SHA256";
 /// Session tag entry.
 pub struct TagSetEntry {
     /// Index.
-    index: usize,
+    index: u16,
 
     /// Session tag.
     tag: Bytes,
 
     /// Session key.
-    key: StaticPrivateKey,
+    key: Bytes,
 }
 
 /// Tag set.
@@ -58,17 +58,20 @@ pub struct TagSet {
     /// Next root key.
     next_root_key: Vec<u8>,
 
+    /// Session key data.
+    session_key_data: Bytes,
+
+    /// Session key constant.
+    session_tag_constant: Vec<u8>,
+
     /// Session tag key.
     session_tag_key: Vec<u8>,
 
     /// Symmetric key.
     symmetric_key: Vec<u8>,
 
-    /// Session key data.
-    session_key_data: Vec<u8>,
-
-    /// Session key constant.
-    session_tag_constant: Vec<u8>,
+    /// Next tag index.
+    tag_index: u16,
 }
 
 impl TagSet {
@@ -105,8 +108,9 @@ impl TagSet {
             next_root_key,
             session_tag_key,
             symmetric_key,
-            session_key_data,
+            session_key_data: Bytes::from(session_key_data),
             session_tag_constant,
+            tag_index: 0u16,
         }
     }
 
@@ -128,7 +132,30 @@ impl TagSet {
     ///
     /// Returns `None` if all tags have been used.
     pub fn next_entry(&mut self) -> Option<TagSetEntry> {
-        None
+        // TODO: fix, can only be used for `MAX_TAGS - 1` many tags
+        let tag_index = {
+            let tag_index = self.tag_index;
+            self.tag_index = self.tag_index.checked_add(1)?;
+
+            tag_index
+        };
+
+        let mut temp_key =
+            Hmac::new(&self.session_key_data).update(&self.session_tag_constant).finalize();
+        self.session_key_data = Bytes::from(
+            Hmac::new(&temp_key).update(&b"SessionTagKeyGen").update(&[0x01]).finalize(),
+        );
+        let session_tag_key_data = Hmac::new(&temp_key)
+            .update(&self.session_key_data)
+            .update(&b"SessionTagKeyGen")
+            .update(&[0x02])
+            .finalize();
+
+        Some(TagSetEntry {
+            index: tag_index,
+            tag: BytesMut::from(&session_tag_key_data[0..9]).freeze(),
+            key: self.session_key_data.clone(),
+        })
     }
 
     /// Get session key for for a session `tag`.
@@ -322,8 +349,6 @@ impl<R: Runtime> KeyContext<R> {
         // state for payload section
         let state = Sha256::new().update(&state).update(&static_key_ciphertext).finalize();
 
-        tracing::error!("first chaining key = {chaining_key:?}");
-
         // encrypt payload section
         let (chaining_key, payload_ciphertext) = {
             let shared = self.private_key.diffie_hellman(&pubkey);
@@ -336,8 +361,6 @@ impl<R: Runtime> KeyContext<R> {
                 .finalize();
 
             // create buffer with 16 extra bytes for poly1305 auth tag
-            //
-            // TODO: optimize?
             let mut payload = {
                 let mut out = BytesMut::with_capacity(payload.len() + 16);
                 out.put_slice(&payload);
