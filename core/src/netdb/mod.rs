@@ -21,6 +21,10 @@ use crate::{
         base32_decode, base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
         SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
+    destination::{
+        protocol::{streaming::Stream, Protocol},
+        session::{KeyContext, OutboundSession},
+    },
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType},
@@ -36,10 +40,8 @@ use crate::{
     primitives::{
         Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterId, RouterIdentity, RouterInfo,
     },
-    protocol::{streaming::Stream, Protocol},
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
-    session::{KeyContext, OutboundSession},
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::TunnelPoolHandle,
