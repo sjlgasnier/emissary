@@ -367,6 +367,8 @@ impl<R: Runtime> NetDb<R> {
                     delivery_instructions,
                     message_body,
                 } => {
+                    assert_eq!(message_type, MessageType::Data);
+
                     let GzipPayload {
                         dst_port,
                         payload,
@@ -378,7 +380,7 @@ impl<R: Runtime> NetDb<R> {
                     tracing::warn!("src port = {src_port:?}");
                     tracing::warn!("protocol = {protocol:?}");
 
-                    // TODO: call self.tmp.1
+                    self.tmp.as_mut().unwrap().1.handle_packet(&payload);
                 }
                 _ => {}
             }

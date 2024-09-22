@@ -113,6 +113,8 @@ impl GzipPayload {
             return None;
         }
 
+        // `TryInto::try_into()` must succeed as `payload` is guaranteed to have enough bytes
+        // and slices taken of the payload are of correct size for a `u16`
         let src_port = TryInto::<[u8; 2]>::try_into(&payload.as_ref()[4..6]).expect("to succeed");
         let dst_port = TryInto::<[u8; 2]>::try_into(&payload.as_ref()[6..8]).expect("to succeed");
         let protocol = payload.as_ref()[9];

@@ -16,13 +16,111 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{primitives::RouterIdentity, runtime::Runtime};
+use crate::{primitives::RouterIdentity, runtime::Runtime, Error};
 
 use bytes::{BufMut, BytesMut};
+use nom::{
+    bytes::complete::take,
+    error::{make_error, ErrorKind},
+    number::complete::{be_u16, be_u32, be_u8},
+    Err, IResult,
+};
 use rand_core::RngCore;
 
 use core::marker::PhantomData;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::protocol::streaming";
+
+/// Streaming protocol packet.
+struct Packet<'a> {
+    /// Send stream ID.
+    send_stream_id: u32,
+
+    /// Receive stream ID.
+    recv_stream_id: u32,
+
+    /// Sequence number of the packet.
+    seq_nro: u32,
+
+    /// ACK through bytes.
+    ack_through: u32,
+
+    /// Negative ACKs.
+    nacks: Vec<u32>,
+
+    /// Resend delay.
+    resend_delay: u8,
+
+    /// Flags.
+    flags: u16,
+
+    /// Payload.
+    payload: &'a [u8],
+}
+
+impl<'a> Packet<'a> {
+    /// Attempt to parse [`Packet`] from `input`.
+    ///
+    /// Returns the parsed message and rest of `input` on success.
+    fn parse_frame(input: &'a [u8]) -> IResult<&[u8], Self> {
+        let (rest, send_stream_id) = be_u32(input)?;
+        let (rest, recv_stream_id) = be_u32(rest)?;
+        let (rest, seq_nro) = be_u32(rest)?;
+        let (rest, ack_through) = be_u32(rest)?;
+        let (rest, nack_count) = be_u8(rest)?;
+        let (rest, nacks) = (0..nack_count)
+            .try_fold((rest, Vec::new()), |(rest, mut nacks), _| {
+                be_u32::<_, ()>(rest).ok().map(|(rest, nack)| {
+                    nacks.push(nack);
+
+                    (rest, nacks)
+                })
+            })
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to parse nack list",
+                );
+
+                Err::Error(make_error(input, ErrorKind::Fail))
+            })?;
+
+        let (rest, resend_delay) = be_u8(rest)?;
+        let (rest, flags) = be_u16(rest)?;
+        let (rest, options_size) = be_u16(rest)?;
+        let (rest, _options) = take(options_size)(rest)?;
+
+        // TODO: parse options
+
+        tracing::info!(
+            "option bytes = {}, flags = {flags}, rest size = {}",
+            _options.len(),
+            rest.len()
+        );
+
+        Ok((
+            &[],
+            Self {
+                send_stream_id,
+                recv_stream_id,
+                seq_nro,
+                ack_through,
+                nacks,
+                resend_delay,
+                flags,
+                payload: rest,
+            },
+        ))
+    }
+
+    /// Attempt to parse `input` into [`Packet`].
+    fn parse(input: &'a [u8]) -> Option<Self> {
+        Some(Self::parse_frame(input).ok()?.1)
+    }
+}
+
+/// Streaming protocol instance.
 pub struct Stream<R: Runtime> {
     recv_stream_id: u32,
     send_stream_id: Option<u32>,
@@ -56,6 +154,13 @@ impl<R: Runtime> Stream<R> {
 
         // out.put_u16(0x01 | 0x03 | 0x20); // flags: `SYN` + `SIGNATURE_INCLUDED` + `FROM_INCLUDED`
 
+        tracing::error!(
+            target: LOG_TARGET,
+            destination = %destination.id(),
+            ?recv_stream_id,
+            "new outbound stream",
+        );
+
         (
             Self {
                 recv_stream_id,
@@ -65,5 +170,24 @@ impl<R: Runtime> Stream<R> {
             },
             out,
         )
+    }
+
+    /// Handle streaming protocol packet.
+    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<()> {
+        let packet = Packet::parse(payload).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                recv_stream_id = ?self.recv_stream_id,
+                "failed to parse streaming protocol packet",
+            );
+
+            Error::InvalidData
+        })?;
+
+        tracing::error!("recv stream id = {}", packet.recv_stream_id);
+        tracing::error!("send stream id = {}", packet.send_stream_id);
+        tracing::error!("payload = {:?}", core::str::from_utf8(packet.payload));
+
+        Ok(())
     }
 }
