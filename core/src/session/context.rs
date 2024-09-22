@@ -63,6 +63,12 @@ pub struct TagSet {
 
     /// Symmetric key.
     symmetric_key: Vec<u8>,
+
+    /// Session key data.
+    session_key_data: Vec<u8>,
+
+    /// Session key constant.
+    session_tag_constant: Vec<u8>,
 }
 
 impl TagSet {
@@ -86,10 +92,21 @@ impl TagSet {
             .update(&[0x02])
             .finalize();
 
+        let mut temp_key = Hmac::new(&session_tag_key).update(&[]).finalize();
+        let session_key_data =
+            Hmac::new(&temp_key).update(&b"STInitialization").update(&[0x01]).finalize();
+        let session_tag_constant = Hmac::new(&temp_key)
+            .update(&session_key_data)
+            .update(&b"STInitialization")
+            .update(&[0x02])
+            .finalize();
+
         Self {
             next_root_key,
             session_tag_key,
             symmetric_key,
+            session_key_data,
+            session_tag_constant,
         }
     }
 
@@ -103,6 +120,8 @@ impl TagSet {
     pub fn ratchet_tag(&mut self) {}
 
     /// Calculate next session key based on the previouis session key.
+    ///
+    /// https://geti2p.net/spec/ecies#dh-ratchet-kdf
     pub fn ratchet_key(&mut self) {}
 
     /// Get next [`TagSetEntry`].
@@ -173,9 +192,7 @@ impl OutboundSession {
         let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
 
         // initialize send and receive tag sets
-        tracing::error!("send keys");
         let send_tag_set = TagSet::new(&chaining_key, send_key);
-        tracing::error!("recv keys");
         let recv_tag_set = TagSet::new(chaining_key, &recv_key);
 
         let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
