@@ -16,5 +16,28 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::{
+    destination::{protocol::streaming::Stream, session::OutboundSession},
+    i2np::Message,
+};
+
 pub mod protocol;
 pub mod session;
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::destination";
+
+/// Client destination.
+pub struct Destination {}
+
+impl Destination {
+    /// Create new [`Destination`].
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Handle garlic message sent to the destination.
+    pub fn on_garlic_message(&mut self, message: Message) -> crate::Result<()> {
+        Ok(())
+    }
+}

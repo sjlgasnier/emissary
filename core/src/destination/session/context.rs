@@ -175,6 +175,8 @@ pub struct OutboundSession {
 
 impl OutboundSession {
     /// Handle `NewSessionReply` message.
+    //
+    // TODO: more documentation
     pub fn handle_new_session_reply(&mut self, message: Message) -> crate::Result<Vec<u8>> {
         let garlic_tag = message.payload[4..12].to_vec();
         let public_key = TryInto::<[u8; 32]>::try_into(&message.payload[12..44])
@@ -229,6 +231,15 @@ impl OutboundSession {
         ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload)?;
 
         Ok(payload)
+    }
+
+    /// Garlic-encrypt `message`.
+    pub fn encrypt_message(&mut self, message: Message) -> crate::Result<()> {
+        Ok(())
+    }
+
+    pub fn decrypt_message(&mut self, message: ()) -> crate::Result<()> {
+        Ok(())
     }
 }
 
