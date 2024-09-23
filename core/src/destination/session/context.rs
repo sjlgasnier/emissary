@@ -31,7 +31,7 @@ use rand_core::RngCore;
 use x25519_dalek::PublicKey;
 
 use alloc::vec::Vec;
-use core::marker::PhantomData;
+use core::{marker::PhantomData, mem};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::session::context";
@@ -164,20 +164,101 @@ impl TagSet {
     }
 }
 
+/// Outbound session state.
+enum OutboundSessionState {
+    /// `NewSession` message has been sent to remote and the session is waiting for a reply.
+    OutboundSessionPending {
+        /// State (`h` from the specification).
+        state: Bytes,
+
+        /// Private key.
+        private_key: StaticPrivateKey,
+
+        /// Chaining key.
+        chaining_key: Vec<u8>,
+    },
+
+    /// Session has been negotiated.
+    Active {
+        /// [`TagSet`] for outbound messages.
+        send_tag_set: TagSet,
+
+        /// [`TagSet`] for inbound messages.
+        recv_tag_set: TagSet,
+    },
+
+    /// State has been poisoned.
+    Poisoned,
+}
+
 /// Outbound session.
-// TODO: pending outbound session
 pub struct OutboundSession {
-    /// AEAD state.
-    pub state: Bytes,
-    pub private_key: StaticPrivateKey,
-    pub chaining_key: Vec<u8>,
+    /// Outbound session state.
+    state: OutboundSessionState,
 }
 
 impl OutboundSession {
+    /// Garlic-encrypt `message`.
+    pub fn encrypt_message(&mut self, message: Message) -> crate::Result<()> {
+        Ok(())
+    }
+
+    /// Garlic-decrypt `message`, potentially advancing the state of the [`OutboundSession`].
+    ///
+    /// Returns a byte vector to the decrypted payload section of `message`.
+    pub fn decrypt_message(&mut self, message: Message) -> crate::Result<Vec<u8>> {
+        match mem::replace(&mut self.state, OutboundSessionState::Poisoned) {
+            OutboundSessionState::OutboundSessionPending {
+                state,
+                private_key,
+                chaining_key,
+            } => {
+                let (send_tag_set, recv_tag_set, payload) =
+                    Self::handle_new_session_reply(message, state, private_key, chaining_key)?;
+
+                self.state = OutboundSessionState::Active {
+                    send_tag_set,
+                    recv_tag_set,
+                };
+
+                Ok(payload)
+            }
+            OutboundSessionState::Active {
+                send_tag_set,
+                recv_tag_set,
+            } => {
+                todo!();
+            }
+            OutboundSessionState::Poisoned => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "outbound session state has been poisoned"
+                );
+                debug_assert!(false);
+                return Err(Error::InvalidState);
+            }
+        }
+    }
+
     /// Handle `NewSessionReply` message.
     //
     // TODO: more documentation
-    pub fn handle_new_session_reply(&mut self, message: Message) -> crate::Result<Vec<u8>> {
+    pub fn handle_new_session_reply(
+        message: Message,
+        state: Bytes,
+        private_key: StaticPrivateKey,
+        chaining_key: Vec<u8>,
+    ) -> crate::Result<(TagSet, TagSet, Vec<u8>)> {
+        if message.payload.len() < 60 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                payload_len = ?message.payload.len(),
+                "`NewSessionReply` is stoo short",
+            );
+
+            return Err(Error::InvalidData);
+        }
+
         let garlic_tag = message.payload[4..12].to_vec();
         let public_key = TryInto::<[u8; 32]>::try_into(&message.payload[12..44])
             .map_err(|_| Error::InvalidData)?;
@@ -189,14 +270,14 @@ impl OutboundSession {
         let pubkey = StaticPublicKey::from(new_pubkey);
         let sk = StaticPrivateKey::from([0u8; 32]);
 
-        let state = self.state.to_vec();
+        let state = state.to_vec();
 
         let state = Sha256::new().update(&state).update(&garlic_tag).finalize();
         let state = Sha256::new().update(&state).update(&new_pubkey).finalize();
 
-        let shared_secret = self.private_key.diffie_hellman(&pubkey);
+        let shared_secret = private_key.diffie_hellman(&pubkey);
 
-        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let mut temp_key = Hmac::new(&chaining_key).update(&shared_secret).finalize();
         let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
 
         let shared = sk.diffie_hellman(&pubkey);
@@ -230,16 +311,7 @@ impl OutboundSession {
 
         ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload)?;
 
-        Ok(payload)
-    }
-
-    /// Garlic-encrypt `message`.
-    pub fn encrypt_message(&mut self, message: Message) -> crate::Result<()> {
-        Ok(())
-    }
-
-    pub fn decrypt_message(&mut self, message: ()) -> crate::Result<()> {
-        Ok(())
+        Ok((send_tag_set, recv_tag_set, payload))
     }
 }
 
@@ -407,9 +479,11 @@ impl<R: Runtime> KeyContext<R> {
 
         (
             OutboundSession {
-                state,
-                private_key: sk,
-                chaining_key,
+                state: OutboundSessionState::OutboundSessionPending {
+                    state,
+                    private_key: sk,
+                    chaining_key,
+                },
             },
             payload,
         )
@@ -426,6 +500,3 @@ impl<R: Runtime> KeyContext<R> {
         let shared = self.private_key.diffie_hellman(&public_key);
     }
 }
-
-#[cfg(test)]
-mod tests {}

@@ -181,7 +181,7 @@ impl<R: Runtime> Destination<R> {
 
     /// Handle garlic message send to the destination.
     fn handle_garlic_message(&mut self, message: Message) {
-        let message = self.session.handle_new_session_reply(message).unwrap();
+        let message = self.session.decrypt_message(message).unwrap();
         let message = GarlicMessage::parse(&message).unwrap();
 
         for block in message.blocks {

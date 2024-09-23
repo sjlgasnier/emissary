@@ -249,16 +249,14 @@ impl<R: Runtime> NetDb<R> {
                     DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
                 };
 
-                let destination = Destination::<R>::new(
+                R::spawn(Destination::<R>::new(
                     self.key.clone(),
                     self.key_context.clone(),
                     self.exploratory_pool_handle.clone(),
                     self.rx.take().expect("to exist"),
                     leaseset,
                     self.metrics.clone(),
-                );
-
-                tracing::error!("message sent!");
+                ));
             }
             MessageType::DatabaseLookup => {
                 tracing::trace!("database lookup");
