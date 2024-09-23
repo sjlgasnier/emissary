@@ -17,8 +17,36 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    destination::{protocol::streaming::Stream, session::OutboundSession},
-    i2np::Message,
+    crypto::{SigningPrivateKey, StaticPrivateKey},
+    destination::{
+        protocol::{streaming::Stream, Protocol},
+        session::{KeyContext, OutboundSession},
+    },
+    i2np::{
+        database::store::{DatabaseStoreBuilder, DatabaseStorePayload},
+        garlic::{
+            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
+            GarlicMessageBuilder,
+        },
+        Message, MessageBuilder, MessageType,
+    },
+    primitives::{
+        Destination as Dest, Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterIdentity,
+    },
+    runtime::Runtime,
+    tunnel::TunnelPoolHandle,
+    util::gzip::{GzipEncoderBuilder, GzipPayload},
+};
+
+use bytes::{BufMut, BytesMut};
+use rand_core::RngCore;
+use thingbuf::mpsc::Receiver;
+
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
 };
 
 pub mod protocol;
@@ -28,16 +56,174 @@ pub mod session;
 const LOG_TARGET: &str = "emissary::destination";
 
 /// Client destination.
-pub struct Destination {}
+pub struct Destination<R: Runtime> {
+    /// Metrics handle.
+    metrics: R::MetricsHandle,
 
-impl Destination {
+    /// Channel for receiving messages from the tunnel pool.
+    rx: Receiver<Message>,
+
+    /// Streaming protocol handle.
+    stream: Stream<R>,
+
+    /// Outbound ECIES-X25519-AEAD-Ratchet session.
+    session: OutboundSession,
+
+    /// Tunnel pool handle.
+    tunnel_pool_handle: TunnelPoolHandle,
+}
+
+impl<R: Runtime> Destination<R> {
     /// Create new [`Destination`].
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(
+        key: Vec<u8>,
+        mut key_context: KeyContext<R>,
+        tunnel_pool_handle: TunnelPoolHandle,
+        rx: Receiver<Message>,
+        leaseset: LeaseSet2,
+        metrics: R::MetricsHandle,
+    ) -> Self {
+        tracing::info!("leases = {:?}", leaseset.leases);
+        tracing::info!("public keys = {:?}", leaseset.public_keys);
+
+        let lease = tunnel_pool_handle.lease().expect("to succeed");
+
+        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let sk = StaticPrivateKey::from([0u8; 32]);
+
+        let local_leaseset = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination: destination.clone(),
+                published: R::time_since_epoch().as_secs() as u32,
+                expires: (R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs() as u32,
+            },
+            public_keys: vec![sk.public()],
+            leases: vec![lease],
+        };
+
+        let database_store = DatabaseStoreBuilder::new(
+            Into::<Vec<u8>>::into(local_leaseset.header.destination.id()),
+            DatabaseStorePayload::LeaseSet2 {
+                leaseset: local_leaseset,
+            },
+        )
+        .build(&signing_key);
+
+        tracing::error!("database_store: {database_store:?}");
+
+        let (stream, payload) = Stream::<R>::new_outbound(destination);
+
+        let mut payload = GarlicMessageBuilder::new()
+            .with_date_time(R::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::DatabaseStore,
+                MessageId::from(R::rng().next_u32()),
+                (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                GarlicDeliveryInstructions::Local,
+                &database_store,
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                MessageId::from(R::rng().next_u32()),
+                (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                GarlicDeliveryInstructions::Destination { hash: &key },
+                &{
+                    let payload = GzipEncoderBuilder::<R>::new(&payload)
+                        .with_source_port(0)
+                        .with_destination_port(0)
+                        .with_protocol(Protocol::Streaming.as_u8())
+                        .build()
+                        .unwrap();
+
+                    let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                    out.put_u32(payload.len() as u32);
+                    out.put_slice(&payload);
+
+                    out.freeze().to_vec()
+                },
+            )
+            .build();
+
+        // TODO:
+        let (session, payload) = key_context
+            .create_oubound_session(leaseset.public_keys.get(0).unwrap().clone(), &payload);
+
+        let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
+        payload_new.put_u32(payload.len() as u32);
+        payload_new.put_slice(&payload);
+        let payload = payload_new.freeze().to_vec();
+
+        let payload = MessageBuilder::standard()
+            .with_expiration((R::time_since_epoch() + Duration::from_secs(10)).as_secs())
+            .with_message_id(R::rng().next_u32())
+            .with_message_type(MessageType::Garlic)
+            .with_payload(&payload)
+            .build();
+
+        let Lease2 {
+            router_id,
+            tunnel_id,
+            ..
+        } = leaseset.leases[0].clone();
+
+        tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload);
+
+        Self {
+            metrics,
+            rx,
+            session,
+            tunnel_pool_handle,
+            stream,
+        }
     }
 
-    /// Handle garlic message sent to the destination.
-    pub fn on_garlic_message(&mut self, message: Message) -> crate::Result<()> {
-        Ok(())
+    /// Handle garlic message send to the destination.
+    fn handle_garlic_message(&mut self, message: Message) {
+        let message = self.session.handle_new_session_reply(message).unwrap();
+        let message = GarlicMessage::parse(&message).unwrap();
+
+        for block in message.blocks {
+            match block {
+                GarlicMessageBlock::GarlicClove {
+                    message_type,
+                    message_id,
+                    expiration,
+                    delivery_instructions,
+                    message_body,
+                } => {
+                    assert_eq!(message_type, MessageType::Data);
+
+                    let GzipPayload {
+                        dst_port,
+                        payload,
+                        protocol,
+                        src_port,
+                    } = GzipPayload::decompress::<R>(&message_body[4..]).unwrap();
+
+                    tracing::warn!("dst port = {dst_port:?}");
+                    tracing::warn!("src port = {src_port:?}");
+                    tracing::warn!("protocol = {protocol:?}");
+
+                    self.stream.handle_packet(&payload);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl<R: Runtime> Future for Destination<R> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.rx.poll_recv(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(message)) => self.handle_garlic_message(message),
+            }
+        }
     }
 }

@@ -24,6 +24,7 @@ use crate::{
     destination::{
         protocol::{streaming::Stream, Protocol},
         session::{KeyContext, OutboundSession},
+        Destination,
     },
     i2np::{
         database::{
@@ -109,7 +110,7 @@ pub struct NetDb<R: Runtime> {
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
     key_context: KeyContext<R>,
-    rx: mpsc::Receiver<Message>,
+    rx: Option<mpsc::Receiver<Message>>,
     tmp: Option<(OutboundSession, Stream<R>)>,
 }
 
@@ -151,7 +152,7 @@ impl<R: Runtime> NetDb<R> {
             routers: HashMap::new(),
             router_storage,
             service,
-            rx,
+            rx: Some(rx),
             tmp: None,
         }
     }
@@ -248,94 +249,14 @@ impl<R: Runtime> NetDb<R> {
                     DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
                 };
 
-                tracing::info!("leases = {:?}", leaseset.leases);
-                tracing::info!("public keys = {:?}", leaseset.public_keys);
-
-                let lease = self.exploratory_pool_handle.lease().expect("to succeed");
-
-                let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-                let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
-                let sk = StaticPrivateKey::from([0u8; 32]);
-
-                let local_leaseset = LeaseSet2 {
-                    header: LeaseSet2Header {
-                        destination: destination.clone(),
-                        published: R::time_since_epoch().as_secs() as u32,
-                        expires: (R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs()
-                            as u32,
-                    },
-                    public_keys: vec![sk.public()],
-                    leases: vec![lease],
-                };
-
-                let database_store = DatabaseStoreBuilder::new(
-                    Into::<Vec<u8>>::into(local_leaseset.header.destination.id()),
-                    DatabaseStorePayload::LeaseSet2 {
-                        leaseset: local_leaseset,
-                    },
-                )
-                .build(&signing_key);
-
-                tracing::error!("database_store: {database_store:?}");
-
-                let (stream, payload) = Stream::<R>::new_outbound(destination);
-
-                let mut payload = GarlicMessageBuilder::new()
-                    .with_date_time(R::time_since_epoch().as_secs() as u32)
-                    .with_garlic_clove(
-                        MessageType::DatabaseStore,
-                        MessageId::from(R::rng().next_u32()),
-                        (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                        GarlicDeliveryInstructions::Local,
-                        &database_store,
-                    )
-                    .with_garlic_clove(
-                        MessageType::Data,
-                        MessageId::from(R::rng().next_u32()),
-                        (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                        GarlicDeliveryInstructions::Destination { hash: &self.key },
-                        &{
-                            let payload = GzipEncoderBuilder::<R>::new(&payload)
-                                .with_source_port(0)
-                                .with_destination_port(0)
-                                .with_protocol(Protocol::Streaming.as_u8())
-                                .build()
-                                .unwrap();
-
-                            let mut out = BytesMut::with_capacity(payload.len() + 4);
-
-                            out.put_u32(payload.len() as u32);
-                            out.put_slice(&payload);
-
-                            out.freeze().to_vec()
-                        },
-                    )
-                    .build();
-
-                let (session, payload) = self
-                    .key_context
-                    .create_oubound_session(leaseset.public_keys.get(0).unwrap().clone(), &payload);
-
-                let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
-                payload_new.put_u32(payload.len() as u32);
-                payload_new.put_slice(&payload);
-                let payload = payload_new.freeze().to_vec();
-
-                let payload = MessageBuilder::standard()
-                    .with_expiration((R::time_since_epoch() + Duration::from_secs(10)).as_secs())
-                    .with_message_id(R::rng().next_u32())
-                    .with_message_type(MessageType::Garlic)
-                    .with_payload(&payload)
-                    .build();
-
-                let Lease2 {
-                    router_id,
-                    tunnel_id,
-                    ..
-                } = leaseset.leases[0].clone();
-
-                self.exploratory_pool_handle.send_to_tunnel(router_id, tunnel_id, payload);
-                self.tmp = Some((session, stream));
+                let destination = Destination::<R>::new(
+                    self.key.clone(),
+                    self.key_context.clone(),
+                    self.exploratory_pool_handle.clone(),
+                    self.rx.take().expect("to exist"),
+                    leaseset,
+                    self.metrics.clone(),
+                );
 
                 tracing::error!("message sent!");
             }
@@ -350,40 +271,6 @@ impl<R: Runtime> NetDb<R> {
                 ?message_type,
                 "unsupported message",
             ),
-        }
-    }
-
-    // TODO: move this to `OutboundSession::handle_session_reply()`
-    fn handle_garlic_response(&mut self, message: Message) {
-        let message = self.tmp.as_mut().unwrap().0.handle_new_session_reply(message).unwrap();
-        let message = GarlicMessage::parse(&message).unwrap();
-
-        for block in message.blocks {
-            match block {
-                GarlicMessageBlock::GarlicClove {
-                    message_type,
-                    message_id,
-                    expiration,
-                    delivery_instructions,
-                    message_body,
-                } => {
-                    assert_eq!(message_type, MessageType::Data);
-
-                    let GzipPayload {
-                        dst_port,
-                        payload,
-                        protocol,
-                        src_port,
-                    } = GzipPayload::decompress::<R>(&message_body[4..]).unwrap();
-
-                    tracing::warn!("dst port = {dst_port:?}");
-                    tracing::warn!("src port = {src_port:?}");
-                    tracing::warn!("protocol = {protocol:?}");
-
-                    self.tmp.as_mut().unwrap().1.handle_packet(&payload);
-                }
-                _ => {}
-            }
         }
     }
 }
@@ -421,14 +308,6 @@ impl<R: Runtime> Future for NetDb<R> {
 
             self.timer = Box::pin(R::delay(core::time::Duration::from_secs(15)));
             let _ = self.timer.poll_unpin(cx);
-        }
-
-        loop {
-            match self.rx.poll_recv(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(message)) => self.handle_garlic_response(message),
-            }
         }
 
         loop {
