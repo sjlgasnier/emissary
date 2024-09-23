@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{primitives::RouterIdentity, runtime::Runtime, Error};
+use crate::{error::StreamingError, primitives::RouterIdentity, runtime::Runtime, Error};
 
 use bytes::{BufMut, BytesMut};
 use nom::{
@@ -173,8 +173,18 @@ impl<R: Runtime> Stream<R> {
     }
 
     /// Handle streaming protocol packet.
-    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<()> {
-        let packet = Packet::parse(payload).ok_or_else(|| {
+    ///
+    /// Returns a serialized [`Packet`] if `payload` warrants sending a reply to remote.
+    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<Option<Vec<u8>>> {
+        let Packet {
+            send_stream_id,
+            recv_stream_id,
+            seq_nro,
+            ack_through,
+            flags,
+            payload,
+            ..
+        } = Packet::parse(payload).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
                 recv_stream_id = ?self.recv_stream_id,
@@ -184,10 +194,63 @@ impl<R: Runtime> Stream<R> {
             Error::InvalidData
         })?;
 
-        tracing::error!("recv stream id = {}", packet.recv_stream_id);
-        tracing::error!("send stream id = {}", packet.send_stream_id);
-        tracing::error!("payload = {:?}", core::str::from_utf8(packet.payload));
+        if self.recv_stream_id != send_stream_id {
+            tracing::warn!(
+                target: LOG_TARGET,
+                recv_stream_id = ?self.recv_stream_id,
+                ?send_stream_id,
+                "stream id mismatch",
+            );
 
-        Ok(())
+            return Err(Error::Streaming(StreamingError::StreamIdMismatch(
+                send_stream_id,
+                self.recv_stream_id,
+            )));
+        }
+
+        tracing::error!("recv stream id = {}", recv_stream_id);
+        tracing::error!("send stream id = {}", send_stream_id);
+        tracing::error!("payload = {:?}", core::str::from_utf8(payload));
+
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{mock::MockRuntime, Runtime};
+
+    #[test]
+    fn stream_id_mismatch() {
+        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let (mut stream, _payload) = Stream::<MockRuntime>::new_outbound(destination.clone());
+        let payload = "hello, world".as_bytes();
+
+        let mut out = BytesMut::with_capacity(payload.len() + 22 + destination.serialized_len());
+
+        let recv_stream_id = MockRuntime::rng().next_u32();
+        let seq_nro = 0u32;
+
+        out.put_u32(stream.recv_stream_id.overflowing_add(1).0);
+        out.put_u32(recv_stream_id);
+        out.put_u32(seq_nro);
+        out.put_u32(0u32); // ack through
+        out.put_u8(0u8); // nack count
+
+        out.put_u8(10u8); // resend delay, in seconds
+        out.put_u16(0x01 | 0x20); // flags: `SYN` + `FROM_INCLUDED`
+
+        out.put_u16(destination.serialized_len() as u16);
+        out.put_slice(&destination.serialize());
+        out.put_slice(&payload);
+
+        match stream.handle_packet(out.as_ref()).unwrap_err() {
+            Error::Streaming(StreamingError::StreamIdMismatch(send, recv)) => {
+                assert_eq!(send, stream.recv_stream_id.overflowing_add(1).0);
+                assert_eq!(recv, stream.recv_stream_id);
+            }
+            _ => panic!("invalid error"),
+        }
     }
 }
