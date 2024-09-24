@@ -44,11 +44,11 @@ pub struct TagSetEntry {
     /// Index.
     index: u16,
 
-    /// Session tag.
-    tag: Bytes,
-
     /// Session key.
     key: Bytes,
+
+    /// Session tag.
+    tag: Bytes,
 }
 
 /// Tag set.
@@ -140,21 +140,49 @@ impl TagSet {
             tag_index
         };
 
-        let mut temp_key =
-            Hmac::new(&self.session_key_data).update(&self.session_tag_constant).finalize();
-        self.session_key_data = Bytes::from(
-            Hmac::new(&temp_key).update(&b"SessionTagKeyGen").update(&[0x01]).finalize(),
-        );
-        let session_tag_key_data = Hmac::new(&temp_key)
-            .update(&self.session_key_data)
-            .update(&b"SessionTagKeyGen")
-            .update(&[0x02])
-            .finalize();
+        // ratchet next tag
+        let garlic_tag = {
+            let mut temp_key =
+                Hmac::new(&self.session_key_data).update(&self.session_tag_constant).finalize();
+
+            // store session key data for the next session tag ratchet
+            self.session_key_data = Bytes::from(
+                Hmac::new(&temp_key).update(&b"SessionTagKeyGen").update(&[0x01]).finalize(),
+            );
+
+            let session_tag_key_data = Hmac::new(&temp_key)
+                .update(&self.session_key_data)
+                .update(&b"SessionTagKeyGen")
+                .update(&[0x02])
+                .finalize();
+
+            BytesMut::from(&session_tag_key_data[0..8]).freeze()
+        };
+
+        tracing::error!("first symmetric key: {:?}", self.symmetric_key);
+
+        let symmetric_key = {
+            let mut temp_key = Hmac::new(&self.symmetric_key).update(&[]).finalize();
+
+            // store symmetric key for the next key ratchet
+            self.symmetric_key =
+                Hmac::new(&temp_key).update(&b"SymmetricRatchet").update(&[0x01]).finalize();
+
+            let symmetric_key = Hmac::new(&temp_key)
+                .update(&self.symmetric_key)
+                .update(&b"SymmetricRatchet")
+                .update(&[0x02])
+                .finalize();
+
+            tracing::error!("symmetric key = {symmetric_key:?}");
+
+            BytesMut::from(&symmetric_key[..]).freeze()
+        };
 
         Some(TagSetEntry {
             index: tag_index,
-            tag: BytesMut::from(&session_tag_key_data[0..9]).freeze(),
-            key: self.session_key_data.clone(),
+            key: symmetric_key,
+            tag: garlic_tag,
         })
     }
 
