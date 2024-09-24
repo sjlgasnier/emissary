@@ -300,9 +300,26 @@ impl OutboundSession {
             }
             OutboundSessionState::Active {
                 send_tag_set,
-                recv_tag_set,
+                mut recv_tag_set,
             } => {
-                todo!();
+                let TagSetEntry { index, key, tag } = recv_tag_set.next_entry().unwrap();
+
+                let size = message.payload[..4].to_vec();
+                let garlic_tag = message.payload[4..12].to_vec();
+                let mut payload = message.payload[12..].to_vec();
+
+                // TODO: lookup for garlic tag
+
+                ChaChaPoly::with_nonce(&key, index as u64)
+                    .decrypt_with_ad(&tag, &mut payload)
+                    .unwrap();
+
+                self.state = OutboundSessionState::Active {
+                    send_tag_set,
+                    recv_tag_set,
+                };
+
+                Ok(payload)
             }
             OutboundSessionState::Poisoned => {
                 tracing::warn!(
