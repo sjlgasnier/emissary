@@ -31,7 +31,7 @@ use rand_core::RngCore;
 use x25519_dalek::PublicKey;
 
 use alloc::vec::Vec;
-use core::{marker::PhantomData, mem};
+use core::{fmt, marker::PhantomData, mem};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::session::context";
@@ -219,6 +219,26 @@ enum OutboundSessionState {
     Poisoned,
 }
 
+impl fmt::Debug for OutboundSessionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutboundSessionPending {
+                state,
+                private_key,
+                chaining_key,
+            } => f
+                .debug_struct("OutboundSessionState::OutboundSessionPending")
+                .finish_non_exhaustive(),
+            Self::Active {
+                send_tag_set,
+                recv_tag_set,
+            } => f.debug_struct("OutboundSessionState::Active").finish_non_exhaustive(),
+            Self::Poisoned =>
+                f.debug_struct("OutboundSessionState::Poisoned").finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Outbound session.
 pub struct OutboundSession {
     /// Outbound session state.
@@ -227,8 +247,35 @@ pub struct OutboundSession {
 
 impl OutboundSession {
     /// Garlic-encrypt `message`.
-    pub fn encrypt_message(&mut self, message: Message) -> crate::Result<()> {
-        Ok(())
+    pub fn encrypt_message(&mut self, mut message: Vec<u8>) -> crate::Result<Vec<u8>> {
+        match &mut self.state {
+            OutboundSessionState::Active { send_tag_set, .. } => {
+                // TODO: next key
+                let TagSetEntry { index, key, tag } = send_tag_set.next_entry().unwrap();
+
+                // TODO: ugly
+                let mut out = BytesMut::with_capacity(message.len() + 16 + 8);
+
+                let mac = ChaChaPoly::with_nonce(&key, index as u64)
+                    .encrypt_with_ad(&tag, &mut message)
+                    .unwrap();
+
+                out.put_slice(&tag);
+                out.put_slice(&message);
+                out.put_slice(&mac);
+
+                Ok(out.freeze().to_vec())
+            }
+            state => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?state,
+                    "invalid state for call to `encrypt_message()`",
+                );
+                debug_assert!(false);
+                return Err(Error::InvalidState);
+            }
+        }
     }
 
     /// Garlic-decrypt `message`, potentially advancing the state of the [`OutboundSession`].
