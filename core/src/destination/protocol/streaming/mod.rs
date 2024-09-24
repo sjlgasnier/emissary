@@ -120,11 +120,44 @@ impl<'a> Packet<'a> {
     }
 }
 
+/// Stream state.
+enum StreamState {
+    /// Outbound stream has been initiated.
+    OutboundInitiated {
+        /// Receive stream ID.
+        recv_stream_id: u32,
+
+        /// Sequence number.
+        seq_nro: u32,
+    },
+
+    /// Stream is open.
+    Open {
+        /// Receive stream ID.
+        recv_stream_id: u32,
+
+        /// Send stream ID.
+        send_stream_id: u32,
+
+        /// Sequence number.
+        seq_nro: u32,
+    },
+}
+
+impl StreamState {
+    /// Get receive stream ID.
+    fn recv_stream_id(&self) -> u32 {
+        match self {
+            Self::OutboundInitiated { recv_stream_id, .. } => *recv_stream_id,
+            Self::Open { recv_stream_id, .. } => *recv_stream_id,
+        }
+    }
+}
+
 /// Streaming protocol instance.
 pub struct Stream<R: Runtime> {
-    recv_stream_id: u32,
-    send_stream_id: Option<u32>,
-    seq_nro: u32,
+    /// Stream state.
+    state: StreamState,
 
     /// Marker for `Runtime`.
     _runtime: PhantomData<R>,
@@ -163,9 +196,10 @@ impl<R: Runtime> Stream<R> {
 
         (
             Self {
-                recv_stream_id,
-                send_stream_id: None,
-                seq_nro,
+                state: StreamState::OutboundInitiated {
+                    recv_stream_id,
+                    seq_nro,
+                },
                 _runtime: Default::default(),
             },
             out,
@@ -187,24 +221,24 @@ impl<R: Runtime> Stream<R> {
         } = Packet::parse(payload).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
-                recv_stream_id = ?self.recv_stream_id,
+                recv_stream_id = ?self.state.recv_stream_id(),
                 "failed to parse streaming protocol packet",
             );
 
             Error::InvalidData
         })?;
 
-        if self.recv_stream_id != send_stream_id {
+        if self.state.recv_stream_id() != send_stream_id {
             tracing::warn!(
                 target: LOG_TARGET,
-                recv_stream_id = ?self.recv_stream_id,
+                recv_stream_id = ?self.state.recv_stream_id(),
                 ?send_stream_id,
                 "stream id mismatch",
             );
 
             return Err(Error::Streaming(StreamingError::StreamIdMismatch(
                 send_stream_id,
-                self.recv_stream_id,
+                self.state.recv_stream_id(),
             )));
         }
 
@@ -232,7 +266,7 @@ mod tests {
         let recv_stream_id = MockRuntime::rng().next_u32();
         let seq_nro = 0u32;
 
-        out.put_u32(stream.recv_stream_id.overflowing_add(1).0);
+        out.put_u32(stream.state.recv_stream_id().overflowing_add(1).0);
         out.put_u32(recv_stream_id);
         out.put_u32(seq_nro);
         out.put_u32(0u32); // ack through
@@ -247,8 +281,8 @@ mod tests {
 
         match stream.handle_packet(out.as_ref()).unwrap_err() {
             Error::Streaming(StreamingError::StreamIdMismatch(send, recv)) => {
-                assert_eq!(send, stream.recv_stream_id.overflowing_add(1).0);
-                assert_eq!(recv, stream.recv_stream_id);
+                assert_eq!(send, stream.state.recv_stream_id().overflowing_add(1).0);
+                assert_eq!(recv, stream.state.recv_stream_id());
             }
             _ => panic!("invalid error"),
         }
