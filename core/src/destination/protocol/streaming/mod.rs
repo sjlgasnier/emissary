@@ -210,6 +210,8 @@ impl<R: Runtime> Stream<R> {
     /// Handle streaming protocol packet.
     ///
     /// Returns a serialized [`Packet`] if `payload` warrants sending a reply to remote.
+    //
+    // TODO: return bytesmut
     pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<Option<Vec<u8>>> {
         let Packet {
             send_stream_id,
@@ -218,6 +220,7 @@ impl<R: Runtime> Stream<R> {
             ack_through,
             flags,
             payload,
+            nacks,
             ..
         } = Packet::parse(payload).ok_or_else(|| {
             tracing::warn!(
@@ -243,11 +246,38 @@ impl<R: Runtime> Stream<R> {
             )));
         }
 
-        tracing::error!("recv stream id = {}", recv_stream_id);
-        tracing::error!("send stream id = {}", send_stream_id);
-        tracing::error!("payload = {:?}", core::str::from_utf8(payload));
+        tracing::warn!("seq_nro = {seq_nro:?}");
+        tracing::warn!("ack_through = {ack_through:?}");
+        tracing::warn!("flags = {flags:?}");
+        tracing::warn!("payload = {payload:?}");
+        tracing::warn!("nacks = {nacks:?}");
 
-        Ok(None)
+        if std::matches!(self.state, StreamState::Open { .. }) {
+            tracing::error!("payload = {:?}", core::str::from_utf8(&payload));
+
+            return Ok(None);
+        }
+
+        let mut out = BytesMut::with_capacity(22);
+
+        out.put_u32(recv_stream_id); // send stream id
+        out.put_u32(self.state.recv_stream_id());
+        out.put_u32(1);
+        out.put_u32(0u32); // ack through
+        out.put_u8(0u8); // nack count
+
+        out.put_u8(10u8); // resend delay, in seconds
+        out.put_u16(0); // no flags
+
+        tracing::error!("sending ack");
+
+        self.state = StreamState::Open {
+            recv_stream_id: self.state.recv_stream_id(),
+            send_stream_id: recv_stream_id,
+            seq_nro: 2,
+        };
+
+        Ok(Some(out.freeze().to_vec()))
     }
 }
 
