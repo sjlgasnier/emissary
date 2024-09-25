@@ -21,6 +21,7 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     i2np::Message,
+    primitives::DestinationId,
     runtime::Runtime,
     Error,
 };
@@ -196,6 +197,9 @@ impl TagSet {
 enum OutboundSessionState {
     /// `NewSession` message has been sent to remote and the session is waiting for a reply.
     OutboundSessionPending {
+        /// Destination ID.
+        destination_id: DestinationId,
+
         /// State (`h` from the specification).
         state: Bytes,
 
@@ -208,6 +212,9 @@ enum OutboundSessionState {
 
     /// Session has been negotiated.
     Active {
+        /// Destination ID.
+        destination_id: DestinationId,
+
         /// [`TagSet`] for outbound messages.
         send_tag_set: TagSet,
 
@@ -222,17 +229,14 @@ enum OutboundSessionState {
 impl fmt::Debug for OutboundSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::OutboundSessionPending {
-                state,
-                private_key,
-                chaining_key,
-            } => f
+            Self::OutboundSessionPending { destination_id, .. } => f
                 .debug_struct("OutboundSessionState::OutboundSessionPending")
+                .field("id", &destination_id)
                 .finish_non_exhaustive(),
-            Self::Active {
-                send_tag_set,
-                recv_tag_set,
-            } => f.debug_struct("OutboundSessionState::Active").finish_non_exhaustive(),
+            Self::Active { destination_id, .. } => f
+                .debug_struct("OutboundSessionState::Active")
+                .field("id", &destination_id)
+                .finish_non_exhaustive(),
             Self::Poisoned =>
                 f.debug_struct("OutboundSessionState::Poisoned").finish_non_exhaustive(),
         }
@@ -287,11 +291,13 @@ impl OutboundSession {
                 state,
                 private_key,
                 chaining_key,
+                destination_id,
             } => {
                 let (send_tag_set, recv_tag_set, payload) =
                     Self::handle_new_session_reply(message, state, private_key, chaining_key)?;
 
                 self.state = OutboundSessionState::Active {
+                    destination_id,
                     send_tag_set,
                     recv_tag_set,
                 };
@@ -299,6 +305,7 @@ impl OutboundSession {
                 Ok(payload)
             }
             OutboundSessionState::Active {
+                destination_id,
                 send_tag_set,
                 mut recv_tag_set,
             } => {
@@ -315,6 +322,7 @@ impl OutboundSession {
                     .unwrap();
 
                 self.state = OutboundSessionState::Active {
+                    destination_id,
                     send_tag_set,
                     recv_tag_set,
                 };
@@ -476,6 +484,7 @@ impl<R: Runtime> KeyContext<R> {
     /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
     pub fn create_oubound_session(
         &mut self,
+        destination_id: DestinationId,
         pubkey: StaticPublicKey,
         payload: &[u8],
     ) -> (OutboundSession, Vec<u8>) {
@@ -573,6 +582,7 @@ impl<R: Runtime> KeyContext<R> {
             OutboundSession {
                 state: OutboundSessionState::OutboundSessionPending {
                     state,
+                    destination_id,
                     private_key: sk,
                     chaining_key,
                 },

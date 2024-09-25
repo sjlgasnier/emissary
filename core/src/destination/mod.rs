@@ -95,6 +95,7 @@ impl<R: Runtime> Destination<R> {
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let public_key = SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap();
         let destination = Dest::new(public_key);
+        let destination_id = destination.id();
         let sk = StaticPrivateKey::from([0u8; 32]);
 
         let local_leaseset = LeaseSet2 {
@@ -152,8 +153,11 @@ impl<R: Runtime> Destination<R> {
             .build();
 
         // TODO:
-        let (session, payload) = key_context
-            .create_oubound_session(leaseset.public_keys.get(0).unwrap().clone(), &payload);
+        let (session, payload) = key_context.create_oubound_session(
+            destination_id,
+            leaseset.public_keys.get(0).unwrap().clone(),
+            &payload,
+        );
 
         let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
         payload_new.put_u32(payload.len() as u32);
