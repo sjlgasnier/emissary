@@ -71,6 +71,9 @@ pub struct Destination<R: Runtime> {
 
     /// Tunnel pool handle.
     tunnel_pool_handle: TunnelPoolHandle,
+
+    key: Vec<u8>,
+    leaseset: LeaseSet2,
 }
 
 impl<R: Runtime> Destination<R> {
@@ -171,11 +174,13 @@ impl<R: Runtime> Destination<R> {
         tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload);
 
         Self {
+            key,
             metrics,
             rx,
             session,
             tunnel_pool_handle,
             stream,
+            leaseset,
         }
     }
 
@@ -202,11 +207,65 @@ impl<R: Runtime> Destination<R> {
                         src_port,
                     } = GzipPayload::decompress::<R>(&message_body[4..]).unwrap();
 
-                    tracing::warn!("dst port = {dst_port:?}");
-                    tracing::warn!("src port = {src_port:?}");
-                    tracing::warn!("protocol = {protocol:?}");
+                    match self.stream.handle_packet(&payload) {
+                        Err(error) => tracing::error!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to handle streaming protocol packet",
+                        ),
+                        Ok(None) => {}
+                        Ok(Some(packet)) => {
+                            let mut payload = GarlicMessageBuilder::new()
+                                .with_garlic_clove(
+                                    MessageType::Data,
+                                    MessageId::from(R::rng().next_u32()),
+                                    (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                                    GarlicDeliveryInstructions::Destination { hash: &self.key },
+                                    &{
+                                        let payload = GzipEncoderBuilder::<R>::new(&packet)
+                                            .with_source_port(0)
+                                            .with_destination_port(0)
+                                            .with_protocol(Protocol::Streaming.as_u8())
+                                            .build()
+                                            .unwrap();
 
-                    self.stream.handle_packet(&payload);
+                                        let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                                        out.put_u32(payload.len() as u32);
+                                        out.put_slice(&payload);
+
+                                        out.freeze().to_vec()
+                                    },
+                                )
+                                .build();
+
+                            let payload = self.session.encrypt_message(payload).unwrap();
+
+                            let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
+                            payload_new.put_u32(payload.len() as u32);
+                            payload_new.put_slice(&payload);
+                            let payload = payload_new.freeze().to_vec();
+
+                            let payload = MessageBuilder::standard()
+                                .with_expiration(
+                                    (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                                )
+                                .with_message_id(R::rng().next_u32())
+                                .with_message_type(MessageType::Garlic)
+                                .with_payload(&payload)
+                                .build();
+
+                            let Lease2 {
+                                router_id,
+                                tunnel_id,
+                                ..
+                            } = self.leaseset.leases[0].clone();
+
+                            self.tunnel_pool_handle
+                                .send_to_tunnel(router_id, tunnel_id, payload)
+                                .unwrap();
+                        }
+                    }
                 }
                 _ => {}
             }
