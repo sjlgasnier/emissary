@@ -139,7 +139,7 @@ impl Destination {
     }
 
     /// Serialize [`Destination`] into a byte vector.
-    pub fn serialize(self) -> BytesMut {
+    pub fn serialize(&self) -> BytesMut {
         Self::serialize_inner(&self.signing_key)
     }
 
@@ -152,6 +152,16 @@ impl Destination {
             .saturating_add(2usize) // certificate length
             .saturating_add(2usize) // signing key type
             .saturating_add(2usize) // public key type
+    }
+
+    /// Get [`DestinationId`].
+    pub fn id(&self) -> DestinationId {
+        self.destination_id.clone()
+    }
+
+    /// Get reference to `SigningPublicKey` of the [`Destination`].
+    pub fn signing_key(&self) -> &SigningPublicKey {
+        &self.signing_key
     }
 }
 

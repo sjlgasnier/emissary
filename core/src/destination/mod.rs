@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::{SigningPrivateKey, SigningPublicKey, StaticPrivateKey},
     destination::{
         protocol::{streaming::Stream, Protocol},
         session::{KeyContext, OutboundSession},
@@ -92,7 +92,8 @@ impl<R: Runtime> Destination<R> {
         let lease = tunnel_pool_handle.lease().expect("to succeed");
 
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let public_key = SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap();
+        let destination = Dest::new(public_key);
         let sk = StaticPrivateKey::from([0u8; 32]);
 
         let local_leaseset = LeaseSet2 {

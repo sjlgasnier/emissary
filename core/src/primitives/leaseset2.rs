@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPublicKey},
-    primitives::{Mapping, RouterId, RouterIdentity, TunnelId, LOG_TARGET},
+    primitives::{Destination, Mapping, RouterId, TunnelId, LOG_TARGET},
 };
 
 use bytes::{BufMut, BytesMut};
@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 #[derive(Clone)]
 pub struct LeaseSet2Header {
     /// Destination for [`LeaseSet2`].
-    pub destination: RouterIdentity,
+    pub destination: Destination,
 
     /// When [`LeaseSet2`] was published.
     pub published: u32,
@@ -51,7 +51,7 @@ impl LeaseSet2Header {
     ///
     /// Returns the parsed message and rest of `input` on success.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Self> {
-        let (rest, destination) = RouterIdentity::parse_frame(input)?;
+        let (rest, destination) = Destination::parse_frame(input)?;
         let (rest, published) = be_u32(rest)?;
         let (rest, expires) = be_u16(rest)?;
         let (rest, flags) = be_u16(rest)?;
@@ -73,7 +73,7 @@ impl LeaseSet2Header {
     /// Get serialized length of [`LeaseSet2Header`].
     pub fn serialized_len(&self) -> usize {
         // destination + published + expires + flags
-        self.destination.serialized_len() + 4usize + 2usize + 2usize
+        Destination::serialized_len() + 4usize + 2usize + 2usize
     }
 
     /// Serialize [`LeaseSet2Header`] into a byte vector.
@@ -311,7 +311,7 @@ impl LeaseSet2 {
 
     #[cfg(test)]
     pub fn random() -> (LeaseSet2, SigningPrivateKey) {
-        use crate::crypto::StaticPrivateKey;
+        use crate::crypto::{SigningPublicKey, StaticPrivateKey};
         use rand::{Rng, RngCore};
 
         let mut rng = rand::thread_rng();
@@ -330,8 +330,7 @@ impl LeaseSet2 {
             rng.fill_bytes(&mut signing_key);
 
             (
-                RouterIdentity::from_keys(static_key.to_vec(), signing_key.clone().to_vec())
-                    .unwrap(),
+                Destination::new(SigningPublicKey::from_private_ed25519(&signing_key).unwrap()),
                 SigningPrivateKey::new(&signing_key).unwrap(),
             )
         };
@@ -374,7 +373,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::StaticPrivateKey,
+        crypto::{SigningPublicKey, StaticPrivateKey},
         runtime::{mock::MockRuntime, Runtime},
     };
 
@@ -382,7 +381,8 @@ mod tests {
     fn serialize_and_parse_leaset() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let destination =
+            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
         let id = destination.id();
 
         let (router1, tunnel1, expires1, lease1) = {
@@ -444,7 +444,8 @@ mod tests {
     fn serialize_and_parse_leaset_no_leasesets() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let destination =
+            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
 
         let mut serialized = LeaseSet2 {
             header: LeaseSet2Header {
@@ -463,7 +464,8 @@ mod tests {
     #[test]
     fn serialize_and_parse_leaset_no_public_keys() {
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let destination =
+            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
         let id = destination.id();
 
         let (router1, tunnel1, expires1, lease1) = {
@@ -524,7 +526,8 @@ mod tests {
     fn serialize_and_parse_leaset_too_many_leases() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = RouterIdentity::from_keys(vec![0u8; 32], vec![1u8; 32]).unwrap();
+        let destination =
+            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
         let id = destination.id();
 
         let leases = (0..17)
