@@ -160,8 +160,6 @@ impl TagSet {
             BytesMut::from(&session_tag_key_data[0..8]).freeze()
         };
 
-        tracing::error!("first symmetric key: {:?}", self.symmetric_key);
-
         let symmetric_key = {
             let mut temp_key = Hmac::new(&self.symmetric_key).update(&[]).finalize();
 
@@ -174,8 +172,6 @@ impl TagSet {
                 .update(&b"SymmetricRatchet")
                 .update(&[0x02])
                 .finalize();
-
-            tracing::error!("symmetric key = {symmetric_key:?}");
 
             BytesMut::from(&symmetric_key[..]).freeze()
         };

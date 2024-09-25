@@ -94,12 +94,6 @@ impl<'a> Packet<'a> {
 
         // TODO: parse options
 
-        tracing::info!(
-            "option bytes = {}, flags = {flags}, rest size = {}",
-            _options.len(),
-            rest.len()
-        );
-
         Ok((
             &[],
             Self {
@@ -247,15 +241,7 @@ impl<R: Runtime> Stream<R> {
             )));
         }
 
-        tracing::warn!("seq_nro = {seq_nro:?}");
-        tracing::warn!("ack_through = {ack_through:?}");
-        tracing::warn!("flags = {flags:?}");
-        tracing::warn!("payload = {payload:?}");
-        tracing::warn!("nacks = {nacks:?}");
-
         if core::matches!(self.state, StreamState::Open { .. }) {
-            tracing::error!("payload = {:?}", core::str::from_utf8(&payload));
-
             return Ok(None);
         }
 
@@ -269,8 +255,6 @@ impl<R: Runtime> Stream<R> {
 
         out.put_u8(10u8); // resend delay, in seconds
         out.put_u16(0); // no flags
-
-        tracing::error!("sending ack");
 
         self.state = StreamState::Open {
             recv_stream_id: self.state.recv_stream_id(),

@@ -87,9 +87,6 @@ impl<R: Runtime> Destination<R> {
         leaseset: LeaseSet2,
         metrics: R::MetricsHandle,
     ) -> Self {
-        tracing::info!("leases = {:?}", leaseset.leases);
-        tracing::info!("public keys = {:?}", leaseset.public_keys);
-
         let lease = tunnel_pool_handle.lease().expect("to succeed");
 
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
@@ -115,8 +112,6 @@ impl<R: Runtime> Destination<R> {
             },
         )
         .build(&signing_key);
-
-        tracing::error!("database_store: {database_store:?}");
 
         let (stream, payload) = Stream::<R>::new_outbound(destination);
 
