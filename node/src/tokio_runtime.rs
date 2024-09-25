@@ -20,6 +20,10 @@ use emissary::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
     MetricsHandle, Runtime, TcpListener, TcpStream,
 };
+use flate2::{
+    write::{GzDecoder, GzEncoder},
+    Compression,
+};
 use futures::{AsyncRead as _, AsyncWrite as _, Stream};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
@@ -29,6 +33,7 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatE
 
 use std::{
     future::Future,
+    io::Write,
     net::SocketAddr,
     pin::{pin, Pin},
     task::{Context, Poll, Waker},
@@ -293,5 +298,19 @@ impl Runtime for TokioRuntime {
 
     fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
         tokio::time::sleep(duration)
+    }
+
+    fn gzip_compress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(bytes.as_ref()).ok()?;
+
+        e.finish().ok()
+    }
+
+    fn gzip_decompress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+        let mut e = GzDecoder::new(Vec::new());
+        e.write_all(bytes.as_ref()).ok()?;
+
+        e.finish().ok()
     }
 }

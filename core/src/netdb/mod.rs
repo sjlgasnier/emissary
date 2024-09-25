@@ -17,23 +17,51 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2np::{Message, MessageType},
+    crypto::{
+        base32_decode, base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
+        SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
+    },
+    destination::{
+        protocol::{streaming::Stream, Protocol},
+        session::{KeyContext, OutboundSession},
+        Destination,
+    },
+    i2np::{
+        database::{
+            lookup::{DatabaseLookupBuilder, LookupType},
+            store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStorePayload},
+        },
+        garlic::{
+            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
+            GarlicMessageBuilder,
+        },
+        Message, MessageBuilder, MessageType,
+    },
     netdb::{dht::Dht, metrics::*},
-    primitives::{RouterId, RouterInfo},
+    primitives::{
+        Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterId, RouterIdentity, RouterInfo,
+    },
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
+    tunnel::TunnelPoolHandle,
+    util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
+use bytes::{BufMut, Bytes, BytesMut};
+use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use futures::{FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use rand_core::RngCore;
+use thingbuf::mpsc;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 mod bucket;
@@ -74,6 +102,16 @@ pub struct NetDb<R: Runtime> {
 
     /// Transport service.
     service: TransportService,
+
+    /// Exploratory tunnel pool handle.
+    exploratory_pool_handle: TunnelPoolHandle,
+
+    key: Vec<u8>,
+    timer: futures::future::BoxFuture<'static, ()>,
+    local_router_id: RouterId,
+    key_context: KeyContext<R>,
+    rx: Option<mpsc::Receiver<Message>>,
+    tmp: Option<(OutboundSession, Stream<R>)>,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -83,6 +121,8 @@ impl<R: Runtime> NetDb<R> {
         service: TransportService,
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
+        exploratory_pool_handle: TunnelPoolHandle,
+        rx: mpsc::Receiver<Message>,
     ) -> Self {
         let floodfills = router_storage
             .routers()
@@ -98,12 +138,22 @@ impl<R: Runtime> NetDb<R> {
             "starting netdb",
         );
 
+        let key = "larnrirsp5fikx7n6fg3aczdxrurt5nyaaleqo4vqmnuo3xd5qeq";
+        let key = base32_decode(&key).unwrap();
+
         Self {
-            dht: Dht::new(local_router_id, floodfills, metrics.clone()),
+            key_context: KeyContext::new(),
+            dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
+            exploratory_pool_handle,
+            timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
+            local_router_id,
+            key,
             metrics,
             routers: HashMap::new(),
             router_storage,
             service,
+            rx: Some(rx),
+            tmp: None,
         }
     }
 
@@ -182,7 +232,31 @@ impl<R: Runtime> NetDb<R> {
     fn on_message(&mut self, message: Message) {
         match message.message_type {
             MessageType::DatabaseStore => {
+                let DatabaseStore {
+                    key,
+                    payload,
+                    reply,
+                    ..
+                } = DatabaseStore::<R>::parse(&message.payload).unwrap();
+
                 tracing::trace!("database store");
+
+                let leaseset = match payload {
+                    DatabaseStorePayload::RouterInfo { router_info } => {
+                        tracing::warn!("ignore routerinfo");
+                        return;
+                    }
+                    DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
+                };
+
+                R::spawn(Destination::<R>::new(
+                    self.key.clone(),
+                    self.key_context.clone(),
+                    self.exploratory_pool_handle.clone(),
+                    self.rx.take().expect("to exist"),
+                    leaseset,
+                    self.metrics.clone(),
+                ));
             }
             MessageType::DatabaseLookup => {
                 tracing::trace!("database lookup");
@@ -203,6 +277,37 @@ impl<R: Runtime> Future for NetDb<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(_) = self.timer.poll_unpin(cx) {
+            let key = self.key.clone();
+            let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+
+            let message =
+                DatabaseLookupBuilder::new(key, self.local_router_id.clone(), LookupType::Leaseset)
+                    .build();
+
+            let message_id = R::rng().next_u32();
+            let message = MessageBuilder::short()
+                .with_expiration(
+                    (R::time_since_epoch() + core::time::Duration::from_secs(8)).as_secs(),
+                )
+                .with_message_type(MessageType::DatabaseLookup)
+                .with_message_id(message_id)
+                .with_payload(&message)
+                .build();
+
+            tracing::error!(
+                ?message_id,
+                "send query to closest floodfills = {floodfills:?}"
+            );
+
+            if let Err(error) = self.service.send(&floodfills[0], message) {
+                tracing::error!("failed to send message");
+            }
+
+            self.timer = Box::pin(R::delay(core::time::Duration::from_secs(15)));
+            let _ = self.timer.poll_unpin(cx);
+        }
+
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,

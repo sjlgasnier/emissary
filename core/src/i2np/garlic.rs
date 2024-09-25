@@ -16,8 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::i2np::{MessageType, LOG_TARGET};
+use crate::{
+    crypto::StaticPublicKey,
+    i2np::{MessageType, LOG_TARGET},
+    primitives::MessageId,
+};
 
+use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -47,7 +52,7 @@ pub enum GarlicMessageType {
     NextKey,
 
     /// ACK.
-    ACK,
+    Ack,
 
     /// ACK request.
     ACKRequest,
@@ -68,11 +73,26 @@ impl GarlicMessageType {
             5 => Some(Self::Options),
             6 => Some(Self::MessageNumber),
             7 => Some(Self::NextKey),
-            8 => Some(Self::ACK),
+            8 => Some(Self::Ack),
             9 => Some(Self::ACKRequest),
             11 => Some(Self::GarlicClove),
             254 => Some(Self::Padding),
             _ => None,
+        }
+    }
+
+    /// Serialize [`GarlicMessageType`].
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::DateTime => 0,
+            Self::Termination => 4,
+            Self::Options => 5,
+            Self::MessageNumber => 6,
+            Self::NextKey => 7,
+            Self::Ack => 8,
+            Self::ACKRequest => 9,
+            Self::GarlicClove => 11,
+            Self::Padding => 254,
         }
     }
 }
@@ -119,6 +139,30 @@ impl<'a> DeliveryInstructions<'a> {
             Self::Tunnel { .. } => 37usize,
         }
     }
+
+    /// Serialize [`DeliveryInstructions`] into a byte vector.
+    fn serialize(self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(self.serialized_len());
+
+        match self {
+            Self::Local => out.put_u8(0x00),
+            Self::Destination { hash } => {
+                out.put_u8(0x01 << 5);
+                out.put_slice(hash);
+            }
+            Self::Router { hash } => {
+                out.put_u8(0x02 << 5);
+                out.put_slice(hash);
+            }
+            Self::Tunnel { hash, tunnel_id } => {
+                out.put_u8(0x03 << 5);
+                out.put_slice(hash);
+                out.put_u32(tunnel_id);
+            }
+        }
+
+        out
+    }
 }
 
 /// Garlic message block.
@@ -153,7 +197,7 @@ pub enum GarlicMessageBlock<'a> {
         message_type: MessageType,
 
         /// Message ID.
-        message_id: u32,
+        message_id: MessageId,
 
         /// Message expiration.
         expiration: u32,
@@ -267,7 +311,7 @@ impl<'a> GarlicMessage<'a> {
             rest,
             GarlicMessageBlock::GarlicClove {
                 message_type,
-                message_id,
+                message_id: MessageId::from(message_id),
                 expiration,
                 delivery_instructions,
                 message_body,
@@ -320,5 +364,92 @@ impl<'a> GarlicMessage<'a> {
         Some(Self {
             blocks: Self::parse_inner(input, Vec::new())?,
         })
+    }
+}
+
+/// Garlic message builder.
+pub struct GarlicMessageBuilder<'a> {
+    /// Cloves.
+    cloves: Vec<GarlicMessageBlock<'a>>,
+
+    /// Total message size.
+    message_size: usize,
+}
+
+impl<'a> GarlicMessageBuilder<'a> {
+    /// Create new [`GarlicMessageBuilder`].
+    pub fn new() -> Self {
+        Self {
+            cloves: Vec::new(),
+            message_size: 0usize,
+        }
+    }
+
+    /// Add [`GarlicMessageBlock::DateTime`].
+    pub fn with_date_time(mut self, timestamp: u32) -> Self {
+        self.message_size += 1 + 2 + 4;
+        self.cloves.push(GarlicMessageBlock::DateTime { timestamp });
+
+        self
+    }
+
+    /// Add [`GarlicMessageBlock::GarlicClove`].
+    pub fn with_garlic_clove(
+        mut self,
+        message_type: MessageType,
+        message_id: MessageId,
+        expiration: u64,
+        delivery_instructions: DeliveryInstructions<'a>,
+        message_body: &'a [u8],
+    ) -> Self {
+        // TODO: ugly
+        self.message_size +=
+            1 + 2 + delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len();
+        self.cloves.push(GarlicMessageBlock::GarlicClove {
+            message_type,
+            message_id,
+            expiration: expiration as u32,
+            delivery_instructions,
+            message_body,
+        });
+
+        self
+    }
+
+    /// Serialize [`GarlicMessageBuilder`] into a byte vector.
+    pub fn build(self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(self.message_size);
+
+        for clove in self.cloves {
+            match clove {
+                GarlicMessageBlock::DateTime { timestamp } => {
+                    out.put_u8(GarlicMessageType::DateTime.as_u8());
+                    out.put_u16(4u16); // size of `timestamp`
+                    out.put_u32(timestamp);
+                }
+                GarlicMessageBlock::GarlicClove {
+                    message_type,
+                    message_id,
+                    expiration,
+                    delivery_instructions,
+                    message_body,
+                } => {
+                    out.put_u8(GarlicMessageType::GarlicClove.as_u8());
+                    // TODO: no hardcoded constants without comments
+                    out.put_u16(
+                        (delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len())
+                            as u16,
+                    );
+                    out.put_slice(&delivery_instructions.serialize());
+                    out.put_u8(message_type.as_u8());
+                    out.put_u32(*message_id);
+                    out.put_u32(expiration);
+                    out.put_slice(message_body);
+                }
+                block => todo!("unimplemented block: {block:?}"),
+            }
+        }
+
+        out.freeze().to_vec()
     }
 }

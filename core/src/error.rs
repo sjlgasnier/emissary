@@ -24,6 +24,22 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// Streaming protocol error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamingError {
+    /// Mismatch between send and receive stream IDs.
+    StreamIdMismatch(u32, u32),
+}
+
+impl fmt::Display for StreamingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StreamIdMismatch(send, recv) =>
+                write!(f, "stream mismatch: {send} (send) vs {recv} (recv)"),
+        }
+    }
+}
+
 /// Channel error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChannelError {
@@ -175,6 +191,7 @@ pub enum Error {
     DialFailure,
     Tunnel(TunnelError),
     Channel(ChannelError),
+    Streaming(StreamingError),
     Timeout,
 }
 
@@ -194,6 +211,7 @@ impl fmt::Display for Error {
             Self::DialFailure => write!(f, "dial failure"),
             Self::Tunnel(error) => write!(f, "tunnel error: {error}"),
             Self::Channel(error) => write!(f, "channel error: {error}"),
+            Self::Streaming(error) => write!(f, "streaming protocol error: {error}"),
             Self::Timeout => write!(f, "operation timed out"),
         }
     }

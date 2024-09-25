@@ -167,4 +167,10 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
 
     /// Return future which blocks for `duration` before returning.
     fn delay(duration: Duration) -> impl Future<Output = ()> + Send;
+
+    /// GZIP-compress `bytes` and return the compressed byte vector.
+    fn gzip_compress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>>;
+
+    /// GZIP-decompress `bytes` and return the decompressed byte vector.
+    fn gzip_decompress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>>;
 }

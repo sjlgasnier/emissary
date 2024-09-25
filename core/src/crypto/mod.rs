@@ -136,6 +136,12 @@ impl StaticPublicKey {
     }
 }
 
+impl From<[u8; 32]> for StaticPublicKey {
+    fn from(value: [u8; 32]) -> Self {
+        StaticPublicKey::X25519(x25519_dalek::PublicKey::from(value))
+    }
+}
+
 impl AsRef<[u8]> for StaticPublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
@@ -162,6 +168,11 @@ pub enum StaticPrivateKey {
 }
 
 impl StaticPrivateKey {
+    /// Create new [`StaticPrivateKey`].
+    pub fn new(csprng: impl RngCore + CryptoRng) -> Self {
+        Self::X25519(x25519_dalek::StaticSecret::random_from_rng(csprng))
+    }
+
     /// Get public key.
     pub fn public(&self) -> StaticPublicKey {
         match self {
@@ -177,11 +188,25 @@ impl StaticPrivateKey {
     }
 }
 
+impl From<[u8; 32]> for StaticPrivateKey {
+    fn from(value: [u8; 32]) -> Self {
+        StaticPrivateKey::X25519(x25519_dalek::StaticSecret::from(value))
+    }
+}
+
 impl From<Vec<u8>> for StaticPrivateKey {
     fn from(value: Vec<u8>) -> Self {
         let ss: [u8; 32] = value.try_into().expect("valid static private key");
 
         StaticPrivateKey::X25519(x25519_dalek::StaticSecret::from(ss))
+    }
+}
+
+impl AsRef<[u8; 32]> for StaticPrivateKey {
+    fn as_ref(&self) -> &[u8; 32] {
+        match self {
+            Self::X25519(key) => key.as_bytes(),
+        }
     }
 }
 

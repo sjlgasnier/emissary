@@ -201,7 +201,7 @@ impl SubsystemHandle {
         );
 
         if !tunnel_messages.is_empty() {
-            self.subsystems[1]
+            self.subsystems[0]
                 .try_send(InnerSubsystemEvent::I2Np {
                     messages: tunnel_messages,
                 })
@@ -210,11 +210,11 @@ impl SubsystemHandle {
         }
 
         if !netdb_messages.is_empty() {
-            self.subsystems[0]
+            self.subsystems[1]
                 .try_send(InnerSubsystemEvent::I2Np {
                     messages: netdb_messages,
                 })
-                .map_err(|_| Error::NotSupported)
+                .map_err(|error| Error::NotSupported)
                 .unwrap();
         }
 

@@ -146,7 +146,7 @@ impl<R: Runtime> GarlicHandler<R> {
                     CloveDeliveryInstructions::Local => Some(DeliveryInstructions::Local {
                         message: Message {
                             message_type,
-                            message_id,
+                            message_id: *message_id,
                             expiration: expiration.into(),
                             payload: message_body.to_vec(), // TODO: is this really needed
                         },
