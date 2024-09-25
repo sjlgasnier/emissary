@@ -27,6 +27,7 @@ use nom::{
 };
 use rand_core::RngCore;
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 /// Logging target for the file.
@@ -252,7 +253,7 @@ impl<R: Runtime> Stream<R> {
         tracing::warn!("payload = {payload:?}");
         tracing::warn!("nacks = {nacks:?}");
 
-        if std::matches!(self.state, StreamState::Open { .. }) {
+        if core::matches!(self.state, StreamState::Open { .. }) {
             tracing::error!("payload = {:?}", core::str::from_utf8(&payload));
 
             return Ok(None);

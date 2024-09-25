@@ -42,6 +42,7 @@ use bytes::{BufMut, BytesMut};
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
+use alloc::{vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
