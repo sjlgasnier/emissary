@@ -475,9 +475,7 @@ impl<R: Runtime> KeyContext<R> {
         let chaining_key = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
 
         // generate random static keypair for the session
-        // TODO: generate actually random key
-        let private_key = StaticPrivateKey::from([0u8; 32]);
-        // let private_key = StaticPrivateKey::new(&mut R::rng());
+        let private_key = StaticPrivateKey::new(&mut R::rng());
         let public_key = private_key.public();
 
         let outbound_state = Sha256::new().update(&chaining_key).finalize();
@@ -631,5 +629,10 @@ impl<R: Runtime> KeyContext<R> {
 
         let state = Sha256::new().update(&self.inbound_state).update(&public_key).finalize();
         let shared = self.private_key.diffie_hellman(&public_key);
+    }
+
+    /// Get static public key.
+    pub fn public_key(&self) -> StaticPublicKey {
+        self.public_key.clone()
     }
 }

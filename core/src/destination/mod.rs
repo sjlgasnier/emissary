@@ -89,11 +89,10 @@ impl<R: Runtime> Destination<R> {
     ) -> Self {
         let lease = tunnel_pool_handle.lease().expect("to succeed");
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let public_key = SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap();
-        let destination = Dest::new(public_key);
+        let signing_key = SigningPrivateKey::random(&mut R::rng());
+        let verifying_key = signing_key.public();
+        let destination = Dest::new(verifying_key);
         let destination_id = destination.id();
-        let sk = StaticPrivateKey::from([0u8; 32]);
 
         let local_leaseset = LeaseSet2 {
             header: LeaseSet2Header {
@@ -101,7 +100,7 @@ impl<R: Runtime> Destination<R> {
                 published: R::time_since_epoch().as_secs() as u32,
                 expires: (R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs() as u32,
             },
-            public_keys: vec![sk.public()],
+            public_keys: vec![key_context.public_key()],
             leases: vec![lease],
         };
 
