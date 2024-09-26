@@ -306,9 +306,17 @@ impl SigningPrivateKey {
         Some(SigningPrivateKey::Ed25519(key))
     }
 
+    /// Sign `message`.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         match self {
             Self::Ed25519(key) => key.sign(&message).to_bytes().to_vec(),
+        }
+    }
+
+    /// Get verifying key.
+    pub fn public(&self) -> SigningPublicKey {
+        match self {
+            Self::Ed25519(key) => SigningPublicKey::Ed25519(key.verifying_key()),
         }
     }
 }
