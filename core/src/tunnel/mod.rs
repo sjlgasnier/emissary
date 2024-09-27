@@ -236,23 +236,13 @@ impl<R: Runtime> TunnelManager<R> {
             }
             None => match router == &self.router_info.identity().id() {
                 true => {
-                    todo!("message to self, shouldn't happen");
-                    // tracing::debug!(
-                    //     target: LOG_TARGET,
-                    //     message_type = ?MessageType::from_u8(message[2]),
-                    //     message_len = ?message.len(),
-                    //     "router message to self",
-                    // );
-                    // match Message::parse_short(&message) {
-                    //     Some(message) => self.on_message(message),
-                    //     None => {
-                    //         tracing::error!(
-                    //             target: LOG_TARGET,
-                    //             "failed to parse message created by emissary",
-                    //         );
-                    //         debug_assert!(false);
-                    //     }
-                    // }
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        message_type = ?MessageType::from_u8(message[2]),
+                        message_len = ?message.len(),
+                        "message incorrectly routed to self",
+                    );
+                    debug_assert!(false);
                 }
                 false => {
                     tracing::debug!(
