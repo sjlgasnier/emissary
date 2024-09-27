@@ -58,6 +58,9 @@ const LOG_TARGET: &str = "emissary::destination";
 
 /// Client destination.
 pub struct Destination<R: Runtime> {
+    /// Key context.
+    key_context: KeyContext<R>,
+
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
@@ -81,13 +84,13 @@ impl<R: Runtime> Destination<R> {
     /// Create new [`Destination`].
     pub fn new(
         key: Vec<u8>,
-        mut key_context: KeyContext<R>,
         tunnel_pool_handle: TunnelPoolHandle,
         rx: Receiver<Message>,
         leaseset: LeaseSet2,
         metrics: R::MetricsHandle,
     ) -> Self {
         let lease = tunnel_pool_handle.lease().expect("to succeed");
+        let mut key_context = KeyContext::new();
 
         let signing_key = SigningPrivateKey::random(&mut R::rng());
         let verifying_key = signing_key.public();
@@ -175,6 +178,7 @@ impl<R: Runtime> Destination<R> {
 
         Self {
             key,
+            key_context,
             metrics,
             rx,
             session,
@@ -279,10 +283,12 @@ impl<R: Runtime> Future for Destination<R> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             match self.rx.poll_recv(cx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(message)) => self.handle_garlic_message(message),
             }
         }
+
+        Poll::Pending
     }
 }

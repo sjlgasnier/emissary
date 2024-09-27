@@ -109,7 +109,6 @@ pub struct NetDb<R: Runtime> {
     key: Vec<u8>,
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
-    key_context: KeyContext<R>,
     rx: Option<mpsc::Receiver<Message>>,
     tmp: Option<(OutboundSession, Stream<R>)>,
 }
@@ -142,7 +141,6 @@ impl<R: Runtime> NetDb<R> {
         let key = base32_decode(&key).unwrap();
 
         Self {
-            key_context: KeyContext::new(),
             dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
             exploratory_pool_handle,
             timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
@@ -251,7 +249,6 @@ impl<R: Runtime> NetDb<R> {
 
                 R::spawn(Destination::<R>::new(
                     self.key.clone(),
-                    self.key_context.clone(),
                     self.exploratory_pool_handle.clone(),
                     self.rx.take().expect("to exist"),
                     leaseset,
