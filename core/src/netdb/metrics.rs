@@ -22,6 +22,11 @@ use alloc::vec::Vec;
 
 pub const NUM_FLOODFILLS: &str = "floodfill_count";
 pub const NUM_CONNECTED_FLOODFILLS: &str = "connected_floodfill_count";
+pub const NUM_QUERIES: &str = "num_queries";
+pub const NUM_SUCCEEDED_QUERIES: &str = "num_succeeded_queries";
+pub const NUM_FAILED_QUERIES: &str = "num_failed_queries";
+pub const NUM_ACTIVE_QUERIES: &str = "num_active_queries";
+pub const QUERY_DURATION_BUCKET: &str = "query_duration_bucket";
 
 /// Register NetDB metrics.
 pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
@@ -30,11 +35,34 @@ pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
         name: NUM_FLOODFILLS,
         description: "total number of know floodfills",
     });
+    metrics.push(MetricType::Counter {
+        name: NUM_QUERIES,
+        description: "total number of queries made",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_SUCCEEDED_QUERIES,
+        description: "total number of succeded queries",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_FAILED_QUERIES,
+        description: "total number of failed queries",
+    });
 
     // gauges
     metrics.push(MetricType::Gauge {
         name: NUM_CONNECTED_FLOODFILLS,
         description: "number of connected floodfills",
+    });
+    metrics.push(MetricType::Gauge {
+        name: NUM_ACTIVE_QUERIES,
+        description: "number of active queries",
+    });
+
+    // histograms
+    metrics.push(MetricType::Histogram {
+        name: QUERY_DURATION_BUCKET,
+        description: "how long queries take",
+        buckets: vec![1f64, 3f64, 5f64, 8f64, 10f64, 15f64, 30f64, 60f64],
     });
 
     metrics
