@@ -241,16 +241,15 @@ impl<R: Runtime> Stream<R> {
             )));
         }
 
-        if core::matches!(self.state, StreamState::Open { .. }) {
-            return Ok(None);
-        }
+        tracing::info!("ack received = {ack_through}, sequence number = {seq_nro:}");
+        tracing::error!("payload = {:?}", core::str::from_utf8(payload));
 
         let mut out = BytesMut::with_capacity(22);
 
         out.put_u32(recv_stream_id); // send stream id
         out.put_u32(self.state.recv_stream_id());
-        out.put_u32(1);
-        out.put_u32(0u32); // ack through
+        out.put_u32(0);
+        out.put_u32(seq_nro); // ack through
         out.put_u8(0u8); // nack count
 
         out.put_u8(10u8); // resend delay, in seconds
@@ -259,7 +258,7 @@ impl<R: Runtime> Stream<R> {
         self.state = StreamState::Open {
             recv_stream_id: self.state.recv_stream_id(),
             send_stream_id: recv_stream_id,
-            seq_nro: 2,
+            seq_nro: 1,
         };
 
         Ok(Some(out.freeze().to_vec()))
