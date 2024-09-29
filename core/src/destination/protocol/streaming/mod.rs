@@ -244,6 +244,11 @@ impl<R: Runtime> Stream<R> {
         tracing::info!("ack received = {ack_through}, sequence number = {seq_nro:}");
         tracing::error!("payload = {:?}", core::str::from_utf8(payload));
 
+        if (flags & 0x02) == 0x02 {
+            tracing::info!("stream closed");
+            return Ok(None);
+        }
+
         let mut out = BytesMut::with_capacity(22);
 
         out.put_u32(recv_stream_id); // send stream id
