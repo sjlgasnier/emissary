@@ -192,6 +192,16 @@ pub enum NextKeyKind {
     },
 }
 
+impl NextKeyKind {
+    /// Get serialized length of [`NextKey`].
+    fn serialized_len(&self) -> usize {
+        match self {
+            NextKeyKind::ForwardKey { .. } | NextKeyKind::ReverseKey { .. } => 39usize,
+            NextKeyKind::ReverseKeyRequest { key_id } => 6usize,
+        }
+    }
+}
+
 /// Garlic message block.
 pub enum GarlicMessageBlock<'a> {
     /// Date time.
@@ -491,6 +501,13 @@ impl<'a> GarlicMessageBuilder<'a> {
         self
     }
 
+    // Add [`GarlicMessageBlock::NextKey`]
+    pub fn with_next_key(mut self, kind: NextKeyKind) -> Self {
+        self.message_size += kind.serialized_len();
+        self.cloves.push(GarlicMessageBlock::NextKey { kind });
+        self
+    }
+
     /// Serialize [`GarlicMessageBuilder`] into a byte vector.
     pub fn build(self) -> Vec<u8> {
         let mut out = BytesMut::with_capacity(self.message_size);
@@ -521,6 +538,28 @@ impl<'a> GarlicMessageBuilder<'a> {
                     out.put_u32(expiration);
                     out.put_slice(message_body);
                 }
+                GarlicMessageBlock::NextKey { kind } => match kind {
+                    NextKeyKind::ForwardKey { key_id, public_key } => {
+                        out.put_u8(GarlicMessageType::NextKey.as_u8());
+                        out.put_u16(35u16);
+                        out.put_u8(0x01); // key present
+                        out.put_u16(key_id);
+                        out.put_slice(public_key.as_ref());
+                    }
+                    NextKeyKind::ReverseKey { key_id, public_key } => {
+                        out.put_u8(GarlicMessageType::NextKey.as_u8());
+                        out.put_u16(35u16);
+                        out.put_u8(0x01 | 0x02); // key present + reverse key
+                        out.put_u16(key_id);
+                        out.put_slice(public_key.as_ref());
+                    }
+                    NextKeyKind::ReverseKeyRequest { key_id } => {
+                        out.put_u8(GarlicMessageType::NextKey.as_u8());
+                        out.put_u16(3u16);
+                        out.put_u8(0x00 | 0x02 | 0x04); // no key present + reverse key + request
+                        out.put_u16(key_id);
+                    }
+                },
                 block => todo!("unimplemented block: {block:?}"),
             }
         }
