@@ -548,31 +548,6 @@ impl<'a> TunnelDataBuilder<'a> {
         out.freeze().to_vec()
     }
 
-    /// Serialize `message` into an unfragmented `TunnelData` message.
-    fn serialize_unfragmented<R: Runtime>(
-        tunnel_id: TunnelId,
-        message: TunnelDataBlock<'a>,
-        payload_size: usize,
-        padding: &[u8],
-    ) -> Vec<u8> {
-        match payload_size == message.message.len() {
-            true => Self::serialize::<R>(
-                tunnel_id,
-                &message.message_kind.serialize(),
-                payload_size,
-                message.message,
-                None,
-            ),
-            false => Self::serialize::<R>(
-                tunnel_id,
-                &message.message_kind.serialize(),
-                payload_size,
-                message.message,
-                Some(padding),
-            ),
-        }
-    }
-
     /// Serialize `message` into two or more `TunnelData` message fragments.
     fn serialize_fragmented<R: Runtime>(
         tunnel_id: TunnelId,
@@ -665,18 +640,21 @@ impl<'a> TunnelDataBuilder<'a> {
             .saturating_sub(1usize) // end of padding flag
             .saturating_sub(2usize); // message size
 
-        match payload_size >= message.message.len() {
-            true => vec![Self::serialize_unfragmented::<R>(
+        // if the message size is smaller than what the payload of `TunnelData` can hold,
+        // send the message as unfragmented
+        if payload_size >= message.message.len() {
+            return vec![Self::serialize::<R>(
                 self.next_tunnel_id,
-                message,
+                &message.message_kind.serialize(),
                 payload_size,
-                padding,
+                message.message,
+                (payload_size != message.message.len()).then_some(padding),
             )]
-            .into_iter(),
-            false =>
-                Self::serialize_fragmented::<R>(self.next_tunnel_id, message, payload_size, padding)
-                    .into_iter(),
+            .into_iter();
         }
+
+        Self::serialize_fragmented::<R>(self.next_tunnel_id, message, payload_size, padding)
+            .into_iter()
     }
 }
 
