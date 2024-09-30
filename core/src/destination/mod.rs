@@ -19,7 +19,10 @@
 use crate::{
     crypto::{SigningPrivateKey, SigningPublicKey, StaticPrivateKey},
     destination::{
-        protocol::{streaming::Stream, Protocol},
+        protocol::{
+            streaming::{Stream, StreamEvent},
+            Protocol,
+        },
         session::{KeyContext, OutboundSession},
     },
     i2np::{
@@ -39,6 +42,7 @@ use crate::{
 };
 
 use bytes::{BufMut, BytesMut};
+use futures::StreamExt;
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
@@ -195,6 +199,7 @@ impl<R: Runtime> Destination<R> {
 
         for block in message.blocks {
             match block {
+                GarlicMessageBlock::Padding { .. } => {}
                 GarlicMessageBlock::GarlicClove {
                     message_type,
                     message_id,
@@ -211,67 +216,17 @@ impl<R: Runtime> Destination<R> {
                         src_port,
                     } = GzipPayload::decompress::<R>(&message_body[4..]).unwrap();
 
-                    match self.stream.handle_packet(&payload) {
-                        Err(error) => tracing::error!(
+                    if let Err(error) = self.stream.handle_packet(&payload) {
+                        tracing::error!(
                             target: LOG_TARGET,
                             ?error,
                             "failed to handle streaming protocol packet",
-                        ),
-                        Ok(None) => {}
-                        Ok(Some(packet)) => {
-                            let mut payload = GarlicMessageBuilder::new()
-                                .with_garlic_clove(
-                                    MessageType::Data,
-                                    MessageId::from(R::rng().next_u32()),
-                                    (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                                    GarlicDeliveryInstructions::Destination { hash: &self.key },
-                                    &{
-                                        let payload = GzipEncoderBuilder::<R>::new(&packet)
-                                            .with_source_port(0)
-                                            .with_destination_port(0)
-                                            .with_protocol(Protocol::Streaming.as_u8())
-                                            .build()
-                                            .unwrap();
-
-                                        let mut out = BytesMut::with_capacity(payload.len() + 4);
-
-                                        out.put_u32(payload.len() as u32);
-                                        out.put_slice(&payload);
-
-                                        out.freeze().to_vec()
-                                    },
-                                )
-                                .build();
-
-                            let payload = self.session.encrypt_message(payload).unwrap();
-
-                            let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
-                            payload_new.put_u32(payload.len() as u32);
-                            payload_new.put_slice(&payload);
-                            let payload = payload_new.freeze().to_vec();
-
-                            let payload = MessageBuilder::standard()
-                                .with_expiration(
-                                    (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                                )
-                                .with_message_id(R::rng().next_u32())
-                                .with_message_type(MessageType::Garlic)
-                                .with_payload(&payload)
-                                .build();
-
-                            let Lease2 {
-                                router_id,
-                                tunnel_id,
-                                ..
-                            } = self.leaseset.leases[0].clone();
-
-                            self.tunnel_pool_handle
-                                .send_to_tunnel(router_id, tunnel_id, payload)
-                                .unwrap();
-                        }
+                        );
                     }
                 }
-                _ => {}
+                message_block => {
+                    tracing::error!("\nunhandled message block {message_block:?}\n");
+                }
             }
         }
     }
@@ -286,6 +241,74 @@ impl<R: Runtime> Future for Destination<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(message)) => self.handle_garlic_message(message),
+            }
+        }
+
+        loop {
+            match self.stream.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(StreamEvent::StreamOpened {
+                    recv_stream_id,
+                    send_stream_id,
+                })) => {
+                    tracing::info!(target: LOG_TARGET, "stream opened");
+                }
+                Poll::Ready(Some(StreamEvent::StreamClosed {
+                    recv_stream_id,
+                    send_stream_id,
+                })) => {
+                    tracing::info!(target: LOG_TARGET, "stream closed");
+                }
+                Poll::Ready(Some(StreamEvent::SendPacket { packet })) => {
+                    let mut payload = GarlicMessageBuilder::new()
+                        .with_garlic_clove(
+                            MessageType::Data,
+                            MessageId::from(R::rng().next_u32()),
+                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                            GarlicDeliveryInstructions::Destination { hash: &self.key },
+                            &{
+                                let payload = GzipEncoderBuilder::<R>::new(&packet)
+                                    .with_source_port(0)
+                                    .with_destination_port(0)
+                                    .with_protocol(Protocol::Streaming.as_u8())
+                                    .build()
+                                    .unwrap();
+
+                                let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                                out.put_u32(payload.len() as u32);
+                                out.put_slice(&payload);
+
+                                out.freeze().to_vec()
+                            },
+                        )
+                        .build();
+
+                    let payload = self.session.encrypt_message(payload).unwrap();
+
+                    let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
+                    payload_new.put_u32(payload.len() as u32);
+                    payload_new.put_slice(&payload);
+                    let payload = payload_new.freeze().to_vec();
+
+                    let payload = MessageBuilder::standard()
+                        .with_expiration(
+                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                        )
+                        .with_message_id(R::rng().next_u32())
+                        .with_message_type(MessageType::Garlic)
+                        .with_payload(&payload)
+                        .build();
+
+                    let Lease2 {
+                        router_id,
+                        tunnel_id,
+                        ..
+                    } = self.leaseset.leases[0].clone();
+
+                    self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload).unwrap();
+                }
             }
         }
 

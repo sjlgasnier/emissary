@@ -30,8 +30,12 @@ use nom::{
 };
 use rand_core::RngCore;
 
-use alloc::vec::Vec;
-use core::marker::PhantomData;
+use alloc::{collections::VecDeque, vec::Vec};
+use core::{
+    marker::PhantomData,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 
 mod packet;
 
@@ -77,6 +81,12 @@ pub struct Stream<R: Runtime> {
     /// Stream state.
     state: StreamState,
 
+    /// Pending events.
+    pending_events: VecDeque<StreamEvent>,
+
+    /// Waker.
+    waker: Option<Waker>,
+
     /// Marker for `Runtime`.
     _runtime: PhantomData<R>,
 }
@@ -119,6 +129,8 @@ impl<R: Runtime> Stream<R> {
                     recv_stream_id,
                     seq_nro,
                 },
+                pending_events: VecDeque::new(),
+                waker: None,
                 _runtime: Default::default(),
             },
             out,
@@ -130,7 +142,7 @@ impl<R: Runtime> Stream<R> {
     /// Returns a serialized [`Packet`] if `payload` warrants sending a reply to remote.
     //
     // TODO: return bytesmut
-    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<Option<Vec<u8>>> {
+    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<()> {
         let Packet {
             send_stream_id,
             recv_stream_id,
@@ -169,7 +181,11 @@ impl<R: Runtime> Stream<R> {
 
         if (flags & 0x02) == 0x02 {
             tracing::info!("stream closed");
-            return Ok(None);
+
+            self.pending_events.push_back(StreamEvent::StreamClosed {
+                recv_stream_id: self.state.recv_stream_id(),
+                send_stream_id: recv_stream_id,
+            });
         }
 
         let mut out = BytesMut::with_capacity(22);
@@ -189,7 +205,51 @@ impl<R: Runtime> Stream<R> {
             seq_nro: 1,
         };
 
-        Ok(Some(out.freeze().to_vec()))
+        self.pending_events.push_back(StreamEvent::SendPacket { packet: out });
+        self.waker.take().map(|waker| waker.wake_by_ref());
+
+        Ok(())
+    }
+}
+
+/// Events emitted by [`Stream`].
+pub enum StreamEvent {
+    /// Stream has been opened.
+    StreamOpened {
+        /// Receive stream ID.
+        recv_stream_id: u32,
+
+        /// Send stream ID.
+        send_stream_id: u32,
+    },
+
+    /// Stream has been closed.
+    StreamClosed {
+        /// Receive stream ID.
+        recv_stream_id: u32,
+
+        /// Send stream ID.
+        send_stream_id: u32,
+    },
+
+    /// Send packet to remote peer.
+    SendPacket {
+        /// Serialized [`Packet`].
+        packet: BytesMut,
+    },
+}
+
+impl<R: Runtime> futures::Stream for Stream<R> {
+    type Item = StreamEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.pending_events.pop_front().map_or_else(
+            || {
+                self.waker = Some(cx.waker().clone());
+                Poll::Pending
+            },
+            |event| Poll::Ready(Some(event)),
+        )
     }
 }
 
@@ -200,12 +260,13 @@ mod tests {
         crypto::{SigningPrivateKey, SigningPublicKey},
         runtime::{mock::MockRuntime, Runtime},
     };
+    use futures::StreamExt;
 
-    #[test]
-    fn stream_id_mismatch() {
+    #[tokio::test]
+    async fn stream_id_mismatch() {
         let destination =
             Dest::new(SigningPublicKey::from_private_ed25519(&vec![1u8; 32]).unwrap());
-        let (mut stream, _payload) = Stream::<MockRuntime>::new_outbound(destination.clone());
+        let (mut stream, packet) = Stream::<MockRuntime>::new_outbound(destination.clone());
         let payload = "hello, world".as_bytes();
 
         let mut out = BytesMut::with_capacity(payload.len() + 22 + Dest::serialized_len());
