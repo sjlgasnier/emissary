@@ -30,10 +30,10 @@ use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use rand_core::RngCore;
 use x25519_dalek::PublicKey;
+use zeroize::Zeroize;
 
 use alloc::vec::Vec;
 use core::{fmt, marker::PhantomData, mem};
-use zeroize::Zeroize;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::session::context";
@@ -287,6 +287,9 @@ impl OutboundSession {
     /// Returns a byte vector to the decrypted payload section of `message`.
     pub fn decrypt_message(&mut self, message: Message) -> crate::Result<Vec<u8>> {
         match mem::replace(&mut self.state, OutboundSessionState::Poisoned) {
+            // Handle `NewSessionReply` message.
+            //
+            // https://geti2p.net/spec/ecies#kdf-for-flags-static-key-section-encrypted-contents
             OutboundSessionState::OutboundSessionPending {
                 state,
                 ephemeral_private_key,
@@ -294,13 +297,98 @@ impl OutboundSession {
                 chaining_key,
                 destination_id,
             } => {
-                let (send_tag_set, recv_tag_set, payload) = Self::handle_new_session_reply(
-                    message,
-                    state,
-                    static_private_key,
-                    ephemeral_private_key,
-                    chaining_key,
-                )?;
+                if message.payload.len() < 60 {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        payload_len = ?message.payload.len(),
+                        "`NewSessionReply` is too short",
+                    );
+                    debug_assert!(false);
+
+                    return Err(Error::InvalidData);
+                }
+
+                // garlic tag, used as associated data for the decipher
+                let garlic_tag = message.payload[4..12].to_vec();
+
+                // extract and decode elligator2-encoded public key of the remote destination
+                let public_key = {
+                    // conversion must succeed since the provided range is correct and
+                    // the payload has been confirmed to be large enough to hold the public key
+                    let public_key = TryInto::<[u8; 32]>::try_into(&message.payload[12..44])
+                        .expect("to succeed");
+                    let new_pubkey = Randomized::from_representative(&public_key)
+                        .unwrap()
+                        .to_montgomery()
+                        .to_bytes();
+
+                    StaticPublicKey::from(new_pubkey)
+                };
+
+                // poly1305 mac for the key section (empty payload)
+                let mut ciphertext = message.payload[44..60].to_vec();
+
+                // payload section of the `NewSessionReply`
+                let mut payload = message.payload[60..].to_vec();
+
+                // calculate new state with garlic tag & remote's ephemeral public key
+                let state = {
+                    let state = Sha256::new().update(&state).update(&garlic_tag).finalize();
+
+                    Sha256::new().update(&state).update::<&[u8]>(public_key.as_ref()).finalize()
+                };
+
+                // calculate keys from shared secrets derived from ee & es
+                let (chaining_key, keydata) = {
+                    // ephemeral-ephemeral
+                    let mut shared = ephemeral_private_key.diffie_hellman(&public_key);
+                    let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+                    let mut chaining_key =
+                        Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+
+                    // static-ephemeral
+                    shared = static_private_key.diffie_hellman(&public_key);
+                    temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+                    chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+                    let keydata = Hmac::new(&temp_key)
+                        .update(&chaining_key)
+                        .update(&b"")
+                        .update(&[0x02])
+                        .finalize();
+
+                    shared.zeroize();
+                    temp_key.zeroize();
+
+                    (chaining_key, keydata)
+                };
+
+                // verify they poly1305 mac for the key section is correct and return updated state
+                let state = {
+                    let updated_state = Sha256::new().update(&state).update(&ciphertext).finalize();
+                    ChaChaPoly::new(&keydata).decrypt_with_ad(&state, &mut ciphertext)?;
+
+                    updated_state
+                };
+
+                // split key into send and receive keys
+                let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+                let mut send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+                let mut recv_key =
+                    Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
+
+                // initialize send and receive tag sets
+                let send_tag_set = TagSet::new(&chaining_key, send_key);
+                let recv_tag_set = TagSet::new(chaining_key, &recv_key);
+
+                // decode payload of the `NewSessionReply` message
+                let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
+                let mut payload_key =
+                    Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
+
+                ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload)?;
+
+                temp_key.zeroize();
+                payload_key.zeroize();
 
                 self.state = OutboundSessionState::Active {
                     destination_id,
@@ -346,103 +434,10 @@ impl OutboundSession {
         }
     }
 
-    /// Handle `NewSessionReply` message.
-    ///
-    /// https://geti2p.net/spec/ecies#kdf-for-flags-static-key-section-encrypted-contents
-    pub fn handle_new_session_reply(
-        message: Message,
-        state: Bytes,
-        static_private_key: StaticPrivateKey,
-        ephemeral_private_key: StaticPrivateKey,
-        chaining_key: Vec<u8>,
-    ) -> crate::Result<(TagSet, TagSet, Vec<u8>)> {
-        if message.payload.len() < 60 {
-            tracing::warn!(
-                target: LOG_TARGET,
-                payload_len = ?message.payload.len(),
-                "`NewSessionReply` is stoo short",
-            );
-
-            return Err(Error::InvalidData);
-        }
-
-        // garlic tag, used as associated data for the decipher
-        let garlic_tag = message.payload[4..12].to_vec();
-
-        // extract and decode elligator2-encoded public key of the remote destination
-        let public_key = {
-            // conversion must succeed since the provided range is correct and
-            // the payload has been confirmed to be large enough to hold the public key
-            let public_key =
-                TryInto::<[u8; 32]>::try_into(&message.payload[12..44]).expect("to succeed");
-            let new_pubkey =
-                Randomized::from_representative(&public_key).unwrap().to_montgomery().to_bytes();
-
-            StaticPublicKey::from(new_pubkey)
-        };
-
-        // poly1305 mac for the key section (empty payload)
-        let mut ciphertext = message.payload[44..60].to_vec();
-
-        // payload section of the `NewSessionReply`
-        let mut payload = message.payload[60..].to_vec();
-
-        // calculate new state with garlic tag & remote's ephemeral public key
-        let state = {
-            let state = Sha256::new().update(&state).update(&garlic_tag).finalize();
-
-            Sha256::new().update(&state).update::<&[u8]>(public_key.as_ref()).finalize()
-        };
-
-        // calculate keys from shared secrets derived from ee & es
-        let (chaining_key, keydata) = {
-            // ephemeral-ephemeral
-            let mut shared = ephemeral_private_key.diffie_hellman(&public_key);
-            let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-
-            // static-ephemeral
-            shared = static_private_key.diffie_hellman(&public_key);
-            temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let keydata = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&b"")
-                .update(&[0x02])
-                .finalize();
-
-            shared.zeroize();
-            temp_key.zeroize();
-
-            (chaining_key, keydata)
-        };
-
-        // verify they poly1305 mac for the key section is correct and return updated state
-        let state = {
-            let updated_state = Sha256::new().update(&state).update(&ciphertext).finalize();
-            ChaChaPoly::new(&keydata).decrypt_with_ad(&state, &mut ciphertext)?;
-
-            updated_state
-        };
-
-        // split key into send and receive keys
-        let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-        let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
-
-        // initialize send and receive tag sets
-        let send_tag_set = TagSet::new(&chaining_key, send_key);
-        let recv_tag_set = TagSet::new(chaining_key, &recv_key);
-
-        // decode payload of the `NewSessionReply` message
-        let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
-        let mut payload_key =
-            Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
-
-        ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload)?;
-
-        Ok((send_tag_set, recv_tag_set, payload))
-    }
+    /// Generate new key for the [`OutboundSession`].
+    //
+    // TODO: explain in more detail
+    pub fn generate_next_key(&mut self) {}
 }
 
 /// Key context for an ECIES-X25519-AEAD-Ratchet session.
@@ -516,26 +511,36 @@ impl<R: Runtime> KeyContext<R> {
         pubkey: StaticPublicKey,
         payload: &[u8],
     ) -> (OutboundSession, Vec<u8>) {
-        let (private_key, tweak) = Self::generate_ephemeral_keypair();
-        let sk = StaticPrivateKey::from(private_key.clone().to_vec());
-        let public_key =
-            StaticPublicKey::from(Randomized::mul_base_clamped(private_key).to_montgomery().0);
+        // generate new elligator2-encodable ephemeral keypair
+        let (private_key, public_key, representative) = {
+            let (private_key, tweak) = Self::generate_ephemeral_keypair();
+            let sk = StaticPrivateKey::from(private_key.clone().to_vec());
+            let public_key =
+                StaticPublicKey::from(Randomized::mul_base_clamped(private_key).to_montgomery().0);
 
-        let state = Sha256::new()
-            .update(&self.outbound_state)
-            .update::<&[u8]>(pubkey.as_ref())
-            .finalize();
+            // elligator2 conversion must succeed because `Self::generate_ephemeral_keypair()`
+            // has ensured that the public key is encodable
+            let representative =
+                Randomized::to_representative(&private_key, tweak).expect("to succeed");
 
-        let state = Sha256::new().update(&state).update(&public_key).finalize();
-        let shared = sk.diffie_hellman(&pubkey);
+            (sk, public_key, representative)
+        };
 
-        let representative = Randomized::to_representative(&private_key, tweak).unwrap();
+        let state = {
+            let state = Sha256::new()
+                .update(&self.outbound_state)
+                .update::<&[u8]>(pubkey.as_ref())
+                .finalize();
+
+            Sha256::new().update(&state).update(&public_key).finalize()
+        };
 
         // derive keys for encrypting initiator's static key
         let (chaining_key, static_key_ciphertext) = {
+            let mut shared = private_key.diffie_hellman(&pubkey);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
             let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let cipher_key = Hmac::new(&temp_key)
+            let mut cipher_key = Hmac::new(&temp_key)
                 .update(&chaining_key)
                 .update(&b"")
                 .update(&[0x02])
@@ -551,9 +556,13 @@ impl<R: Runtime> KeyContext<R> {
                 out.freeze().to_vec()
             };
 
-            ChaChaPoly::with_nonce(&cipher_key, 0)
+            ChaChaPoly::with_nonce(&cipher_key, 0u64)
                 .encrypt_with_ad_new(&state, &mut static_key)
                 .expect("to succeed");
+
+            shared.zeroize();
+            temp_key.zeroize();
+            cipher_key.zeroize();
 
             (chaining_key, static_key)
         };
@@ -581,7 +590,7 @@ impl<R: Runtime> KeyContext<R> {
             };
 
             // `encrypt_with_ad()` must succeed as it's called with valid parameters
-            ChaChaPoly::with_nonce(&cipher_key, 0)
+            ChaChaPoly::with_nonce(&cipher_key, 0u64)
                 .encrypt_with_ad_new(&state, &mut payload)
                 .expect("to succeed");
 
@@ -612,7 +621,7 @@ impl<R: Runtime> KeyContext<R> {
                     state,
                     destination_id,
                     static_private_key: self.private_key.clone(),
-                    ephemeral_private_key: sk,
+                    ephemeral_private_key: private_key,
                     chaining_key,
                 },
             },
