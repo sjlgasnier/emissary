@@ -33,6 +33,11 @@ use nom::{
 use alloc::vec::Vec;
 use core::fmt;
 
+/// Garlic message header length.
+///
+/// Message type (1 byte) + size (2 bytes).
+const GARLIC_HEADER_LEN: usize = 3;
+
 /// Garlic message type.
 #[derive(Debug)]
 pub enum GarlicMessageType {
@@ -196,8 +201,9 @@ impl NextKeyKind {
     /// Get serialized length of [`NextKey`].
     fn serialized_len(&self) -> usize {
         match self {
-            NextKeyKind::ForwardKey { .. } | NextKeyKind::ReverseKey { .. } => 39usize,
-            NextKeyKind::ReverseKeyRequest { key_id } => 6usize,
+            NextKeyKind::ForwardKey { .. } | NextKeyKind::ReverseKey { .. } =>
+                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key
+            NextKeyKind::ReverseKeyRequest { key_id } => GARLIC_HEADER_LEN + 3usize, /* flag + key id */
         }
     }
 }
@@ -374,6 +380,8 @@ impl<'a> GarlicMessage<'a> {
         let (rest, key_id) = be_u16(input)?;
 
         // key present
+        //
+        // TODO: ugly
         let (rest, kind) = if flag & 1 == 1 {
             let (rest, key) = take(32usize)(rest)?;
 
@@ -472,7 +480,7 @@ impl<'a> GarlicMessageBuilder<'a> {
 
     /// Add [`GarlicMessageBlock::DateTime`].
     pub fn with_date_time(mut self, timestamp: u32) -> Self {
-        self.message_size += 1 + 2 + 4;
+        self.message_size = self.message_size.saturating_add(GARLIC_HEADER_LEN).saturating_add(4); // 4-byte timestamp
         self.cloves.push(GarlicMessageBlock::DateTime { timestamp });
 
         self
@@ -487,9 +495,15 @@ impl<'a> GarlicMessageBuilder<'a> {
         delivery_instructions: DeliveryInstructions<'a>,
         message_body: &'a [u8],
     ) -> Self {
-        // TODO: ugly
-        self.message_size +=
-            1 + 2 + delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len();
+        self.message_size = self
+            .message_size
+            .saturating_add(GARLIC_HEADER_LEN)
+            .saturating_add(delivery_instructions.serialized_len())
+            .saturating_add(1) // message type
+            .saturating_add(4) // message id
+            .saturating_add(4) // expiration
+            .saturating_add(message_body.len());
+
         self.cloves.push(GarlicMessageBlock::GarlicClove {
             message_type,
             message_id,
@@ -527,10 +541,13 @@ impl<'a> GarlicMessageBuilder<'a> {
                     message_body,
                 } => {
                     out.put_u8(GarlicMessageType::GarlicClove.as_u8());
-                    // TODO: no hardcoded constants without comments
                     out.put_u16(
-                        (delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len())
-                            as u16,
+                        delivery_instructions
+                            .serialized_len()
+                            .saturating_add(1) // message type
+                            .saturating_add(4) // message id
+                            .saturating_add(4) // expiration
+                            .saturating_add(message_body.len()) as u16,
                     );
                     out.put_slice(&delivery_instructions.serialize());
                     out.put_u8(message_type.as_u8());
