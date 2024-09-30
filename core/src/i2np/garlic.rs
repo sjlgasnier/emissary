@@ -165,6 +165,33 @@ impl<'a> DeliveryInstructions<'a> {
     }
 }
 
+/// `NextKey` messsage kind.
+pub enum NextKeyKind {
+    /// Forward key.
+    ForwardKey {
+        /// Key ID.
+        key_id: u16,
+
+        /// Public key of the `Destination`
+        public_key: StaticPublicKey,
+    },
+
+    /// Reverse key.
+    ReverseKey {
+        /// Key ID.
+        key_id: u16,
+
+        /// Public key of the `Destination`
+        public_key: StaticPublicKey,
+    },
+
+    /// Reverse key request.
+    ReverseKeyRequest {
+        /// Key ID.
+        key_id: u16,
+    },
+}
+
 /// Garlic message block.
 pub enum GarlicMessageBlock<'a> {
     /// Date time.
@@ -183,7 +210,10 @@ pub enum GarlicMessageBlock<'a> {
     MessageNumber {},
 
     /// Next key.
-    NextKey {},
+    NextKey {
+        /// `NextKey` kind.
+        kind: NextKeyKind,
+    },
 
     /// ACK.
     ACK {},
@@ -327,6 +357,50 @@ impl<'a> GarlicMessage<'a> {
         Ok((rest, GarlicMessageBlock::Padding { padding }))
     }
 
+    /// Try to parse [`GarlicMessage::NextKey`] from `input`.
+    fn parse_next_key(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, flag) = be_u8(input)?;
+        let (rest, key_id) = be_u16(input)?;
+
+        // key present
+        let (rest, kind) = if flag & 1 == 1 {
+            let (rest, key) = take(32usize)(rest)?;
+
+            let kind = match (flag >> 1) & 1 {
+                0 => NextKeyKind::ForwardKey {
+                    key_id,
+                    public_key: StaticPublicKey::from(
+                        TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
+                    ),
+                },
+                1 => NextKeyKind::ReverseKey {
+                    key_id,
+                    public_key: StaticPublicKey::from(
+                        TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
+                    ),
+                },
+                _ => unreachable!(),
+            };
+
+            (rest, kind)
+        } else {
+            if flag >> 1 & 0b11 == 0b11 {
+                (rest, NextKeyKind::ReverseKeyRequest { key_id })
+            } else {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    ?flag,
+                    "unknown `NextKey` flag",
+                );
+
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
+        };
+
+        Ok((rest, GarlicMessageBlock::NextKey { kind }))
+    }
+
     fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
         let (rest, message_type) = be_u8(input)?;
 
@@ -334,6 +408,7 @@ impl<'a> GarlicMessage<'a> {
             Some(GarlicMessageType::DateTime) => Self::parse_date_time(rest),
             Some(GarlicMessageType::GarlicClove) => Self::parse_garlic_clove(rest),
             Some(GarlicMessageType::Padding) => Self::parse_padding(rest),
+            Some(GarlicMessageType::NextKey) => Self::parse_next_key(rest),
             message_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
