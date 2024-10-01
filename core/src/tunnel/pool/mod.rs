@@ -775,7 +775,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             continue;
                         };
 
-                        tracing::error!(
+                        tracing::trace!(
                             target: LOG_TARGET,
                             %outbound_gateway,
                             "send tunnel message to remote destination",
