@@ -170,6 +170,72 @@ impl<'a> DeliveryInstructions<'a> {
     }
 }
 
+/// Builder for [`NextKeyKind`].
+pub struct NextKeyBuilder {
+    /// Is the [`NextKeyKind`] forward.
+    forward: bool,
+
+    /// Public key sent to the remote.
+    public_key: Option<StaticPublicKey>,
+
+    /// Key ID.
+    key_id: u16,
+
+    /// Request reverse key.
+    request_reverse_key: bool,
+}
+
+impl NextKeyBuilder {
+    /// Create new [`NextKeyBuilder`] for forward key.
+    pub fn forward(key_id: u16) -> Self {
+        Self {
+            forward: true,
+            key_id,
+            public_key: None,
+            request_reverse_key: false,
+        }
+    }
+
+    /// Create new [`NextKeyBuilder`] for reverse key.
+    pub fn reverse(key_id: u16) -> Self {
+        Self {
+            forward: false,
+            key_id,
+            public_key: None,
+            request_reverse_key: false,
+        }
+    }
+
+    /// Specify `StaticPublicKey` for the `NextKey` block.
+    pub fn with_public_key(mut self, public_key: StaticPublicKey) -> Self {
+        self.public_key = Some(public_key);
+        self
+    }
+
+    /// Specify whether remote should send reverse key.
+    ///
+    /// By default, reverse key is not requested.
+    pub fn with_request_reverse_key(mut self, request_reverse_key: bool) -> Self {
+        self.request_reverse_key = request_reverse_key;
+        self
+    }
+
+    /// Build [`NextKeyKind`]
+    pub fn build(self) -> NextKeyKind {
+        match self.forward {
+            true => NextKeyKind::ForwardKey {
+                key_id: self.key_id,
+                public_key: self.public_key,
+                reverse_key_requested: self.request_reverse_key,
+            },
+            false => NextKeyKind::ReverseKey {
+                key_id: self.key_id,
+                public_key: self.public_key,
+            },
+        }
+    }
+}
+
 /// `NextKey` messsage kind.
 pub enum NextKeyKind {
     /// Forward key.
@@ -177,8 +243,11 @@ pub enum NextKeyKind {
         /// Key ID.
         key_id: u16,
 
-        /// Public key of the `Destination`
-        public_key: StaticPublicKey,
+        /// Public key of the `Destination`, if sent.
+        public_key: Option<StaticPublicKey>,
+
+        /// Reverse key requested.
+        reverse_key_requested: bool,
     },
 
     /// Reverse key.
@@ -186,14 +255,8 @@ pub enum NextKeyKind {
         /// Key ID.
         key_id: u16,
 
-        /// Public key of the `Destination`
-        public_key: StaticPublicKey,
-    },
-
-    /// Reverse key request.
-    ReverseKeyRequest {
-        /// Key ID.
-        key_id: u16,
+        /// Public key of the `Destination`, if requested.
+        public_key: Option<StaticPublicKey>,
     },
 }
 
@@ -201,9 +264,11 @@ impl NextKeyKind {
     /// Get serialized length of [`NextKey`].
     fn serialized_len(&self) -> usize {
         match self {
-            NextKeyKind::ForwardKey { .. } | NextKeyKind::ReverseKey { .. } =>
-                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key
-            NextKeyKind::ReverseKeyRequest { key_id } => GARLIC_HEADER_LEN + 3usize, /* flag + key id */
+            NextKeyKind::ForwardKey { public_key, .. }
+            | NextKeyKind::ReverseKey { public_key, .. }
+                if public_key.is_some() =>
+                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key */
+            _ => GARLIC_HEADER_LEN + 3usize, // flag + key id
         }
     }
 }
@@ -379,41 +444,29 @@ impl<'a> GarlicMessage<'a> {
         let (rest, flag) = be_u8(input)?;
         let (rest, key_id) = be_u16(input)?;
 
-        // key present
-        //
-        // TODO: ugly
-        let (rest, kind) = if flag & 1 == 1 {
-            let (rest, key) = take(32usize)(rest)?;
+        let (rest, public_key) = match flag & 1 {
+            0 => (rest, None),
+            1 => {
+                let (rest, key) = take(32usize)(rest)?;
 
-            let kind = match (flag >> 1) & 1 {
-                0 => NextKeyKind::ForwardKey {
-                    key_id,
-                    public_key: StaticPublicKey::from(
+                (
+                    rest,
+                    Some(StaticPublicKey::from(
                         TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
-                    ),
-                },
-                1 => NextKeyKind::ReverseKey {
-                    key_id,
-                    public_key: StaticPublicKey::from(
-                        TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
-                    ),
-                },
-                _ => unreachable!(),
-            };
-
-            (rest, kind)
-        } else {
-            if flag >> 1 & 0b11 == 0b11 {
-                (rest, NextKeyKind::ReverseKeyRequest { key_id })
-            } else {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    ?flag,
-                    "unknown `NextKey` flag",
-                );
-
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                    )),
+                )
             }
+            _ => unreachable!(),
+        };
+
+        let kind = match (flag >> 1) & 1 {
+            1 => NextKeyKind::ReverseKey { key_id, public_key },
+            0 => NextKeyKind::ForwardKey {
+                key_id,
+                public_key,
+                reverse_key_requested: (flag >> 2 & 1) == 1,
+            },
+            _ => unreachable!(),
         };
 
         Ok((rest, GarlicMessageBlock::NextKey { kind }))
@@ -556,25 +609,43 @@ impl<'a> GarlicMessageBuilder<'a> {
                     out.put_slice(message_body);
                 }
                 GarlicMessageBlock::NextKey { kind } => match kind {
-                    NextKeyKind::ForwardKey { key_id, public_key } => {
+                    NextKeyKind::ForwardKey {
+                        key_id,
+                        public_key,
+                        reverse_key_requested,
+                    } => {
                         out.put_u8(GarlicMessageType::NextKey.as_u8());
-                        out.put_u16(35u16);
-                        out.put_u8(0x01); // key present
+                        out.put_u16(if public_key.is_some() { 35u16 } else { 3u16 });
+                        out.put_u8(match (public_key.is_some(), reverse_key_requested) {
+                            (true, true) => 0x01 | 0x04, // key present + request reverse key
+                            (true, false) => 0x01,       // key present
+                            (false, true) => 0x04,       // request reverse key
+                            (false, false) => panic!(
+                                "state mismatch: no public key and reverse key not requested"
+                            ),
+                        });
                         out.put_u16(key_id);
-                        out.put_slice(public_key.as_ref());
+
+                        if let Some(public_key) = public_key {
+                            out.put_slice(public_key.as_ref());
+                        }
                     }
                     NextKeyKind::ReverseKey { key_id, public_key } => {
                         out.put_u8(GarlicMessageType::NextKey.as_u8());
-                        out.put_u16(35u16);
-                        out.put_u8(0x01 | 0x02); // key present + reverse key
-                        out.put_u16(key_id);
-                        out.put_slice(public_key.as_ref());
-                    }
-                    NextKeyKind::ReverseKeyRequest { key_id } => {
-                        out.put_u8(GarlicMessageType::NextKey.as_u8());
-                        out.put_u16(3u16);
-                        out.put_u8(0x00 | 0x02 | 0x04); // no key present + reverse key + request
-                        out.put_u16(key_id);
+
+                        match public_key {
+                            Some(public_key) => {
+                                out.put_u16(35u16);
+                                out.put_u8(0x01 | 0x02); // key present + reverse key
+                                out.put_u16(key_id);
+                                out.put_slice(public_key.as_ref());
+                            }
+                            None => {
+                                out.put_u16(3u16);
+                                out.put_u8(0x02); // reverse key
+                                out.put_u16(key_id);
+                            }
+                        }
                     }
                 },
                 block => todo!("unimplemented block: {block:?}"),
