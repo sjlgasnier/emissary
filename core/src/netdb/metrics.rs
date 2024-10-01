@@ -18,7 +18,7 @@
 
 use crate::runtime::MetricType;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 pub const NUM_FLOODFILLS: &str = "floodfill_count";
 pub const NUM_CONNECTED_FLOODFILLS: &str = "connected_floodfill_count";

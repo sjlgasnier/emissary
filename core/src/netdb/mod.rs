@@ -26,6 +26,7 @@ use crate::{
         session::{KeyContext, OutboundSession},
         Destination,
     },
+    error::{ChannelError, QueryError},
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType},
@@ -37,7 +38,11 @@ use crate::{
         },
         Message, MessageBuilder, MessageType,
     },
-    netdb::{dht::Dht, metrics::*},
+    netdb::{
+        dht::Dht,
+        handle::{QueryKind, QueryRecycle},
+        metrics::*,
+    },
     primitives::{
         Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterId, RouterIdentity, RouterInfo,
     },
@@ -52,6 +57,7 @@ use crate::{
 use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use futures::{FutureExt, StreamExt};
+use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc;
@@ -64,8 +70,11 @@ use core::{
     time::Duration,
 };
 
+pub use handle::NetDbHandle;
+
 mod bucket;
 mod dht;
+mod handle;
 mod metrics;
 mod routing_table;
 mod types;
@@ -75,7 +84,7 @@ const LOG_TARGET: &str = "emissary::netdb";
 
 /// Floodfill state.
 #[derive(Debug)]
-pub enum RouterState {
+enum RouterState {
     /// FloodFill is connected.
     Connected,
 
@@ -106,6 +115,9 @@ pub struct NetDb<R: Runtime> {
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
 
+    /// RX channel for receiving queries from other subsystems.
+    handle_rx: mpsc::Receiver<QueryKind, QueryRecycle>,
+
     key: Vec<u8>,
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
@@ -122,7 +134,7 @@ impl<R: Runtime> NetDb<R> {
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
         rx: mpsc::Receiver<Message>,
-    ) -> Self {
+    ) -> (Self, NetDbHandle) {
         let floodfills = router_storage
             .routers()
             .iter()
@@ -140,19 +152,25 @@ impl<R: Runtime> NetDb<R> {
         let key = "larnrirsp5fikx7n6fg3aczdxrurt5nyaaleqo4vqmnuo3xd5qeq";
         let key = base32_decode(&key).unwrap();
 
-        Self {
-            dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
-            exploratory_pool_handle,
-            timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
-            local_router_id,
-            key,
-            metrics,
-            routers: HashMap::new(),
-            router_storage,
-            service,
-            rx: Some(rx),
-            tmp: None,
-        }
+        let (handle_tx, handle_rx) = mpsc::with_recycle(64, QueryRecycle::default());
+
+        (
+            Self {
+                dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
+                exploratory_pool_handle,
+                timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
+                local_router_id,
+                handle_rx,
+                key,
+                metrics,
+                routers: HashMap::new(),
+                router_storage,
+                service,
+                rx: Some(rx),
+                tmp: None,
+            },
+            NetDbHandle::new(handle_tx),
+        )
     }
 
     /// Collect `NetDb`-related metric counters, gauges and histograms.
@@ -206,13 +224,11 @@ impl<R: Runtime> NetDb<R> {
     /// Handle closed connection to `router`.
     fn on_connection_closed(&mut self, router_id: RouterId) {
         match self.routers.remove(&router_id) {
-            None => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    "connection closed",
-                );
-            }
+            None => tracing::trace!(
+                target: LOG_TARGET,
+                %router_id,
+                "connection closed",
+            ),
             Some(_) => {
                 tracing::debug!(
                     target: LOG_TARGET,

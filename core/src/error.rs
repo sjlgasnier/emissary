@@ -24,6 +24,33 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// Query error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum QueryError {
+    /// No floodfills.
+    NoFloodfills,
+
+    /// Query timed out.
+    Timeout,
+
+    /// Value not found.
+    ValueNotFound,
+
+    /// Malformed reply.
+    Malformed,
+}
+
+impl fmt::Display for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoFloodfills => write!(f, "no floodfills"),
+            Self::Timeout => write!(f, "query timed out"),
+            Self::ValueNotFound => write!(f, "value not found"),
+            Self::Malformed => write!(f, "malformed reply"),
+        }
+    }
+}
+
 /// Streaming protocol error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamingError {
@@ -192,6 +219,7 @@ pub enum Error {
     Tunnel(TunnelError),
     Channel(ChannelError),
     Streaming(StreamingError),
+    Query(QueryError),
     Timeout,
 }
 
@@ -209,10 +237,11 @@ impl fmt::Display for Error {
             Self::EssentialTaskClosed => write!(f, "essential task closed"),
             Self::RouterDoesntExist => write!(f, "router doesn't exist"),
             Self::DialFailure => write!(f, "dial failure"),
+            Self::Timeout => write!(f, "operation timed out"),
             Self::Tunnel(error) => write!(f, "tunnel error: {error}"),
             Self::Channel(error) => write!(f, "channel error: {error}"),
             Self::Streaming(error) => write!(f, "streaming protocol error: {error}"),
-            Self::Timeout => write!(f, "operation timed out"),
+            Self::Query(error) => write!(f, "query error: {error}"),
         }
     }
 }
