@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{error::StreamingError, primitives::Destination as Dest, runtime::Runtime, Error};
+use crate::{
+    destination::protocol::streaming::packet::Packet, error::StreamingError,
+    primitives::Destination as Dest, runtime::Runtime, Error,
+};
 
 use bytes::{BufMut, BytesMut};
 use nom::{
@@ -27,98 +30,17 @@ use nom::{
 };
 use rand_core::RngCore;
 
-use core::marker::PhantomData;
+use alloc::{collections::VecDeque, vec::Vec};
+use core::{
+    marker::PhantomData,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
+
+mod packet;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::protocol::streaming";
-
-/// Streaming protocol packet.
-struct Packet<'a> {
-    /// Send stream ID.
-    send_stream_id: u32,
-
-    /// Receive stream ID.
-    recv_stream_id: u32,
-
-    /// Sequence number of the packet.
-    seq_nro: u32,
-
-    /// ACK through bytes.
-    ack_through: u32,
-
-    /// Negative ACKs.
-    nacks: Vec<u32>,
-
-    /// Resend delay.
-    resend_delay: u8,
-
-    /// Flags.
-    flags: u16,
-
-    /// Payload.
-    payload: &'a [u8],
-}
-
-impl<'a> Packet<'a> {
-    /// Attempt to parse [`Packet`] from `input`.
-    ///
-    /// Returns the parsed message and rest of `input` on success.
-    fn parse_frame(input: &'a [u8]) -> IResult<&[u8], Self> {
-        let (rest, send_stream_id) = be_u32(input)?;
-        let (rest, recv_stream_id) = be_u32(rest)?;
-        let (rest, seq_nro) = be_u32(rest)?;
-        let (rest, ack_through) = be_u32(rest)?;
-        let (rest, nack_count) = be_u8(rest)?;
-        let (rest, nacks) = (0..nack_count)
-            .try_fold((rest, Vec::new()), |(rest, mut nacks), _| {
-                be_u32::<_, ()>(rest).ok().map(|(rest, nack)| {
-                    nacks.push(nack);
-
-                    (rest, nacks)
-                })
-            })
-            .ok_or_else(|| {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "failed to parse nack list",
-                );
-
-                Err::Error(make_error(input, ErrorKind::Fail))
-            })?;
-
-        let (rest, resend_delay) = be_u8(rest)?;
-        let (rest, flags) = be_u16(rest)?;
-        let (rest, options_size) = be_u16(rest)?;
-        let (rest, _options) = take(options_size)(rest)?;
-
-        // TODO: parse options
-
-        tracing::info!(
-            "option bytes = {}, flags = {flags}, rest size = {}",
-            _options.len(),
-            rest.len()
-        );
-
-        Ok((
-            &[],
-            Self {
-                send_stream_id,
-                recv_stream_id,
-                seq_nro,
-                ack_through,
-                nacks,
-                resend_delay,
-                flags,
-                payload: rest,
-            },
-        ))
-    }
-
-    /// Attempt to parse `input` into [`Packet`].
-    fn parse(input: &'a [u8]) -> Option<Self> {
-        Some(Self::parse_frame(input).ok()?.1)
-    }
-}
 
 /// Stream state.
 enum StreamState {
@@ -158,6 +80,12 @@ impl StreamState {
 pub struct Stream<R: Runtime> {
     /// Stream state.
     state: StreamState,
+
+    /// Pending events.
+    pending_events: VecDeque<StreamEvent>,
+
+    /// Waker.
+    waker: Option<Waker>,
 
     /// Marker for `Runtime`.
     _runtime: PhantomData<R>,
@@ -201,6 +129,8 @@ impl<R: Runtime> Stream<R> {
                     recv_stream_id,
                     seq_nro,
                 },
+                pending_events: VecDeque::new(),
+                waker: None,
                 _runtime: Default::default(),
             },
             out,
@@ -210,9 +140,7 @@ impl<R: Runtime> Stream<R> {
     /// Handle streaming protocol packet.
     ///
     /// Returns a serialized [`Packet`] if `payload` warrants sending a reply to remote.
-    //
-    // TODO: return bytesmut
-    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<Option<Vec<u8>>> {
+    pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<()> {
         let Packet {
             send_stream_id,
             recv_stream_id,
@@ -246,38 +174,87 @@ impl<R: Runtime> Stream<R> {
             )));
         }
 
-        tracing::warn!("seq_nro = {seq_nro:?}");
-        tracing::warn!("ack_through = {ack_through:?}");
-        tracing::warn!("flags = {flags:?}");
-        tracing::warn!("payload = {payload:?}");
-        tracing::warn!("nacks = {nacks:?}");
+        tracing::info!("ack received = {ack_through}, sequence number = {seq_nro:}");
+        tracing::error!("payload = {:?}", core::str::from_utf8(payload));
 
-        if std::matches!(self.state, StreamState::Open { .. }) {
-            tracing::error!("payload = {:?}", core::str::from_utf8(&payload));
+        if (flags & 0x02) == 0x02 {
+            tracing::info!("stream closed");
 
-            return Ok(None);
+            self.pending_events.push_back(StreamEvent::StreamClosed {
+                recv_stream_id: self.state.recv_stream_id(),
+                send_stream_id: recv_stream_id,
+            });
         }
 
         let mut out = BytesMut::with_capacity(22);
 
         out.put_u32(recv_stream_id); // send stream id
         out.put_u32(self.state.recv_stream_id());
-        out.put_u32(1);
-        out.put_u32(0u32); // ack through
+        out.put_u32(0);
+        out.put_u32(seq_nro); // ack through
         out.put_u8(0u8); // nack count
 
         out.put_u8(10u8); // resend delay, in seconds
         out.put_u16(0); // no flags
 
-        tracing::error!("sending ack");
+        if core::matches!(self.state, StreamState::OutboundInitiated { .. }) {
+            self.pending_events.push_back(StreamEvent::StreamOpened {
+                recv_stream_id: self.state.recv_stream_id(),
+                send_stream_id: recv_stream_id,
+            });
+        }
 
         self.state = StreamState::Open {
             recv_stream_id: self.state.recv_stream_id(),
             send_stream_id: recv_stream_id,
-            seq_nro: 2,
+            seq_nro: 1,
         };
 
-        Ok(Some(out.freeze().to_vec()))
+        self.pending_events.push_back(StreamEvent::SendPacket { packet: out });
+        self.waker.take().map(|waker| waker.wake_by_ref());
+
+        Ok(())
+    }
+}
+
+/// Events emitted by [`Stream`].
+pub enum StreamEvent {
+    /// Stream has been opened.
+    StreamOpened {
+        /// Receive stream ID.
+        recv_stream_id: u32,
+
+        /// Send stream ID.
+        send_stream_id: u32,
+    },
+
+    /// Stream has been closed.
+    StreamClosed {
+        /// Receive stream ID.
+        recv_stream_id: u32,
+
+        /// Send stream ID.
+        send_stream_id: u32,
+    },
+
+    /// Send packet to remote peer.
+    SendPacket {
+        /// Serialized [`Packet`].
+        packet: BytesMut,
+    },
+}
+
+impl<R: Runtime> futures::Stream for Stream<R> {
+    type Item = StreamEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.pending_events.pop_front().map_or_else(
+            || {
+                self.waker = Some(cx.waker().clone());
+                Poll::Pending
+            },
+            |event| Poll::Ready(Some(event)),
+        )
     }
 }
 
@@ -288,12 +265,13 @@ mod tests {
         crypto::{SigningPrivateKey, SigningPublicKey},
         runtime::{mock::MockRuntime, Runtime},
     };
+    use futures::StreamExt;
 
-    #[test]
-    fn stream_id_mismatch() {
+    #[tokio::test]
+    async fn stream_id_mismatch() {
         let destination =
             Dest::new(SigningPublicKey::from_private_ed25519(&vec![1u8; 32]).unwrap());
-        let (mut stream, _payload) = Stream::<MockRuntime>::new_outbound(destination.clone());
+        let (mut stream, packet) = Stream::<MockRuntime>::new_outbound(destination.clone());
         let payload = "hello, world".as_bytes();
 
         let mut out = BytesMut::with_capacity(payload.len() + 22 + Dest::serialized_len());

@@ -19,6 +19,7 @@
 use crate::Error;
 
 use data_encoding::{Encoding, Specification};
+use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
@@ -296,9 +297,13 @@ pub enum SigningPrivateKey {
     Ed25519(ed25519_dalek::SigningKey),
 }
 
-use ed25519_dalek::Signer;
-
 impl SigningPrivateKey {
+    /// Generate random [`SigningPrivateKey`].
+    pub fn random(csprng: &mut (impl RngCore + CryptoRng)) -> Self {
+        Self::Ed25519(ed25519_dalek::SigningKey::generate(csprng))
+    }
+
+    // TODO: remove
     pub fn new(key: &[u8]) -> Option<Self> {
         let key: [u8; 32] = key.to_vec().try_into().ok()?;
         let key = ed25519_dalek::SigningKey::from_bytes(&key);
@@ -306,9 +311,17 @@ impl SigningPrivateKey {
         Some(SigningPrivateKey::Ed25519(key))
     }
 
+    /// Sign `message`.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         match self {
             Self::Ed25519(key) => key.sign(&message).to_bytes().to_vec(),
+        }
+    }
+
+    /// Get verifying key.
+    pub fn public(&self) -> SigningPublicKey {
+        match self {
+            Self::Ed25519(key) => SigningPublicKey::Ed25519(key.verifying_key()),
         }
     }
 }

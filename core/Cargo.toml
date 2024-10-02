@@ -19,7 +19,7 @@ chrono = { version = "0.4.38", default-features = false, features = ["alloc"] }
 curve25519-elligator2 = { version = "0.1.0-alpha.2", default-features = false, features = ["elligator2", "alloc"] }
 data-encoding = { version = "2.6.0", features = ["alloc"], default-features = false }
 ecb = { version = "0.1.2", features = ["alloc"], default-features = false }
-ed25519-dalek = { version = "2.1.1", features = ["alloc"], default-features = false }
+ed25519-dalek = { version = "2.1.1", features = ["alloc", "rand_core"], default-features = false }
 futures = { package = "futures-util", version = "0.3.30", features = ["alloc"], default-features = false }
 futures-channel = { version = "0.3.30", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14.5", features = ["ahash", "inline-more"], default-features = false }

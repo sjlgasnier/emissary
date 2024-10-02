@@ -22,5 +22,6 @@
 
 mod context;
 mod message;
+mod tagset;
 
 pub use context::{KeyContext, OutboundSession};

@@ -33,6 +33,11 @@ use nom::{
 use alloc::vec::Vec;
 use core::fmt;
 
+/// Garlic message header length.
+///
+/// Message type (1 byte) + size (2 bytes).
+const GARLIC_HEADER_LEN: usize = 3;
+
 /// Garlic message type.
 #[derive(Debug)]
 pub enum GarlicMessageType {
@@ -165,6 +170,124 @@ impl<'a> DeliveryInstructions<'a> {
     }
 }
 
+/// Builder for [`NextKeyKind`].
+pub struct NextKeyBuilder {
+    /// Is the [`NextKeyKind`] forward.
+    forward: bool,
+
+    /// Public key sent to the remote.
+    public_key: Option<StaticPublicKey>,
+
+    /// Key ID.
+    key_id: u16,
+
+    /// Request reverse key.
+    request_reverse_key: bool,
+}
+
+impl NextKeyBuilder {
+    /// Create new [`NextKeyBuilder`] for forward key.
+    pub fn forward(key_id: u16) -> Self {
+        Self {
+            forward: true,
+            key_id,
+            public_key: None,
+            request_reverse_key: false,
+        }
+    }
+
+    /// Create new [`NextKeyBuilder`] for reverse key.
+    pub fn reverse(key_id: u16) -> Self {
+        Self {
+            forward: false,
+            key_id,
+            public_key: None,
+            request_reverse_key: false,
+        }
+    }
+
+    /// Specify `StaticPublicKey` for the `NextKey` block.
+    pub fn with_public_key(mut self, public_key: StaticPublicKey) -> Self {
+        self.public_key = Some(public_key);
+        self
+    }
+
+    /// Specify whether remote should send reverse key.
+    ///
+    /// By default, reverse key is not requested.
+    pub fn with_request_reverse_key(mut self, request_reverse_key: bool) -> Self {
+        self.request_reverse_key = request_reverse_key;
+        self
+    }
+
+    /// Build [`NextKeyKind`]
+    pub fn build(self) -> NextKeyKind {
+        match self.forward {
+            true => NextKeyKind::ForwardKey {
+                key_id: self.key_id,
+                public_key: self.public_key,
+                reverse_key_requested: self.request_reverse_key,
+            },
+            false => NextKeyKind::ReverseKey {
+                key_id: self.key_id,
+                public_key: self.public_key,
+            },
+        }
+    }
+}
+
+/// `NextKey` messsage kind.
+pub enum NextKeyKind {
+    /// Forward key.
+    ForwardKey {
+        /// Key ID.
+        key_id: u16,
+
+        /// Public key of the `Destination`, if sent.
+        public_key: Option<StaticPublicKey>,
+
+        /// Reverse key requested.
+        reverse_key_requested: bool,
+    },
+
+    /// Reverse key.
+    ReverseKey {
+        /// Key ID.
+        key_id: u16,
+
+        /// Public key of the `Destination`, if requested.
+        public_key: Option<StaticPublicKey>,
+    },
+}
+
+impl NextKeyKind {
+    /// Get serialized length of [`NextKey`].
+    fn serialized_len(&self) -> usize {
+        match self {
+            NextKeyKind::ForwardKey { public_key, .. }
+            | NextKeyKind::ReverseKey { public_key, .. }
+                if public_key.is_some() =>
+                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key */
+            _ => GARLIC_HEADER_LEN + 3usize, // flag + key id
+        }
+    }
+}
+
+impl fmt::Debug for NextKeyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForwardKey { key_id, .. } => f
+                .debug_struct("NextKeyKind::ForwardKey")
+                .field("key_id", &key_id)
+                .finish_non_exhaustive(),
+            Self::ReverseKey { key_id, .. } => f
+                .debug_struct("NextKeyKind::ReverseKey")
+                .field("key_id", &key_id)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Garlic message block.
 pub enum GarlicMessageBlock<'a> {
     /// Date time.
@@ -183,13 +306,16 @@ pub enum GarlicMessageBlock<'a> {
     MessageNumber {},
 
     /// Next key.
-    NextKey {},
+    NextKey {
+        /// `NextKey` kind.
+        kind: NextKeyKind,
+    },
 
     /// ACK.
     ACK {},
 
     /// ACK request.
-    ACKRequest {},
+    ACKRequest,
 
     /// Garlic clove.
     GarlicClove {
@@ -238,7 +364,13 @@ impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
                 .finish_non_exhaustive(),
             Self::Padding { .. } =>
                 f.debug_struct("GarlicMessageBlock::Padding").finish_non_exhaustive(),
-            _ => f.debug_struct("Unknown").finish_non_exhaustive(),
+            Self::Termination {} => f.debug_struct("GarlicMessageBlock::Termination").finish(),
+            Self::Options {} => f.debug_struct("GarlicMessageBlock::Options").finish(),
+            Self::MessageNumber {} => f.debug_struct("GarlicMessageBlock::MessageNumber").finish(),
+            Self::NextKey { kind } =>
+                f.debug_struct("GarlicMessageBlock::NextKey").field("kind", &kind).finish(),
+            Self::ACK {} => f.debug_struct("GarlicMessageBlock::ACK").finish(),
+            Self::ACKRequest => f.debug_struct("GarlicMessageBlock::ACKRequest").finish(),
         }
     }
 }
@@ -327,6 +459,40 @@ impl<'a> GarlicMessage<'a> {
         Ok((rest, GarlicMessageBlock::Padding { padding }))
     }
 
+    /// Try to parse [`GarlicMessage::NextKey`] from `input`.
+    fn parse_next_key(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, flag) = be_u8(rest)?;
+        let (rest, key_id) = be_u16(rest)?;
+
+        let (rest, public_key) = match flag & 1 {
+            0 => (rest, None),
+            1 => {
+                let (rest, key) = take(32usize)(rest)?;
+
+                (
+                    rest,
+                    Some(StaticPublicKey::from(
+                        TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
+                    )),
+                )
+            }
+            _ => unreachable!(),
+        };
+
+        let kind = match (flag >> 1) & 1 {
+            1 => NextKeyKind::ReverseKey { key_id, public_key },
+            0 => NextKeyKind::ForwardKey {
+                key_id,
+                public_key,
+                reverse_key_requested: (flag >> 2 & 1) == 1,
+            },
+            _ => unreachable!(),
+        };
+
+        Ok((rest, GarlicMessageBlock::NextKey { kind }))
+    }
+
     fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
         let (rest, message_type) = be_u8(input)?;
 
@@ -334,10 +500,12 @@ impl<'a> GarlicMessage<'a> {
             Some(GarlicMessageType::DateTime) => Self::parse_date_time(rest),
             Some(GarlicMessageType::GarlicClove) => Self::parse_garlic_clove(rest),
             Some(GarlicMessageType::Padding) => Self::parse_padding(rest),
-            message_type => {
+            Some(GarlicMessageType::NextKey) => Self::parse_next_key(rest),
+            parsed_message_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     ?message_type,
+                    ?parsed_message_type,
                     "invalid garlic message block",
                 );
                 return Err(Err::Error(make_error(input, ErrorKind::Fail)));
@@ -387,7 +555,7 @@ impl<'a> GarlicMessageBuilder<'a> {
 
     /// Add [`GarlicMessageBlock::DateTime`].
     pub fn with_date_time(mut self, timestamp: u32) -> Self {
-        self.message_size += 1 + 2 + 4;
+        self.message_size = self.message_size.saturating_add(GARLIC_HEADER_LEN).saturating_add(4); // 4-byte timestamp
         self.cloves.push(GarlicMessageBlock::DateTime { timestamp });
 
         self
@@ -402,9 +570,15 @@ impl<'a> GarlicMessageBuilder<'a> {
         delivery_instructions: DeliveryInstructions<'a>,
         message_body: &'a [u8],
     ) -> Self {
-        // TODO: ugly
-        self.message_size +=
-            1 + 2 + delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len();
+        self.message_size = self
+            .message_size
+            .saturating_add(GARLIC_HEADER_LEN)
+            .saturating_add(delivery_instructions.serialized_len())
+            .saturating_add(1) // message type
+            .saturating_add(4) // message id
+            .saturating_add(4) // expiration
+            .saturating_add(message_body.len());
+
         self.cloves.push(GarlicMessageBlock::GarlicClove {
             message_type,
             message_id,
@@ -413,6 +587,19 @@ impl<'a> GarlicMessageBuilder<'a> {
             message_body,
         });
 
+        self
+    }
+
+    // Add [`GarlicMessageBlock::NextKey`]
+    pub fn with_next_key(mut self, kind: NextKeyKind) -> Self {
+        self.message_size += kind.serialized_len();
+        self.cloves.push(GarlicMessageBlock::NextKey { kind });
+        self
+    }
+
+    pub fn with_ack_request(mut self) -> Self {
+        self.message_size += GARLIC_HEADER_LEN + 1; // 1 byte flag
+        self.cloves.push(GarlicMessageBlock::ACKRequest);
         self
     }
 
@@ -435,16 +622,64 @@ impl<'a> GarlicMessageBuilder<'a> {
                     message_body,
                 } => {
                     out.put_u8(GarlicMessageType::GarlicClove.as_u8());
-                    // TODO: no hardcoded constants without comments
                     out.put_u16(
-                        (delivery_instructions.serialized_len() + 1 + 4 + 4 + message_body.len())
-                            as u16,
+                        delivery_instructions
+                            .serialized_len()
+                            .saturating_add(1) // message type
+                            .saturating_add(4) // message id
+                            .saturating_add(4) // expiration
+                            .saturating_add(message_body.len()) as u16,
                     );
                     out.put_slice(&delivery_instructions.serialize());
                     out.put_u8(message_type.as_u8());
                     out.put_u32(*message_id);
                     out.put_u32(expiration);
                     out.put_slice(message_body);
+                }
+                GarlicMessageBlock::NextKey { kind } => match kind {
+                    NextKeyKind::ForwardKey {
+                        key_id,
+                        public_key,
+                        reverse_key_requested,
+                    } => {
+                        out.put_u8(GarlicMessageType::NextKey.as_u8());
+                        out.put_u16(if public_key.is_some() { 35u16 } else { 3u16 });
+                        out.put_u8(match (public_key.is_some(), reverse_key_requested) {
+                            (true, true) => 0x01 | 0x04, // key present + request reverse key
+                            (true, false) => 0x01,       // key present
+                            (false, true) => 0x04,       // request reverse key
+                            (false, false) => panic!(
+                                "state mismatch: no public key and reverse key not requested"
+                            ),
+                        });
+                        out.put_u16(key_id);
+
+                        if let Some(public_key) = public_key {
+                            out.put_slice(public_key.as_ref());
+                        }
+                    }
+                    NextKeyKind::ReverseKey { key_id, public_key } => {
+                        out.put_u8(GarlicMessageType::NextKey.as_u8());
+
+                        match public_key {
+                            Some(public_key) => {
+                                out.put_u16(35u16);
+                                out.put_u8(0x01 | 0x02); // key present + reverse key
+                                out.put_u16(key_id);
+                                out.put_slice(public_key.as_ref());
+                            }
+                            None => {
+                                out.put_u16(3u16);
+                                out.put_u8(0x02); // reverse key
+                                out.put_u16(key_id);
+                            }
+                        }
+                    }
+                },
+                GarlicMessageBlock::ACKRequest => {
+                    out.put_u8(GarlicMessageType::ACKRequest.as_u8());
+                    out.put_u16(1u16);
+                    out.put_u8(0u8); // flag, unused
                 }
                 block => todo!("unimplemented block: {block:?}"),
             }
