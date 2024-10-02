@@ -24,31 +24,61 @@ use crate::{
 use bytes::{Bytes, BytesMut};
 
 use alloc::vec::Vec;
+use zeroize::Zeroize;
 
 /// Pending tag set.
 ///
 /// Local router has sent `NextKey` message to remote and is waiting to receive
 /// remote's public key so the session can be ratcheted.
 pub struct PendingTagSet {
+    /// Key ID.
+    key_id: u16,
+
     /// Private key for the pending tag set.
     private_key: StaticPrivateKey,
 
-    /// Key index.
-    key_index: u16,
+    /// Root key of the previous [`TagSet`].
+    root_key: Bytes,
 }
 
 impl PendingTagSet {
     /// Create new [`PendingTagSet`].
-    pub fn new<R: Runtime>(key_index: u16) -> Self {
+    pub fn new<R: Runtime>(key_id: u16, root_key: Bytes) -> Self {
         Self {
-            key_index,
+            key_id,
             private_key: StaticPrivateKey::new(R::rng()),
+            root_key,
         }
+    }
+
+    /// Get key ID of the [`PendingTagSet`].
+    pub fn key_id(&self) -> u16 {
+        self.key_id
     }
 
     /// Get [`StaticPublicKey`] of the [`PendingTagSet`].
     pub fn public_key(&self) -> StaticPublicKey {
         self.private_key.public()
+    }
+
+    /// Build [`Tagset`] from [`PendingTagSet`] using remote's `public_key`.
+    ///
+    /// https://geti2p.net/spec/ecies#dh-ratchet-kdf
+    pub fn into_tagset(self, public_key: StaticPublicKey) -> TagSet {
+        let shared = self.private_key.diffie_hellman(&public_key);
+
+        // derive new key for the new [`TagSet`]
+        let tagset_key = {
+            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+            let mut tagset_key =
+                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
+
+            temp_key.zeroize();
+
+            tagset_key
+        };
+
+        TagSet::new(self.key_id, self.root_key, tagset_key)
     }
 }
 
@@ -68,8 +98,11 @@ pub struct TagSetEntry {
 ///
 /// https://geti2p.net/spec/ecies#sample-implementation
 pub struct TagSet {
+    /// Key ID.
+    key_id: u16,
+
     /// Next root key.
-    next_root_key: Vec<u8>,
+    next_root_key: Bytes,
 
     /// Session key data.
     session_key_data: Bytes,
@@ -89,7 +122,7 @@ pub struct TagSet {
 
 impl TagSet {
     /// Create new [`TagSet`].
-    pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
+    pub fn new(key_id: u16, root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
         let mut temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
         let next_root_key =
             Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
@@ -118,11 +151,12 @@ impl TagSet {
             .finalize();
 
         Self {
-            next_root_key,
-            session_tag_key,
-            symmetric_key,
+            key_id,
+            next_root_key: Bytes::from(next_root_key),
             session_key_data: Bytes::from(session_key_data),
             session_tag_constant,
+            session_tag_key,
+            symmetric_key,
             tag_index: 0u16,
         }
     }
@@ -200,5 +234,10 @@ impl TagSet {
     /// Get session key for for a session `tag`.
     pub fn session_key(&mut self, tag: Bytes) -> Option<StaticPrivateKey> {
         None
+    }
+
+    /// Create new [`PendingTagSet`] from current [`TagSet`].
+    pub fn create_pending_tagset<R: Runtime>(&self) -> PendingTagSet {
+        PendingTagSet::new::<R>(self.key_id, self.next_root_key.clone())
     }
 }

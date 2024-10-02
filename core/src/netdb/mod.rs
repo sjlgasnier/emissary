@@ -122,7 +122,7 @@ pub struct NetDb<R: Runtime> {
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
     rx: Option<mpsc::Receiver<Message>>,
-    tmp: Option<(OutboundSession, Stream<R>)>,
+    tmp: Option<(OutboundSession<R>, Stream<R>)>,
 }
 
 impl<R: Runtime> NetDb<R> {

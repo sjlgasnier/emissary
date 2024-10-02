@@ -29,7 +29,7 @@ use crate::{
         database::store::{DatabaseStoreBuilder, DatabaseStorePayload},
         garlic::{
             DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
-            GarlicMessageBuilder,
+            GarlicMessageBuilder, NextKeyKind,
         },
         Message, MessageBuilder, MessageType,
     },
@@ -75,7 +75,7 @@ pub struct Destination<R: Runtime> {
     stream: Stream<R>,
 
     /// Outbound ECIES-X25519-AEAD-Ratchet session.
-    session: OutboundSession,
+    session: OutboundSession<R>,
 
     /// Tunnel pool handle.
     tunnel_pool_handle: TunnelPoolHandle,
@@ -200,6 +200,7 @@ impl<R: Runtime> Destination<R> {
         for block in message.blocks {
             match block {
                 GarlicMessageBlock::Padding { .. } => {}
+                GarlicMessageBlock::DateTime { .. } => {}
                 GarlicMessageBlock::GarlicClove {
                     message_type,
                     message_id,
@@ -223,6 +224,9 @@ impl<R: Runtime> Destination<R> {
                             "failed to handle streaming protocol packet",
                         );
                     }
+                }
+                GarlicMessageBlock::NextKey { kind } => {
+                    self.session.handle_next_key(kind);
                 }
                 message_block => {
                     tracing::error!("\nunhandled message block {message_block:?}\n");
@@ -253,13 +257,47 @@ impl<R: Runtime> Future for Destination<R> {
                     send_stream_id,
                 })) => {
                     tracing::info!(target: LOG_TARGET, "stream opened");
+
+                    let next_key_kind = match self.session.generate_next_key() {
+                        Ok(kind) => kind,
+                        Err(error) => return Poll::Ready(()),
+                    };
+
+                    for _ in 0..5 {
+                        tracing::info!(target: LOG_TARGET, "SEND NEXT KEY");
+                    }
+
+                    let mut payload =
+                        GarlicMessageBuilder::new().with_next_key(next_key_kind).build();
+
+                    let payload = self.session.encrypt_message(payload).unwrap();
+
+                    let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
+                    payload_new.put_u32(payload.len() as u32);
+                    payload_new.put_slice(&payload);
+
+                    let payload = payload_new.freeze().to_vec();
+                    let payload = MessageBuilder::standard()
+                        .with_expiration(
+                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                        )
+                        .with_message_id(R::rng().next_u32())
+                        .with_message_type(MessageType::Garlic)
+                        .with_payload(&payload)
+                        .build();
+
+                    let Lease2 {
+                        router_id,
+                        tunnel_id,
+                        ..
+                    } = self.leaseset.leases[0].clone();
+
+                    self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload).unwrap();
                 }
                 Poll::Ready(Some(StreamEvent::StreamClosed {
                     recv_stream_id,
                     send_stream_id,
-                })) => {
-                    tracing::info!(target: LOG_TARGET, "stream closed");
-                }
+                })) => {}
                 Poll::Ready(Some(StreamEvent::SendPacket { packet })) => {
                     let mut payload = GarlicMessageBuilder::new()
                         .with_garlic_clove(

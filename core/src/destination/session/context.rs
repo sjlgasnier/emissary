@@ -20,8 +20,11 @@ use crate::{
     crypto::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
-    destination::session::tagset::{TagSet, TagSetEntry},
-    i2np::Message,
+    destination::session::tagset::{PendingTagSet, TagSet, TagSetEntry},
+    i2np::{
+        garlic::{NextKeyBuilder, NextKeyKind},
+        Message,
+    },
     primitives::DestinationId,
     runtime::Runtime,
     Error,
@@ -72,6 +75,9 @@ enum OutboundSessionState {
 
         /// [`TagSet`] for inbound messages.
         recv_tag_set: TagSet,
+
+        /// Pending outbound [`TagSet`], if any.
+        pending_outbound_tagset: Option<PendingTagSet>,
     },
 
     /// State has been poisoned.
@@ -96,12 +102,15 @@ impl fmt::Debug for OutboundSessionState {
 }
 
 /// Outbound session.
-pub struct OutboundSession {
+pub struct OutboundSession<R: Runtime> {
     /// Outbound session state.
     state: OutboundSessionState,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
 }
 
-impl OutboundSession {
+impl<R: Runtime> OutboundSession<R> {
     /// Garlic-encrypt `message`.
     pub fn encrypt_message(&mut self, mut message: Vec<u8>) -> crate::Result<Vec<u8>> {
         match &mut self.state {
@@ -229,8 +238,8 @@ impl OutboundSession {
                     Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
 
                 // initialize send and receive tag sets
-                let send_tag_set = TagSet::new(&chaining_key, send_key);
-                let recv_tag_set = TagSet::new(chaining_key, &recv_key);
+                let send_tag_set = TagSet::new(0u16, &chaining_key, send_key);
+                let recv_tag_set = TagSet::new(0u16, chaining_key, &recv_key);
 
                 // decode payload of the `NewSessionReply` message
                 let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
@@ -246,6 +255,7 @@ impl OutboundSession {
                     destination_id,
                     send_tag_set,
                     recv_tag_set,
+                    pending_outbound_tagset: None,
                 };
 
                 Ok(payload)
@@ -254,6 +264,7 @@ impl OutboundSession {
                 destination_id,
                 send_tag_set,
                 mut recv_tag_set,
+                pending_outbound_tagset,
             } => {
                 let TagSetEntry { index, key, tag } = recv_tag_set.next_entry().unwrap();
 
@@ -271,6 +282,7 @@ impl OutboundSession {
                     destination_id,
                     send_tag_set,
                     recv_tag_set,
+                    pending_outbound_tagset,
                 };
 
                 Ok(payload)
@@ -286,10 +298,99 @@ impl OutboundSession {
         }
     }
 
-    /// Generate new key for the [`OutboundSession`].
+    /// Generate new send key for the [`OutboundSession`].
     //
     // TODO: explain in more detail
-    pub fn generate_next_key(&mut self) {}
+    pub fn generate_next_key(&mut self) -> crate::Result<NextKeyKind> {
+        match mem::replace(&mut self.state, OutboundSessionState::Poisoned) {
+            OutboundSessionState::Active {
+                destination_id,
+                send_tag_set,
+                recv_tag_set,
+                pending_outbound_tagset,
+            } => {
+                let pending_tagset = send_tag_set.create_pending_tagset::<R>();
+                let public_key = pending_tagset.public_key();
+                let key_id = pending_tagset.key_id();
+
+                self.state = OutboundSessionState::Active {
+                    destination_id,
+                    send_tag_set,
+                    recv_tag_set,
+                    pending_outbound_tagset: Some(pending_tagset),
+                };
+
+                Ok(NextKeyBuilder::forward(key_id)
+                    .with_public_key(public_key)
+                    .with_request_reverse_key(true)
+                    .build())
+            }
+            OutboundSessionState::OutboundSessionPending { .. } => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "cannot generate new key while session is pending"
+                );
+                debug_assert!(false);
+                return Err(Error::InvalidState);
+            }
+            OutboundSessionState::Poisoned => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "outbound session state has been poisoned"
+                );
+                debug_assert!(false);
+                return Err(Error::InvalidState);
+            }
+        }
+    }
+
+    /// Handle `NextKey` block from remote.
+    ///
+    /// This is either a response to a `NextKey` block sent by the local router, either containing a
+    /// reverse key or an ID of an existing key or it's a `NextKey` block for a new receive
+    /// [`TagSet`], containing a new forward key, or an ID of an existing forward key.
+    pub fn handle_next_key(&mut self, kind: NextKeyKind) {
+        match kind {
+            NextKeyKind::ForwardKey {
+                key_id,
+                public_key,
+                reverse_key_requested,
+            } => {
+                todo!("forward keys not supported");
+            }
+            NextKeyKind::ReverseKey {
+                key_id,
+                mut public_key,
+            } => {
+                tracing::info!(?key_id, "handle reverse key");
+
+                match mem::replace(&mut self.state, OutboundSessionState::Poisoned) {
+                    OutboundSessionState::Active {
+                        destination_id,
+                        send_tag_set,
+                        recv_tag_set,
+                        mut pending_outbound_tagset,
+                    } => {
+                        tracing::info!(target: LOG_TARGET, "generate new outbound tagset");
+
+                        let public_key = public_key.take().expect("key to exist");
+                        let tagset = pending_outbound_tagset
+                            .take()
+                            .expect("to exist")
+                            .into_tagset(public_key);
+
+                        self.state = OutboundSessionState::Active {
+                            destination_id,
+                            send_tag_set: tagset,
+                            recv_tag_set,
+                            pending_outbound_tagset: None,
+                        };
+                    }
+                    state => panic!("invalid state: {state:?}"),
+                }
+            }
+        }
+    }
 }
 
 /// Key context for an ECIES-X25519-AEAD-Ratchet session.
@@ -362,7 +463,7 @@ impl<R: Runtime> KeyContext<R> {
         destination_id: DestinationId,
         pubkey: StaticPublicKey,
         payload: &[u8],
-    ) -> (OutboundSession, Vec<u8>) {
+    ) -> (OutboundSession<R>, Vec<u8>) {
         // generate new elligator2-encodable ephemeral keypair
         let (private_key, public_key, representative) = {
             let (private_key, tweak) = Self::generate_ephemeral_keypair();
@@ -476,6 +577,7 @@ impl<R: Runtime> KeyContext<R> {
                     ephemeral_private_key: private_key,
                     chaining_key,
                 },
+                _runtime: Default::default(),
             },
             payload,
         )
