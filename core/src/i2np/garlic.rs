@@ -300,7 +300,7 @@ pub enum GarlicMessageBlock<'a> {
     ACK {},
 
     /// ACK request.
-    ACKRequest {},
+    ACKRequest,
 
     /// Garlic clove.
     GarlicClove {
@@ -575,6 +575,12 @@ impl<'a> GarlicMessageBuilder<'a> {
         self
     }
 
+    pub fn with_ack_request(mut self) -> Self {
+        self.message_size += GARLIC_HEADER_LEN + 1; // 1 byte flag
+        self.cloves.push(GarlicMessageBlock::ACKRequest);
+        self
+    }
+
     /// Serialize [`GarlicMessageBuilder`] into a byte vector.
     pub fn build(self) -> Vec<u8> {
         let mut out = BytesMut::with_capacity(self.message_size);
@@ -648,6 +654,11 @@ impl<'a> GarlicMessageBuilder<'a> {
                         }
                     }
                 },
+                GarlicMessageBlock::ACKRequest => {
+                    out.put_u8(GarlicMessageType::ACKRequest.as_u8());
+                    out.put_u16(1u16);
+                    out.put_u8(0u8); // flag, unused
+                }
                 block => todo!("unimplemented block: {block:?}"),
             }
         }
