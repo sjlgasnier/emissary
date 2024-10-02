@@ -273,6 +273,21 @@ impl NextKeyKind {
     }
 }
 
+impl fmt::Debug for NextKeyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForwardKey { key_id, .. } => f
+                .debug_struct("NextKeyKind::ForwardKey")
+                .field("key_id", &key_id)
+                .finish_non_exhaustive(),
+            Self::ReverseKey { key_id, .. } => f
+                .debug_struct("NextKeyKind::ReverseKey")
+                .field("key_id", &key_id)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Garlic message block.
 pub enum GarlicMessageBlock<'a> {
     /// Date time.
@@ -349,7 +364,13 @@ impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
                 .finish_non_exhaustive(),
             Self::Padding { .. } =>
                 f.debug_struct("GarlicMessageBlock::Padding").finish_non_exhaustive(),
-            _ => f.debug_struct("Unknown").finish_non_exhaustive(),
+            Self::Termination {} => f.debug_struct("GarlicMessageBlock::Termination").finish(),
+            Self::Options {} => f.debug_struct("GarlicMessageBlock::Options").finish(),
+            Self::MessageNumber {} => f.debug_struct("GarlicMessageBlock::MessageNumber").finish(),
+            Self::NextKey { kind } =>
+                f.debug_struct("GarlicMessageBlock::NextKey").field("kind", &kind).finish(),
+            Self::ACK {} => f.debug_struct("GarlicMessageBlock::ACK").finish(),
+            Self::ACKRequest => f.debug_struct("GarlicMessageBlock::ACKRequest").finish(),
         }
     }
 }
