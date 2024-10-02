@@ -140,8 +140,6 @@ impl<R: Runtime> Stream<R> {
     /// Handle streaming protocol packet.
     ///
     /// Returns a serialized [`Packet`] if `payload` warrants sending a reply to remote.
-    //
-    // TODO: return bytesmut
     pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<()> {
         let Packet {
             send_stream_id,
@@ -198,6 +196,13 @@ impl<R: Runtime> Stream<R> {
 
         out.put_u8(10u8); // resend delay, in seconds
         out.put_u16(0); // no flags
+
+        if core::matches!(self.state, StreamState::OutboundInitiated { .. }) {
+            self.pending_events.push_back(StreamEvent::StreamOpened {
+                recv_stream_id: self.state.recv_stream_id(),
+                send_stream_id: recv_stream_id,
+            });
+        }
 
         self.state = StreamState::Open {
             recv_stream_id: self.state.recv_stream_id(),
