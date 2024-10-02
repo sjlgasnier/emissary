@@ -441,8 +441,8 @@ impl<'a> GarlicMessage<'a> {
     /// Try to parse [`GarlicMessage::NextKey`] from `input`.
     fn parse_next_key(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
         let (rest, size) = be_u16(input)?;
-        let (rest, flag) = be_u8(input)?;
-        let (rest, key_id) = be_u16(input)?;
+        let (rest, flag) = be_u8(rest)?;
+        let (rest, key_id) = be_u16(rest)?;
 
         let (rest, public_key) = match flag & 1 {
             0 => (rest, None),
@@ -480,10 +480,11 @@ impl<'a> GarlicMessage<'a> {
             Some(GarlicMessageType::GarlicClove) => Self::parse_garlic_clove(rest),
             Some(GarlicMessageType::Padding) => Self::parse_padding(rest),
             Some(GarlicMessageType::NextKey) => Self::parse_next_key(rest),
-            message_type => {
+            parsed_message_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     ?message_type,
+                    ?parsed_message_type,
                     "invalid garlic message block",
                 );
                 return Err(Err::Error(make_error(input, ErrorKind::Fail)));
