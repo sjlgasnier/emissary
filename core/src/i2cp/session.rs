@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::runtime::Runtime;
+use crate::{i2cp::socket::I2cpSocket, runtime::Runtime};
 
 use core::{
     future::Future,
@@ -27,14 +27,14 @@ use core::{
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
-    /// TCP stream.
-    stream: R::TcpStream,
+    /// I2CP socket.
+    socket: I2cpSocket<R>,
 }
 
 impl<R: Runtime> I2cpSession<R> {
     /// Create new [`I2cpSession`] from `stream`.
-    pub fn new(stream: R::TcpStream) -> Self {
-        Self { stream }
+    pub fn new(socket: I2cpSocket<R>) -> Self {
+        Self { socket }
     }
 }
 

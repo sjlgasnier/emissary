@@ -22,7 +22,7 @@
 
 use crate::{
     error::I2cpError,
-    i2cp::session::I2cpSession,
+    i2cp::{session::I2cpSession, socket::I2cpSocket},
     runtime::{JoinSet, Runtime, TcpListener},
     util::AsyncReadExt,
     Error,
@@ -38,6 +38,7 @@ use core::{
 };
 
 mod session;
+mod socket;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp";
@@ -140,7 +141,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         "i2cp client session accepted",
                     );
 
-                    R::spawn(I2cpSession::<R>::new(stream));
+                    R::spawn(I2cpSession::<R>::new(I2cpSocket::new(stream)));
                 }
             }
         }
