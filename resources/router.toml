@@ -1,0 +1,7 @@
+[ntcp2]
+enabled = true
+port = 8888
+
+[i2cp]
+enabled = true
+port = 7654
