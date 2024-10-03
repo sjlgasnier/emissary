@@ -33,8 +33,10 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp::socket";
 
-/// I2CP header length (payload size + message type).
-const I2CP_HEADER_SIZE: usize = 3;
+/// I2CP header length.
+///
+/// Header is payload size (4 bytes) + message type (1 bytes).
+const I2CP_HEADER_SIZE: usize = 5;
 
 /// Read state.
 enum ReadState {
@@ -158,12 +160,15 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 continue;
                             }
 
-                            let size = (this.read_buffer[0] as u16) << 8
-                                | (this.read_buffer[1] as u16) & 0xff;
+                            // conversion succeeds because `read_buffer` is ensured to have 5 bytes
+                            let size = u32::from_be_bytes(
+                                TryInto::<[u8; 4]>::try_into(&this.read_buffer[..4])
+                                    .expect("to succeed"),
+                            );
 
                             this.read_state = ReadState::ReadFrame {
                                 size: size as usize,
-                                msg_type: this.read_buffer[2],
+                                msg_type: this.read_buffer[4],
                                 offset: 0usize,
                             };
                         }
