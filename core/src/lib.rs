@@ -24,7 +24,7 @@ extern crate alloc;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub use config::{Config, Ntcp2Config};
+pub use config::{Config, I2cpConfig, Ntcp2Config};
 pub use error::Error;
 
 mod config;
