@@ -40,7 +40,7 @@ pub struct Ntcp2Config {
 }
 
 /// IC2P configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct I2cpConfig {
     /// I2CP server listen port.
     pub port: u16,

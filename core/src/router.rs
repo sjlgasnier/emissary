@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
+    i2cp::I2cpServer,
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
     router_storage::RouterStorage,
@@ -25,7 +26,7 @@ use crate::{
     subsystem::SubsystemKind,
     transports::TransportManager,
     tunnel::TunnelManager,
-    Config,
+    Config, I2cpConfig,
 };
 
 use futures::{FutureExt, Stream, StreamExt};
@@ -67,6 +68,7 @@ impl<R: Runtime> Router<R> {
         let test = config.signing_key.clone();
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
         let ntcp2_config = config.ntcp2_config.clone();
+        let i2cp_config = config.i2cp_config.clone();
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -135,6 +137,11 @@ impl<R: Runtime> Router<R> {
             );
 
             R::spawn(netdb);
+        }
+
+        // initialize i2cp server if it was enabled
+        if let Some(I2cpConfig { port }) = i2cp_config {
+            R::spawn(I2cpServer::<R>::new(port).await?);
         }
 
         // initialize and start ntcp2

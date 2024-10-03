@@ -31,6 +31,7 @@ mod config;
 mod crypto;
 mod destination;
 mod error;
+mod i2cp;
 mod netdb;
 mod router_storage;
 mod subsystem;
