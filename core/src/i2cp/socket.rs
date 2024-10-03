@@ -33,10 +33,13 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp::socket";
 
+/// I2CP header length (payload size + message type).
+const I2CP_HEADER_SIZE: usize = 3;
+
 /// Read state.
 enum ReadState {
-    /// Read I2CP frame length.
-    ReadSize {
+    /// Read I2CP message header.
+    ReadHeader {
         /// Offset into read buffer.
         offset: usize,
     },
@@ -45,6 +48,12 @@ enum ReadState {
     ReadFrame {
         /// Size of the next frame.
         size: usize,
+
+        /// Unparsed message type.
+        ///
+        /// Message type parsed only after the full frame has been read so that
+        /// the payload of the invalid message can be read and discarded.
+        msg_type: u8,
 
         /// Offset into read buffer.
         offset: usize,
@@ -101,7 +110,7 @@ impl<R: Runtime> I2cpSocket<R> {
     pub fn new(stream: R::TcpStream) -> Self {
         Self {
             read_buffer: vec![0u8; 0xffff],
-            read_state: ReadState::ReadSize { offset: 0usize },
+            read_state: ReadState::ReadHeader { offset: 0usize },
             stream,
             write_state: WriteState::GetMessage,
         }
@@ -117,8 +126,11 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
         loop {
             match this.read_state {
-                ReadState::ReadSize { offset } => {
-                    match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..2]) {
+                ReadState::ReadHeader { offset } => {
+                    match stream
+                        .as_mut()
+                        .poll_read(cx, &mut this.read_buffer[offset..I2CP_HEADER_SIZE])
+                    {
                         Poll::Pending => break,
                         Poll::Ready(Err(error)) => {
                             tracing::debug!(
@@ -139,8 +151,8 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 return Poll::Ready(None);
                             }
 
-                            if offset + nread != 2 {
-                                this.read_state = ReadState::ReadSize {
+                            if offset + nread != I2CP_HEADER_SIZE {
+                                this.read_state = ReadState::ReadHeader {
                                     offset: offset + nread,
                                 };
                                 continue;
@@ -151,12 +163,17 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
                             this.read_state = ReadState::ReadFrame {
                                 size: size as usize,
+                                msg_type: this.read_buffer[2],
                                 offset: 0usize,
                             };
                         }
                     }
                 }
-                ReadState::ReadFrame { size, offset } => {
+                ReadState::ReadFrame {
+                    size,
+                    msg_type,
+                    offset,
+                } => {
                     match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..size]) {
                         Poll::Pending => break,
                         Poll::Ready(Err(error)) => {
@@ -182,6 +199,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                             if offset + nread < size {
                                 this.read_state = ReadState::ReadFrame {
                                     size,
+                                    msg_type,
                                     offset: offset + nread,
                                 };
                                 continue;
@@ -189,9 +207,9 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
                             let _data_block = this.read_buffer[..size].to_vec();
 
-                            // TODO: do something with data block
+                            // TODO: parse message
 
-                            this.read_state = ReadState::ReadSize { offset: 0usize };
+                            this.read_state = ReadState::ReadHeader { offset: 0usize };
                         }
                     }
                 }
