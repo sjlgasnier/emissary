@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2cp::message::{Message, MessageType},
+    i2cp::message::{Message, MessageType, I2CP_HEADER_SIZE},
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     Error,
 };
@@ -33,11 +33,6 @@ use core::{
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp::socket";
-
-/// I2CP header length.
-///
-/// Header is payload size (4 bytes) + message type (1 bytes).
-const I2CP_HEADER_SIZE: usize = 5;
 
 /// Read state.
 enum ReadState {

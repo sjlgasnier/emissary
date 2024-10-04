@@ -18,15 +18,18 @@
 
 use crate::{
     i2cp::{message::Message, socket::I2cpSocket},
+    primitives::{Date, Str},
     runtime::Runtime,
 };
 
+use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
 
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
+    str::FromStr,
     task::{Context, Poll},
 };
 
@@ -53,8 +56,15 @@ impl<R: Runtime> I2cpSession<R> {
                     target: LOG_TARGET,
                     %version,
                     ?options,
-                    "get date",
+                    "get date, send set date",
                 );
+
+                let message = {
+                    let date = Date::new(R::time_since_epoch().as_secs()).serialize();
+                    let version = Str::from_str("0.9.62").expect("to succeed").serialize();
+
+                    let mut out = BytesMut::with_capacity(date.len() + version.len() + 5);
+                };
             }
             _ => {}
         }

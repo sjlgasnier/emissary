@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{Mapping, Str};
+use crate::primitives::{Date, Mapping, Str};
 
 use nom::{
     bytes::complete::take,
@@ -27,8 +27,15 @@ use nom::{
 
 use alloc::vec::Vec;
 
+mod set_date;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp::message";
+
+/// I2CP header length.
+///
+/// Header is payload size (4 bytes) + message type (1 bytes).
+pub const I2CP_HEADER_SIZE: usize = 5;
 
 /// I2CP message type.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -262,7 +269,13 @@ pub enum Message {
     SessionStatus,
 
     /// Set date.
-    SetDate,
+    SetDate {
+        /// Date.
+        date: Date,
+
+        /// Version.
+        version: Str,
+    },
 }
 
 impl Message {
@@ -271,9 +284,6 @@ impl Message {
     /// https://geti2p.net/spec/i2cp#getdatemessage
     fn parse_get_date(input: impl AsRef<[u8]>) -> Option<Self> {
         let (rest, version) = Str::parse_frame(input.as_ref()).ok()?;
-
-        tracing::error!("version = {version}, rest len = {}", rest.len());
-
         let (rest, options) = Mapping::parse_multi_frame(rest).ok()?;
 
         debug_assert!(rest.is_empty());
@@ -281,10 +291,23 @@ impl Message {
         Some(Message::GetDate { version, options })
     }
 
+    /// Attempt to parse [`Message::GetDate`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#setdatemessage
+    fn parse_set_date(input: impl AsRef<[u8]>) -> Option<Self> {
+        let (rest, date) = Date::parse_frame(input.as_ref()).ok()?;
+        let (rest, version) = Str::parse_frame(rest).ok()?;
+
+        debug_assert!(rest.is_empty());
+
+        Some(Message::SetDate { date, version })
+    }
+
     /// Attempt to parse `input` into [`Message`].
     pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
             MessageType::GetDate => Self::parse_get_date(input),
+            MessageType::SetDate => Self::parse_set_date(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
