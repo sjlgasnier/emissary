@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    i2cp::message::{Message, MessageType},
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     Error,
 };
@@ -120,7 +121,7 @@ impl<R: Runtime> I2cpSocket<R> {
 }
 
 impl<R: Runtime> Stream for I2cpSocket<R> {
-    type Item = ();
+    type Item = Message;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
@@ -210,104 +211,123 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 continue;
                             }
 
-                            let _data_block = this.read_buffer[..size].to_vec();
-
-                            // TODO: parse message
-
+                            // frame has been fully, reset read state and attempt to parse message
                             this.read_state = ReadState::ReadHeader { offset: 0usize };
+
+                            let Some(msg_type) = MessageType::from_u8(msg_type) else {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?msg_type,
+                                    "invalid message type",
+                                );
+
+                                continue;
+                            };
+
+                            let Some(message) = Message::parse(msg_type, &this.read_buffer[..size])
+                            else {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?msg_type,
+                                    "failed to parse i2cp message",
+                                );
+                                continue;
+                            };
+
+                            return Poll::Ready(Some(message));
                         }
                     }
                 }
             }
         }
 
-        loop {
-            match mem::replace(&mut this.write_state, WriteState::Poisoned) {
-                WriteState::GetMessage => {
-                    todo!();
-                }
-                WriteState::SendSize {
-                    offset,
-                    size,
-                    message,
-                } => match stream.as_mut().poll_write(cx, &size[offset..]) {
-                    Poll::Pending => {
-                        this.write_state = WriteState::SendSize {
-                            offset,
-                            size,
-                            message,
-                        };
-                        break;
-                    }
-                    Poll::Ready(Err(error)) => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "socket write error",
-                        );
-                        return Poll::Ready(None);
-                    }
-                    Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            "wrote zero bytes to socket",
-                        );
+        // loop {
+        //     match mem::replace(&mut this.write_state, WriteState::Poisoned) {
+        //         WriteState::GetMessage => {
+        //             todo!();
+        //         }
+        //         WriteState::SendSize {
+        //             offset,
+        //             size,
+        //             message,
+        //         } => match stream.as_mut().poll_write(cx, &size[offset..]) {
+        //             Poll::Pending => {
+        //                 this.write_state = WriteState::SendSize {
+        //                     offset,
+        //                     size,
+        //                     message,
+        //                 };
+        //                 break;
+        //             }
+        //             Poll::Ready(Err(error)) => {
+        //                 tracing::debug!(
+        //                     target: LOG_TARGET,
+        //                     ?error,
+        //                     "socket write error",
+        //                 );
+        //                 return Poll::Ready(None);
+        //             }
+        //             Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+        //                 tracing::debug!(
+        //                     target: LOG_TARGET,
+        //                     "wrote zero bytes to socket",
+        //                 );
 
-                        return Poll::Ready(None);
-                    }
-                    Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
-                        true => {
-                            this.write_state = WriteState::SendMessage {
-                                offset: 0usize,
-                                message,
-                            };
-                        }
-                        false => {
-                            this.write_state = WriteState::SendSize {
-                                size,
-                                offset: offset + nwritten,
-                                message,
-                            };
-                        }
-                    },
-                },
-                WriteState::SendMessage { offset, message } =>
-                    match stream.as_mut().poll_write(cx, &message[offset..]) {
-                        Poll::Pending => {
-                            this.write_state = WriteState::SendMessage { offset, message };
-                            break;
-                        }
-                        Poll::Ready(Err(error)) => return Poll::Ready(None),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                "wrote zero bytes to socket",
-                            );
+        //                 return Poll::Ready(None);
+        //             }
+        //             Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
+        //                 true => {
+        //                     this.write_state = WriteState::SendMessage {
+        //                         offset: 0usize,
+        //                         message,
+        //                     };
+        //                 }
+        //                 false => {
+        //                     this.write_state = WriteState::SendSize {
+        //                         size,
+        //                         offset: offset + nwritten,
+        //                         message,
+        //                     };
+        //                 }
+        //             },
+        //         },
+        //         WriteState::SendMessage { offset, message } =>
+        //             match stream.as_mut().poll_write(cx, &message[offset..]) {
+        //                 Poll::Pending => {
+        //                     this.write_state = WriteState::SendMessage { offset, message };
+        //                     break;
+        //                 }
+        //                 Poll::Ready(Err(error)) => return Poll::Ready(None),
+        //                 Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+        //                     tracing::debug!(
+        //                         target: LOG_TARGET,
+        //                         "wrote zero bytes to socket",
+        //                     );
 
-                            return Poll::Ready(None);
-                        }
-                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
-                            true => {
-                                this.write_state = WriteState::GetMessage;
-                            }
-                            false => {
-                                this.write_state = WriteState::SendMessage {
-                                    offset: offset + nwritten,
-                                    message,
-                                };
-                            }
-                        },
-                    },
-                WriteState::Poisoned => {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        "write state is poisoned",
-                    );
-                    debug_assert!(false);
-                    return Poll::Ready(None);
-                }
-            }
-        }
+        //                     return Poll::Ready(None);
+        //                 }
+        //                 Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
+        //                     true => {
+        //                         this.write_state = WriteState::GetMessage;
+        //                     }
+        //                     false => {
+        //                         this.write_state = WriteState::SendMessage {
+        //                             offset: offset + nwritten,
+        //                             message,
+        //                         };
+        //                     }
+        //                 },
+        //             },
+        //         WriteState::Poisoned => {
+        //             tracing::warn!(
+        //                 target: LOG_TARGET,
+        //                 "write state is poisoned",
+        //             );
+        //             debug_assert!(false);
+        //             return Poll::Ready(None);
+        //         }
+        //     }
+        // }
 
         Poll::Pending
     }

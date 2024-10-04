@@ -78,6 +78,10 @@ impl Mapping {
 
     /// Parse multiple [`Mapping`]s from `input`.
     pub fn parse_multi_frame(input: &[u8]) -> IResult<&[u8], Vec<Mapping>> {
+        if input.is_empty() {
+            return Ok((&[], Vec::new()));
+        }
+
         let (mut rest, mut num_option_bytes) = be_u16(input)?;
         let mut options = Vec::<Mapping>::new();
 

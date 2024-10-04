@@ -16,7 +16,12 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{i2cp::socket::I2cpSocket, runtime::Runtime};
+use crate::{
+    i2cp::{message::Message, socket::I2cpSocket},
+    runtime::Runtime,
+};
+
+use futures::StreamExt;
 
 use core::{
     future::Future,
@@ -24,6 +29,9 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::i2cp::session";
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
@@ -36,12 +44,35 @@ impl<R: Runtime> I2cpSession<R> {
     pub fn new(socket: I2cpSocket<R>) -> Self {
         Self { socket }
     }
+
+    /// Handle I2CP message received from the client.
+    fn on_message(&mut self, message: Message) {
+        match message {
+            Message::GetDate { version, options } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %version,
+                    ?options,
+                    "get date",
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 impl<R: Runtime> Future for I2cpSession<R> {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.socket.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(message)) => self.on_message(message),
+            }
+        }
+
         Poll::Pending
     }
 }
