@@ -25,6 +25,8 @@ use nom::{
     Err, IResult,
 };
 
+use alloc::vec::Vec;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp::message";
 

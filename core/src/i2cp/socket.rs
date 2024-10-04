@@ -24,7 +24,7 @@ use crate::{
 
 use futures::Stream;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::{
     mem,
     pin::Pin,

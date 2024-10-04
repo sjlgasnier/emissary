@@ -30,6 +30,7 @@ use crate::{
 
 use futures::StreamExt;
 
+use alloc::{string::String, vec};
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
