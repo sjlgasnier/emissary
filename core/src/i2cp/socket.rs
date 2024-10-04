@@ -149,7 +149,8 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                             if nread == 0 {
                                 tracing::debug!(
                                     target: LOG_TARGET,
-                                    "read zero bytes from socket",
+                                    ?offset,
+                                    "read zero bytes from socket (header)",
                                 );
 
                                 return Poll::Ready(None);
@@ -228,7 +229,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                             if nread == 0 {
                                 tracing::debug!(
                                     target: LOG_TARGET,
-                                    "read zero bytes from socket",
+                                    "read zero bytes from socket (payload)",
                                 );
 
                                 return Poll::Ready(None);

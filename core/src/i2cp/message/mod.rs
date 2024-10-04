@@ -28,9 +28,11 @@ use nom::{
 use alloc::vec::Vec;
 
 pub use bandwidth::BandwidthLimits;
+pub use session_status::{SessionStatus, SessionStatusKind};
 pub use set_date::SetDate;
 
 mod bandwidth;
+mod session_status;
 mod set_date;
 
 /// Logging target for the file.
@@ -40,6 +42,35 @@ const LOG_TARGET: &str = "emissary::i2cp::message";
 ///
 /// Header is payload size (4 bytes) + message type (1 bytes).
 pub const I2CP_HEADER_SIZE: usize = 5;
+
+/// Session ID.
+#[derive(Debug)]
+pub enum SessionId {
+    /// Session with iD.
+    Session(u16),
+
+    /// No session, special value `0xffff`;
+    NoSession,
+}
+
+impl SessionId {
+    /// Serialize [`SessionId`].
+    pub fn as_u16(self) -> u16 {
+        match self {
+            Self::Session(session_id) => session_id,
+            Self::NoSession => 0xffff,
+        }
+    }
+}
+
+impl From<u16> for SessionId {
+    fn from(value: u16) -> Self {
+        match value {
+            0xffff => SessionId::NoSession,
+            value => SessionId::Session(value),
+        }
+    }
+}
 
 /// I2CP message type.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -216,7 +247,10 @@ pub enum Message {
     DestReply,
 
     /// Destroy session.
-    DestroySession,
+    DestroySession {
+        /// Session ID.
+        session_id: SessionId,
+    },
 
     /// Disconnect connection.
     Disconnect,
@@ -316,12 +350,26 @@ impl Message {
         Some(Message::GetBandwidthLimits)
     }
 
+    /// Attempt to parse [`Message::DestroySession`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#destroysessionmessage
+    fn parse_destroy_session(input: impl AsRef<[u8]>) -> Option<Self> {
+        let (rest, session_id) = be_u16::<_, ()>(input.as_ref()).ok()?;
+
+        debug_assert!(rest.is_empty());
+
+        Some(Message::DestroySession {
+            session_id: SessionId::from(session_id),
+        })
+    }
+
     /// Attempt to parse `input` into [`Message`].
     pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
             MessageType::GetDate => Self::parse_get_date(input),
             MessageType::SetDate => Self::parse_set_date(input),
             MessageType::GetBandwidthLimits => Self::parse_get_bandwidth_limits(input),
+            MessageType::DestroySession => Self::parse_destroy_session(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,

@@ -36,13 +36,13 @@ impl BandwidthLimits {
         out.put_u32(16 * 4);
         out.put_u8(MessageType::BandwidthLimits.as_u8());
 
-        out.put_u32(500); // client inbound limit (KBps)
-        out.put_u32(500); // client outbound limit (KBps)
-        out.put_u32(2000); // router inbound limit (KBps)
-        out.put_u32(2000); // router inbound burst limit (KBps)
-        out.put_u32(2000); // router outbound limit (KBps)
-        out.put_u32(2000); // router outbound burst limit (KBps)
-        out.put_u32(5); // router burst time (seconds)
+        out.put_u32(50); // client inbound limit (KBps)
+        out.put_u32(50); // client outbound limit (KBps)
+        out.put_u32(20); // router inbound limit (KBps)
+        out.put_u32(20); // router inbound burst limit (KBps)
+        out.put_u32(20); // router outbound limit (KBps)
+        out.put_u32(20); // router outbound burst limit (KBps)
+        out.put_u32(0); // router burst time (seconds)
 
         // nine 4-byte integers, undefined
         for _ in 0..9 {

@@ -18,7 +18,7 @@
 
 use crate::{
     i2cp::{
-        message::{BandwidthLimits, Message, SetDate},
+        message::{BandwidthLimits, Message, SessionStatus, SessionStatusKind, SetDate},
         socket::I2cpSocket,
     },
     primitives::{Date, Str},
@@ -74,6 +74,16 @@ impl<R: Runtime> I2cpSession<R> {
                 );
 
                 self.socket.send_message(BandwidthLimits::new());
+            }
+            Message::DestroySession { session_id } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    ?session_id,
+                    "destroy session",
+                );
+
+                self.socket
+                    .send_message(SessionStatus::new(session_id, SessionStatusKind::Destroyed));
             }
             _ => {}
         }
