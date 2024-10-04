@@ -27,6 +27,8 @@ use nom::{
 
 use alloc::vec::Vec;
 
+pub use set_date::SetDate;
+
 mod set_date;
 
 /// Logging target for the file.

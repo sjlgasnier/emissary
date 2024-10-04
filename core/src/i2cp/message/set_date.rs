@@ -31,9 +31,9 @@ impl SetDate {
     pub fn new(date: Date, version: Str) -> BytesMut {
         let date = date.serialize();
         let version = version.serialize();
-        let len = I2CP_HEADER_SIZE + date.len() + version.len();
+        let len = date.len() + version.len();
 
-        let mut out = BytesMut::with_capacity(len);
+        let mut out = BytesMut::with_capacity(I2CP_HEADER_SIZE + len);
 
         out.put_u32(len as u32);
         out.put_u8(MessageType::SetDate.as_u8());

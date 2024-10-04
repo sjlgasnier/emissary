@@ -17,7 +17,10 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2cp::{message::Message, socket::I2cpSocket},
+    i2cp::{
+        message::{Message, SetDate},
+        socket::I2cpSocket,
+    },
     primitives::{Date, Str},
     runtime::Runtime,
 };
@@ -59,12 +62,10 @@ impl<R: Runtime> I2cpSession<R> {
                     "get date, send set date",
                 );
 
-                let message = {
-                    let date = Date::new(R::time_since_epoch().as_secs()).serialize();
-                    let version = Str::from_str("0.9.62").expect("to succeed").serialize();
-
-                    let mut out = BytesMut::with_capacity(date.len() + version.len() + 5);
-                };
+                self.socket.send_message(SetDate::new(
+                    Date::new(R::time_since_epoch().as_millis() as u64),
+                    Str::from_str("0.9.63").expect("to succeed"),
+                ));
             }
             _ => {}
         }

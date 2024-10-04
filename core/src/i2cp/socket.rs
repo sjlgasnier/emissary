@@ -22,13 +22,14 @@ use crate::{
     Error,
 };
 
+use bytes::BytesMut;
 use futures::Stream;
 
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     mem,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 /// Logging target for the file.
@@ -60,20 +61,8 @@ enum ReadState {
 
 /// Write state
 enum WriteState {
-    /// Read next outbound message from channel.
+    /// Read next outbound message from message buffer.
     GetMessage,
-
-    /// Send message size.
-    SendSize {
-        /// Write offset.
-        offset: usize,
-
-        /// Obfuscated message size as a byte vector.
-        size: Vec<u8>,
-
-        /// I2NP message.
-        message: Vec<u8>,
-    },
 
     /// Send message.
     SendMessage {
@@ -81,7 +70,7 @@ enum WriteState {
         offset: usize,
 
         /// I2CP message, potentially partially written.
-        message: Vec<u8>,
+        message: BytesMut,
     },
 
     /// [`WriteState`] has been poisoned due to a bug.
@@ -90,6 +79,9 @@ enum WriteState {
 
 /// I2CP client socket.
 pub struct I2cpSocket<R: Runtime> {
+    /// Pending outbound frames.
+    pending_frames: VecDeque<BytesMut>,
+
     /// Read buffer.
     read_buffer: Vec<u8>,
 
@@ -99,6 +91,9 @@ pub struct I2cpSocket<R: Runtime> {
     /// TCP stream.
     stream: R::TcpStream,
 
+    /// Waker, if any.
+    waker: Option<Waker>,
+
     /// Write state.
     write_state: WriteState,
 }
@@ -107,10 +102,21 @@ impl<R: Runtime> I2cpSocket<R> {
     /// Create new [`I2cpSocket`].
     pub fn new(stream: R::TcpStream) -> Self {
         Self {
+            pending_frames: VecDeque::new(),
             read_buffer: vec![0u8; 0xffff],
             read_state: ReadState::ReadHeader { offset: 0usize },
             stream,
             write_state: WriteState::GetMessage,
+            waker: None,
+        }
+    }
+
+    /// Attempt to send `message` to the connected I2CP client.
+    pub fn send_message(&mut self, message: BytesMut) {
+        self.pending_frames.push_back(message);
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
         }
     }
 }
@@ -236,94 +242,59 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
             }
         }
 
-        // loop {
-        //     match mem::replace(&mut this.write_state, WriteState::Poisoned) {
-        //         WriteState::GetMessage => {
-        //             todo!();
-        //         }
-        //         WriteState::SendSize {
-        //             offset,
-        //             size,
-        //             message,
-        //         } => match stream.as_mut().poll_write(cx, &size[offset..]) {
-        //             Poll::Pending => {
-        //                 this.write_state = WriteState::SendSize {
-        //                     offset,
-        //                     size,
-        //                     message,
-        //                 };
-        //                 break;
-        //             }
-        //             Poll::Ready(Err(error)) => {
-        //                 tracing::debug!(
-        //                     target: LOG_TARGET,
-        //                     ?error,
-        //                     "socket write error",
-        //                 );
-        //                 return Poll::Ready(None);
-        //             }
-        //             Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-        //                 tracing::debug!(
-        //                     target: LOG_TARGET,
-        //                     "wrote zero bytes to socket",
-        //                 );
+        loop {
+            match mem::replace(&mut this.write_state, WriteState::Poisoned) {
+                WriteState::GetMessage => match this.pending_frames.pop_front() {
+                    None => {
+                        this.write_state = WriteState::GetMessage;
+                        break;
+                    }
+                    Some(message) => {
+                        this.write_state = WriteState::SendMessage {
+                            offset: 0usize,
+                            message,
+                        };
+                    }
+                },
+                WriteState::SendMessage { offset, message } =>
+                    match stream.as_mut().poll_write(cx, &message[offset..]) {
+                        Poll::Pending => {
+                            this.write_state = WriteState::SendMessage { offset, message };
+                            break;
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(None),
+                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                "wrote zero bytes to socket",
+                            );
 
-        //                 return Poll::Ready(None);
-        //             }
-        //             Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
-        //                 true => {
-        //                     this.write_state = WriteState::SendMessage {
-        //                         offset: 0usize,
-        //                         message,
-        //                     };
-        //                 }
-        //                 false => {
-        //                     this.write_state = WriteState::SendSize {
-        //                         size,
-        //                         offset: offset + nwritten,
-        //                         message,
-        //                     };
-        //                 }
-        //             },
-        //         },
-        //         WriteState::SendMessage { offset, message } =>
-        //             match stream.as_mut().poll_write(cx, &message[offset..]) {
-        //                 Poll::Pending => {
-        //                     this.write_state = WriteState::SendMessage { offset, message };
-        //                     break;
-        //                 }
-        //                 Poll::Ready(Err(error)) => return Poll::Ready(None),
-        //                 Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-        //                     tracing::debug!(
-        //                         target: LOG_TARGET,
-        //                         "wrote zero bytes to socket",
-        //                     );
+                            return Poll::Ready(None);
+                        }
+                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
+                            true => {
+                                this.write_state = WriteState::GetMessage;
+                            }
+                            false => {
+                                this.write_state = WriteState::SendMessage {
+                                    offset: offset + nwritten,
+                                    message,
+                                };
+                            }
+                        },
+                    },
+                WriteState::Poisoned => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "write state is poisoned",
+                    );
+                    debug_assert!(false);
+                    return Poll::Ready(None);
+                }
+            }
+        }
 
-        //                     return Poll::Ready(None);
-        //                 }
-        //                 Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
-        //                     true => {
-        //                         this.write_state = WriteState::GetMessage;
-        //                     }
-        //                     false => {
-        //                         this.write_state = WriteState::SendMessage {
-        //                             offset: offset + nwritten,
-        //                             message,
-        //                         };
-        //                     }
-        //                 },
-        //             },
-        //         WriteState::Poisoned => {
-        //             tracing::warn!(
-        //                 target: LOG_TARGET,
-        //                 "write state is poisoned",
-        //             );
-        //             debug_assert!(false);
-        //             return Poll::Ready(None);
-        //         }
-        //     }
-        // }
-
+        self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
 }
