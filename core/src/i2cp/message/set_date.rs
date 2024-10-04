@@ -24,6 +24,8 @@ use crate::{
 use bytes::{BufMut, BytesMut};
 
 /// `SetDate` message.
+///
+/// https://geti2p.net/spec/i2cp#setdatemessage
 pub struct SetDate(());
 
 impl SetDate {

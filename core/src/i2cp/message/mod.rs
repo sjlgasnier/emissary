@@ -27,8 +27,10 @@ use nom::{
 
 use alloc::vec::Vec;
 
+pub use bandwidth::BandwidthLimits;
 pub use set_date::SetDate;
 
+mod bandwidth;
 mod set_date;
 
 /// Logging target for the file.
@@ -293,7 +295,7 @@ impl Message {
         Some(Message::GetDate { version, options })
     }
 
-    /// Attempt to parse [`Message::GetDate`] from `input`.
+    /// Attempt to parse [`Message::SetDate`] from `input`.
     ///
     /// https://geti2p.net/spec/i2cp#setdatemessage
     fn parse_set_date(input: impl AsRef<[u8]>) -> Option<Self> {
@@ -305,11 +307,21 @@ impl Message {
         Some(Message::SetDate { date, version })
     }
 
+    /// Attempt to parse [`Message::GetBandwidthLimits`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#getbandwidthlimitsmessage
+    fn parse_get_bandwidth_limits(input: impl AsRef<[u8]>) -> Option<Self> {
+        debug_assert!(input.as_ref().is_empty());
+
+        Some(Message::GetBandwidthLimits)
+    }
+
     /// Attempt to parse `input` into [`Message`].
     pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
             MessageType::GetDate => Self::parse_get_date(input),
             MessageType::SetDate => Self::parse_set_date(input),
+            MessageType::GetBandwidthLimits => Self::parse_get_bandwidth_limits(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,

@@ -18,7 +18,7 @@
 
 use crate::{
     i2cp::{
-        message::{Message, SetDate},
+        message::{BandwidthLimits, Message, SetDate},
         socket::I2cpSocket,
     },
     primitives::{Date, Str},
@@ -66,6 +66,14 @@ impl<R: Runtime> I2cpSession<R> {
                     Date::new(R::time_since_epoch().as_millis() as u64),
                     Str::from_str("0.9.63").expect("to succeed"),
                 ));
+            }
+            Message::GetBandwidthLimits => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    "handle bandwidth limit request",
+                );
+
+                self.socket.send_message(BandwidthLimits::new());
             }
             _ => {}
         }
