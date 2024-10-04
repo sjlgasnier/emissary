@@ -167,10 +167,42 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 TryInto::<[u8; 4]>::try_into(&this.read_buffer[..4])
                                     .expect("to succeed"),
                             );
+                            let msg_type = this.read_buffer[4];
+
+                            // some i2cp messages may not contain a payload (such as
+                            // `GetBandwithLimits`) meaning the message type is the entire message
+                            //
+                            // these messages must be handled before attempting to read any bytes
+                            // from socket and the read state must be reset to `ReadHeader`
+                            if size == 0 {
+                                this.read_state = ReadState::ReadHeader { offset: 0usize };
+
+                                let Some(msg_type) = MessageType::from_u8(msg_type) else {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?msg_type,
+                                        "invalid message type",
+                                    );
+
+                                    continue;
+                                };
+
+                                let Some(message) = Message::parse(msg_type, &[]) else {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?msg_type,
+                                        "failed to parse i2cp message with no payload",
+                                    );
+
+                                    continue;
+                                };
+
+                                return Poll::Ready(Some(message));
+                            }
 
                             this.read_state = ReadState::ReadFrame {
                                 size: size as usize,
-                                msg_type: this.read_buffer[4],
+                                msg_type,
                                 offset: 0usize,
                             };
                         }
