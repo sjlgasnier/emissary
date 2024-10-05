@@ -357,7 +357,7 @@ impl LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
                     published,
-                    expires: published + expires,
+                    expires: published.saturating_sub(expires),
                 },
                 public_keys: vec![public_key],
                 leases,

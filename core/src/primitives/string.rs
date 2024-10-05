@@ -16,25 +16,78 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// TODO: dx of `Str` needs a lot of work!
+//! Implementation of I2P string type.
+//!
+//! https://geti2p.net/spec/common-structures#string
 
 use crate::{primitives::LOG_TARGET, Error};
 
-use nom::{bytes::complete::take, number::complete::be_u8, IResult};
+use bytes::{BufMut, BytesMut};
+use nom::{
+    bytes::complete::take,
+    error::{make_error, ErrorKind},
+    number::complete::be_u8,
+    Err, IResult,
+};
 
-use alloc::{vec, vec::Vec};
-use core::{fmt, str::FromStr};
+use alloc::{sync::Arc, vec, vec::Vec};
+use core::{
+    fmt,
+    hash::{Hash, Hasher},
+    str::FromStr,
+};
 
-/// String.
-#[derive(Debug, Hash, Clone, PartialEq, Eq)]
-pub struct Str {
-    /// String as byte vector.
-    string: Vec<u8>,
+/// I2P string.
+#[derive(Debug, Clone)]
+pub enum Str {
+    Static(&'static str),
+    Allocated(Arc<str>),
+}
+
+impl From<&'static str> for Str {
+    fn from(protocol: &'static str) -> Self {
+        Str::Static(protocol)
+    }
 }
 
 impl fmt::Display for Str {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", core::str::from_utf8(&self.string).unwrap_or("..."))
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(protocol) => protocol.fmt(f),
+            Self::Allocated(protocol) => protocol.fmt(f),
+        }
+    }
+}
+
+impl From<String> for Str {
+    fn from(protocol: String) -> Self {
+        Str::Allocated(Arc::from(protocol))
+    }
+}
+
+impl From<Arc<str>> for Str {
+    fn from(protocol: Arc<str>) -> Self {
+        Self::Allocated(protocol)
+    }
+}
+
+impl TryFrom<&[u8]> for Str {
+    type Error = ();
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let string = core::str::from_utf8(value)
+            .map_err(|error| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to parse `Str`",
+                );
+
+                ()
+            })?
+            .to_owned();
+
+        Ok(Self::from(string))
     }
 }
 
@@ -51,66 +104,64 @@ impl FromStr for Str {
             return Err(Error::InvalidData);
         }
 
-        Ok(Str {
-            string: s.as_bytes().to_vec(),
-        })
+        Ok(Str::from(s.to_owned()))
     }
 }
 
-impl Str {
-    /// Create new [`Str`].
-    pub fn new(string: Vec<u8>) -> Self {
-        Self { string }
-    }
+impl std::ops::Deref for Str {
+    type Target = str;
 
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Static(protocol) => protocol,
+            Self::Allocated(protocol) => protocol,
+        }
+    }
+}
+
+impl Hash for Str {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self as &str).hash(state)
+    }
+}
+
+impl PartialEq for Str {
+    fn eq(&self, other: &Self) -> bool {
+        (self as &str) == (other as &str)
+    }
+}
+
+impl Eq for Str {}
+
+impl Str {
     /// Serialize [`Str`] into a byte vector.
     pub fn serialize(self) -> Vec<u8> {
-        let mut out = vec![0u8; self.string.len() + 1];
+        let mut out = BytesMut::with_capacity(self.len() + 1);
 
-        out[0] = self.string.len() as u8;
-        out[1..].copy_from_slice(&self.string);
+        out.put_u8(self.len() as u8);
+        out.put_slice(self.as_bytes());
 
-        out
+        out.freeze().to_vec()
     }
 
     /// Parse [`Str`] from `input`, returning rest of `input` and parsed address.
-    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Str> {
+    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Self> {
         let (rest, size) = be_u8(input)?;
         let (rest, string) = take(size)(rest)?;
+        let string =
+            Str::try_from(string).map_err(|()| Err::Error(make_error(input, ErrorKind::Fail)))?;
 
-        Ok((
-            rest,
-            Str {
-                string: string.to_vec(),
-            },
-        ))
+        Ok((rest, string))
     }
 
     /// Try to convert `bytes` into a [`Str`].
-    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Str> {
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Option<Str> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
-    }
-
-    /// Get reference to inner string.
-    pub fn string(&self) -> &[u8] {
-        &self.string
-    }
-
-    /// Get length of inner string.
-    pub fn len(&self) -> usize {
-        self.string.len()
     }
 
     /// Get serialized length of [`Str`].
     pub fn serialized_len(&self) -> usize {
-        self.string.len() + 1
-    }
-
-    /// Returns `true` if `self` contains `substring`.
-    pub fn contains(&self, substring: &str) -> bool {
-        core::str::from_utf8(&self.string)
-            .ok()
-            .map_or_else(|| false, |string| string.contains(&substring))
+        self.len() + 1
     }
 }
 
@@ -132,12 +183,7 @@ mod tests {
         string.push_front(string.len() as u8);
         let string: Vec<u8> = string.into();
 
-        assert_eq!(
-            Str::from_bytes(string),
-            Some(Str {
-                string: String::from("hello, world!").as_bytes().to_vec()
-            })
-        );
+        assert_eq!(Str::from_bytes(string), Some(Str::from("hello, world!")),);
     }
 
     #[test]
@@ -151,12 +197,7 @@ mod tests {
         string.push_back(4);
         let string: Vec<u8> = string.into();
 
-        assert_eq!(
-            Str::from_bytes(string),
-            Some(Str {
-                string: String::from("hello, world!").as_bytes().to_vec()
-            })
-        );
+        assert_eq!(Str::from_bytes(string), Some(Str::from("hello, world!")));
     }
 
     #[test]
@@ -172,25 +213,15 @@ mod tests {
 
         let (rest, string) = Str::parse_frame(&string).unwrap();
 
-        assert_eq!(
-            string,
-            Str {
-                string: String::from("hello, world!").as_bytes().to_vec()
-            }
-        );
+        assert_eq!(string, Str::from("hello, world!"));
         assert_eq!(rest, [1, 2, 3, 4]);
     }
 
     #[test]
     fn serialize_works() {
-        let bytes = Str::new("hello, world!".as_bytes().to_vec()).serialize();
+        let bytes = Str::from("hello, world!").serialize();
 
-        assert_eq!(
-            Str::from_bytes(bytes),
-            Some(Str {
-                string: "hello, world!".as_bytes().to_vec()
-            })
-        );
+        assert_eq!(Str::from_bytes(bytes), Some(Str::from("hello, world!")));
     }
 
     #[test]
