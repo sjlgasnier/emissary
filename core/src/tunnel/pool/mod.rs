@@ -123,9 +123,6 @@ pub struct TunnelPoolConfig {
 
     /// How many hops should each outbound tunnel have.
     num_outbound_hops: usize,
-
-    /// Destination of the tunnel (currently unused).
-    destination: (),
 }
 
 impl Default for TunnelPoolConfig {
@@ -135,7 +132,6 @@ impl Default for TunnelPoolConfig {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
-            destination: (),
         }
     }
 }
@@ -933,7 +929,6 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1011,7 +1006,6 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1084,7 +1078,6 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1162,7 +1155,6 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1236,7 +1228,6 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1312,7 +1303,6 @@ mod tests {
                 num_inbound_hops: 3usize,
                 num_outbound: 0usize,
                 num_outbound_hops: 0usize,
-                destination: (),
             };
             let mut client_pool = TunnelPool::<MockRuntime, _>::new(
                 pool_config,
@@ -1433,7 +1423,6 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1509,7 +1498,6 @@ mod tests {
                 num_inbound_hops: 0usize,
                 num_outbound: 1usize,
                 num_outbound_hops: 3usize,
-                destination: (),
             };
             let mut client_pool = TunnelPool::<MockRuntime, _>::new(
                 pool_config,
@@ -1629,7 +1617,6 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1712,7 +1699,6 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1792,7 +1778,6 @@ mod tests {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1960,7 +1945,6 @@ mod tests {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
-            destination: (),
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
