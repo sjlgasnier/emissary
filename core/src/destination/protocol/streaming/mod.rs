@@ -37,6 +37,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
+mod config;
 mod packet;
 
 /// Logging target for the file.
