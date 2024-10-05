@@ -16,8 +16,12 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{Date, Mapping, Str};
+use crate::{
+    primitives::{Date, Destination, Mapping, Str},
+    tunnel::TunnelPoolConfig,
+};
 
+use hashbrown::HashMap;
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -238,7 +242,16 @@ pub enum Message {
     CreateLeaseSet2,
 
     /// Create session.
-    CreateSession,
+    CreateSession {
+        /// Destination.
+        destination: Destination,
+
+        /// Create date.
+        date: Date,
+
+        /// Session options.
+        options: HashMap<Str, Str>,
+    },
 
     /// Lookup destination.
     DestLookup,
@@ -363,6 +376,32 @@ impl Message {
         })
     }
 
+    /// Attempt to parse [`Message::CreateSession`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#createsessionmessage
+    fn parse_create_session(input: impl AsRef<[u8]>) -> Option<Self> {
+        let (rest, destination) = Destination::parse_frame(input.as_ref()).ok()?;
+        let (rest, options) = Mapping::parse_multi_frame(rest).ok()?;
+        let (rest, date) = Date::parse_frame(rest).ok()?;
+        let (rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
+
+        if let Err(error) = destination.signing_key().verify(input.as_ref(), signature) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to verify `CreateSession` signature",
+            );
+
+            return None;
+        }
+
+        Some(Message::CreateSession {
+            destination,
+            date,
+            options: Mapping::into_hashmap(options),
+        })
+    }
+
     /// Attempt to parse `input` into [`Message`].
     pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
@@ -370,6 +409,7 @@ impl Message {
             MessageType::SetDate => Self::parse_set_date(input),
             MessageType::GetBandwidthLimits => Self::parse_get_bandwidth_limits(input),
             MessageType::DestroySession => Self::parse_destroy_session(input),
+            MessageType::CreateSession => Self::parse_create_session(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
