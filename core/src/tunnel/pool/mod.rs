@@ -19,7 +19,7 @@
 use crate::{
     error::{ChannelError, Error},
     i2np::{Message, MessageBuilder, MessageType},
-    primitives::{Lease2, MessageId, RouterId, TunnelId},
+    primitives::{Lease2, MessageId, RouterId, Str, TunnelId},
     runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
@@ -111,6 +111,7 @@ pub enum TunnelPoolKind {
 }
 
 /// Tunnel pool configuration.
+#[derive(Debug)]
 pub struct TunnelPoolConfig {
     /// How many inbound tunnels the pool should have.
     num_inbound: usize,
@@ -132,6 +133,33 @@ impl Default for TunnelPoolConfig {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
+        }
+    }
+}
+
+impl From<&HashMap<Str, Str>> for TunnelPoolConfig {
+    fn from(options: &HashMap<Str, Str>) -> Self {
+        let num_inbound = options
+            .get(&Str::from("inbound.quantity"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let num_inbound_hops = options
+            .get(&Str::from("inbound.length"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let num_outbound = options
+            .get(&Str::from("outbound.quantity"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let num_outbound_hops = options
+            .get(&Str::from("outbound.length"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        Self {
+            num_inbound,
+            num_inbound_hops,
+            num_outbound,
+            num_outbound_hops,
         }
     }
 }

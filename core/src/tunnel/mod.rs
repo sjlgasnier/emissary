@@ -28,9 +28,7 @@ use crate::{
         garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         noise::NoiseContext,
-        pool::{
-            ExploratorySelector, TunnelPool, TunnelPoolConfig, TunnelPoolContext, TunnelPoolKind,
-        },
+        pool::{ExploratorySelector, TunnelPool, TunnelPoolContext, TunnelPoolKind},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -60,7 +58,7 @@ mod transit;
 #[cfg(test)]
 mod tests;
 
-pub use pool::TunnelPoolHandle;
+pub use pool::{TunnelPoolConfig, TunnelPoolHandle};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
