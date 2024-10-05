@@ -56,6 +56,9 @@ pub struct I2cpServer<R: Runtime> {
     /// TCP listener.
     listener: R::TcpListener,
 
+    /// Next session ID.
+    next_session_id: u16,
+
     /// Pending connections.
     pending_connections: R::JoinSet<crate::Result<R::TcpStream>>,
 }
@@ -76,8 +79,17 @@ impl<R: Runtime> I2cpServer<R> {
 
         Ok(Self {
             listener,
+            next_session_id: 1u16,
             pending_connections: R::join_set(),
         })
+    }
+
+    /// Allocate next session ID.
+    fn next_session_id(&mut self) -> u16 {
+        let session_id = self.next_session_id;
+        self.next_session_id.overflowing_add(1);
+
+        session_id
     }
 }
 
@@ -143,7 +155,10 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         "i2cp client session accepted",
                     );
 
-                    R::spawn(I2cpSession::<R>::new(I2cpSocket::new(stream)));
+                    R::spawn(I2cpSession::<R>::new(
+                        self.next_session_id(),
+                        I2cpSocket::new(stream),
+                    ));
                 }
             }
         }

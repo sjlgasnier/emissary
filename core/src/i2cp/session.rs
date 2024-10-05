@@ -41,14 +41,17 @@ const LOG_TARGET: &str = "emissary::i2cp::session";
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
+    /// Session ID.
+    session_id: u16,
+
     /// I2CP socket.
     socket: I2cpSocket<R>,
 }
 
 impl<R: Runtime> I2cpSession<R> {
     /// Create new [`I2cpSession`] from `stream`.
-    pub fn new(socket: I2cpSocket<R>) -> Self {
-        Self { socket }
+    pub fn new(session_id: u16, socket: I2cpSocket<R>) -> Self {
+        Self { session_id, socket }
     }
 
     /// Handle I2CP message received from the client.
