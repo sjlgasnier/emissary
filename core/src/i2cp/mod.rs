@@ -22,7 +22,11 @@
 
 use crate::{
     error::I2cpError,
-    i2cp::{session::I2cpSession, socket::I2cpSocket},
+    i2cp::{
+        pending::{I2cpSessionContext, PendingI2cpSession},
+        session::I2cpSession,
+        socket::I2cpSocket,
+    },
     netdb::NetDbHandle,
     runtime::{JoinSet, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
@@ -41,6 +45,7 @@ use core::{
 };
 
 mod message;
+mod pending;
 mod session;
 mod socket;
 
@@ -66,6 +71,9 @@ pub struct I2cpServer<R: Runtime> {
 
     /// Pending connections.
     pending_connections: R::JoinSet<crate::Result<R::TcpStream>>,
+
+    /// Pending sessions.
+    pending_session: R::JoinSet<Option<I2cpSessionContext<R>>>,
 
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
@@ -94,6 +102,7 @@ impl<R: Runtime> I2cpServer<R> {
             netdb_handle,
             next_session_id: 1u16,
             pending_connections: R::join_set(),
+            pending_session: R::join_set(),
             tunnel_manager_handle,
         })
     }
@@ -169,12 +178,25 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         "i2cp client session accepted",
                     );
 
-                    R::spawn(I2cpSession::<R>::new(
-                        self.next_session_id(),
+                    let session_id = self.next_session_id();
+                    let handle = self.tunnel_manager_handle.clone();
+
+                    self.pending_session.push(PendingI2cpSession::<R>::new(
+                        session_id,
                         I2cpSocket::new(stream),
-                        self.netdb_handle.clone(),
-                        self.tunnel_manager_handle.clone(),
+                        handle,
                     ));
+                }
+            }
+        }
+
+        loop {
+            match self.pending_session.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(None)) => {}
+                Poll::Ready(Some(Some(context))) => {
+                    tracing::info!("start active i2cp connection");
                 }
             }
         }

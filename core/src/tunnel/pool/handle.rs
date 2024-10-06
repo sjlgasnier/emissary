@@ -34,7 +34,7 @@ use core::{
 };
 
 /// Events emitted by a `TunnelPool`.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum TunnelPoolEvent {
     /// Tunnel pool has been shut down.
     TunnelPoolShutDown,

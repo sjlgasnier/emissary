@@ -27,12 +27,10 @@ use crate::{
     tunnel::TunnelManagerHandle,
 };
 
-use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
 
 use core::{
     future::Future,
-    net::{IpAddr, SocketAddr},
     pin::Pin,
     str::FromStr,
     task::{Context, Poll},
@@ -43,14 +41,14 @@ const LOG_TARGET: &str = "emissary::i2cp::session";
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
+    /// Handle to `NetDb`.
+    netdb_handle: NetDbHandle,
+
     /// Session ID.
     session_id: u16,
 
     /// I2CP socket.
     socket: I2cpSocket<R>,
-
-    /// Handle to `NetDb`.
-    netdb_handle: NetDbHandle,
 
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
@@ -65,10 +63,9 @@ impl<R: Runtime> I2cpSession<R> {
         tunnel_manager_handle: TunnelManagerHandle,
     ) -> Self {
         Self {
+            netdb_handle,
             session_id,
             socket,
-
-            netdb_handle,
             tunnel_manager_handle,
         }
     }
