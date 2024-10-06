@@ -393,7 +393,7 @@ mod test {
         runtime::mock::MockRuntime,
         tunnel::{
             noise::NoiseContext,
-            pool::{TunnelPoolContext, TunnelPoolContextHandle, TunnelPoolKind},
+            pool::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle},
             routing_table::RoutingTable,
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
@@ -495,7 +495,11 @@ mod test {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
-        let (context, handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let TunnelPoolBuildParameters {
+            context,
+            context_handle: handle,
+            ..
+        } = TunnelPoolBuildParameters::new(Default::default());
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =

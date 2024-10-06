@@ -50,7 +50,7 @@ use crate::{
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
-    tunnel::TunnelPoolContextHandle,
+    tunnel::TunnelPoolHandle,
     util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
@@ -113,7 +113,7 @@ pub struct NetDb<R: Runtime> {
     service: TransportService,
 
     /// Exploratory tunnel pool handle.
-    exploratory_pool_handle: TunnelPoolContextHandle,
+    exploratory_pool_handle: Option<TunnelPoolHandle>,
 
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<QueryKind, QueryRecycle>,
@@ -121,7 +121,6 @@ pub struct NetDb<R: Runtime> {
     key: Vec<u8>,
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
-    rx: Option<mpsc::Receiver<Message>>,
     tmp: Option<(OutboundSession<R>, Stream<R>)>,
 }
 
@@ -132,8 +131,7 @@ impl<R: Runtime> NetDb<R> {
         service: TransportService,
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
-        exploratory_pool_handle: TunnelPoolContextHandle,
-        rx: mpsc::Receiver<Message>,
+        exploratory_pool_handle: TunnelPoolHandle,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_storage
             .routers()
@@ -157,7 +155,7 @@ impl<R: Runtime> NetDb<R> {
         (
             Self {
                 dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
-                exploratory_pool_handle,
+                exploratory_pool_handle: Some(exploratory_pool_handle),
                 timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
                 local_router_id,
                 handle_rx,
@@ -166,7 +164,6 @@ impl<R: Runtime> NetDb<R> {
                 routers: HashMap::new(),
                 router_storage,
                 service,
-                rx: Some(rx),
                 tmp: None,
             },
             NetDbHandle::new(handle_tx),
@@ -263,13 +260,13 @@ impl<R: Runtime> NetDb<R> {
                     DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
                 };
 
-                R::spawn(Destination::<R>::new(
-                    self.key.clone(),
-                    self.exploratory_pool_handle.clone(),
-                    self.rx.take().expect("to exist"),
-                    leaseset,
-                    self.metrics.clone(),
-                ));
+                // R::spawn(Destination::<R>::new(
+                //     self.key.clone(),
+                //     self.exploratory_pool_handle.take().expect("to exist"),
+                //     self.rx.take().expect("to exist"),
+                //     leaseset,
+                //     self.metrics.clone(),
+                // ));
             }
             MessageType::DatabaseLookup => {
                 tracing::trace!("database lookup");

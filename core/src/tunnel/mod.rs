@@ -28,7 +28,7 @@ use crate::{
         garlic::{DeliveryInstructions, GarlicHandler},
         metrics::*,
         noise::NoiseContext,
-        pool::{ExploratorySelector, TunnelPool, TunnelPoolContext, TunnelPoolKind},
+        pool::{ExploratorySelector, TunnelPool, TunnelPoolBuildParameters, TunnelPoolContext},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },
@@ -36,7 +36,7 @@ use crate::{
 
 use futures::StreamExt;
 use hashbrown::{HashMap, HashSet};
-use thingbuf::mpsc::{channel, Receiver};
+use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{vec, vec::Vec};
 use core::{
@@ -58,7 +58,8 @@ mod transit;
 #[cfg(test)]
 mod tests;
 
-pub use pool::{TunnelPoolConfig, TunnelPoolContextHandle};
+// TODO: remove `TunnelPoolContextHandle` re-export
+pub use pool::{TunnelPoolConfig, TunnelPoolContextHandle, TunnelPoolEvent, TunnelPoolHandle};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
@@ -122,12 +123,7 @@ impl<R: Runtime> TunnelManager<R> {
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
-        // TODO: remove
-    ) -> (
-        Self,
-        TunnelPoolContextHandle,
-        thingbuf::mpsc::Receiver<Message>,
-    ) {
+    ) -> (Self, TunnelPoolHandle) {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",
@@ -153,29 +149,25 @@ impl<R: Runtime> TunnelManager<R> {
             metrics_handle.clone(),
         ));
 
-        // TODO: remove
-        let (tx, rx) = thingbuf::mpsc::channel(64);
-
         // start exploratory tunnel pool
         //
         // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
         let pool_handle = {
-            // TODO: convert back to `Exploratory`
-            // let (pool_context, pool_handle) =
-            // TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-            let (pool_context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Client(tx));
-            let selector = ExploratorySelector::new(router_storage.clone(), pool_handle.clone());
-
-            R::spawn(TunnelPool::<R, _>::new(
-                TunnelPoolConfig::default(),
+            let build_parameters = TunnelPoolBuildParameters::new(TunnelPoolConfig::default());
+            let selector = ExploratorySelector::new(
+                router_storage.clone(),
+                build_parameters.context_handle.clone(),
+            );
+            let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
+                build_parameters,
                 selector,
-                pool_context,
                 routing_table.clone(),
                 noise.clone(),
                 metrics_handle.clone(),
-            ));
+            );
+            R::spawn(tunnel_pool);
 
-            pool_handle
+            tunnel_pool_handle
         };
 
         (
@@ -191,8 +183,6 @@ impl<R: Runtime> TunnelManager<R> {
                 service,
             },
             pool_handle,
-            // TODO: remove
-            rx,
         )
     }
 
