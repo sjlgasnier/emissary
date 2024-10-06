@@ -72,7 +72,7 @@ pub struct TunnelPoolContextHandle {
     listeners: Arc<RwLock<MessageListeners>>,
 
     /// TX channel for sending messages to the subscriber of the tunnel pool.
-    message_tx: mpsc::Sender<TunnelPoolEvent>,
+    event_tx: mpsc::Sender<TunnelPoolEvent>,
 
     /// TX channel for sending messages via one of the pool's outbound tunnels to remote routers.
     tx: mpsc::Sender<TunnelMessage>,
@@ -141,7 +141,7 @@ impl TunnelPoolContextHandle {
                     }
                     None => {
                         return self
-                            .message_tx
+                            .event_tx
                             .try_send(TunnelPoolEvent::Message { message })
                             .map_err(|error| {
                                 tracing::warn!(
@@ -303,7 +303,7 @@ pub struct TunnelPoolContext {
     listeners: Arc<RwLock<MessageListeners>>,
 
     /// TX channel for sending messages to the subscriber of the tunnel pool.
-    message_tx: mpsc::Sender<TunnelPoolEvent>,
+    event_tx: mpsc::Sender<TunnelPoolEvent>,
 
     /// RX channel for receiving messages destined to remote routers.
     rx: mpsc::Receiver<TunnelMessage>,
@@ -320,20 +320,20 @@ impl TunnelPoolContext {
         let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
 
-        let (tunnel_pool_handle, message_tx, shutdown_tx) = TunnelPoolHandle::new(tx.clone());
+        let (tunnel_pool_handle, event_tx, shutdown_tx) = TunnelPoolHandle::new(tx.clone());
 
         (
             Self {
                 leases: Arc::clone(&leases),
                 listeners: Arc::clone(&listeners),
-                message_tx: message_tx.clone(),
+                event_tx: event_tx.clone(),
                 rx,
                 tx: tx.clone(),
             },
             TunnelPoolContextHandle {
                 leases,
                 listeners,
-                message_tx,
+                event_tx,
                 tx,
             },
             tunnel_pool_handle,
@@ -389,9 +389,57 @@ impl TunnelPoolContext {
         TunnelPoolContextHandle {
             leases: Arc::clone(&self.leases),
             listeners: Arc::clone(&self.listeners),
-            message_tx: self.message_tx.clone(),
+            event_tx: self.event_tx.clone(),
             tx: self.tx.clone(),
         }
+    }
+
+    /// Inform the tunnel pool creator that the tunnel pool has been shut down.
+    pub fn register_tunnel_pool_shut_down(&self) -> Result<(), ChannelError> {
+        self.event_tx.try_send(TunnelPoolEvent::TunnelPoolShutDown).map_err(From::from)
+    }
+
+    /// Inform the tunnel pool creator that an inbound tunnel has been built.
+    ///
+    /// `tunnel_id` refers to the IBGW of the newly built tunnel.
+    pub fn register_inbound_tunnel_built(
+        &self,
+        tunnel_id: TunnelId,
+        lease: Lease2,
+    ) -> Result<(), ChannelError> {
+        self.event_tx
+            .try_send(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })
+            .map_err(From::from)
+    }
+
+    /// Inform the tunnel pool creator that an outbound tunnel has been built.
+    ///
+    /// `tunnel_id` refers to the OBGW of the newly built tunnel.
+    pub fn register_outbound_tunnel_built(&self, tunnel_id: TunnelId) -> Result<(), ChannelError> {
+        self.event_tx
+            .try_send(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })
+            .map_err(From::from)
+    }
+
+    /// Inform the tunnel pool creator that an inbound tunnel has expired.
+    ///
+    /// `tunnel_id` refers to the IBGW of the newly built tunnel.
+    pub fn register_inbound_tunnel_expired(&self, tunnel_id: TunnelId) -> Result<(), ChannelError> {
+        self.event_tx
+            .try_send(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })
+            .map_err(From::from)
+    }
+
+    /// Inform the tunnel pool creator that an outbound tunnel has expired.
+    ///
+    /// `tunnel_id` refers to the OBGW of the newly built tunnel.
+    pub fn register_outbound_tunnel_expired(
+        &self,
+        tunnel_id: TunnelId,
+    ) -> Result<(), ChannelError> {
+        self.event_tx
+            .try_send(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })
+            .map_err(From::from)
     }
 }
 
@@ -438,21 +486,21 @@ impl TunnelPoolBuildParameters {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
         let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
-        let (tunnel_pool_handle, message_tx, shutdown_rx) = TunnelPoolHandle::new(tx.clone());
+        let (tunnel_pool_handle, event_tx, shutdown_rx) = TunnelPoolHandle::new(tx.clone());
 
         Self {
             config,
             context: TunnelPoolContext {
                 leases: Arc::clone(&leases),
                 listeners: Arc::clone(&listeners),
-                message_tx: message_tx.clone(),
+                event_tx: event_tx.clone(),
                 rx,
                 tx: tx.clone(),
             },
             context_handle: TunnelPoolContextHandle {
                 leases,
                 listeners,
-                message_tx,
+                event_tx,
                 tx,
             },
             shutdown_rx,

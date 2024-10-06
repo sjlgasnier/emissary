@@ -667,6 +667,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.outbound.insert(tunnel_id, tunnel);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                     self.metrics.gauge(NUM_OUTBOUND_TUNNELS).increment(1);
+
+                    // inform the owner of the tunnel pool that a new outbound tunnel has been built
+                    if let Err(error) = self.context.register_outbound_tunnel_built(tunnel_id) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register new outbound tunnel to owner",
+                        );
+                    }
                 }
             }
         }
@@ -702,17 +712,22 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.selector.add_inbound_tunnel(tunnel_id, router_id.clone());
                     self.inbound_tunnels.insert(tunnel_id, router_id.clone());
 
-                    // store lease of the new inbound tunnel into `TunnelPoolContextHandle` so
-                    // client code can query available leases when it's creating
-                    // new sessions
-                    self.context.add_lease(
-                        *tunnel.tunnel_id(),
+                    // inform the owner of the tunnel pool that a new inbound tunnel has been built
+                    if let Err(error) = self.context.register_inbound_tunnel_built(
+                        tunnel_id,
                         Lease2 {
                             router_id,
                             tunnel_id,
                             expires: (R::time_since_epoch() + TUNNEL_EXPIRATION).as_secs() as u32,
                         },
-                    );
+                    ) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register new inbound tunnel to owner",
+                        );
+                    }
 
                     self.inbound.push(tunnel);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).increment(1);
@@ -737,6 +752,18 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.context.remove_lease(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
+
+                    // inform the owner of the tunnel pool that an inbound tunnel has expired
+                    if let Err(error) =
+                        self.context.register_inbound_tunnel_expired(gateway_tunnel_id)
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %gateway_tunnel_id,
+                            ?error,
+                            "failed to register expired inbound tunnel to owner",
+                        );
+                    }
                 }
             }
         }
@@ -885,6 +912,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.outbound.remove(&tunnel_id);
                     self.expiring_outbound.remove(&tunnel_id);
                     self.selector.remove_outbound_tunnel(&tunnel_id);
+
+                    // inform the owner of the tunnel pool that an inbound tunnel has expired
+                    if let Err(error) = self.context.register_outbound_tunnel_expired(tunnel_id) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register expired outbound tunnel to owner",
+                        );
+                    }
                 }
                 Some(TunnelTimerEvent::Rebuild {
                     kind: TunnelKind::Outbound { tunnel_id },
@@ -918,6 +955,18 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         }
 
         self.maintain_pool();
+
+        if let Some(rx) = &mut self.shutdown_rx {
+            if let Poll::Ready(_) = rx.poll_unpin(cx) {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "tunnel pool shutting down",
+                );
+                let _ = self.context.register_tunnel_pool_shut_down();
+
+                return Poll::Ready(());
+            }
+        }
 
         Poll::Pending
     }
