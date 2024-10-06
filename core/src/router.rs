@@ -129,9 +129,9 @@ impl<R: Runtime> Router<R> {
         };
 
         // initialize and start netdb
-        {
+        let netdb_handle = {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
-            let (netdb, _netdb_handle) = NetDb::<R>::new(
+            let (netdb, netdb_handle) = NetDb::<R>::new(
                 local_router_id,
                 transport_service,
                 router_storage.clone(),
@@ -140,11 +140,16 @@ impl<R: Runtime> Router<R> {
             );
 
             R::spawn(netdb);
-        }
+
+            netdb_handle
+        };
 
         // initialize i2cp server if it was enabled
         if let Some(I2cpConfig { port }) = i2cp_config {
-            R::spawn(I2cpServer::<R>::new(port).await?);
+            let i2cp_server =
+                I2cpServer::<R>::new(port, netdb_handle, tunnel_manager_handle.clone()).await?;
+
+            R::spawn(i2cp_server);
         }
 
         // initialize and start ntcp2

@@ -23,7 +23,9 @@
 use crate::{
     error::I2cpError,
     i2cp::{session::I2cpSession, socket::I2cpSocket},
+    netdb::NetDbHandle,
     runtime::{JoinSet, Runtime, TcpListener},
+    tunnel::TunnelManagerHandle,
     util::AsyncReadExt,
     Error,
 };
@@ -56,16 +58,26 @@ pub struct I2cpServer<R: Runtime> {
     /// TCP listener.
     listener: R::TcpListener,
 
+    /// Handle to `NetDb`.
+    netdb_handle: NetDbHandle,
+
     /// Next session ID.
     next_session_id: u16,
 
     /// Pending connections.
     pending_connections: R::JoinSet<crate::Result<R::TcpStream>>,
+
+    /// Handle to `TunnelManager`.
+    tunnel_manager_handle: TunnelManagerHandle,
 }
 
 impl<R: Runtime> I2cpServer<R> {
     /// Create new [`I2cpServer`].
-    pub async fn new(port: u16) -> crate::Result<Self> {
+    pub async fn new(
+        port: u16,
+        netdb_handle: NetDbHandle,
+        tunnel_manager_handle: TunnelManagerHandle,
+    ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
             ?port,
@@ -79,8 +91,10 @@ impl<R: Runtime> I2cpServer<R> {
 
         Ok(Self {
             listener,
+            netdb_handle,
             next_session_id: 1u16,
             pending_connections: R::join_set(),
+            tunnel_manager_handle,
         })
     }
 
@@ -158,6 +172,8 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     R::spawn(I2cpSession::<R>::new(
                         self.next_session_id(),
                         I2cpSocket::new(stream),
+                        self.netdb_handle.clone(),
+                        self.tunnel_manager_handle.clone(),
                     ));
                 }
             }

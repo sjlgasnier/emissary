@@ -21,8 +21,10 @@ use crate::{
         message::{BandwidthLimits, Message, SessionId, SessionStatus, SessionStatusKind, SetDate},
         socket::I2cpSocket,
     },
+    netdb::NetDbHandle,
     primitives::{Date, Str},
     runtime::Runtime,
+    tunnel::TunnelManagerHandle,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -46,12 +48,29 @@ pub struct I2cpSession<R: Runtime> {
 
     /// I2CP socket.
     socket: I2cpSocket<R>,
+
+    /// Handle to `NetDb`.
+    netdb_handle: NetDbHandle,
+
+    /// Handle to `TunnelManager`.
+    tunnel_manager_handle: TunnelManagerHandle,
 }
 
 impl<R: Runtime> I2cpSession<R> {
     /// Create new [`I2cpSession`] from `stream`.
-    pub fn new(session_id: u16, socket: I2cpSocket<R>) -> Self {
-        Self { session_id, socket }
+    pub fn new(
+        session_id: u16,
+        socket: I2cpSocket<R>,
+        netdb_handle: NetDbHandle,
+        tunnel_manager_handle: TunnelManagerHandle,
+    ) -> Self {
+        Self {
+            session_id,
+            socket,
+
+            netdb_handle,
+            tunnel_manager_handle,
+        }
     }
 
     /// Handle I2CP message received from the client.
