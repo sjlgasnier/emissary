@@ -58,7 +58,7 @@ use core::{
     time::Duration,
 };
 
-pub use context::{TunnelPoolContext, TunnelPoolHandle};
+pub use context::{TunnelPoolContext, TunnelPoolContextHandle};
 pub use selector::ExploratorySelector;
 
 mod context;
@@ -702,8 +702,9 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.selector.add_inbound_tunnel(tunnel_id, router_id.clone());
                     self.inbound_tunnels.insert(tunnel_id, router_id.clone());
 
-                    // store lease of the new inbound tunnel into `TunnelPoolHandle` so client code
-                    // can query available leases when it's creating new sessions
+                    // store lease of the new inbound tunnel into `TunnelPoolContextHandle` so
+                    // client code can query available leases when it's creating
+                    // new sessions
                     self.context.add_lease(
                         *tunnel.tunnel_id(),
                         Lease2 {

@@ -37,7 +37,7 @@ use crate::{
         Destination as Dest, Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterIdentity,
     },
     runtime::Runtime,
-    tunnel::TunnelPoolHandle,
+    tunnel::TunnelPoolContextHandle,
     util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
@@ -78,7 +78,7 @@ pub struct Destination<R: Runtime> {
     session: OutboundSession<R>,
 
     /// Tunnel pool handle.
-    tunnel_pool_handle: TunnelPoolHandle,
+    tunnel_pool_handle: TunnelPoolContextHandle,
 
     key: Vec<u8>,
     leaseset: LeaseSet2,
@@ -88,7 +88,7 @@ impl<R: Runtime> Destination<R> {
     /// Create new [`Destination`].
     pub fn new(
         key: Vec<u8>,
-        tunnel_pool_handle: TunnelPoolHandle,
+        tunnel_pool_handle: TunnelPoolContextHandle,
         rx: Receiver<Message>,
         leaseset: LeaseSet2,
         metrics: R::MetricsHandle,

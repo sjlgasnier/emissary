@@ -64,7 +64,7 @@ struct MessageListeners {
 
 /// Tunnel pool handle.
 #[derive(Clone)]
-pub struct TunnelPoolHandle {
+pub struct TunnelPoolContextHandle {
     /// Leases of the tunnel pool.
     leases: Arc<RwLock<HashMap<TunnelId, Lease2>>>,
 
@@ -78,7 +78,7 @@ pub struct TunnelPoolHandle {
     tx: mpsc::Sender<TunnelMessage>,
 }
 
-impl TunnelPoolHandle {
+impl TunnelPoolContextHandle {
     /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
     pub fn send_to_router(
         &self,
@@ -117,8 +117,8 @@ impl TunnelPoolHandle {
     /// Message is routed to an existing listener if one exists for the message and if there are no
     /// installed listeners, the message is routed to `TunnelPool` for further processing.
     ///
-    /// If the message is a garlic clove and the [`TunnelPoolHandle`] belongs to a client session
-    /// the clove is forwarded to the session without routing through [`TunnelPool`].
+    /// If the message is a garlic clove and the [`TunnelPoolContextHandle`] belongs to a client
+    /// session the clove is forwarded to the session without routing through [`TunnelPool`].
     pub fn route_message(&self, message: Message) -> Result<(), RoutingError> {
         let mut inner = self.listeners.write();
         let message_id = MessageId::from(message.message_id);
@@ -314,7 +314,7 @@ pub struct TunnelPoolContext {
 
 impl TunnelPoolContext {
     /// Create new [`TunnelPoolContext`].
-    pub fn new(pool_kind: TunnelPoolKind) -> (Self, TunnelPoolHandle) {
+    pub fn new(pool_kind: TunnelPoolKind) -> (Self, TunnelPoolContextHandle) {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
         let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
@@ -327,7 +327,7 @@ impl TunnelPoolContext {
                 rx,
                 tx: tx.clone(),
             },
-            TunnelPoolHandle {
+            TunnelPoolContextHandle {
                 leases,
                 listeners,
                 pool_kind,
@@ -376,9 +376,9 @@ impl TunnelPoolContext {
         self.leases.write().remove(tunnel_id);
     }
 
-    /// Allocate new [`TunnelPoolHandle`] for the context.
-    pub fn handle(&self) -> TunnelPoolHandle {
-        TunnelPoolHandle {
+    /// Allocate new [`TunnelPoolContextHandle`] for the context.
+    pub fn handle(&self) -> TunnelPoolContextHandle {
+        TunnelPoolContextHandle {
             leases: Arc::clone(&self.leases),
             listeners: Arc::clone(&self.listeners),
             pool_kind: self.pool_kind.clone(),

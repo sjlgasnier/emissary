@@ -50,7 +50,7 @@ use crate::{
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
-    tunnel::TunnelPoolHandle,
+    tunnel::TunnelPoolContextHandle,
     util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
@@ -113,7 +113,7 @@ pub struct NetDb<R: Runtime> {
     service: TransportService,
 
     /// Exploratory tunnel pool handle.
-    exploratory_pool_handle: TunnelPoolHandle,
+    exploratory_pool_handle: TunnelPoolContextHandle,
 
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<QueryKind, QueryRecycle>,
@@ -132,7 +132,7 @@ impl<R: Runtime> NetDb<R> {
         service: TransportService,
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
-        exploratory_pool_handle: TunnelPoolHandle,
+        exploratory_pool_handle: TunnelPoolContextHandle,
         rx: mpsc::Receiver<Message>,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_storage

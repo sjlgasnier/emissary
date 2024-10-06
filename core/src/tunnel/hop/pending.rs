@@ -393,7 +393,7 @@ mod test {
         runtime::mock::MockRuntime,
         tunnel::{
             noise::NoiseContext,
-            pool::{TunnelPoolContext, TunnelPoolHandle, TunnelPoolKind},
+            pool::{TunnelPoolContext, TunnelPoolContextHandle, TunnelPoolKind},
             routing_table::RoutingTable,
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,

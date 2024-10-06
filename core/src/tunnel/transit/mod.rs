@@ -510,7 +510,7 @@ mod tests {
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
             },
-            pool::{TunnelPool, TunnelPoolContext, TunnelPoolHandle, TunnelPoolKind},
+            pool::{TunnelPool, TunnelPoolContext, TunnelPoolContextHandle, TunnelPoolKind},
             tests::make_router,
         },
     };

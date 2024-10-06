@@ -33,7 +33,7 @@ use crate::{
             TunnelBuildParameters, TunnelInfo,
         },
         noise::NoiseContext,
-        pool::{TunnelPoolContext, TunnelPoolHandle, TunnelPoolKind},
+        pool::{TunnelPoolContext, TunnelPoolContextHandle, TunnelPoolKind},
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
     },

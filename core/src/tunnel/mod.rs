@@ -58,7 +58,7 @@ mod transit;
 #[cfg(test)]
 mod tests;
 
-pub use pool::{TunnelPoolConfig, TunnelPoolHandle};
+pub use pool::{TunnelPoolConfig, TunnelPoolContextHandle};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
@@ -123,7 +123,11 @@ impl<R: Runtime> TunnelManager<R> {
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
         // TODO: remove
-    ) -> (Self, TunnelPoolHandle, thingbuf::mpsc::Receiver<Message>) {
+    ) -> (
+        Self,
+        TunnelPoolContextHandle,
+        thingbuf::mpsc::Receiver<Message>,
+    ) {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",

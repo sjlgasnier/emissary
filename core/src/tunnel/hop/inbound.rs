@@ -31,7 +31,7 @@ use crate::{
     tunnel::{
         fragment::{FragmentHandler, OwnedDeliveryInstructions},
         hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
-        pool::TunnelPoolHandle,
+        pool::TunnelPoolContextHandle,
         TUNNEL_EXPIRATION,
     },
     Error,
@@ -61,7 +61,7 @@ pub struct InboundTunnel {
     fragment: FragmentHandler,
 
     /// Tunnel pool handle.
-    handle: TunnelPoolHandle,
+    handle: TunnelPoolContextHandle,
 
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
