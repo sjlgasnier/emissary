@@ -25,7 +25,7 @@ use crate::{
     runtime::{MetricType, Runtime},
     subsystem::SubsystemKind,
     transports::TransportManager,
-    tunnel::TunnelManager,
+    tunnel::{TunnelManager, TunnelManagerHandle},
     Config, I2cpConfig,
 };
 
@@ -58,6 +58,9 @@ pub struct Router<R: Runtime> {
 
     /// Local router info.
     local_router_info: RouterInfo,
+
+    /// Handle to [`TunnelManager`].
+    _tunnel_manager_handle: TunnelManagerHandle,
 }
 
 impl<R: Runtime> Router<R> {
@@ -109,19 +112,20 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         //
         // acquire handle to exploratory tunnel pool which is given to `NetDb`
-        let exploratory_pool_handle = {
+        let (tunnel_manager_handle, exploratory_pool_handle) = {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
-            let (tunnel_manager, pool_handle) = TunnelManager::<R>::new(
-                transport_service,
-                local_router_info.clone(), // TODO: should be cheap
-                local_key,
-                metrics_handle.clone(),
-                router_storage.clone(),
-            );
+            let (tunnel_manager, tunnel_manager_handle, tunnel_pool_handle) =
+                TunnelManager::<R>::new(
+                    transport_service,
+                    local_router_info.clone(),
+                    local_key,
+                    metrics_handle.clone(),
+                    router_storage.clone(),
+                );
 
             R::spawn(tunnel_manager);
 
-            pool_handle
+            (tunnel_manager_handle, tunnel_pool_handle)
         };
 
         // initialize and start netdb
@@ -153,6 +157,7 @@ impl<R: Runtime> Router<R> {
                 runtime,
                 local_router_info,
                 transport_manager,
+                _tunnel_manager_handle: tunnel_manager_handle,
             },
             serialized_router_info,
         ))
