@@ -87,7 +87,7 @@ impl<R: Runtime> I2cpServer<R> {
     /// Allocate next session ID.
     fn next_session_id(&mut self) -> u16 {
         let session_id = self.next_session_id;
-        self.next_session_id.overflowing_add(1);
+        self.next_session_id = self.next_session_id.wrapping_add(1);
 
         session_id
     }
