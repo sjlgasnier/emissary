@@ -34,6 +34,7 @@ use nom::{
 };
 
 use alloc::vec::Vec;
+use core::fmt;
 
 /// "No reply" token/tunnel ID.
 const NO_REPLY: u32 = 0u32;
@@ -135,6 +136,23 @@ pub enum DatabaseStorePayload {
         /// Lease set.
         leaseset: LeaseSet2,
     },
+}
+
+impl fmt::Display for DatabaseStorePayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RouterInfo { router_info } => write!(
+                f,
+                "DatabaseStorePayload::RouterInfo ({})",
+                router_info.identity().id()
+            ),
+            Self::LeaseSet2 { leaseset } => write!(
+                f,
+                "DatabaseStorePayload::LeaseSet2 ({})",
+                leaseset.header.destination.id()
+            ),
+        }
+    }
 }
 
 impl DatabaseStorePayload {

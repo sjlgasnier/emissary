@@ -17,24 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base32_decode, base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
-        SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
-    },
-    destination::{
-        protocol::{streaming::Stream, Protocol},
-        session::{KeyContext, OutboundSession},
-        Destination,
-    },
-    error::{ChannelError, QueryError},
+    crypto::base32_decode,
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType},
-            store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStorePayload},
-        },
-        garlic::{
-            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
-            GarlicMessageBuilder,
+            store::{DatabaseStore, DatabaseStorePayload},
         },
         Message, MessageBuilder, MessageType,
     },
@@ -43,31 +30,24 @@ use crate::{
         handle::{QueryKind, QueryRecycle},
         metrics::*,
     },
-    primitives::{
-        Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterId, RouterIdentity, RouterInfo,
-    },
+    primitives::RouterId,
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::TunnelPoolHandle,
-    util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
-use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use futures::{FutureExt, StreamExt};
-use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 
 pub use handle::NetDbHandle;
@@ -113,15 +93,15 @@ pub struct NetDb<R: Runtime> {
     service: TransportService,
 
     /// Exploratory tunnel pool handle.
-    exploratory_pool_handle: Option<TunnelPoolHandle>,
+    exploratory_pool_handle: TunnelPoolHandle,
 
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<QueryKind, QueryRecycle>,
 
+    // TODO: remove these
     key: Vec<u8>,
     timer: futures::future::BoxFuture<'static, ()>,
     local_router_id: RouterId,
-    tmp: Option<(OutboundSession<R>, Stream<R>)>,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -155,7 +135,7 @@ impl<R: Runtime> NetDb<R> {
         (
             Self {
                 dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
-                exploratory_pool_handle: Some(exploratory_pool_handle),
+                exploratory_pool_handle,
                 timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
                 local_router_id,
                 handle_rx,
@@ -164,7 +144,6 @@ impl<R: Runtime> NetDb<R> {
                 routers: HashMap::new(),
                 router_storage,
                 service,
-                tmp: None,
             },
             NetDbHandle::new(handle_tx),
         )
@@ -202,7 +181,7 @@ impl<R: Runtime> NetDb<R> {
                         );
                     }
                 },
-            Some(state) => {
+            Some(_) => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
@@ -243,30 +222,26 @@ impl<R: Runtime> NetDb<R> {
     fn on_message(&mut self, message: Message) {
         match message.message_type {
             MessageType::DatabaseStore => {
-                let DatabaseStore {
+                let Some(DatabaseStore {
                     key,
                     payload,
                     reply,
                     ..
-                } = DatabaseStore::<R>::parse(&message.payload).unwrap();
+                }) = DatabaseStore::<R>::parse(&message.payload)
+                else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "malformed database store received",
+                    );
 
-                tracing::trace!("database store");
-
-                let leaseset = match payload {
-                    DatabaseStorePayload::RouterInfo { router_info } => {
-                        tracing::warn!("ignore routerinfo");
-                        return;
-                    }
-                    DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
+                    return;
                 };
 
-                // R::spawn(Destination::<R>::new(
-                //     self.key.clone(),
-                //     self.exploratory_pool_handle.take().expect("to exist"),
-                //     self.rx.take().expect("to exist"),
-                //     leaseset,
-                //     self.metrics.clone(),
-                // ));
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %payload,
+                    "database store"
+                );
             }
             MessageType::DatabaseLookup => {
                 tracing::trace!("database lookup");
@@ -310,7 +285,7 @@ impl<R: Runtime> Future for NetDb<R> {
                 "send query to closest floodfills = {floodfills:?}"
             );
 
-            if let Err(error) = self.service.send(&floodfills[0], message) {
+            if let Err(_error) = self.service.send(&floodfills[0], message) {
                 tracing::error!("failed to send message");
             }
 
@@ -320,7 +295,7 @@ impl<R: Runtime> Future for NetDb<R> {
 
         loop {
             match self.service.poll_next_unpin(cx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => break,
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| self.on_message(message)),
                 Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
@@ -330,5 +305,16 @@ impl<R: Runtime> Future for NetDb<R> {
                 _ => {}
             }
         }
+
+        // events from the exploratory pool are not interesting to `NetDb`
+        loop {
+            match self.exploratory_pool_handle.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(_)) => {}
+            }
+        }
+
+        Poll::Pending
     }
 }
