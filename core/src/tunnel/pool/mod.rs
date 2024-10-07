@@ -20,7 +20,7 @@ use crate::{
     error::{ChannelError, Error},
     i2np::{Message, MessageBuilder, MessageType},
     primitives::{Lease2, MessageId, RouterId, Str, TunnelId},
-    runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
+    runtime::{Counter, Gauge, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
@@ -207,7 +207,7 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     pending_outbound: TunnelBuildListener<R, OutboundTunnel<R>>,
 
     /// Pending tunnel tests.
-    pending_tests: R::JoinSet<(TunnelId, TunnelId, crate::Result<()>)>,
+    pending_tests: R::JoinSet<(TunnelId, TunnelId, crate::Result<Duration>)>,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -637,11 +637,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     .send_message(router, messages.next().expect("message to exist"))
                 {
                     Ok(_) => self.pending_tests.push(async move {
+                        let started = R::now();
+
                         match select(message_rx, Box::pin(R::delay(TUNNEL_TEST_EXPIRATION))).await {
                             Either::Right((_, _)) => (outbound, inbound, Err(Error::Timeout)),
                             Either::Left((Err(_), _)) =>
                                 (outbound, inbound, Err(Error::Channel(ChannelError::Closed))),
-                            Either::Left((Ok(_), _)) => (outbound, inbound, Ok(())),
+                            Either::Left((Ok(_), _)) => (outbound, inbound, Ok(started.elapsed())),
                         }
                     }),
                     Err(error) => {
@@ -914,12 +916,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                         self.metrics.counter(NUM_TEST_FAILURES).increment(1);
                     }
-                    Ok(()) => {
+                    Ok(elapsed) => {
                         tracing::trace!(
                             target: LOG_TARGET,
                             name = %self.config.name,
                             %outbound,
                             %inbound,
+                            ?elapsed,
                             "tunnel test succeeded",
                         );
 
