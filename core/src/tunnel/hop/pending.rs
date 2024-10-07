@@ -114,16 +114,16 @@ impl<T: Tunnel> PendingTunnel<T> {
 
         tracing::trace!(
             target: LOG_TARGET,
+            direction = ?T::direction(),
             %message_id,
             %tunnel_id,
-            direction = ?T::direction(),
             num_hops = ?hops.len(),
             "create tunnel",
         );
 
         // set build record to expire 10 seconds from now
         let time_now = R::time_since_epoch();
-        let build_expiration = (time_now + TUNNEL_BUILD_EXPIRATION).as_secs() as u32;
+        let build_expiration = time_now + TUNNEL_BUILD_EXPIRATION;
         let num_hops =
             NonZeroUsize::new(hops.len()).ok_or(TunnelError::NotEnoughHops(hops.len()))?;
 
@@ -161,8 +161,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                             .with_next_tunnel_id(*next_tunnel_id)
                             .with_next_router_hash(next_router_hash.as_ref())
                             .with_hop_role(hop_role)
-                            .with_request_time(time_now.as_secs() as u32)
-                            .with_request_expiration(build_expiration)
+                            .with_request_time((time_now.as_secs() / 60) as u32)
+                            .with_request_expiration(build_expiration.as_secs() as u32)
                             .with_next_message_id(message_id)
                             .serialize(&mut R::rng()),
                     )
@@ -234,7 +234,8 @@ impl<T: Tunnel> PendingTunnel<T> {
             RouterId::from(router_hashes[0].clone().to_vec()),
             Message {
                 message_id: *message_id,
-                expiration: build_expiration as u64,
+                // TODO: fix, s/ms depends on header format
+                expiration: build_expiration.as_secs() as u64,
                 message_type: MessageType::ShortTunnelBuild,
                 payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
             },
