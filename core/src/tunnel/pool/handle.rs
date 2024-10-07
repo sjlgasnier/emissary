@@ -27,6 +27,7 @@ use futures::Stream;
 use futures_channel::oneshot;
 use thingbuf::mpsc;
 
+use alloc::vec::Vec;
 use core::{
     future::Future,
     pin::Pin,

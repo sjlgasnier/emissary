@@ -25,7 +25,7 @@ use crate::{
 use bytes::BytesMut;
 use futures::Stream;
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use core::{
     mem,
     pin::Pin,

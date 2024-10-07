@@ -37,7 +37,9 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 
+use alloc::{boxed::Box, string::ToString};
 use core::{
+    fmt,
     future::Future,
     mem,
     pin::Pin,

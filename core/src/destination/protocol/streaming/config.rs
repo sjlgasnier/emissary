@@ -18,6 +18,7 @@
 
 use crate::primitives::Str;
 
+use alloc::string::String;
 use core::{num::NonZeroUsize, time::Duration};
 
 /// Inactivity action.

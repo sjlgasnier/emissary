@@ -30,10 +30,11 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
     hash::{Hash, Hasher},
+    ops,
     str::FromStr,
 };
 
@@ -51,7 +52,7 @@ impl From<&'static str> for Str {
 }
 
 impl fmt::Display for Str {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Static(protocol) => protocol.fmt(f),
             Self::Allocated(protocol) => protocol.fmt(f),
@@ -108,7 +109,7 @@ impl FromStr for Str {
     }
 }
 
-impl std::ops::Deref for Str {
+impl ops::Deref for Str {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
