@@ -74,7 +74,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
-            ?router,
+            %router,
             message_len = ?message.len(),
             "router delivery",
         );
@@ -117,7 +117,7 @@ impl<R: Runtime> OutboundTunnel<R> {
                 MessageBuilder::short()
                     .with_message_type(MessageType::TunnelData)
                     .with_message_id(message_id)
-                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                     .with_payload(&message)
                     .build()
             });
@@ -135,8 +135,8 @@ impl<R: Runtime> OutboundTunnel<R> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
-            ?router,
-            ?gateway,
+            %router,
+            %gateway,
             message_len = ?message.len(),
             "tunnel delivery",
         );
@@ -179,7 +179,7 @@ impl<R: Runtime> OutboundTunnel<R> {
                 MessageBuilder::short()
                     .with_message_type(MessageType::TunnelData)
                     .with_message_id(message_id)
-                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                     .with_payload(&message)
                     .build()
             });
@@ -194,7 +194,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
-            ?router,
+            %router,
             message_len = ?message.len(),
             "local delivery",
         );
@@ -283,7 +283,7 @@ mod tests {
         let message = MessageBuilder::standard()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(13371338u32)
-            .with_expiration((MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(8))
             .with_payload(b"hello, world")
             .build();
 
@@ -353,7 +353,7 @@ mod tests {
         let message = MessageBuilder::standard()
             .with_message_type(MessageType::Data)
             .with_message_id(13371338u32)
-            .with_expiration((MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(8))
             .with_payload(&original)
             .build();
 

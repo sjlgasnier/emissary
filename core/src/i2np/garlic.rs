@@ -31,7 +31,7 @@ use nom::{
 };
 
 use alloc::vec::Vec;
-use core::fmt;
+use core::{fmt, time::Duration};
 
 /// Garlic message header length.
 ///
@@ -325,8 +325,8 @@ pub enum GarlicMessageBlock<'a> {
         /// Message ID.
         message_id: MessageId,
 
-        /// Message expiration.
-        expiration: u32,
+        /// Message expiration, seconds since UNIX epoch.
+        expiration: Duration,
 
         /// Delivery instructions.
         delivery_instructions: DeliveryInstructions<'a>,
@@ -444,7 +444,7 @@ impl<'a> GarlicMessage<'a> {
             GarlicMessageBlock::GarlicClove {
                 message_type,
                 message_id: MessageId::from(message_id),
-                expiration,
+                expiration: Duration::from_secs(expiration as u64),
                 delivery_instructions,
                 message_body,
             },
@@ -582,7 +582,7 @@ impl<'a> GarlicMessageBuilder<'a> {
         self.cloves.push(GarlicMessageBlock::GarlicClove {
             message_type,
             message_id,
-            expiration: expiration as u32,
+            expiration: Duration::from_secs(expiration as u64),
             delivery_instructions,
             message_body,
         });
@@ -633,7 +633,7 @@ impl<'a> GarlicMessageBuilder<'a> {
                     out.put_slice(&delivery_instructions.serialize());
                     out.put_u8(message_type.as_u8());
                     out.put_u32(*message_id);
-                    out.put_u32(expiration);
+                    out.put_u32(expiration.as_secs() as u32);
                     out.put_slice(message_body);
                 }
                 GarlicMessageBlock::NextKey { kind } => match kind {

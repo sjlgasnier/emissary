@@ -274,7 +274,7 @@ mod tests {
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelData)
                 .with_message_id(MockRuntime::rng().next_u32())
-                .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                .with_expiration(MockRuntime::time_since_epoch())
                 .with_payload(&message)
                 .build();
 
@@ -308,7 +308,7 @@ mod tests {
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelData)
                 .with_message_id(MockRuntime::rng().next_u32())
-                .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                .with_expiration(MockRuntime::time_since_epoch())
                 .with_payload(&message)
                 .build();
 
@@ -330,7 +330,7 @@ mod tests {
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::ShortTunnelBuild)
                 .with_message_id(MockRuntime::rng().next_u32())
-                .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                .with_expiration(MockRuntime::time_since_epoch())
                 .with_payload(&vec![1, 2, 3, 4, 5])
                 .build();
 
@@ -355,7 +355,7 @@ mod tests {
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::ShortTunnelBuild)
                 .with_message_id(message_id)
-                .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                .with_expiration(MockRuntime::time_since_epoch())
                 .with_payload(&vec![1, 2, 3, 4, 5])
                 .build();
 
@@ -382,7 +382,7 @@ mod tests {
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::ShortTunnelBuild)
                 .with_message_id(message_id)
-                .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                .with_expiration(MockRuntime::time_since_epoch())
                 .with_payload(&vec![1, 2, 3, 4, 5])
                 .build();
 
@@ -420,7 +420,7 @@ mod tests {
                 let message = MessageBuilder::short()
                     .with_message_type(MessageType::TunnelData)
                     .with_message_id(MockRuntime::rng().next_u32())
-                    .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                    .with_expiration(MockRuntime::time_since_epoch())
                     .with_payload(&message)
                     .build();
 
@@ -441,7 +441,7 @@ mod tests {
             let message = MessageBuilder::short()
                 .with_message_type(MessageType::TunnelData)
                 .with_message_id(MockRuntime::rng().next_u32())
-                .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+                .with_expiration(MockRuntime::time_since_epoch())
                 .with_payload(&message)
                 .build();
 
@@ -471,7 +471,7 @@ mod tests {
         let message = MessageBuilder::short()
             .with_message_type(MessageType::ShortTunnelBuild)
             .with_message_id(message_id)
-            .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+            .with_expiration(MockRuntime::time_since_epoch())
             .with_payload(&vec![1, 2, 3, 4, 5])
             .build();
 
@@ -489,7 +489,7 @@ mod tests {
         let message = MessageBuilder::short()
             .with_message_type(MessageType::ShortTunnelBuild)
             .with_message_id(MessageId::from(MockRuntime::rng().next_u32()))
-            .with_expiration((MockRuntime::time_since_epoch()).as_secs())
+            .with_expiration(MockRuntime::time_since_epoch())
             .with_payload(&vec![1, 2, 3, 4, 5])
             .build();
 

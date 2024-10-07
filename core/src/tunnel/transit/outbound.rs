@@ -233,7 +233,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
                         tracing::trace!(
                             target: LOG_TARGET,
                             tunnel_id = %self.tunnel_id,
-                            ?router,
+                            %router,
                             message_type = ?message.message_type,
                             "fragment router delivery",
                         );
@@ -253,7 +253,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
                         tracing::trace!(
                             target: LOG_TARGET,
                             tunnel_id = %self.tunnel_id,
-                            ?router,
+                            %router,
                             delivery_tunnel = ?tunnel_id,
                             "fragment router delivery",
                         );
@@ -267,9 +267,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
                         let message = MessageBuilder::short()
                             .with_message_type(MessageType::TunnelGateway)
                             .with_message_id(R::rng().next_u32())
-                            .with_expiration(
-                                (R::time_since_epoch() + Duration::from_secs(8)).as_secs(),
-                            )
+                            .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                             .with_payload(&payload)
                             .build();
 

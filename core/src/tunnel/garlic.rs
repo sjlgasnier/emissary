@@ -181,10 +181,7 @@ impl<R: Runtime> GarlicHandler<R> {
                             message: MessageBuilder::short()
                                 .with_message_type(message_type)
                                 .with_message_id(message_id)
-                                // TODO: fix expiration
-                                .with_expiration(
-                                    (R::time_since_epoch() + Duration::from_secs(5 * 60)).as_secs(),
-                                )
+                                .with_expiration((R::time_since_epoch() + Duration::from_secs(10)))
                                 .with_payload(&message)
                                 .build(),
                         })

@@ -618,7 +618,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 // create dummy test message and send it through the outbound tunnel
                 // to the selected inbound tunnel's gateway
                 let message = MessageBuilder::standard()
-                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                     .with_message_type(MessageType::Data)
                     .with_message_id(message_id)
                     .with_payload(b"tunnel test")
@@ -718,7 +718,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         name = %self.config.name,
                         %tunnel_id,
                         ?error,
-                        "failed to build inbound channel",
+                        "failed to build inbound tunnel",
                     );
 
                     self.routing_table.remove_tunnel(&tunnel_id);
@@ -1073,7 +1073,7 @@ mod tests {
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -1151,7 +1151,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -1224,7 +1224,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -1302,7 +1302,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -1379,7 +1379,7 @@ mod tests {
         let pool_handle = parameters.context_handle.clone();
         let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
 
-        let (mut exploratory_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             exploratory_selector.clone(),
             routing_table.clone(),
@@ -1436,7 +1436,7 @@ mod tests {
             let client_selector =
                 ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
 
-            let (mut client_pool, _) = TunnelPool::<MockRuntime, _>::new(
+            let (mut client_pool, _client_handle) = TunnelPool::<MockRuntime, _>::new(
                 client_parameters,
                 client_selector,
                 routing_table.clone(),
@@ -1578,7 +1578,7 @@ mod tests {
         let pool_handle = parameters.context_handle.clone();
         let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
 
-        let (mut exploratory_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             exploratory_selector.clone(),
             routing_table.clone(),
@@ -1634,7 +1634,7 @@ mod tests {
             let pool_handle = parameters.context_handle.clone();
             let client_selector = ClientSelector::new(exploratory_selector, pool_handle);
 
-            let (mut client_pool, _) = TunnelPool::<MockRuntime, _>::new(
+            let (mut client_pool, _client_handle) = TunnelPool::<MockRuntime, _>::new(
                 parameters,
                 client_selector,
                 routing_table.clone(),
@@ -1772,7 +1772,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -1855,7 +1855,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -1936,7 +1936,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),
@@ -2104,7 +2104,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
-        let (mut tunnel_pool, _) = TunnelPool::<MockRuntime, _>::new(
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
             routing_table.clone(),

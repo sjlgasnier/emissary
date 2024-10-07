@@ -234,8 +234,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             RouterId::from(router_hashes[0].clone().to_vec()),
             Message {
                 message_id: *message_id,
-                // TODO: fix, s/ms depends on header format
-                expiration: build_expiration.as_secs() as u64,
+                expiration: build_expiration,
                 message_type: MessageType::ShortTunnelBuild,
                 payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
             },

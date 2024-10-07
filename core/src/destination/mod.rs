@@ -166,7 +166,7 @@ impl<R: Runtime> Destination<R> {
         let payload = payload_new.freeze().to_vec();
 
         let payload = MessageBuilder::standard()
-            .with_expiration((R::time_since_epoch() + Duration::from_secs(10)).as_secs())
+            .with_expiration(R::time_since_epoch() + Duration::from_secs(10))
             .with_message_id(R::rng().next_u32())
             .with_message_type(MessageType::Garlic)
             .with_payload(&payload)
@@ -278,9 +278,7 @@ impl<R: Runtime> Future for Destination<R> {
 
                     let payload = payload_new.freeze().to_vec();
                     let payload = MessageBuilder::standard()
-                        .with_expiration(
-                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                        )
+                        .with_expiration(R::time_since_epoch() + Duration::from_secs(10))
                         .with_message_id(R::rng().next_u32())
                         .with_message_type(MessageType::Garlic)
                         .with_payload(&payload)
@@ -331,9 +329,7 @@ impl<R: Runtime> Future for Destination<R> {
                     let payload = payload_new.freeze().to_vec();
 
                     let payload = MessageBuilder::standard()
-                        .with_expiration(
-                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                        )
+                        .with_expiration(R::time_since_epoch() + Duration::from_secs(10))
                         .with_message_id(R::rng().next_u32())
                         .with_message_type(MessageType::Garlic)
                         .with_payload(&payload)

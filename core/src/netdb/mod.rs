@@ -48,6 +48,7 @@ use core::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 pub use handle::NetDbHandle;
@@ -272,9 +273,7 @@ impl<R: Runtime> Future for NetDb<R> {
 
             let message_id = R::rng().next_u32();
             let message = MessageBuilder::short()
-                .with_expiration(
-                    (R::time_since_epoch() + core::time::Duration::from_secs(8)).as_secs(),
-                )
+                .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                 .with_message_type(MessageType::DatabaseLookup)
                 .with_message_id(message_id)
                 .with_payload(&message)
