@@ -170,6 +170,7 @@ impl<R: Runtime> PendingI2cpSession<R> {
             Message::GetDate { version, options } => {
                 tracing::trace!(
                     target: LOG_TARGET,
+                    session_id = ?self.state.session_id(),
                     %version,
                     ?options,
                     "get date, send set date",
@@ -183,6 +184,7 @@ impl<R: Runtime> PendingI2cpSession<R> {
             Message::GetBandwidthLimits => {
                 tracing::trace!(
                     target: LOG_TARGET,
+                    session_id = ?self.state.session_id(),
                     "handle bandwidth limit request",
                 );
 
@@ -191,7 +193,8 @@ impl<R: Runtime> PendingI2cpSession<R> {
             Message::DestroySession { session_id } => {
                 tracing::trace!(
                     target: LOG_TARGET,
-                    ?session_id,
+                    session_id = ?self.state.session_id(),
+                    destroyed_session_id = ?session_id,
                     "destroy session",
                 );
 
@@ -300,6 +303,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         tracing::trace!(
                             target: LOG_TARGET,
                             ?session_id,
+                            %tunnel_id,
                             "first inbound tunnel built for pending session",
                         );
                         inbound.insert(tunnel_id, lease);
@@ -316,6 +320,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         tracing::trace!(
                             target: LOG_TARGET,
                             ?session_id,
+                            %tunnel_id,
                             "outbound tunnel built for pending session",
                         );
                         outbound.insert(tunnel_id);
@@ -332,6 +337,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?session_id,
+                            %tunnel_id,
                             "inbound tunnel expired for pending session",
                         );
                         inbound.remove(&tunnel_id);
@@ -348,6 +354,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?session_id,
+                            %tunnel_id,
                             "outbound tunnel expired for pending session",
                         );
                         outbound.remove(&tunnel_id);

@@ -196,7 +196,13 @@ impl<R: Runtime> Future for I2cpServer<R> {
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(None)) => {}
                 Poll::Ready(Some(Some(context))) => {
-                    tracing::info!("start active i2cp connection");
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?context.session_id,
+                        "start active i2cp connection",
+                    );
+
+                    R::spawn(I2cpSession::<R>::new(self.netdb_handle.clone(), context));
                 }
             }
         }

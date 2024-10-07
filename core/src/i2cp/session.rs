@@ -19,15 +19,17 @@
 use crate::{
     i2cp::{
         message::{BandwidthLimits, Message, SessionId, SessionStatus, SessionStatusKind, SetDate},
+        pending::I2cpSessionContext,
         socket::I2cpSocket,
     },
     netdb::NetDbHandle,
-    primitives::{Date, Str},
+    primitives::{Date, Lease2, Str, TunnelId},
     runtime::Runtime,
-    tunnel::TunnelManagerHandle,
+    tunnel::{TunnelManagerHandle, TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use futures::StreamExt;
+use hashbrown::{HashMap, HashSet};
 
 use core::{
     future::Future,
@@ -41,8 +43,14 @@ const LOG_TARGET: &str = "emissary::i2cp::session";
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
+    /// Active inbound tunnels and their leases.
+    inbound: HashMap<TunnelId, Lease2>,
+
     /// Handle to `NetDb`.
     netdb_handle: NetDbHandle,
+
+    /// Active outbound tunnels.
+    outbound: HashSet<TunnelId>,
 
     /// Session ID.
     session_id: u16,
@@ -50,23 +58,28 @@ pub struct I2cpSession<R: Runtime> {
     /// I2CP socket.
     socket: I2cpSocket<R>,
 
-    /// Handle to `TunnelManager`.
-    tunnel_manager_handle: TunnelManagerHandle,
+    /// Tunnel pool handle.
+    tunnel_pool_handle: TunnelPoolHandle,
 }
 
 impl<R: Runtime> I2cpSession<R> {
     /// Create new [`I2cpSession`] from `stream`.
-    pub fn new(
-        session_id: u16,
-        socket: I2cpSocket<R>,
-        netdb_handle: NetDbHandle,
-        tunnel_manager_handle: TunnelManagerHandle,
-    ) -> Self {
+    pub fn new(netdb_handle: NetDbHandle, context: I2cpSessionContext<R>) -> Self {
+        let I2cpSessionContext {
+            inbound,
+            outbound,
+            session_id,
+            socket,
+            tunnel_pool_handle,
+        } = context;
+
         Self {
             netdb_handle,
             session_id,
             socket,
-            tunnel_manager_handle,
+            tunnel_pool_handle,
+            inbound,
+            outbound,
         }
     }
 
@@ -125,6 +138,18 @@ impl<R: Runtime> I2cpSession<R> {
             _ => {}
         }
     }
+
+    /// Handle `event` received from the session's tunnel pool.
+    fn on_tunnel_pool_event(&mut self, event: TunnelPoolEvent) {
+        match event {
+            TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease } => {}
+            TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {}
+            TunnelPoolEvent::InboundTunnelExpired { tunnel_id } => {}
+            TunnelPoolEvent::OutboundTunnelExpired { tunnel_id } => {}
+            TunnelPoolEvent::Message { message } => {}
+            TunnelPoolEvent::TunnelPoolShutDown | TunnelPoolEvent::Dummy => unreachable!(),
+        }
+    }
 }
 
 impl<R: Runtime> Future for I2cpSession<R> {
@@ -136,6 +161,23 @@ impl<R: Runtime> Future for I2cpSession<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(message)) => self.on_message(message),
+            }
+        }
+
+        loop {
+            match self.tunnel_pool_handle.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        "tunnel pool shut down, shutting down session",
+                    );
+
+                    return Poll::Ready(());
+                }
+                Poll::Ready(Some(event)) => self.on_tunnel_pool_event(event),
             }
         }
 
