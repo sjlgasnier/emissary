@@ -34,7 +34,7 @@ use crate::{
         Message, MessageBuilder, MessageType,
     },
     primitives::{
-        Destination as Dest, Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterIdentity,
+        Destination as Dest, Lease, LeaseSet2, LeaseSet2Header, MessageId, RouterIdentity,
     },
     runtime::Runtime,
     tunnel::TunnelPoolContextHandle,
@@ -172,7 +172,7 @@ impl<R: Runtime> Destination<R> {
             .with_payload(&payload)
             .build();
 
-        let Lease2 {
+        let Lease {
             router_id,
             tunnel_id,
             ..
@@ -284,7 +284,7 @@ impl<R: Runtime> Future for Destination<R> {
                         .with_payload(&payload)
                         .build();
 
-                    let Lease2 {
+                    let Lease {
                         router_id,
                         tunnel_id,
                         ..
@@ -335,7 +335,7 @@ impl<R: Runtime> Future for Destination<R> {
                         .with_payload(&payload)
                         .build();
 
-                    let Lease2 {
+                    let Lease {
                         router_id,
                         tunnel_id,
                         ..

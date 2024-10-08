@@ -25,11 +25,12 @@ use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u32, be_u8},
+    number::complete::{be_u16, be_u32, be_u64, be_u8},
     Err, IResult,
 };
 
 use alloc::vec::Vec;
+use core::time::Duration;
 
 /// Header for [`LeaseSet2`].
 ///
@@ -89,11 +90,15 @@ impl LeaseSet2Header {
     }
 }
 
-/// Lease2
+/// Lease
 ///
-/// https://geti2p.net/spec/common-structures#struct-lease2
+/// [`Lease`] is common for `Lease` [1] and `Lease2` [2] and a difference
+/// is made made only when serializing/deserializing them.
+///
+/// [1] https://geti2p.net/spec/common-structures#struct-lease
+/// [2] https://geti2p.net/spec/common-structures#struct-lease2
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Lease2 {
+pub struct Lease {
     /// ID of the gateway router.
     pub router_id: RouterId,
 
@@ -101,14 +106,14 @@ pub struct Lease2 {
     pub tunnel_id: TunnelId,
 
     /// When the lease expires.
-    pub expires: u32,
+    pub expires: Duration,
 }
 
-impl Lease2 {
-    /// Attempt to parse [`Lease2`] from `input`.
+impl Lease {
+    /// Attempt to parse `Lease2` from `input`.
     ///
-    /// Returns the parsed message and rest of `input` on success.
-    pub fn parse_frame(input: &[u8]) -> IResult<&[u8], Self> {
+    /// Returns the parsed lease and rest of `input` on success.
+    pub fn parse_frame_lease2(input: &[u8]) -> IResult<&[u8], Self> {
         let (rest, tunnel_gateway) = take(32usize)(input)?;
         let (rest, tunnel_id) = be_u32(rest)?;
         let (rest, expires) = be_u32(rest)?;
@@ -118,24 +123,59 @@ impl Lease2 {
             Self {
                 router_id: RouterId::from(tunnel_gateway),
                 tunnel_id: TunnelId::from(tunnel_id),
-                expires,
+                expires: Duration::from_secs(expires as u64),
             },
         ))
     }
 
-    /// Get serialized length of [`Lease2`].
-    pub fn serialized_len(&self) -> usize {
+    /// Attempt to parse `Lease` from `input`.
+    ///
+    /// Returns the parsed lease and rest of `input` on success.
+    pub fn parse_frame_lease(input: &[u8]) -> IResult<&[u8], Self> {
+        let (rest, tunnel_gateway) = take(32usize)(input)?;
+        let (rest, tunnel_id) = be_u32(rest)?;
+        let (rest, expires) = be_u64(rest)?;
+
+        Ok((
+            rest,
+            Self {
+                router_id: RouterId::from(tunnel_gateway),
+                tunnel_id: TunnelId::from(tunnel_id),
+                expires: Duration::from_millis(expires),
+            },
+        ))
+    }
+
+    /// Get serialized length of `Lease2`.
+    pub fn serialized_len_lease2(&self) -> usize {
         // router hash length + tunnel id + expiration
         32usize + 4usize + 4usize
     }
 
-    /// Serialize [`Leaset2`] into a byte vector.
-    pub fn serialize(self) -> Vec<u8> {
+    /// Get serialized length of `Lease`.
+    pub fn serialized_len_lease(&self) -> usize {
+        // router hash length + tunnel id + expiration
+        32usize + 4usize + 8usize
+    }
+
+    /// Serialize [`Lease`] into a byte vector representing `Lease`.
+    pub fn serialize_lease(self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(32usize + 4 + 8);
+
+        out.put_slice(&Into::<Vec<u8>>::into(self.router_id));
+        out.put_u32(*self.tunnel_id);
+        out.put_u64(self.expires.as_millis() as u64);
+
+        out.freeze().to_vec()
+    }
+
+    /// Serialize [`Lease`] into a byte vector representing `Lease2`.
+    pub fn serialize_lease2(self) -> Vec<u8> {
         let mut out = BytesMut::with_capacity(32usize + 4 + 4);
 
         out.put_slice(&Into::<Vec<u8>>::into(self.router_id));
         out.put_u32(*self.tunnel_id);
-        out.put_u32(self.expires);
+        out.put_u32(self.expires.as_secs() as u32);
 
         out.freeze().to_vec()
     }
@@ -153,7 +193,7 @@ pub struct LeaseSet2 {
     pub public_keys: Vec<StaticPublicKey>,
 
     /// Leases.
-    pub leases: Vec<Lease2>,
+    pub leases: Vec<Lease>,
 }
 
 impl LeaseSet2 {
@@ -225,8 +265,8 @@ impl LeaseSet2 {
         }
 
         let (rest, leases) = (0..num_leases)
-            .try_fold((rest, Vec::<Lease2>::new()), |(rest, mut leases), _| {
-                let (rest, lease) = Lease2::parse_frame(rest).ok()?;
+            .try_fold((rest, Vec::<Lease>::new()), |(rest, mut leases), _| {
+                let (rest, lease) = Lease::parse_frame_lease2(rest).ok()?;
                 leases.push(lease);
 
                 Some((rest, leases))
@@ -278,7 +318,7 @@ impl LeaseSet2 {
         self.header.serialized_len()
             + 2usize
             + self.public_keys.iter().fold(0usize, |acc, _| acc + 32)
-            + self.leases.iter().fold(0usize, |acc, x| acc + x.serialized_len())
+            + self.leases.iter().fold(0usize, |acc, x| acc + x.serialized_len_lease2())
             + 64usize // signature
     }
 
@@ -300,7 +340,7 @@ impl LeaseSet2 {
         out.put_u8(self.leases.len() as u8);
 
         self.leases.into_iter().for_each(|lease| {
-            out.put_slice(&lease.serialize());
+            out.put_slice(&lease.serialize_lease2());
         });
 
         let signature = signing_key.sign(&out[..out.len()]);
@@ -341,10 +381,10 @@ impl LeaseSet2 {
                 let tunnel_id = TunnelId::from(rng.next_u32());
                 let expires = rng.next_u32();
 
-                Lease2 {
+                Lease {
                     router_id: RouterId::random(),
                     tunnel_id: TunnelId::from(rng.next_u32()),
-                    expires: rng.next_u32(),
+                    expires: Duration::from_secs(rng.next_u32() as u64),
                 }
             })
             .collect::<Vec<_>>();
@@ -388,13 +428,13 @@ mod tests {
         let (router1, tunnel1, expires1, lease1) = {
             let router_id = RouterId::random();
             let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-            let expires = MockRuntime::rng().next_u32();
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
 
             (
                 router_id.clone(),
                 tunnel_id,
                 expires,
-                Lease2 {
+                Lease {
                     router_id,
                     tunnel_id,
                     expires,
@@ -405,13 +445,13 @@ mod tests {
         let (router2, tunnel2, expires2, lease2) = {
             let router_id = RouterId::random();
             let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-            let expires = MockRuntime::rng().next_u32();
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
 
             (
                 router_id.clone(),
                 tunnel_id,
                 expires,
-                Lease2 {
+                Lease {
                     router_id,
                     tunnel_id,
                     expires,
@@ -471,13 +511,13 @@ mod tests {
         let (router1, tunnel1, expires1, lease1) = {
             let router_id = RouterId::random();
             let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-            let expires = MockRuntime::rng().next_u32();
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
 
             (
                 router_id.clone(),
                 tunnel_id,
                 expires,
-                Lease2 {
+                Lease {
                     router_id,
                     tunnel_id,
                     expires,
@@ -488,13 +528,13 @@ mod tests {
         let (router2, tunnel2, expires2, lease2) = {
             let router_id = RouterId::random();
             let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-            let expires = MockRuntime::rng().next_u32();
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
 
             (
                 router_id.clone(),
                 tunnel_id,
                 expires,
-                Lease2 {
+                Lease {
                     router_id,
                     tunnel_id,
                     expires,
@@ -531,10 +571,10 @@ mod tests {
         let id = destination.id();
 
         let leases = (0..17)
-            .map(|_| Lease2 {
+            .map(|_| Lease {
                 router_id: RouterId::random(),
                 tunnel_id: TunnelId::from(MockRuntime::rng().next_u32()),
-                expires: MockRuntime::rng().next_u32(),
+                expires: Duration::from_secs(MockRuntime::rng().next_u32() as u64),
             })
             .collect::<Vec<_>>();
 

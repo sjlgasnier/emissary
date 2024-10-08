@@ -29,7 +29,7 @@ use crate::{
         message::{BandwidthLimits, Message, SessionId, SessionStatus, SessionStatusKind, SetDate},
         socket::I2cpSocket,
     },
-    primitives::{Date, Lease2, Str, TunnelId},
+    primitives::{Date, Lease, Str, TunnelId},
     runtime::Runtime,
     tunnel::{TunnelManagerHandle, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
 };
@@ -53,7 +53,7 @@ const LOG_TARGET: &str = "emissary::i2cp::pending-session";
 /// I2CP client session context.
 pub struct I2cpSessionContext<R: Runtime> {
     /// Active inbound tunnels and their leases.
-    pub inbound: HashMap<TunnelId, Lease2>,
+    pub inbound: HashMap<TunnelId, Lease>,
 
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
@@ -110,7 +110,7 @@ enum PendingSessionState<R: Runtime> {
         handle: TunnelPoolHandle,
 
         /// Active inbound tunnels and their leases.
-        inbound: HashMap<TunnelId, Lease2>,
+        inbound: HashMap<TunnelId, Lease>,
 
         /// Active outbound tunnels.
         outbound: HashSet<TunnelId>,

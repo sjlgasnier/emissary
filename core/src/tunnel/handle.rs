@@ -19,7 +19,7 @@
 use crate::{
     error::ChannelError,
     i2np::Message,
-    primitives::{Lease2, RouterId, TunnelId},
+    primitives::{RouterId, TunnelId},
     tunnel::{TunnelPoolConfig, TunnelPoolHandle},
 };
 

@@ -20,7 +20,7 @@ use core::{fmt, ops::Deref};
 
 pub use date::Date;
 pub use destination::{Destination, DestinationId};
-pub use leaseset2::{Lease2, LeaseSet2, LeaseSet2Header};
+pub use leaseset2::{Lease, LeaseSet2, LeaseSet2Header};
 pub use mapping::Mapping;
 pub use router_address::{RouterAddress, TransportKind};
 pub use router_identity::{RouterId, RouterIdentity};

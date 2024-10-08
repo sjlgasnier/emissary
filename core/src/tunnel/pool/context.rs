@@ -21,7 +21,7 @@
 use crate::{
     error::{ChannelError, RouteKind, RoutingError},
     i2np::{Message, MessageType},
-    primitives::{Lease2, MessageId, RouterId, TunnelId},
+    primitives::{Lease, MessageId, RouterId, TunnelId},
     tunnel::pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TUNNEL_CHANNEL_SIZE},
 };
 
@@ -66,7 +66,7 @@ struct MessageListeners {
 #[derive(Clone)]
 pub struct TunnelPoolContextHandle {
     /// Leases of the tunnel pool.
-    leases: Arc<RwLock<HashMap<TunnelId, Lease2>>>,
+    leases: Arc<RwLock<HashMap<TunnelId, Lease>>>,
 
     /// Message listeners.
     listeners: Arc<RwLock<MessageListeners>>,
@@ -244,7 +244,7 @@ impl TunnelPoolContextHandle {
 
     /// Attempt to get a [`Lease2`] for the tunnel pool.
     // TODO: remove
-    pub fn lease(&self) -> Option<Lease2> {
+    pub fn lease(&self) -> Option<Lease> {
         // TODO: distribute more evently
         self.leases.read().values().next().cloned()
     }
@@ -297,7 +297,7 @@ impl Default for TunnelMessage {
 /// Tunnel pool context.
 pub struct TunnelPoolContext {
     /// Leases of the tunnel pool.
-    leases: Arc<RwLock<HashMap<TunnelId, Lease2>>>,
+    leases: Arc<RwLock<HashMap<TunnelId, Lease>>>,
 
     /// Message listeners.
     listeners: Arc<RwLock<MessageListeners>>,
@@ -371,7 +371,7 @@ impl TunnelPoolContext {
     /// Add new [`Lease2`] for the tunnel pool.
     //
     // TODO: remove
-    pub fn add_lease(&self, tunnel_id: TunnelId, lease: Lease2) {
+    pub fn add_lease(&self, tunnel_id: TunnelId, lease: Lease) {
         let mut inner = self.leases.write();
 
         inner.insert(tunnel_id, lease);
@@ -405,7 +405,7 @@ impl TunnelPoolContext {
     pub fn register_inbound_tunnel_built(
         &self,
         tunnel_id: TunnelId,
-        lease: Lease2,
+        lease: Lease,
     ) -> Result<(), ChannelError> {
         self.event_tx
             .try_send(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })

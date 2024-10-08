@@ -19,7 +19,7 @@
 use crate::{
     error::{ChannelError, Error},
     i2np::{Message, MessageBuilder, MessageType},
-    primitives::{Lease2, MessageId, RouterId, Str, TunnelId},
+    primitives::{Lease, MessageId, RouterId, Str, TunnelId},
     runtime::{Counter, Gauge, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
@@ -747,10 +747,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     // inform the owner of the tunnel pool that a new inbound tunnel has been built
                     if let Err(error) = self.context.register_inbound_tunnel_built(
                         tunnel_id,
-                        Lease2 {
+                        Lease {
                             router_id,
                             tunnel_id,
-                            expires: (R::time_since_epoch() + TUNNEL_EXPIRATION).as_secs() as u32,
+                            expires: R::time_since_epoch() + TUNNEL_EXPIRATION,
                         },
                     ) {
                         tracing::warn!(

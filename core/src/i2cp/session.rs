@@ -23,7 +23,7 @@ use crate::{
         socket::I2cpSocket,
     },
     netdb::NetDbHandle,
-    primitives::{Date, Lease2, Str, TunnelId},
+    primitives::{Date, Lease, Str, TunnelId},
     runtime::Runtime,
     tunnel::{TunnelManagerHandle, TunnelPoolEvent, TunnelPoolHandle},
 };
@@ -44,7 +44,7 @@ const LOG_TARGET: &str = "emissary::i2cp::session";
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
     /// Active inbound tunnels and their leases.
-    inbound: HashMap<TunnelId, Lease2>,
+    inbound: HashMap<TunnelId, Lease>,
 
     /// Handle to `NetDb`.
     netdb_handle: NetDbHandle,

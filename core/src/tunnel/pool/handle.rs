@@ -19,7 +19,7 @@
 use crate::{
     error::ChannelError,
     i2np::Message,
-    primitives::{Lease2, RouterId, TunnelId},
+    primitives::{Lease, RouterId, TunnelId},
     tunnel::pool::{TunnelMessage, TunnelPoolConfig},
 };
 
@@ -46,7 +46,7 @@ pub enum TunnelPoolEvent {
         tunnel_id: TunnelId,
 
         /// `Lease2` of the inbound tunnel.
-        lease: Lease2,
+        lease: Lease,
     },
 
     /// Outbound tunnel has been built.
