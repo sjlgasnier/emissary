@@ -18,7 +18,10 @@
 
 use crate::{
     i2cp::{
-        message::{BandwidthLimits, Message, SessionId, SessionStatus, SessionStatusKind, SetDate},
+        message::{
+            BandwidthLimits, Message, RequestVariableLeaseSet, SessionId, SessionStatus,
+            SessionStatusKind, SetDate,
+        },
         pending::I2cpSessionContext,
         socket::I2cpSocket,
     },
@@ -69,15 +72,34 @@ impl<R: Runtime> I2cpSession<R> {
             inbound,
             outbound,
             session_id,
-            socket,
+            mut socket,
             tunnel_pool_handle,
         } = context;
+
+        assert!(!inbound.is_empty(), "no inbound tunnels");
 
         tracing::info!(
             target: LOG_TARGET,
             ?session_id,
+            num_inbound_tunnels = ?inbound.len(),
+            num_outbound_tunnels = ?outbound.len(),
             "start active i2cp session",
         );
+
+        {
+            tracing::trace!(
+                target: LOG_TARGET,
+                ?session_id,
+                "send leaseset request to client",
+            );
+
+            let message = RequestVariableLeaseSet::new(
+                session_id,
+                inbound.values().cloned().collect::<Vec<_>>(),
+            );
+
+            socket.send_message(message);
+        }
 
         Self {
             netdb_handle,

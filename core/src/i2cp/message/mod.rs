@@ -32,10 +32,12 @@ use nom::{
 use alloc::vec::Vec;
 
 pub use bandwidth::BandwidthLimits;
+pub use leaseset::RequestVariableLeaseSet;
 pub use session_status::{SessionStatus, SessionStatusKind};
 pub use set_date::SetDate;
 
 mod bandwidth;
+mod leaseset;
 mod session_status;
 mod set_date;
 
