@@ -299,6 +299,14 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 continue;
                             };
 
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                router_id = %this.router,
+                                ?size,
+                                num_messages = ?messages.len(),
+                                "read ntc2 frame",
+                            );
+
                             let messages = messages
                                 .into_iter()
                                 .filter_map(|message| match message {
