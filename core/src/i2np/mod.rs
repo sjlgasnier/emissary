@@ -78,6 +78,11 @@ const I2NP_SHORT_HEADER_LEN: usize = 9usize;
 /// I2NP standard header size.
 const I2NP_STANDARD_HEADER_LEN: usize = 16usize;
 
+/// I2NP message expiration timeout.
+///
+/// Defaults to 8000 milliseconds.
+const I2NP_MESSAGE_EXPIRATION: Duration = Duration::from_millis(8000);
+
 /// Message type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -511,11 +516,17 @@ impl Message {
             .with_payload(&self.payload)
             .build()
     }
+
+    /// Returns `true` if [`Message`] is expired.
+    pub fn is_expired<R: Runtime>(&self) -> bool {
+        self.expiration < R::time_since_epoch()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::mock::MockRuntime;
 
     #[test]
     fn parse_short_as_standard() {
@@ -603,5 +614,29 @@ mod tests {
         let serialized = out.freeze().to_vec();
 
         assert!(Message::parse_short(&serialized).is_none());
+    }
+
+    #[test]
+    fn i2np_message_expired_short() {
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::DeliveryStatus)
+            .with_message_id(1337u32)
+            .with_expiration(MockRuntime::time_since_epoch() - Duration::from_secs(10))
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        assert!(Message::parse_short(&message).unwrap().is_expired::<MockRuntime>());
+    }
+
+    #[test]
+    fn i2np_message_expired_standard() {
+        let message = MessageBuilder::standard()
+            .with_message_type(MessageType::DeliveryStatus)
+            .with_message_id(1337u32)
+            .with_expiration(MockRuntime::time_since_epoch() - I2NP_MESSAGE_EXPIRATION)
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        assert!(Message::parse_standard(&message).unwrap().is_expired::<MockRuntime>());
     }
 }
