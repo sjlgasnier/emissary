@@ -73,6 +73,12 @@ impl<R: Runtime> I2cpSession<R> {
             tunnel_pool_handle,
         } = context;
 
+        tracing::info!(
+            target: LOG_TARGET,
+            ?session_id,
+            "start active i2cp session",
+        );
+
         Self {
             netdb_handle,
             session_id,
@@ -122,17 +128,17 @@ impl<R: Runtime> I2cpSession<R> {
                 date,
                 options,
             } => {
-                tracing::info!(
+                tracing::warn!(
                     target: LOG_TARGET,
                     destination = %destination.id(),
                     ?date,
                     num_options = ?options.len(),
-                    "create session",
+                    "received `CreateSession` for an active session",
                 );
 
                 self.socket.send_message(SessionStatus::new(
                     SessionId::Session(self.session_id),
-                    SessionStatusKind::Created,
+                    SessionStatusKind::Refused,
                 ));
             }
             _ => {}

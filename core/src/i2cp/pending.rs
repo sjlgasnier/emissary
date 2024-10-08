@@ -31,7 +31,7 @@ use crate::{
     },
     primitives::{Date, Lease2, Str, TunnelId},
     runtime::Runtime,
-    tunnel::{TunnelManagerHandle, TunnelPoolEvent, TunnelPoolHandle},
+    tunnel::{TunnelManagerHandle, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use futures::{future::BoxFuture, FutureExt, StreamExt};
@@ -70,7 +70,8 @@ pub struct I2cpSessionContext<R: Runtime> {
 
 /// State of the pending I2CP client session.
 enum PendingSessionState<R: Runtime> {
-    /// I2CP session doesn't have an active tunnel pool.
+    /// I2CP session doesn't have an active tunnel pool
+    /// and is waiting for the client to send `CreateSession` message.
     Inactive {
         /// Session ID.
         session_id: u16,
@@ -93,10 +94,11 @@ enum PendingSessionState<R: Runtime> {
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
     },
 
-    /// Building tunnels of the tunnel pool.
+    /// Tunnels of the tunnel pool are being built.
     ///
-    /// As soon as the the first inbound tunnel is built,
-    /// the state is switched to [`TunnnelPoolState::Active`].
+    /// As soon as the the first inbound tunnel is built, the pending I2CP session
+    /// future returns [`I2cpSessionContext`] to `I2cpServer` which starts
+    /// the actual I2CP client session event loop
     BuildingTunnels {
         /// Session ID.
         session_id: u16,
@@ -116,6 +118,27 @@ enum PendingSessionState<R: Runtime> {
 
     /// Tunnel pool state is poisoned.
     Poisoned,
+}
+
+impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inactive { session_id, .. } => f
+                .debug_struct("PendingSessionState::Inactive")
+                .field("session_id", &session_id)
+                .finish_non_exhaustive(),
+            Self::BuildingPool { session_id, .. } => f
+                .debug_struct("PendingSessionState::BuildingPool")
+                .field("session_id", &session_id)
+                .finish_non_exhaustive(),
+            Self::BuildingTunnels { session_id, .. } => f
+                .debug_struct("PendingSessionState::BuildingTunnels")
+                .field("session_id", &session_id)
+                .finish_non_exhaustive(),
+            Self::Poisoned =>
+                f.debug_struct("PendingSessionState::Poisoned").finish_non_exhaustive(),
+        }
+    }
 }
 
 impl<R: Runtime> PendingSessionState<R> {
@@ -207,30 +230,98 @@ impl<R: Runtime> PendingI2cpSession<R> {
             Message::CreateSession {
                 destination,
                 date,
-                options,
-            } => {
-                let session_id = self.state.session_id();
+                mut options,
+            } => match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
+                PendingSessionState::Inactive {
+                    session_id,
+                    mut socket,
+                } => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        destination = %destination.id(),
+                        ?date,
+                        num_options = ?options.len(),
+                        "create session",
+                    );
 
-                tracing::info!(
-                    target: LOG_TARGET,
-                    ?session_id,
-                    destination = %destination.id(),
-                    ?date,
-                    num_options = ?options.len(),
-                    "create session",
-                );
+                    for (key, value) in &options {
+                        tracing::info!("{key}={value}");
+                    }
 
-                self.state.socket().send_message(SessionStatus::new(
-                    SessionId::Session(session_id),
-                    SessionStatusKind::Created,
-                ));
+                    // create tunnel pool config
+                    //
+                    // emissary uses `inbound.nick` to name the tunnel pool config and in case it's
+                    // not set check if `outbound.nick` is set and if so, use that for the tunnel
+                    // pool's name
+                    //
+                    // if neither is set, use the destination short hash as the tunnel pool's name
+                    let tunnel_pool_config = {
+                        match options.get(&Str::from("inbound.nickname")) {
+                            Some(_) => TunnelPoolConfig::from(&options),
+                            None => {
+                                let name =
+                                    options.get(&Str::from("outbound.nickname")).map_or_else(
+                                        || Str::from(destination.id().to_string()),
+                                        |name| name.clone(),
+                                    );
+                                options.insert(Str::from("inbound.nickname"), Str::from(name));
 
-                // TODO: introduce `TunnelManager`
-                // TODO:  - allow creating new `TunnelManagerHandle`
-                // TODO: parse tunnel pool config from options
-                // TODO: create tunnel pool
-                // TODO: return new kind of handle from `TunnelManager`
-            }
+                                TunnelPoolConfig::from(&options)
+                            }
+                        }
+                    };
+
+                    // attempt to create tunnel pool for the session
+                    //
+                    // if channel towards `TunnelManager` is clogged, don't respond to the client,
+                    // allowing them to retry `CreateSession` later when the channel has available
+                    // capacity
+                    //
+                    // response from `TunnelManagerHandle::create_tunnel_pool()` is a future which
+                    // the session must poll until a `TunnelPoolHandle` is received. Reception of
+                    // the handle doesn't mean the tunnel is ready for use and the handle must be
+                    // polled further until an inbound tunnel is built
+                    match self.tunnel_manager_handle.create_tunnel_pool(tunnel_pool_config) {
+                        Ok(future) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                ?session_id,
+                                "tunnel pool build started",
+                            );
+
+                            socket.send_message(SessionStatus::new(
+                                SessionId::Session(session_id),
+                                SessionStatusKind::Created,
+                            ));
+                            self.state = PendingSessionState::BuildingPool {
+                                session_id,
+                                socket,
+                                tunnel_pool_future: Box::pin(future),
+                            };
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?session_id,
+                                ?error,
+                                "failed to build tunnel pool",
+                            );
+
+                            self.state = PendingSessionState::Inactive { session_id, socket };
+                        }
+                    }
+                }
+                state => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?state,
+                        "`CreateSession` received but tunnel pool is already pending",
+                    );
+
+                    self.state = state;
+                }
+            },
             _ => {}
         }
     }
@@ -391,6 +482,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         target: LOG_TARGET,
                         "pending i2cp session tunnel pool state is poisoned",
                     );
+                    debug_assert!(false);
 
                     return Poll::Ready(None);
                 }

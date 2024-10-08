@@ -149,7 +149,7 @@ impl From<&HashMap<Str, Str>> for TunnelPoolConfig {
             .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
 
         let name = options
-            .get(&Str::from("inbound.nick"))
+            .get(&Str::from("inbound.nickname"))
             .cloned()
             .unwrap_or(Str::from("unspecified"));
 
@@ -905,7 +905,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 None => return Poll::Ready(()),
                 Some((outbound, inbound, result)) => match result {
                     Err(error) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             target: LOG_TARGET,
                             name = %self.config.name,
                             %outbound,
@@ -1004,6 +1004,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
         self.maintain_pool();
 
+        // check if the pool owner has sent a shutdown signal to the tunnel pool
+        //
+        // currently `TunnelPool` doesn't do any graceful shutdown for its own tunnels
+        // and instead shuts down immediately
+        //
+        // the client is informed that the pool is shut down before it's shutdown so
+        // the destination can starts up its own shutdown process
         if let Some(rx) = &mut self.shutdown_rx {
             if let Poll::Ready(_) = rx.poll_unpin(cx) {
                 tracing::info!(
