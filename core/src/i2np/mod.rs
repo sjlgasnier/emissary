@@ -81,7 +81,7 @@ const I2NP_STANDARD_HEADER_LEN: usize = 16usize;
 /// I2NP message expiration timeout.
 ///
 /// Defaults to 8000 milliseconds.
-const I2NP_MESSAGE_EXPIRATION: Duration = Duration::from_millis(8000);
+pub const I2NP_MESSAGE_EXPIRATION: Duration = Duration::from_millis(8000);
 
 /// Message type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

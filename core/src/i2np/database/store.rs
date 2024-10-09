@@ -16,8 +16,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use core::marker::PhantomData;
-
 use crate::{
     crypto::SigningPrivateKey,
     i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
@@ -25,7 +23,7 @@ use crate::{
     runtime::Runtime,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -34,7 +32,7 @@ use nom::{
 };
 
 use alloc::vec::Vec;
-use core::fmt;
+use core::{fmt, marker::PhantomData};
 
 /// "No reply" token/tunnel ID.
 const NO_REPLY: u32 = 0u32;
@@ -168,7 +166,7 @@ impl DatabaseStorePayload {
 /// Database store message.
 pub struct DatabaseStore<R: Runtime> {
     /// Search key.
-    pub key: Vec<u8>,
+    pub key: Bytes,
 
     /// Payload contained within the `DatabaseStore` message.
     pub payload: DatabaseStorePayload,
@@ -243,7 +241,7 @@ impl<R: Runtime> DatabaseStore<R> {
                 Ok((
                     rest,
                     Self {
-                        key: key.to_vec(),
+                        key: Bytes::from(key.to_vec()),
                         payload: DatabaseStorePayload::RouterInfo { router_info },
                         reply,
                         _runtime: Default::default(),
@@ -256,7 +254,7 @@ impl<R: Runtime> DatabaseStore<R> {
                 Ok((
                     rest,
                     Self {
-                        key: key.to_vec(),
+                        key: Bytes::from(key.to_vec()),
                         payload: DatabaseStorePayload::LeaseSet2 { leaseset },
                         reply,
                         _runtime: Default::default(),

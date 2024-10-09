@@ -25,30 +25,45 @@ use bytes::Bytes;
 use futures_channel::oneshot;
 use thingbuf::mpsc;
 
-/// Recycling strategy for [`QueryKind`].
+/// Recycling strategy for [`NetDbAction`].
 #[derive(Default, Clone)]
-pub(super) struct QueryRecycle(());
+pub(super) struct NetDbActionRecycle(());
 
-impl thingbuf::Recycle<QueryKind> for QueryRecycle {
-    fn new_element(&self) -> QueryKind {
-        QueryKind::Dummy
+impl thingbuf::Recycle<NetDbAction> for NetDbActionRecycle {
+    fn new_element(&self) -> NetDbAction {
+        NetDbAction::Dummy
     }
 
-    fn recycle(&self, element: &mut QueryKind) {
-        *element = QueryKind::Dummy;
+    fn recycle(&self, element: &mut NetDbAction) {
+        *element = NetDbAction::Dummy;
     }
 }
 
 /// Query kind.
-pub(super) enum QueryKind {
+pub(super) enum NetDbAction {
     /// `LeaseSet2` query.
-    LeaseSet2(Bytes, oneshot::Sender<Result<LeaseSet2, QueryError>>),
+    QueryLeaseSet2 {
+        /// Key,
+        key: Bytes,
+
+        /// Oneshot sender for query result.
+        tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
+    },
+
+    /// Store `LeaseSet2` into `NetDb`.
+    StoreLeaseSet2 {
+        /// SHA256 of the `Destination` in `leaseset`.
+        key: Bytes,
+
+        /// Serialized `LeaseSet2`.
+        leaseset: Bytes,
+    },
 
     /// Dummy value.
     Dummy,
 }
 
-impl Default for QueryKind {
+impl Default for NetDbAction {
     fn default() -> Self {
         Self::Dummy
     }
@@ -58,12 +73,12 @@ impl Default for QueryKind {
 #[derive(Clone)]
 pub struct NetDbHandle {
     /// TX channel for sending queries to [`NetDb`].
-    tx: mpsc::Sender<QueryKind, QueryRecycle>,
+    tx: mpsc::Sender<NetDbAction, NetDbActionRecycle>,
 }
 
 impl NetDbHandle {
     /// Create new [`NetDbHandle`].
-    pub(super) fn new(tx: mpsc::Sender<QueryKind, QueryRecycle>) -> Self {
+    pub(super) fn new(tx: mpsc::Sender<NetDbAction, NetDbActionRecycle>) -> Self {
         Self { tx }
     }
 
@@ -80,7 +95,18 @@ impl NetDbHandle {
     ) -> Result<oneshot::Receiver<Result<LeaseSet2, QueryError>>, ChannelError> {
         let (tx, rx) = oneshot::channel();
 
-        self.tx.try_send(QueryKind::LeaseSet2(key, tx)).map(|_| rx).map_err(From::from)
+        self.tx
+            .try_send(NetDbAction::QueryLeaseSet2 { key, tx })
+            .map(|_| rx)
+            .map_err(From::from)
+    }
+
+    /// Store `leaseset` under `key` in `NetDb`.
+    pub fn store_leaseset(&self, key: Bytes, leaseset: Bytes) -> Result<(), ChannelError> {
+        self.tx
+            .try_send(NetDbAction::StoreLeaseSet2 { key, leaseset })
+            .map(|_| ())
+            .map_err(From::from)
     }
 }
 
@@ -90,13 +116,13 @@ mod tests {
 
     #[test]
     fn send_leaseset_query() {
-        let (tx, mut rx) = mpsc::with_recycle(5, QueryRecycle(()));
+        let (tx, mut rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
         assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
 
         match rx.try_recv() {
-            Ok(QueryKind::LeaseSet2(key, _)) => {
+            Ok(NetDbAction::QueryLeaseSet2 { key, .. }) => {
                 assert_eq!(key, Bytes::from(vec![1, 2, 3, 4]));
             }
             _ => panic!("invalid event"),
@@ -105,7 +131,7 @@ mod tests {
 
     #[test]
     fn channel_full() {
-        let (tx, mut rx) = mpsc::with_recycle(5, QueryRecycle(()));
+        let (tx, mut rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
         for _ in 0..5 {
