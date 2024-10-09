@@ -397,17 +397,29 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                             target: LOG_TARGET,
                             ?session_id,
                             %tunnel_id,
-                            "first inbound tunnel built for pending session",
+                            "inbound tunnel built for pending session",
                         );
                         inbound.insert(tunnel_id, lease);
 
-                        return Poll::Ready(Some(I2cpSessionContext {
-                            inbound,
-                            outbound,
-                            tunnel_pool_handle: handle,
+                        // create active i2cp session if there's at least one outbound
+                        // and one inbound tunnel
+                        if !inbound.is_empty() && !outbound.is_empty() {
+                            return Poll::Ready(Some(I2cpSessionContext {
+                                inbound,
+                                outbound,
+                                tunnel_pool_handle: handle,
+                                session_id,
+                                socket,
+                            }));
+                        }
+
+                        self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
-                        }));
+                            handle,
+                            inbound,
+                            outbound,
+                        };
                     }
                     Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
                         tracing::trace!(
@@ -417,6 +429,18 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                             "outbound tunnel built for pending session",
                         );
                         outbound.insert(tunnel_id);
+
+                        // create active i2cp session if there's at least one outbound
+                        // and one inbound tunnel
+                        if !inbound.is_empty() && !outbound.is_empty() {
+                            return Poll::Ready(Some(I2cpSessionContext {
+                                inbound,
+                                outbound,
+                                tunnel_pool_handle: handle,
+                                session_id,
+                                socket,
+                            }));
+                        }
 
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
