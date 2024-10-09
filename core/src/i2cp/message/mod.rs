@@ -17,10 +17,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    primitives::{Date, Destination, Mapping, Str},
+    crypto::StaticPrivateKey,
+    primitives::{Date, Destination, LeaseSet2, Mapping, Str},
     tunnel::TunnelPoolConfig,
 };
 
+use bytes::{BufMut, Bytes, BytesMut};
 use hashbrown::HashMap;
 use nom::{
     bytes::complete::take,
@@ -258,7 +260,21 @@ pub enum Message {
     CreateLeaseSet,
 
     /// Create `LeaseSet2`.
-    CreateLeaseSet2,
+    CreateLeaseSet2 {
+        /// Session ID.
+        session_id: SessionId,
+
+        /// SHA256 of the `Destination`.
+        ///
+        /// `leaseset` needs to be stored in `key` in `NetDb`.
+        key: Bytes,
+
+        /// Serialized `LeaseSet2`.
+        leaseset: Bytes,
+
+        /// Encryption private keys.
+        private_keys: Vec<StaticPrivateKey>,
+    },
 
     /// Create session.
     CreateSession {
@@ -467,6 +483,98 @@ impl Message {
         })
     }
 
+    /// Attempt to parse [`Message::CreateLeaseSet2`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#createleaseset2message
+    fn parse_create_leaseset2(input: impl AsRef<[u8]>) -> Option<Self> {
+        let (rest, session_id) = be_u16::<_, ()>(input.as_ref()).ok()?;
+        let (rest, kind) = be_u8::<_, ()>(rest).ok()?;
+
+        let (rest, key, leaseset) = match kind {
+            3 => {
+                // parse `LeaseSet2` from input to verify it's valid and supports correct crypto
+                //
+                // emissary discards unneeded date from the `Destination`/`LeaseSet2` when it
+                // deserializes them which would make the parsed `LeaseSet2` unpublishable as
+                // `emissary` cannot recreate and sign it since it doesn't hold the signing key for
+                // the client
+                //
+                // in order to keep the `LeaseSet2` publishable, parse the raw byte vector from
+                // input and return that in `Message::CreateLeaseSet2` so it can be published
+                // unmodified to `NetDb`
+                let (rest, parsed) = LeaseSet2::parse_frame(rest).ok()?;
+
+                (
+                    rest,
+                    Bytes::from(Into::<Vec<u8>>::into(parsed.header.destination.id())),
+                    Bytes::from(input.as_ref()[3..(input.as_ref().len() - rest.len())].to_vec()),
+                )
+            }
+            1 => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "leasesets not supported",
+                );
+                return None;
+            }
+            5 => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "encrypted leasesets not supported",
+                );
+                return None;
+            }
+            7 => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "meta leasesets not supported",
+                );
+                return None;
+            }
+            _ => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "invalid leaseset kind",
+                );
+                return None;
+            }
+        };
+
+        let (rest, num_private_keys) = be_u8::<_, ()>(rest).ok()?;
+        let (rest, private_keys) = (0..num_private_keys).try_fold(
+            (rest, Vec::<StaticPrivateKey>::new()),
+            |(rest, mut keys), _| {
+                let (rest, key_kind) = be_u16::<_, ()>(rest).ok()?;
+                let (rest, key_length) = be_u16::<_, ()>(rest).ok()?;
+                let (rest, key) = take::<_, _, ()>(key_length)(rest).ok()?;
+
+                match key_kind {
+                    0x0004 if key_length == 32 => {
+                        keys.push(StaticPrivateKey::from(key.to_vec()));
+
+                        Some((rest, keys))
+                    }
+                    key_kind => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?key_kind,
+                            "unsupported key kind",
+                        );
+                        return None;
+                    }
+                }
+            },
+        )?;
+
+        Some(Message::CreateLeaseSet2 {
+            session_id: SessionId::from(session_id),
+            key,
+            leaseset,
+            private_keys,
+        })
+    }
+
     /// Attempt to parse `input` into [`Message`].
     pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
@@ -476,6 +584,7 @@ impl Message {
             MessageType::DestroySession => Self::parse_destroy_session(input),
             MessageType::CreateSession => Self::parse_create_session(input),
             MessageType::HostLookup => Self::parse_host_lookup(input),
+            MessageType::CreateLeaseSet2 => Self::parse_create_leaseset2(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -486,5 +595,50 @@ impl Message {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_create_leaseset2() {
+        let message = vec![
+            0, 2, 3, 161, 188, 214, 236, 128, 189, 119, 155, 149, 15, 103, 59, 133, 120, 146, 190,
+            219, 94, 244, 254, 170, 105, 111, 60, 33, 87, 105, 100, 147, 146, 113, 201, 161, 188,
+            214, 236, 128, 189, 119, 155, 149, 15, 103, 59, 133, 120, 146, 190, 219, 94, 244, 254,
+            170, 105, 111, 60, 33, 87, 105, 100, 147, 146, 113, 201, 161, 188, 214, 236, 128, 189,
+            119, 155, 149, 15, 103, 59, 133, 120, 146, 190, 219, 94, 244, 254, 170, 105, 111, 60,
+            33, 87, 105, 100, 147, 146, 113, 201, 161, 188, 214, 236, 128, 189, 119, 155, 149, 15,
+            103, 59, 133, 120, 146, 190, 219, 94, 244, 254, 170, 105, 111, 60, 33, 87, 105, 100,
+            147, 146, 113, 201, 161, 188, 214, 236, 128, 189, 119, 155, 149, 15, 103, 59, 133, 120,
+            146, 190, 219, 94, 244, 254, 170, 105, 111, 60, 33, 87, 105, 100, 147, 146, 113, 201,
+            161, 188, 214, 236, 128, 189, 119, 155, 149, 15, 103, 59, 133, 120, 146, 190, 219, 94,
+            244, 254, 170, 105, 111, 60, 33, 87, 105, 100, 147, 146, 113, 201, 161, 188, 214, 236,
+            128, 189, 119, 155, 149, 15, 103, 59, 133, 120, 146, 190, 219, 94, 244, 254, 170, 105,
+            111, 60, 33, 87, 105, 100, 147, 146, 113, 201, 161, 188, 214, 236, 128, 189, 119, 155,
+            149, 15, 103, 59, 133, 120, 146, 190, 219, 94, 244, 254, 170, 105, 111, 60, 33, 87,
+            105, 100, 147, 146, 113, 201, 161, 188, 214, 236, 128, 189, 119, 155, 149, 15, 103, 59,
+            133, 120, 146, 190, 219, 94, 244, 254, 170, 105, 111, 60, 33, 87, 105, 100, 147, 146,
+            113, 201, 161, 188, 214, 236, 128, 189, 119, 155, 149, 15, 103, 59, 133, 120, 146, 190,
+            219, 94, 244, 254, 170, 105, 111, 60, 33, 87, 105, 100, 147, 146, 113, 201, 161, 188,
+            214, 236, 128, 189, 119, 155, 149, 15, 103, 59, 133, 120, 146, 190, 219, 94, 244, 254,
+            170, 105, 111, 60, 33, 87, 105, 100, 147, 146, 113, 201, 55, 230, 91, 80, 122, 122, 80,
+            230, 218, 220, 163, 141, 116, 3, 154, 178, 46, 33, 45, 176, 86, 88, 53, 55, 134, 6,
+            142, 105, 68, 152, 7, 222, 5, 0, 4, 0, 7, 0, 0, 103, 4, 36, 95, 2, 87, 0, 0, 0, 0, 1,
+            0, 4, 0, 32, 19, 126, 50, 234, 104, 194, 242, 90, 231, 249, 16, 61, 140, 95, 139, 51,
+            191, 75, 145, 72, 239, 39, 170, 37, 3, 90, 126, 236, 0, 63, 150, 1, 1, 249, 0, 187,
+            182, 11, 128, 61, 16, 80, 73, 190, 216, 57, 137, 166, 213, 35, 195, 36, 79, 56, 118,
+            161, 49, 37, 5, 174, 148, 94, 114, 242, 7, 191, 145, 154, 197, 103, 4, 38, 182, 179,
+            59, 226, 238, 95, 209, 4, 132, 89, 207, 155, 202, 52, 193, 120, 84, 210, 180, 114, 204,
+            152, 224, 101, 25, 129, 155, 98, 137, 183, 232, 231, 62, 182, 0, 228, 184, 67, 239,
+            239, 110, 98, 62, 71, 23, 146, 128, 244, 117, 50, 157, 17, 49, 46, 201, 99, 89, 109,
+            216, 180, 195, 236, 57, 92, 8, 1, 0, 4, 0, 32, 214, 240, 124, 122, 202, 10, 154, 164,
+            239, 93, 80, 233, 10, 158, 39, 174, 132, 26, 242, 214, 53, 186, 119, 19, 61, 184, 149,
+            26, 115, 111, 255, 68,
+        ];
+
+        assert!(Message::parse(MessageType::CreateLeaseSet2, &message).is_some());
     }
 }

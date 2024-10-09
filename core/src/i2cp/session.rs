@@ -178,6 +178,19 @@ impl<R: Runtime> I2cpSession<R> {
                     "host lookup",
                 );
             }
+            Message::CreateLeaseSet2 {
+                session_id,
+                key,
+                leaseset,
+                private_keys,
+            } => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?session_id,
+                    num_private_keys = ?private_keys.len(),
+                    "create leaseset2",
+                );
+            }
             _ => {}
         }
     }
