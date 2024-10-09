@@ -283,11 +283,13 @@ impl LeaseSet2 {
         // verify signature
         //
         // TODO: really inefficient
-        let mut bytes = BytesMut::with_capacity(input.len() + 1);
-        bytes.put_u8(3u8);
-        bytes.put_slice(&input[..input.len()]);
+        let (rest, signature) = take(64usize)(rest)?;
 
-        header.destination.signing_key().verify(&bytes, rest).or_else(|error| {
+        let mut bytes = BytesMut::with_capacity(input.len());
+        bytes.put_u8(3u8);
+        bytes.put_slice(&input[..input.len() - rest.len()]);
+
+        header.destination.signing_key().verify(&bytes, signature).or_else(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?error,
