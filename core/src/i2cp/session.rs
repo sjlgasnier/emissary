@@ -163,6 +163,21 @@ impl<R: Runtime> I2cpSession<R> {
                     SessionStatusKind::Refused,
                 ));
             }
+            Message::HostLookup {
+                session_id,
+                request_id,
+                timeout,
+                kind,
+            } => {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    ?session_id,
+                    ?request_id,
+                    ?timeout,
+                    ?kind,
+                    "host lookup",
+                );
+            }
             _ => {}
         }
     }

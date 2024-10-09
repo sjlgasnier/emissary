@@ -30,6 +30,7 @@ use nom::{
 };
 
 use alloc::vec::Vec;
+use core::time::Duration;
 
 pub use bandwidth::BandwidthLimits;
 pub use leaseset::RequestVariableLeaseSet;
@@ -76,6 +77,22 @@ impl From<u16> for SessionId {
             value => SessionId::Session(value),
         }
     }
+}
+
+/// Request kind for host lookups.
+#[derive(Debug)]
+pub enum RequestKind {
+    /// Host name.
+    HostName {
+        /// Host name.
+        host_name: Str,
+    },
+
+    /// Hash.
+    Hash {
+        /// SHA256 hash.
+        hash: Vec<u8>,
+    },
 }
 
 /// I2CP message type.
@@ -283,7 +300,19 @@ pub enum Message {
     },
 
     /// Lookup host.
-    HostLookup,
+    HostLookup {
+        /// Session ID.
+        session_id: SessionId,
+
+        /// Request ID.
+        request_id: u32,
+
+        /// Timeout.
+        timeout: Duration,
+
+        /// Lookup kind.
+        kind: RequestKind,
+    },
 
     /// Host lookup reply.
     HostReply,
@@ -404,6 +433,40 @@ impl Message {
         })
     }
 
+    /// Attempt to parse [`Message::HostLookup`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#hostlookupmessage
+    fn parse_host_lookup(input: impl AsRef<[u8]>) -> Option<Self> {
+        let (rest, session_id) = be_u16::<_, ()>(input.as_ref()).ok()?;
+        let (rest, request_id) = be_u32::<_, ()>(rest).ok()?;
+        let (rest, timeout) = be_u32::<_, ()>(rest).ok()?;
+        let (rest, kind) = be_u8::<_, ()>(rest).ok()?;
+
+        let kind = match kind {
+            0 => RequestKind::Hash {
+                hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
+            },
+            1 => RequestKind::HostName {
+                host_name: Str::parse_frame(rest).ok()?.1,
+            },
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "invalid host lookup kind",
+                );
+                return None;
+            }
+        };
+
+        Some(Message::HostLookup {
+            session_id: SessionId::from(session_id),
+            request_id,
+            timeout: Duration::from_millis(timeout as u64),
+            kind,
+        })
+    }
+
     /// Attempt to parse `input` into [`Message`].
     pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
@@ -412,6 +475,7 @@ impl Message {
             MessageType::GetBandwidthLimits => Self::parse_get_bandwidth_limits(input),
             MessageType::DestroySession => Self::parse_destroy_session(input),
             MessageType::CreateSession => Self::parse_create_session(input),
+            MessageType::HostLookup => Self::parse_host_lookup(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
