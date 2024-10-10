@@ -35,11 +35,13 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 pub use bandwidth::BandwidthLimits;
+pub use host_reply::{HostReply, HostReplyKind};
 pub use leaseset::RequestVariableLeaseSet;
 pub use session_status::{SessionStatus, SessionStatusKind};
 pub use set_date::SetDate;
 
 mod bandwidth;
+mod host_reply;
 mod leaseset;
 mod session_status;
 mod set_date;

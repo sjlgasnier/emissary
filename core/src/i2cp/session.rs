@@ -19,8 +19,8 @@
 use crate::{
     i2cp::{
         message::{
-            BandwidthLimits, Message, RequestVariableLeaseSet, SessionId, SessionStatus,
-            SessionStatusKind, SetDate,
+            BandwidthLimits, HostReply, HostReplyKind, Message, RequestVariableLeaseSet, SessionId,
+            SessionStatus, SessionStatusKind, SetDate,
         },
         pending::I2cpSessionContext,
         socket::I2cpSocket,
@@ -176,14 +176,20 @@ impl<R: Runtime> I2cpSession<R> {
                 timeout,
                 kind,
             } => {
-                tracing::error!(
+                tracing::info!(
                     target: LOG_TARGET,
                     ?session_id,
                     ?request_id,
                     ?timeout,
                     ?kind,
-                    "host lookup",
+                    "host lookup, address book not implemented",
                 );
+
+                self.socket.send_message(HostReply::new(
+                    session_id.as_u16(),
+                    request_id,
+                    HostReplyKind::Failure,
+                ));
             }
             Message::CreateLeaseSet2 {
                 session_id,
