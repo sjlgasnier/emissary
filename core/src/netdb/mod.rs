@@ -17,11 +17,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::base32_encode,
     error::QueryError,
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType},
-            store::{DatabaseStore, DatabaseStorePayload},
+            store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         },
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
@@ -310,6 +311,13 @@ impl<R: Runtime> NetDb<R> {
     ) {
         let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
 
+        tracing::debug!(
+            target: LOG_TARGET,
+            key = ?base32_encode(&key),
+            num_floodfills = ?floodfills.len(),
+            "query leaseset",
+        );
+
         let message = DatabaseLookupBuilder::new(
             key.clone(),
             self.local_router_id.clone(),
@@ -335,13 +343,6 @@ impl<R: Runtime> NetDb<R> {
                 let _ = tx.send(Err(QueryError::NoFloodfills));
             }
             false => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    ?message_id,
-                    num_floodfills = ?floodfills.len(),
-                    "send query to closest floodfills"
-                );
-
                 // TODO: send over exploratory tunnel pool
                 // TODO: send to multiple floodfills
                 match self.service.send(&floodfills[0], message) {
@@ -369,7 +370,42 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Store `leaseset` under `key` in `NetDb`.
-    fn on_store_leaseset(&mut self, _key: Bytes, _leaseset: Bytes) {}
+    fn on_store_leaseset(&mut self, key: Bytes, leaseset: Bytes) {
+        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            key = ?base32_encode(&key),
+            num_floodfills = ?floodfills.len(),
+            "store leaseset in netdb",
+        );
+
+        let message =
+            DatabaseStoreBuilder::new(key, DatabaseStoreKind::LeaseSet2 { leaseset }).build();
+
+        let message_id = R::rng().next_u32();
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseStore)
+            .with_message_id(message_id)
+            .with_payload(&message)
+            .build();
+
+        match floodfills.is_empty() {
+            true => tracing::warn!(
+                target: LOG_TARGET,
+                "cannot store leaseset, no floodfills",
+            ),
+            false =>
+                if let Err(error) = self.service.send(&floodfills[0], message) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to store leaseset",
+                    );
+                },
+        }
+    }
 }
 
 impl<R: Runtime> Future for NetDb<R> {

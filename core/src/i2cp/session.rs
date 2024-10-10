@@ -86,6 +86,7 @@ impl<R: Runtime> I2cpSession<R> {
             "start active i2cp session",
         );
 
+        // request `LeaseSet2` from i2cp client
         {
             tracing::trace!(
                 target: LOG_TARGET,
@@ -188,8 +189,17 @@ impl<R: Runtime> I2cpSession<R> {
                     target: LOG_TARGET,
                     ?session_id,
                     num_private_keys = ?private_keys.len(),
-                    "create leaseset2",
+                    "store leaseset to netdb",
                 );
+
+                if let Err(error) = self.netdb_handle.store_leaseset(key, leaseset) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        ?error,
+                        "failed to store leaseset to netdb",
+                    );
+                }
             }
             _ => {}
         }

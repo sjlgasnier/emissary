@@ -26,7 +26,7 @@ use crate::{
         session::{KeyContext, OutboundSession},
     },
     i2np::{
-        database::store::{DatabaseStoreBuilder, DatabaseStorePayload},
+        database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         garlic::{
             DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
             GarlicMessageBuilder, NextKeyKind,
@@ -41,7 +41,7 @@ use crate::{
     util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
@@ -112,12 +112,14 @@ impl<R: Runtime> Destination<R> {
         };
 
         let database_store = DatabaseStoreBuilder::new(
-            Into::<Vec<u8>>::into(local_leaseset.header.destination.id()),
-            DatabaseStorePayload::LeaseSet2 {
-                leaseset: local_leaseset,
+            Bytes::from(Into::<Vec<u8>>::into(
+                local_leaseset.header.destination.id(),
+            )),
+            DatabaseStoreKind::LeaseSet2 {
+                leaseset: Bytes::from(local_leaseset.serialize(&signing_key)),
             },
         )
-        .build(&signing_key);
+        .build();
 
         let (stream, payload) = Stream::<R>::new_outbound(destination);
 
