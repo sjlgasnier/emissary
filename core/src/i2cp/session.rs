@@ -34,6 +34,7 @@ use crate::{
 use futures::StreamExt;
 use hashbrown::{HashMap, HashSet};
 
+use alloc::vec::Vec;
 use core::{
     future::Future,
     pin::Pin,
@@ -51,6 +52,9 @@ pub struct I2cpSession<R: Runtime> {
 
     /// Handle to `NetDb`.
     netdb_handle: NetDbHandle,
+
+    /// Session options.
+    options: HashMap<Str, Str>,
 
     /// Active outbound tunnels.
     outbound: HashSet<TunnelId>,
@@ -73,6 +77,7 @@ impl<R: Runtime> I2cpSession<R> {
             outbound,
             session_id,
             mut socket,
+            options,
             tunnel_pool_handle,
         } = context;
 
@@ -103,12 +108,13 @@ impl<R: Runtime> I2cpSession<R> {
         }
 
         Self {
+            inbound,
             netdb_handle,
+            options,
+            outbound,
             session_id,
             socket,
             tunnel_pool_handle,
-            inbound,
-            outbound,
         }
     }
 

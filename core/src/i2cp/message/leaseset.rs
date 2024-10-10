@@ -23,6 +23,8 @@ use crate::{
 
 use bytes::{BufMut, BytesMut};
 
+use alloc::vec::Vec;
+
 /// `RequestVariableLeaseSet` message.
 ///
 /// https://geti2p.net/spec/i2cp#requestvariableleasesetmessage

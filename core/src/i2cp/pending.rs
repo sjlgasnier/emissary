@@ -55,6 +55,9 @@ pub struct I2cpSessionContext<R: Runtime> {
     /// Active inbound tunnels and their leases.
     pub inbound: HashMap<TunnelId, Lease>,
 
+    /// Session options.
+    pub options: HashMap<Str, Str>,
+
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
 
@@ -88,6 +91,9 @@ enum PendingSessionState<R: Runtime> {
         /// I2CP socket.
         socket: I2cpSocket<R>,
 
+        /// Session options.
+        options: HashMap<Str, Str>,
+
         /// Tunnel pool build future.
         ///
         /// Resolves to a `TunnelPoolHandle` once the pool has been built.
@@ -105,6 +111,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// I2CP socket.
         socket: I2cpSocket<R>,
+
+        /// Session options.
+        options: HashMap<Str, Str>,
 
         /// Handle to the built tunnel pool.
         handle: TunnelPoolHandle,
@@ -245,10 +254,6 @@ impl<R: Runtime> PendingI2cpSession<R> {
                         "create session",
                     );
 
-                    for (key, value) in &options {
-                        tracing::info!("{key}={value}");
-                    }
-
                     // create tunnel pool config
                     //
                     // emissary uses `inbound.nick` to name the tunnel pool config and in case it's
@@ -297,6 +302,7 @@ impl<R: Runtime> PendingI2cpSession<R> {
                             self.state = PendingSessionState::BuildingPool {
                                 session_id,
                                 socket,
+                                options,
                                 tunnel_pool_future: Box::pin(future),
                             };
                         }
@@ -348,6 +354,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                 PendingSessionState::BuildingPool {
                     session_id,
                     socket,
+                    options,
                     mut tunnel_pool_future,
                 } => match tunnel_pool_future.poll_unpin(cx) {
                     Poll::Ready(handle) => {
@@ -360,6 +367,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound: HashMap::new(),
                             outbound: HashSet::new(),
@@ -369,6 +377,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         self.state = PendingSessionState::BuildingPool {
                             session_id,
                             socket,
+                            options,
                             tunnel_pool_future,
                         };
                         break;
@@ -377,6 +386,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                 PendingSessionState::BuildingTunnels {
                     session_id,
                     socket,
+                    options,
                     mut handle,
                     mut inbound,
                     mut outbound,
@@ -385,6 +395,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound,
                             outbound,
@@ -406,16 +417,18 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         if !inbound.is_empty() && !outbound.is_empty() {
                             return Poll::Ready(Some(I2cpSessionContext {
                                 inbound,
+                                options,
                                 outbound,
-                                tunnel_pool_handle: handle,
                                 session_id,
                                 socket,
+                                tunnel_pool_handle: handle,
                             }));
                         }
 
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound,
                             outbound,
@@ -435,16 +448,18 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         if !inbound.is_empty() && !outbound.is_empty() {
                             return Poll::Ready(Some(I2cpSessionContext {
                                 inbound,
+                                options,
                                 outbound,
-                                tunnel_pool_handle: handle,
                                 session_id,
                                 socket,
+                                tunnel_pool_handle: handle,
                             }));
                         }
 
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound,
                             outbound,
@@ -462,6 +477,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound,
                             outbound,
@@ -479,6 +495,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound,
                             outbound,
@@ -495,6 +512,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             session_id,
                             socket,
+                            options,
                             handle,
                             inbound,
                             outbound,
