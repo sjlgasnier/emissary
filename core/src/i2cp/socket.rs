@@ -188,7 +188,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                     continue;
                                 };
 
-                                let Some(message) = Message::parse(msg_type, &[]) else {
+                                let Some(message) = Message::parse::<R>(msg_type, &[]) else {
                                     tracing::warn!(
                                         target: LOG_TARGET,
                                         ?msg_type,
@@ -258,7 +258,8 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 continue;
                             };
 
-                            let Some(message) = Message::parse(msg_type, &this.read_buffer[..size])
+                            let Some(message) =
+                                Message::parse::<R>(msg_type, &this.read_buffer[..size])
                             else {
                                 tracing::warn!(
                                     target: LOG_TARGET,

@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey};
+use crate::{
+    crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey},
+    primitives::LOG_TARGET,
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
@@ -97,6 +100,12 @@ impl Destination {
         let (rest, _pub_key_type) = be_u16(rest)?;
 
         let (0x5, 0x4) = (cert_type, cert_len) else {
+            tracing::debug!(
+                target: LOG_TARGET,
+                ?cert_type,
+                ?cert_len,
+                "unsupported certificate type for destination",
+            );
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         };
 

@@ -132,7 +132,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     return Poll::Ready(());
                 }
                 Poll::Ready(Some(mut stream)) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         target: LOG_TARGET,
                         "incoming connection, read protocol byte",
                     );
@@ -173,13 +173,14 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     "failed to accept inbound i2cp connection",
                 ),
                 Poll::Ready(Some(Ok(stream))) => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        "i2cp client session accepted",
-                    );
-
                     let session_id = self.next_session_id();
                     let handle = self.tunnel_manager_handle.clone();
+
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        "i2cp client session accepted",
+                    );
 
                     self.pending_session.push(PendingI2cpSession::<R>::new(
                         session_id,

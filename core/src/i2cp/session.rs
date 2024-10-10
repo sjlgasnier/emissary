@@ -99,12 +99,10 @@ impl<R: Runtime> I2cpSession<R> {
                 "send leaseset request to client",
             );
 
-            let message = RequestVariableLeaseSet::new(
+            socket.send_message(RequestVariableLeaseSet::new(
                 session_id,
                 inbound.values().cloned().collect::<Vec<_>>(),
-            );
-
-            socket.send_message(message);
+            ));
         }
 
         Self {
@@ -213,12 +211,35 @@ impl<R: Runtime> I2cpSession<R> {
                     );
                 }
             }
+            Message::SendMessageExpires {
+                session_id,
+                destination,
+                payload,
+                ..
+            } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    ?session_id,
+                    destination = %destination.id(),
+                    src_port = ?payload.src_port,
+                    dst_port = ?payload.dst_port,
+                    protocol = ?payload.protocol,
+                    "send message with expiration",
+                );
+            }
             _ => {}
         }
     }
 
     /// Handle `event` received from the session's tunnel pool.
     fn on_tunnel_pool_event(&mut self, event: TunnelPoolEvent) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = ?self.session_id,
+            ?event,
+            "tunnel pool event",
+        );
+
         match event {
             TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease } => {}
             TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {}

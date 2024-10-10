@@ -19,7 +19,9 @@
 use crate::{
     crypto::StaticPrivateKey,
     primitives::{Date, Destination, LeaseSet2, Mapping, Str},
+    runtime::Runtime,
     tunnel::TunnelPoolConfig,
+    util::gzip::GzipPayload,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -363,7 +365,25 @@ pub enum Message {
     SendMessage,
 
     /// Send message to remote router with expiration and options.
-    SendMessageExpires,
+    SendMessageExpires {
+        /// Session ID.
+        session_id: SessionId,
+
+        /// Destination.
+        destination: Destination,
+
+        /// Payload:
+        payload: GzipPayload,
+
+        /// Nonce.
+        nonce: u32,
+
+        /// Options,
+        options: u16,
+
+        /// Message expiration, as duration since UNIX epoch.
+        expires: Duration,
+    },
 
     /// Inform client about the status of the session.
     SessionStatus,
@@ -577,8 +597,45 @@ impl Message {
         })
     }
 
+    /// Attempt to parse [`Message::SendMessageExpires`] from `input`.
+    ///
+    /// https://geti2p.net/spec/i2cp#sendmessageexpiresmessage
+    fn parse_send_message_expires<R: Runtime>(input: impl AsRef<[u8]>) -> Option<Self> {
+        let (rest, session_id) = be_u16::<_, ()>(input.as_ref()).ok()?;
+        let (rest, destination) = Destination::parse_frame(rest).ok()?;
+        let (rest, payload_len) = be_u32::<_, ()>(rest).ok()?;
+        let (rest, payload) = take::<_, _, ()>(payload_len)(rest).ok()?;
+        let (rest, nonce) = be_u32::<_, ()>(rest).ok()?;
+        let (rest, options) = be_u16::<_, ()>(rest).ok()?;
+        let expires = {
+            let expiration = take::<_, _, ()>(6usize)(rest).ok()?.1;
+            let mut extended = [0u8; 8];
+            extended[2..].copy_from_slice(&expiration);
+
+            Duration::from_millis(u64::from_be_bytes(extended))
+        };
+
+        let Some(payload) = GzipPayload::decompress::<R>(payload) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?session_id,
+                "invalid i2cp payload",
+            );
+            return None;
+        };
+
+        Some(Message::SendMessageExpires {
+            session_id: SessionId::from(session_id),
+            destination,
+            payload,
+            nonce,
+            options,
+            expires,
+        })
+    }
+
     /// Attempt to parse `input` into [`Message`].
-    pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
+    pub fn parse<R: Runtime>(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
             MessageType::GetDate => Self::parse_get_date(input),
             MessageType::SetDate => Self::parse_set_date(input),
@@ -587,6 +644,7 @@ impl Message {
             MessageType::CreateSession => Self::parse_create_session(input),
             MessageType::HostLookup => Self::parse_host_lookup(input),
             MessageType::CreateLeaseSet2 => Self::parse_create_leaseset2(input),
+            MessageType::SendMessageExpires => Self::parse_send_message_expires::<R>(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -603,6 +661,7 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::mock::MockRuntime;
 
     #[test]
     fn parse_create_leaseset2() {
@@ -641,6 +700,6 @@ mod tests {
             26, 115, 111, 255, 68,
         ];
 
-        assert!(Message::parse(MessageType::CreateLeaseSet2, &message).is_some());
+        assert!(Message::parse::<MockRuntime>(MessageType::CreateLeaseSet2, &message).is_some());
     }
 }
