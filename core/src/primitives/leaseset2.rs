@@ -74,7 +74,7 @@ impl LeaseSet2Header {
     /// Get serialized length of [`LeaseSet2Header`].
     pub fn serialized_len(&self) -> usize {
         // destination + published + expires + flags
-        Destination::serialized_len() + 4usize + 2usize + 2usize
+        self.destination.serialized_len() + 4usize + 2usize + 2usize
     }
 
     /// Serialize [`LeaseSet2Header`] into a byte vector.
@@ -289,15 +289,26 @@ impl LeaseSet2 {
         bytes.put_u8(3u8);
         bytes.put_slice(&input[..input.len() - rest.len()]);
 
-        header.destination.signing_key().verify(&bytes, signature).or_else(|error| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?error,
-                "invalid signature for leaseset2",
-            );
+        match header.destination.signing_key() {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    id = %header.destination.id(),
+                    "no signing key in destination, cannot verify signature",
+                );
 
-            Err(Err::Error(make_error(input, ErrorKind::Fail)))
-        })?;
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
+            Some(signing_key) => signing_key.verify(&bytes, signature).or_else(|error| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "invalid signature for leaseset2",
+                );
+
+                Err(Err::Error(make_error(input, ErrorKind::Fail)))
+            })?,
+        }
 
         Ok((
             rest,

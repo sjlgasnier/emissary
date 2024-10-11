@@ -454,14 +454,22 @@ impl Message {
         let (rest, date) = Date::parse_frame(rest).ok()?;
         let (rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
 
-        if let Err(error) = destination.signing_key().verify(input.as_ref(), signature) {
-            tracing::warn!(
+        match destination.signing_key() {
+            None => tracing::debug!(
                 target: LOG_TARGET,
-                ?error,
-                "failed to verify `CreateSession` signature",
-            );
+                id = %destination.id(),
+                "no signing key in destination, cannot verify signature",
+            ),
+            Some(signing_key) =>
+                if let Err(error) = signing_key.verify(input.as_ref(), signature) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to verify `CreateSession` signature",
+                    );
 
-            return None;
+                    return None;
+                },
         }
 
         Some(Message::CreateSession {
