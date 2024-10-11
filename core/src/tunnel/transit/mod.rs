@@ -25,6 +25,7 @@ use crate::{
     },
     error::{RejectionReason, RoutingError, TunnelError},
     i2np::{
+        garlic::GarlicMessage,
         tunnel::{
             build::{short, variable},
             data::EncryptedTunnelData,
@@ -460,6 +461,14 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                 Some(message) => match message.message_type {
                     MessageType::ShortTunnelBuild => self.handle_short_tunnel_build(message),
                     MessageType::VariableTunnelBuild => self.handle_variable_tunnel_build(message),
+                    MessageType::Garlic => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            parsed = ?GarlicMessage::parse(&message.payload[..12]),
+                            "garlic message received to obep",
+                        );
+                        continue;
+                    }
                     message_type => {
                         tracing::warn!(?message_type, "unsupported message type");
                         continue;
