@@ -45,6 +45,11 @@ impl DestinationId {
         let bytes = rand::thread_rng().gen::<[u8; 32]>();
         DestinationId::from(bytes)
     }
+
+    /// Copy [`DestinationId`] into a byte vector.
+    pub fn to_vec(&self) -> Vec<u8> {
+        base64_decode(&self.0.as_bytes())
+    }
 }
 
 impl fmt::Display for DestinationId {
@@ -56,12 +61,6 @@ impl fmt::Display for DestinationId {
 impl<T: AsRef<[u8]>> From<T> for DestinationId {
     fn from(value: T) -> Self {
         DestinationId(Arc::new(base64_encode(value)))
-    }
-}
-
-impl Into<Vec<u8>> for DestinationId {
-    fn into(self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes())
     }
 }
 

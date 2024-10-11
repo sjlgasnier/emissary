@@ -112,9 +112,7 @@ impl<R: Runtime> Destination<R> {
         };
 
         let database_store = DatabaseStoreBuilder::new(
-            Bytes::from(Into::<Vec<u8>>::into(
-                local_leaseset.header.destination.id(),
-            )),
+            Bytes::from(local_leaseset.header.destination.id().to_vec()),
             DatabaseStoreKind::LeaseSet2 {
                 leaseset: Bytes::from(local_leaseset.serialize(&signing_key)),
             },

@@ -528,7 +528,7 @@ impl Message {
 
                 (
                     rest,
-                    Bytes::from(Into::<Vec<u8>>::into(parsed.header.destination.id())),
+                    Bytes::from(parsed.header.destination.id().to_vec()),
                     Bytes::from(input.as_ref()[3..(input.as_ref().len() - rest.len())].to_vec()),
                 )
             }
