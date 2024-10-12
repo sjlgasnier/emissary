@@ -23,7 +23,7 @@ use crate::{
     runtime::{JoinSet, Runtime},
     tunnel::{
         hop::{pending::PendingTunnel, Tunnel},
-        pool::{context::TunnelPoolHandle, TUNNEL_BUILD_EXPIRATION},
+        pool::{context::TunnelPoolContextHandle, TUNNEL_BUILD_EXPIRATION},
         routing_table::RoutingTable,
     },
     Error,
@@ -58,7 +58,7 @@ pub enum ReceiveKind {
         message_id: MessageId,
 
         /// Tunnel pool handle.
-        handle: TunnelPoolHandle,
+        handle: TunnelPoolContextHandle,
     },
 }
 

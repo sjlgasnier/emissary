@@ -16,8 +16,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use core::marker::PhantomData;
-
 use crate::{
     crypto::SigningPrivateKey,
     i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
@@ -25,7 +23,7 @@ use crate::{
     runtime::Runtime,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -34,6 +32,7 @@ use nom::{
 };
 
 use alloc::vec::Vec;
+use core::{fmt, marker::PhantomData};
 
 /// "No reply" token/tunnel ID.
 const NO_REPLY: u32 = 0u32;
@@ -137,6 +136,23 @@ pub enum DatabaseStorePayload {
     },
 }
 
+impl fmt::Display for DatabaseStorePayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RouterInfo { router_info } => write!(
+                f,
+                "DatabaseStorePayload::RouterInfo ({})",
+                router_info.identity().id()
+            ),
+            Self::LeaseSet2 { leaseset } => write!(
+                f,
+                "DatabaseStorePayload::LeaseSet2 ({})",
+                leaseset.header.destination.id()
+            ),
+        }
+    }
+}
+
 impl DatabaseStorePayload {
     fn serialized_len(&self) -> usize {
         match self {
@@ -150,7 +166,7 @@ impl DatabaseStorePayload {
 /// Database store message.
 pub struct DatabaseStore<R: Runtime> {
     /// Search key.
-    pub key: Vec<u8>,
+    pub key: Bytes,
 
     /// Payload contained within the `DatabaseStore` message.
     pub payload: DatabaseStorePayload,
@@ -225,7 +241,7 @@ impl<R: Runtime> DatabaseStore<R> {
                 Ok((
                     rest,
                     Self {
-                        key: key.to_vec(),
+                        key: Bytes::from(key.to_vec()),
                         payload: DatabaseStorePayload::RouterInfo { router_info },
                         reply,
                         _runtime: Default::default(),
@@ -238,7 +254,7 @@ impl<R: Runtime> DatabaseStore<R> {
                 Ok((
                     rest,
                     Self {
-                        key: key.to_vec(),
+                        key: Bytes::from(key.to_vec()),
                         payload: DatabaseStorePayload::LeaseSet2 { leaseset },
                         reply,
                         _runtime: Default::default(),
@@ -255,13 +271,31 @@ impl<R: Runtime> DatabaseStore<R> {
     }
 }
 
+/// Database store kind.
+pub enum DatabaseStoreKind {
+    /// [`LeaseSet2`].
+    LeaseSet2 {
+        /// Serialized [`LeaseSet2`].
+        leaseset: Bytes,
+    },
+}
+
+impl DatabaseStoreKind {
+    /// Get serialized length of the payload.
+    fn serialized_len(&self) -> usize {
+        match self {
+            Self::LeaseSet2 { leaseset } => leaseset.len(),
+        }
+    }
+}
+
 /// [`DatabaseStore`] builder.
 pub struct DatabaseStoreBuilder {
     /// Store key.
-    key: Vec<u8>,
+    key: Bytes,
 
-    /// Payload.
-    payload: DatabaseStorePayload,
+    /// Database store kind.
+    kind: DatabaseStoreKind,
 
     /// Reply type, if specified.
     reply: Option<ReplyType>,
@@ -269,10 +303,10 @@ pub struct DatabaseStoreBuilder {
 
 impl DatabaseStoreBuilder {
     /// Create new [`DatabaseStoreBuilder`].
-    pub fn new(key: Vec<u8>, payload: DatabaseStorePayload) -> Self {
+    pub fn new(key: Bytes, kind: DatabaseStoreKind) -> Self {
         Self {
             key,
-            payload,
+            kind,
             reply: None,
         }
     }
@@ -284,20 +318,19 @@ impl DatabaseStoreBuilder {
     }
 
     /// Serialize [`DatabaseStore`] into a byte vector.
-    pub fn build(self, signing_key: &SigningPrivateKey) -> BytesMut {
+    pub fn build(self) -> BytesMut {
         let reply = self.reply.unwrap_or(ReplyType::None);
         let mut out = BytesMut::with_capacity(
             DATABASE_KEY_SIZE
                 .saturating_add(1usize) // store type
                 .saturating_add(reply.serialized_len())
-                .saturating_add(self.payload.serialized_len()),
+                .saturating_add(self.kind.serialized_len()),
         );
 
         out.put_slice(&self.key);
 
-        match &self.payload {
-            DatabaseStorePayload::RouterInfo { .. } => todo!("database store not supported"),
-            DatabaseStorePayload::LeaseSet2 { .. } => out.put_u8(StoreType::LeaseSet2.as_u8()),
+        match &self.kind {
+            DatabaseStoreKind::LeaseSet2 { .. } => out.put_u8(StoreType::LeaseSet2.as_u8()),
         }
 
         match reply {
@@ -323,11 +356,9 @@ impl DatabaseStoreBuilder {
             }
         }
 
-        match self.payload {
-            DatabaseStorePayload::RouterInfo { .. } =>
-                todo!("database store with routerinfo not supported"),
-            DatabaseStorePayload::LeaseSet2 { leaseset } => {
-                out.put_slice(&leaseset.serialize(signing_key));
+        match self.kind {
+            DatabaseStoreKind::LeaseSet2 { leaseset } => {
+                out.put_slice(&leaseset);
             }
         }
 
@@ -448,17 +479,20 @@ mod tests {
     #[test]
     fn serialize_and_parse_store_with_no_reply() {
         let (leaseset, signing_key) = LeaseSet2::random();
-        let mut key = vec![0u8; 32];
+        let key = {
+            let mut key = vec![0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
 
-        rand::thread_rng().fill_bytes(&mut key);
+            Bytes::from(key)
+        };
 
         let serialized = DatabaseStoreBuilder::new(
             key.clone(),
-            DatabaseStorePayload::LeaseSet2 {
-                leaseset: leaseset.clone(),
+            DatabaseStoreKind::LeaseSet2 {
+                leaseset: Bytes::from(leaseset.clone().serialize(&signing_key)),
             },
         )
-        .build(&signing_key);
+        .build();
 
         let store = DatabaseStore::<MockRuntime>::parse(&serialized).unwrap();
 
@@ -477,16 +511,19 @@ mod tests {
 
     #[test]
     fn serialize_and_parse_store_with_reply() {
-        let (leaseset, siging_key) = LeaseSet2::random();
-        let mut key = vec![0u8; 32];
+        let (leaseset, signing_key) = LeaseSet2::random();
         let reply_router = RouterId::random();
+        let key = {
+            let mut key = vec![0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
 
-        rand::thread_rng().fill_bytes(&mut key);
+            Bytes::from(key)
+        };
 
         let serialized = DatabaseStoreBuilder::new(
             key.clone(),
-            DatabaseStorePayload::LeaseSet2 {
-                leaseset: leaseset.clone(),
+            DatabaseStoreKind::LeaseSet2 {
+                leaseset: Bytes::from(leaseset.clone().serialize(&signing_key)),
             },
         )
         .with_reply_type(ReplyType::Tunnel {
@@ -494,7 +531,7 @@ mod tests {
             tunnel_id: TunnelId::from(0x13351336),
             router_id: reply_router.clone(),
         })
-        .build(&siging_key);
+        .build();
 
         let store = DatabaseStore::<MockRuntime>::parse(&serialized).unwrap();
 

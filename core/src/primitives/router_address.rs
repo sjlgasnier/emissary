@@ -53,19 +53,11 @@ impl TryFrom<Str> for TransportKind {
     type Error = ();
 
     fn try_from(value: Str) -> Result<Self, Self::Error> {
-        let value = value.string();
-
-        // TODO: verify that `2` exists
-        if value[0] == b'S' && value[1] == b'S' && value[2] == b'U' {
+        if value.starts_with("SSU") {
             return Ok(TransportKind::Ssu2);
         }
 
-        if value[0] == b'N'
-            && value[1] == b'T'
-            && value[2] == b'C'
-            && value[3] == b'P'
-            && value[4] == b'2'
-        {
+        if value.starts_with("NTCP2") {
             return Ok(TransportKind::Ntcp2);
         }
 
@@ -191,12 +183,10 @@ impl RouterAddress {
 
             match (maybe_host, maybe_port) {
                 (Some(host), Some(port)) => {
-                    let port =
-                        str::from_utf8(port.string()).ok().map(|port| port.parse::<u16>().ok());
-                    let host =
-                        str::from_utf8(host.string()).ok().map(|host| host.parse::<IpAddr>().ok());
+                    let port = port.parse::<u16>().ok();
+                    let host = host.parse::<IpAddr>().ok();
 
-                    match (host.flatten(), port.flatten()) {
+                    match (host, port) {
                         (Some(host), Some(port)) => Some(SocketAddr::new(host, port)),
                         (host, port) => {
                             tracing::warn!(

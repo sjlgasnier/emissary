@@ -78,6 +78,10 @@ impl Mapping {
 
     /// Parse multiple [`Mapping`]s from `input`.
     pub fn parse_multi_frame(input: &[u8]) -> IResult<&[u8], Vec<Mapping>> {
+        if input.is_empty() {
+            return Ok((&[], Vec::new()));
+        }
+
         let (mut rest, mut num_option_bytes) = be_u16(input)?;
         let mut options = Vec::<Mapping>::new();
 
@@ -126,28 +130,20 @@ mod tests {
 
     #[test]
     fn valid_mapping() {
-        let mapping = Mapping::new(
-            Str::new("hello".as_bytes().to_vec()),
-            Str::new("world".as_bytes().to_vec()),
-        )
-        .serialize();
+        let mapping = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
 
         assert_eq!(
             Mapping::from_bytes(mapping),
             Some(Mapping {
-                key: Str::new("hello".as_bytes().to_vec()),
-                value: Str::new("world".as_bytes().to_vec()),
+                key: Str::from("hello"),
+                value: Str::from("world"),
             })
         );
     }
 
     #[test]
     fn valid_string_with_extra_bytes() {
-        let mut mapping = Mapping::new(
-            Str::new("hello".as_bytes().to_vec()),
-            Str::new("world".as_bytes().to_vec()),
-        )
-        .serialize();
+        let mut mapping = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
         mapping.push(1);
         mapping.push(2);
         mapping.push(3);
@@ -156,19 +152,15 @@ mod tests {
         assert_eq!(
             Mapping::from_bytes(mapping),
             Some(Mapping {
-                key: Str::new("hello".as_bytes().to_vec()),
-                value: Str::new("world".as_bytes().to_vec()),
+                key: Str::from("hello"),
+                value: Str::from("world"),
             })
         );
     }
 
     #[test]
     fn extra_bytes_returned() {
-        let mut mapping = Mapping::new(
-            Str::new("hello".as_bytes().to_vec()),
-            Str::new("world".as_bytes().to_vec()),
-        )
-        .serialize();
+        let mut mapping = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
         mapping.push(1);
         mapping.push(2);
         mapping.push(3);
@@ -179,8 +171,8 @@ mod tests {
         assert_eq!(
             mapping,
             Mapping {
-                key: Str::new("hello".as_bytes().to_vec()),
-                value: Str::new("world".as_bytes().to_vec()),
+                key: Str::from("hello"),
+                value: Str::from("world"),
             }
         );
         assert_eq!(rest, [1, 2, 3, 4]);
@@ -188,21 +180,9 @@ mod tests {
 
     #[test]
     fn multiple_mappings() {
-        let mut mapping1 = Mapping::new(
-            Str::new("hello".as_bytes().to_vec()),
-            Str::new("world".as_bytes().to_vec()),
-        )
-        .serialize();
-        let mapping2 = Mapping::new(
-            Str::new("foo".as_bytes().to_vec()),
-            Str::new("bar".as_bytes().to_vec()),
-        )
-        .serialize();
-        let mapping3 = Mapping::new(
-            Str::new("siip".as_bytes().to_vec()),
-            Str::new("huup".as_bytes().to_vec()),
-        )
-        .serialize();
+        let mut mapping1 = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
+        let mapping2 = Mapping::new(Str::from("foo"), Str::from("bar")).serialize();
+        let mapping3 = Mapping::new(Str::from("siip"), Str::from("huup")).serialize();
 
         mapping1.extend_from_slice(&mapping2);
         mapping1.extend_from_slice(&mapping3);
@@ -211,8 +191,8 @@ mod tests {
         assert_eq!(
             mapping,
             Mapping {
-                key: Str::new("hello".as_bytes().to_vec()),
-                value: Str::new("world".as_bytes().to_vec()),
+                key: Str::from("hello"),
+                value: Str::from("world"),
             }
         );
 
@@ -220,8 +200,8 @@ mod tests {
         assert_eq!(
             mapping,
             Mapping {
-                key: Str::new("foo".as_bytes().to_vec()),
-                value: Str::new("bar".as_bytes().to_vec()),
+                key: Str::from("foo"),
+                value: Str::from("bar"),
             }
         );
 
@@ -229,29 +209,17 @@ mod tests {
         assert_eq!(
             mapping,
             Mapping {
-                key: Str::new("siip".as_bytes().to_vec()),
-                value: Str::new("huup".as_bytes().to_vec()),
+                key: Str::from("siip"),
+                value: Str::from("huup"),
             }
         );
     }
 
     #[test]
     fn parse_multi_frame() {
-        let mapping1 = Mapping::new(
-            Str::new("hello".as_bytes().to_vec()),
-            Str::new("world".as_bytes().to_vec()),
-        )
-        .serialize();
-        let mapping2 = Mapping::new(
-            Str::new("foo".as_bytes().to_vec()),
-            Str::new("bar".as_bytes().to_vec()),
-        )
-        .serialize();
-        let mapping3 = Mapping::new(
-            Str::new("siip".as_bytes().to_vec()),
-            Str::new("huup".as_bytes().to_vec()),
-        )
-        .serialize();
+        let mapping1 = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
+        let mapping2 = Mapping::new(Str::from("foo"), Str::from("bar")).serialize();
+        let mapping3 = Mapping::new(Str::from("siip"), Str::from("huup")).serialize();
 
         let mut mappings = ((mapping1.len() + mapping2.len() + mapping3.len()) as u16)
             .to_be_bytes()
@@ -269,22 +237,22 @@ mod tests {
         assert_eq!(
             mappings[0],
             Mapping {
-                key: Str::new("hello".as_bytes().to_vec()),
-                value: Str::new("world".as_bytes().to_vec()),
+                key: Str::from("hello"),
+                value: Str::from("world"),
             }
         );
         assert_eq!(
             mappings[1],
             Mapping {
-                key: Str::new("foo".as_bytes().to_vec()),
-                value: Str::new("bar".as_bytes().to_vec()),
+                key: Str::from("foo"),
+                value: Str::from("bar"),
             }
         );
         assert_eq!(
             mappings[2],
             Mapping {
-                key: Str::new("siip".as_bytes().to_vec()),
-                value: Str::new("huup".as_bytes().to_vec()),
+                key: Str::from("siip"),
+                value: Str::from("huup"),
             }
         );
     }

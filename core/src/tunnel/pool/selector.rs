@@ -23,7 +23,7 @@ use crate::{
     primitives::{RouterId, TunnelId},
     router_storage::RouterStorage,
     runtime::JoinSet,
-    tunnel::pool::TunnelPoolHandle,
+    tunnel::pool::TunnelPoolContextHandle,
 };
 
 use bytes::Bytes;
@@ -48,12 +48,12 @@ pub trait TunnelSelector: Send + Unpin {
     /// Attempt to select an outbound tunnel for delivery of an inbound tunnel build request.
     ///
     /// Returns `None` if there are no outbound tunnels available.
-    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)>;
+    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolContextHandle)>;
 
     /// Attempt to select an inbound tunnel for reception of an outbound tunnel build reply.
     ///
     /// Returns `None` if there are no inbound tunnels available.
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)>;
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolContextHandle)>;
 
     /// Add a new tunnel into the set of active outbound tunnels.
     fn add_outbound_tunnel(&self, tunnel_id: TunnelId);
@@ -87,7 +87,7 @@ pub trait HopSelector: Send + Unpin {
 #[derive(Clone)]
 pub struct ExploratorySelector {
     /// Exploratory tunnel pool handle.
-    handle: TunnelPoolHandle,
+    handle: TunnelPoolContextHandle,
 
     /// Active inbound tunnels.
     inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
@@ -101,7 +101,7 @@ pub struct ExploratorySelector {
 
 impl ExploratorySelector {
     /// Create new [`ExploratorySelector`].
-    pub fn new(router_storage: RouterStorage, handle: TunnelPoolHandle) -> Self {
+    pub fn new(router_storage: RouterStorage, handle: TunnelPoolContextHandle) -> Self {
         Self {
             handle,
             inbound: Default::default(),
@@ -116,17 +116,17 @@ impl ExploratorySelector {
     }
 
     /// Get reference to exploratory tunnel pool's [`TunnePoolHandle`].
-    pub fn handle(&self) -> &TunnelPoolHandle {
+    pub fn handle(&self) -> &TunnelPoolContextHandle {
         &self.handle
     }
 }
 
 impl TunnelSelector for ExploratorySelector {
-    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)> {
+    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolContextHandle)> {
         self.outbound.read().iter().next().map(|tunnel_id| (*tunnel_id, &self.handle))
     }
 
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)> {
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolContextHandle)> {
         self.inbound
             .read()
             .iter()
@@ -189,7 +189,7 @@ pub struct ClientSelector {
     exploratory: ExploratorySelector,
 
     /// Client tunnel pool handle.
-    handle: TunnelPoolHandle,
+    handle: TunnelPoolContextHandle,
 
     /// Active inbound tunnels.
     inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
@@ -200,7 +200,7 @@ pub struct ClientSelector {
 
 impl ClientSelector {
     /// Create new [`ClientSelector`].
-    pub fn new(exploratory: ExploratorySelector, handle: TunnelPoolHandle) -> Self {
+    pub fn new(exploratory: ExploratorySelector, handle: TunnelPoolContextHandle) -> Self {
         Self {
             exploratory,
             handle,
@@ -211,14 +211,14 @@ impl ClientSelector {
 }
 
 impl TunnelSelector for ClientSelector {
-    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolHandle)> {
+    fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolContextHandle)> {
         self.outbound.read().iter().next().map_or_else(
             || self.exploratory.select_outbound_tunnel(),
             |tunnel_id| Some((*tunnel_id, &self.handle)),
         )
     }
 
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolHandle)> {
+    fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolContextHandle)> {
         self.inbound.read().iter().next().map_or_else(
             || self.exploratory.select_inbound_tunnel(),
             |(tunnel_id, router_id)| Some((*tunnel_id, router_id.clone(), &self.handle)),

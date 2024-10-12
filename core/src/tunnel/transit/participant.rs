@@ -106,7 +106,7 @@ impl<R: Runtime> Participant<R> {
         let message = MessageBuilder::short()
             .with_message_type(MessageType::TunnelData)
             .with_message_id(R::rng().next_u32())
-            .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
             .with_payload(&out)
             .build();
 

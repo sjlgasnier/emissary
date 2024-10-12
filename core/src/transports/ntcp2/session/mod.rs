@@ -245,8 +245,8 @@ impl<R: Runtime> SessionManager<R> {
                 })?;
 
                 (
-                    StaticPublicKey::from_bytes(base64_decode(static_key.string())).unwrap(),
-                    base64_decode(iv.string()),
+                    StaticPublicKey::from_bytes(base64_decode(static_key.as_bytes())).unwrap(),
+                    base64_decode(iv.as_bytes()),
                     socket_address,
                 )
             };

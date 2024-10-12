@@ -40,8 +40,15 @@ struct Ntcp2Config {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct I2cpConfig {
+    enabled: bool,
+    port: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     ntcp2: Ntcp2Config,
+    i2cp: I2cpConfig,
 }
 
 /// Router configuration.
@@ -54,6 +61,9 @@ pub struct Config {
 
     /// NTCP2 config.
     ntcp2_config: Option<emissary::Ntcp2Config>,
+
+    /// I2CP config.
+    i2cp_config: Option<emissary::I2cpConfig>,
 
     /// Static key.
     static_key: Vec<u8>,
@@ -68,6 +78,7 @@ impl Into<emissary::Config> for Config {
             static_key: self.static_key,
             signing_key: self.signing_key,
             ntcp2_config: self.ntcp2_config,
+            i2cp_config: self.i2cp_config,
             routers: self.routers,
         }
     }
@@ -292,6 +303,10 @@ impl Config {
                 port: 8888u16,
                 host: None,
             },
+            i2cp: I2cpConfig {
+                enabled: true,
+                port: 7654,
+            },
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -312,6 +327,7 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
+            i2cp_config: Some(emissary::I2cpConfig { port: 7654 }),
             static_key,
             signing_key,
         })
@@ -335,6 +351,10 @@ impl Config {
                         port: 8888u16,
                         host: None,
                     },
+                    i2cp: I2cpConfig {
+                        enabled: true,
+                        port: 7654,
+                    },
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -354,6 +374,7 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
+            i2cp_config: Some(emissary::I2cpConfig { port: 7654 }),
             static_key,
             signing_key,
         })
@@ -549,6 +570,10 @@ mod tests {
                 enabled: true,
                 port: 1337u16,
                 host: None,
+            },
+            i2cp: I2cpConfig {
+                enabled: false,
+                port: 0u16,
             },
         };
         let config = toml::to_string(&config).expect("to succeed");

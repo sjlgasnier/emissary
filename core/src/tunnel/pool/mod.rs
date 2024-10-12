@@ -19,8 +19,8 @@
 use crate::{
     error::{ChannelError, Error},
     i2np::{Message, MessageBuilder, MessageType},
-    primitives::{Lease2, MessageId, RouterId, TunnelId},
-    runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
+    primitives::{Lease, MessageId, RouterId, Str, TunnelId},
+    runtime::{Counter, Gauge, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
@@ -45,6 +45,7 @@ use futures::{
     future::{select, BoxFuture, Either},
     FutureExt, StreamExt,
 };
+use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
 use listener::ReceiveKind;
 use rand_core::RngCore;
@@ -58,10 +59,12 @@ use core::{
     time::Duration,
 };
 
-pub use context::{TunnelPoolContext, TunnelPoolHandle};
-pub use selector::ExploratorySelector;
+pub use context::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle};
+pub use handle::{TunnelPoolEvent, TunnelPoolHandle};
+pub use selector::{ClientSelector, ExploratorySelector};
 
 mod context;
+mod handle;
 mod listener;
 mod selector;
 mod timer;
@@ -93,25 +96,15 @@ const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 /// tunnel expires.
 const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
-/// Tunnel pool kind.
-///
-/// There are two different kinds of tunnel pools:
-///  * exploratory tunnel pool
-///  * client tunnel pools
-///
-/// The distinction is made as client tunnel pools are crated for destinations and inbound tunnels
-/// of those pools must be able to route garlic cloves to the installed destination.
-#[derive(Clone)]
-pub enum TunnelPoolKind {
-    /// Exploratory tunnel pool.
-    Exploratory,
-
-    /// Client tunnel pool.
-    Client(mpsc::Sender<Message>),
-}
-
 /// Tunnel pool configuration.
+#[derive(Debug)]
 pub struct TunnelPoolConfig {
+    /// Tunnel pool name.
+    ///
+    /// This is either set in I2CP options and if none is set,
+    /// it's the short hash of the `Destination`.
+    name: Str,
+
     /// How many inbound tunnels the pool should have.
     num_inbound: usize,
 
@@ -123,9 +116,6 @@ pub struct TunnelPoolConfig {
 
     /// How many hops should each outbound tunnel have.
     num_outbound_hops: usize,
-
-    /// Destination of the tunnel (currently unused).
-    destination: (),
 }
 
 impl Default for TunnelPoolConfig {
@@ -135,7 +125,40 @@ impl Default for TunnelPoolConfig {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
-            destination: (),
+            name: Str::from("exploratory"),
+        }
+    }
+}
+
+impl From<&HashMap<Str, Str>> for TunnelPoolConfig {
+    fn from(options: &HashMap<Str, Str>) -> Self {
+        let num_inbound = options
+            .get(&Str::from("inbound.quantity"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let num_inbound_hops = options
+            .get(&Str::from("inbound.length"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let num_outbound = options
+            .get(&Str::from("outbound.quantity"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let num_outbound_hops = options
+            .get(&Str::from("outbound.length"))
+            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+
+        let name = options
+            .get(&Str::from("inbound.nickname"))
+            .cloned()
+            .unwrap_or(Str::from("unspecified"));
+
+        Self {
+            name,
+            num_inbound,
+            num_inbound_hops,
+            num_outbound,
+            num_outbound_hops,
         }
     }
 }
@@ -184,13 +207,16 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     pending_outbound: TunnelBuildListener<R, OutboundTunnel<R>>,
 
     /// Pending tunnel tests.
-    pending_tests: R::JoinSet<(TunnelId, TunnelId, crate::Result<()>)>,
+    pending_tests: R::JoinSet<(TunnelId, TunnelId, crate::Result<Duration>)>,
 
     /// Routing table.
     routing_table: RoutingTable,
 
     /// Tunnel/hop selector for the tunnel pool.
     selector: S,
+
+    /// RX channel for receiving a shutdown signal from the pool's owner.
+    shutdown_rx: Option<oneshot::Receiver<()>>,
 
     /// Expiration timers for inbound/outbound tunnels.
     tunnel_timers: TunnelTimer<R>,
@@ -199,31 +225,42 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
 impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
     /// Create new [`TunnelPool`].
     pub fn new(
-        config: TunnelPoolConfig,
+        build_parameters: TunnelPoolBuildParameters,
         selector: S,
-        context: TunnelPoolContext,
         routing_table: RoutingTable,
         noise: NoiseContext,
         metrics: R::MetricsHandle,
-    ) -> Self {
-        Self {
+    ) -> (Self, TunnelPoolHandle) {
+        let TunnelPoolBuildParameters {
             config,
             context,
-            expiring_inbound: HashSet::new(),
-            expiring_outbound: HashSet::new(),
-            inbound: R::join_set(),
-            inbound_tunnels: HashMap::new(),
-            maintenance_timer: Box::pin(R::delay(Duration::from_secs(0))),
-            metrics,
-            noise,
-            outbound: HashMap::new(),
-            pending_inbound: TunnelBuildListener::new(routing_table.clone()),
-            pending_outbound: TunnelBuildListener::new(routing_table.clone()),
-            pending_tests: R::join_set(),
-            routing_table,
-            selector,
-            tunnel_timers: TunnelTimer::new(),
-        }
+            shutdown_rx,
+            tunnel_pool_handle,
+            ..
+        } = build_parameters;
+
+        (
+            Self {
+                config,
+                context,
+                expiring_inbound: HashSet::new(),
+                expiring_outbound: HashSet::new(),
+                inbound: R::join_set(),
+                inbound_tunnels: HashMap::new(),
+                maintenance_timer: Box::pin(R::delay(Duration::from_secs(0))),
+                metrics,
+                noise,
+                outbound: HashMap::new(),
+                pending_inbound: TunnelBuildListener::new(routing_table.clone()),
+                pending_outbound: TunnelBuildListener::new(routing_table.clone()),
+                pending_tests: R::join_set(),
+                routing_table,
+                selector,
+                shutdown_rx: Some(shutdown_rx),
+                tunnel_timers: TunnelTimer::new(),
+            },
+            tunnel_pool_handle,
+        )
     }
 
     /// Maintain the tunnel pool.
@@ -252,6 +289,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             let Some(hops) = self.selector.select_hops(self.config.num_outbound_hops) else {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    name = %self.config.name,
                     hops_required = ?self.config.num_outbound_hops,
                     "not enough routers for outbound tunnel build",
                 );
@@ -293,6 +331,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                     tracing::trace!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         %gateway,
                         %message_id,
@@ -333,6 +372,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         Err(error) => {
                             tracing::warn!(
                                 target: LOG_TARGET,
+                                name = %self.config.name,
                                 %tunnel_id,
                                 %message_id,
                                 ?error,
@@ -360,6 +400,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                     tracing::trace!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         %gateway,
                         %router_id,
@@ -411,6 +452,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         Err(error) => {
                             tracing::warn!(
                                 target: LOG_TARGET,
+                                name = %self.config.name,
                                 %tunnel_id,
                                 %message_id,
                                 ?error,
@@ -447,6 +489,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             let Some(hops) = self.selector.select_hops(self.config.num_inbound_hops) else {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    name = %self.config.name,
                     hops_required = ?self.config.num_inbound_hops,
                     "not enough routers for inbound tunnel build",
                 );
@@ -472,7 +515,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 },
                 receiver: ReceiverKind::Inbound {
                     message_rx: tunnel_rx,
-                    handle: self.context.handle(),
+                    handle: self.context.context_handle(),
                 },
                 message_id,
                 noise: self.noise.clone(),
@@ -491,6 +534,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         None => {
                             tracing::debug!(
                                 target: LOG_TARGET,
+                                name = %self.config.name,
                                 %tunnel_id,
                                 "no outbound tunnel available, send build request to router",
                             );
@@ -499,6 +543,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         Some((send_tunnel_id, handle)) => {
                             tracing::trace!(
                                 target: LOG_TARGET,
+                                name = %self.config.name,
                                 %tunnel_id,
                                 %send_tunnel_id,
                                 "send tunnel build request to local outbound tunnel",
@@ -511,6 +556,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                             ) {
                                 tracing::warn!(
                                     target: LOG_TARGET,
+                                    name = %self.config.name,
                                     %tunnel_id,
                                     %send_tunnel_id,
                                     ?error,
@@ -523,8 +569,9 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 Err(error) => {
                     tracing::warn!(
                         target: LOG_TARGET,
-                        ?tunnel_id,
-                        ?message_id,
+                        name = %self.config.name,
+                        %tunnel_id,
+                        %message_id,
                         ?error,
                         "failed to create outbound tunnel",
                     );
@@ -560,6 +607,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                 tracing::trace!(
                     target: LOG_TARGET,
+                    name = %self.config.name,
                     %outbound,
                     %inbound,
                     %router,
@@ -570,7 +618,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 // create dummy test message and send it through the outbound tunnel
                 // to the selected inbound tunnel's gateway
                 let message = MessageBuilder::standard()
-                    .with_expiration((R::time_since_epoch() + Duration::from_secs(8)).as_secs())
+                    .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                     .with_message_type(MessageType::Data)
                     .with_message_id(message_id)
                     .with_payload(b"tunnel test")
@@ -589,16 +637,19 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     .send_message(router, messages.next().expect("message to exist"))
                 {
                     Ok(_) => self.pending_tests.push(async move {
+                        let started = R::now();
+
                         match select(message_rx, Box::pin(R::delay(TUNNEL_TEST_EXPIRATION))).await {
                             Either::Right((_, _)) => (outbound, inbound, Err(Error::Timeout)),
                             Either::Left((Err(_), _)) =>
                                 (outbound, inbound, Err(Error::Channel(ChannelError::Closed))),
-                            Either::Left((Ok(_), _)) => (outbound, inbound, Ok(())),
+                            Either::Left((Ok(_), _)) => (outbound, inbound, Ok(started.elapsed())),
                         }
                     }),
                     Err(error) => {
                         tracing::warn!(
                             target: LOG_TARGET,
+                            name = %self.config.name,
                             %outbound,
                             %inbound,
                             ?error,
@@ -625,6 +676,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Err(error) => {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         ?error,
                         "failed to build outbound tunnel",
                     );
@@ -635,6 +687,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Ok(tunnel) => {
                     tracing::debug!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         outbound_tunnel_id = %tunnel.tunnel_id(),
                         "outbound tunnel built",
                     );
@@ -643,6 +696,17 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.outbound.insert(tunnel_id, tunnel);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                     self.metrics.gauge(NUM_OUTBOUND_TUNNELS).increment(1);
+
+                    // inform the owner of the tunnel pool that a new outbound tunnel has been built
+                    if let Err(error) = self.context.register_outbound_tunnel_built(tunnel_id) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register new outbound tunnel to owner",
+                        );
+                    }
                 }
             }
         }
@@ -653,9 +717,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Err(error) => {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         ?error,
-                        "failed to build inbound channel",
+                        "failed to build inbound tunnel",
                     );
 
                     self.routing_table.remove_tunnel(&tunnel_id);
@@ -665,6 +730,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Ok(tunnel) => {
                     tracing::debug!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         tunnel_id = %tunnel.tunnel_id(),
                         "inbound tunnel built",
                     );
@@ -678,16 +744,23 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.selector.add_inbound_tunnel(tunnel_id, router_id.clone());
                     self.inbound_tunnels.insert(tunnel_id, router_id.clone());
 
-                    // store lease of the new inbound tunnel into `TunnelPoolHandle` so client code
-                    // can query available leases when it's creating new sessions
-                    self.context.add_lease(
-                        *tunnel.tunnel_id(),
-                        Lease2 {
+                    // inform the owner of the tunnel pool that a new inbound tunnel has been built
+                    if let Err(error) = self.context.register_inbound_tunnel_built(
+                        tunnel_id,
+                        Lease {
                             router_id,
                             tunnel_id,
-                            expires: (R::time_since_epoch() + TUNNEL_EXPIRATION).as_secs() as u32,
+                            expires: R::time_since_epoch() + TUNNEL_EXPIRATION,
                         },
-                    );
+                    ) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register new inbound tunnel to owner",
+                        );
+                    }
 
                     self.inbound.push(tunnel);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).increment(1);
@@ -703,6 +776,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Some((tunnel_id, gateway_tunnel_id)) => {
                     tracing::debug!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         %gateway_tunnel_id,
                         "inbound tunnel exited",
@@ -712,6 +786,19 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.context.remove_lease(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
+
+                    // inform the owner of the tunnel pool that an inbound tunnel has expired
+                    if let Err(error) =
+                        self.context.register_inbound_tunnel_expired(gateway_tunnel_id)
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %gateway_tunnel_id,
+                            ?error,
+                            "failed to register expired inbound tunnel to owner",
+                        );
+                    }
                 }
             }
         }
@@ -741,6 +828,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     } => match self.outbound.get(&gateway) {
                         None => tracing::warn!(
                             target: LOG_TARGET,
+                            name = %self.config.name,
                             %gateway,
                             "cannot send message, outbound tunnel doesn't exist",
                         ),
@@ -753,6 +841,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                                 {
                                     tracing::warn!(
                                         target: LOG_TARGET,
+                                        name = %self.config.name,
                                         %gateway,
                                         ?error,
                                         "failed to send tunnel message to router",
@@ -770,6 +859,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         let Some((outbound_gateway, tunnel)) = self.outbound.iter().next() else {
                             tracing::warn!(
                                 target: LOG_TARGET,
+                                name = %self.config.name,
                                 "failed to send tunnel message, no outbound tunnel available",
                             );
                             continue;
@@ -777,6 +867,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                         tracing::trace!(
                             target: LOG_TARGET,
+                            name = %self.config.name,
                             %outbound_gateway,
                             "send tunnel message to remote destination",
                         );
@@ -790,6 +881,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             {
                                 tracing::warn!(
                                     target: LOG_TARGET,
+                                    name = %self.config.name,
                                     %gateway,
                                     ?error,
                                     "failed to send tunnel message to router",
@@ -799,6 +891,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     }
                     TunnelMessage::Inbound { message } => tracing::warn!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         message_type = ?message.message_type,
                         "unhandled message"
                     ),
@@ -812,8 +905,9 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 None => return Poll::Ready(()),
                 Some((outbound, inbound, result)) => match result {
                     Err(error) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             target: LOG_TARGET,
+                            name = %self.config.name,
                             %outbound,
                             %inbound,
                             ?error,
@@ -822,11 +916,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                         self.metrics.counter(NUM_TEST_FAILURES).increment(1);
                     }
-                    Ok(()) => {
+                    Ok(elapsed) => {
                         tracing::trace!(
                             target: LOG_TARGET,
+                            name = %self.config.name,
                             %outbound,
                             %inbound,
+                            ?elapsed,
                             "tunnel test succeeded",
                         );
 
@@ -854,18 +950,31 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Some(TunnelTimerEvent::Destroy { tunnel_id }) => {
                     tracing::debug!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         "outbound tunnel expired",
                     );
                     self.outbound.remove(&tunnel_id);
                     self.expiring_outbound.remove(&tunnel_id);
                     self.selector.remove_outbound_tunnel(&tunnel_id);
+
+                    // inform the owner of the tunnel pool that an inbound tunnel has expired
+                    if let Err(error) = self.context.register_outbound_tunnel_expired(tunnel_id) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register expired outbound tunnel to owner",
+                        );
+                    }
                 }
                 Some(TunnelTimerEvent::Rebuild {
                     kind: TunnelKind::Outbound { tunnel_id },
                 }) => {
                     tracing::trace!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         "outbound tunnel about to expire",
                     );
@@ -876,6 +985,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 }) => {
                     tracing::trace!(
                         target: LOG_TARGET,
+                        name = %self.config.name,
                         %tunnel_id,
                         "inbound tunnel about to expire",
                     );
@@ -893,6 +1003,26 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         }
 
         self.maintain_pool();
+
+        // check if the pool owner has sent a shutdown signal to the tunnel pool
+        //
+        // currently `TunnelPool` doesn't do any graceful shutdown for its own tunnels
+        // and instead shuts down immediately
+        //
+        // the client is informed that the pool is shut down before it's shutdown so
+        // the destination can starts up its own shutdown process
+        if let Some(rx) = &mut self.shutdown_rx {
+            if let Poll::Ready(_) = rx.poll_unpin(cx) {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    name = %self.config.name,
+                    "tunnel pool shutting down",
+                );
+                let _ = self.context.register_tunnel_pool_shut_down();
+
+                return Poll::Ready(());
+            }
+        }
 
         Poll::Pending
     }
@@ -933,7 +1063,7 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -951,12 +1081,11 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1011,7 +1140,7 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1029,12 +1158,12 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1084,7 +1213,7 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1102,12 +1231,12 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1162,7 +1291,7 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1180,12 +1309,12 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1236,7 +1365,7 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1255,16 +1384,14 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-        let (client_context, client_pool_handle) =
-            TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-        let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
-        let client_selector = ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
 
-        let mut exploratory_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
+        let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
+
+        let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             exploratory_selector.clone(),
-            context,
             routing_table.clone(),
             noise.clone(),
             handle.clone(),
@@ -1312,12 +1439,16 @@ mod tests {
                 num_inbound_hops: 3usize,
                 num_outbound: 0usize,
                 num_outbound_hops: 0usize,
-                destination: (),
+                ..Default::default()
             };
-            let mut client_pool = TunnelPool::<MockRuntime, _>::new(
-                pool_config,
-                exploratory_selector,
-                client_context,
+            let client_parameters = TunnelPoolBuildParameters::new(pool_config);
+            let client_pool_handle = client_parameters.context_handle.clone();
+            let client_selector =
+                ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
+
+            let (mut client_pool, _client_handle) = TunnelPool::<MockRuntime, _>::new(
+                client_parameters,
+                client_selector,
                 routing_table.clone(),
                 noise,
                 handle.clone(),
@@ -1433,7 +1564,7 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1452,16 +1583,14 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-        let (client_context, client_pool_handle) =
-            TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-        let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
-        let client_selector = ClientSelector::new(exploratory_selector.clone(), client_pool_handle);
 
-        let mut exploratory_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
+        let exploratory_selector = ExploratorySelector::new(router_storage.clone(), pool_handle);
+
+        let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             exploratory_selector.clone(),
-            context,
             routing_table.clone(),
             noise.clone(),
             handle.clone(),
@@ -1509,12 +1638,15 @@ mod tests {
                 num_inbound_hops: 0usize,
                 num_outbound: 1usize,
                 num_outbound_hops: 3usize,
-                destination: (),
+                ..Default::default()
             };
-            let mut client_pool = TunnelPool::<MockRuntime, _>::new(
-                pool_config,
-                exploratory_selector,
-                client_context,
+            let parameters = TunnelPoolBuildParameters::new(pool_config);
+            let pool_handle = parameters.context_handle.clone();
+            let client_selector = ClientSelector::new(exploratory_selector, pool_handle);
+
+            let (mut client_pool, _client_handle) = TunnelPool::<MockRuntime, _>::new(
+                parameters,
+                client_selector,
                 routing_table.clone(),
                 noise,
                 handle.clone(),
@@ -1629,7 +1761,7 @@ mod tests {
             num_inbound_hops: 0usize,
             num_outbound: 1usize,
             num_outbound_hops: 3usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1647,12 +1779,12 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1712,7 +1844,7 @@ mod tests {
             num_inbound_hops: 3usize,
             num_outbound: 0usize,
             num_outbound_hops: 0usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1730,12 +1862,12 @@ mod tests {
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1792,7 +1924,7 @@ mod tests {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1811,12 +1943,12 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1960,7 +2092,7 @@ mod tests {
             num_inbound_hops: 2usize,
             num_outbound: 1usize,
             num_outbound_hops: 2usize,
-            destination: (),
+            ..Default::default()
         };
         let our_hash = {
             let mut our_hash = vec![0u8; 32];
@@ -1979,12 +2111,12 @@ mod tests {
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-        let (context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
 
-        let mut tunnel_pool = TunnelPool::<MockRuntime, _>::new(
-            pool_config,
+        let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
             ExploratorySelector::new(router_storage.clone(), pool_handle),
-            context,
             routing_table.clone(),
             noise,
             handle.clone(),

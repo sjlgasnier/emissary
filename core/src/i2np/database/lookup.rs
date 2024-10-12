@@ -21,7 +21,7 @@ use crate::{
     primitives::{RouterId, RouterInfo, TunnelId},
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use hashbrown::HashSet;
 use nom::{
     bytes::complete::take,
@@ -207,7 +207,7 @@ impl DatabaseLookup {
 /// [`DatabaseLookup`] message builder.
 pub struct DatabaseLookupBuilder {
     /// Search key.
-    key: Vec<u8>,
+    key: Bytes,
 
     /// Lookup type.
     lookup: LookupType,
@@ -222,7 +222,7 @@ pub struct DatabaseLookupBuilder {
 
 impl DatabaseLookupBuilder {
     /// Create new [`DatabaseLookupBuilder`].
-    pub fn new(key: Vec<u8>, router_id: RouterId, lookup: LookupType) -> Self {
+    pub fn new(key: Bytes, router_id: RouterId, lookup: LookupType) -> Self {
         Self {
             key,
             lookup,
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn normal_lookup() {
         let mut message = DatabaseLookupBuilder::new(
-            vec![1u8; 32],
+            Bytes::from(vec![1u8; 32]),
             RouterId::from(vec![0u8; 32]),
             LookupType::Normal,
         )
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn leaseset_lookup() {
         let mut message = DatabaseLookupBuilder::new(
-            vec![2u8; 32],
+            Bytes::from(vec![2u8; 32]),
             RouterId::from(vec![1u8; 32]),
             LookupType::Leaseset,
         )
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn router_lookup() {
         let mut message = DatabaseLookupBuilder::new(
-            vec![3u8; 32],
+            Bytes::from(vec![3u8; 32]),
             RouterId::from(vec![2u8; 32]),
             LookupType::Router,
         )
@@ -355,7 +355,7 @@ mod tests {
             (5..10).map(|id| RouterId::from(vec![id as u8; 32])).collect::<HashSet<_>>();
 
         let mut message = DatabaseLookupBuilder::new(
-            vec![3u8; 32],
+            Bytes::from(vec![3u8; 32]),
             RouterId::from(vec![2u8; 32]),
             LookupType::Router,
         )
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn exploration_lookup() {
         let mut message = DatabaseLookupBuilder::new(
-            vec![4u8; 32],
+            Bytes::from(vec![4u8; 32]),
             RouterId::from(vec![3u8; 32]),
             LookupType::Exploration,
         )

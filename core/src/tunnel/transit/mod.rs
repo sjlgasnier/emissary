@@ -25,6 +25,7 @@ use crate::{
     },
     error::{RejectionReason, RoutingError, TunnelError},
     i2np::{
+        garlic::GarlicMessage,
         tunnel::{
             build::{short, variable},
             data::EncryptedTunnelData,
@@ -460,6 +461,14 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                 Some(message) => match message.message_type {
                     MessageType::ShortTunnelBuild => self.handle_short_tunnel_build(message),
                     MessageType::VariableTunnelBuild => self.handle_variable_tunnel_build(message),
+                    MessageType::Garlic => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            parsed = ?GarlicMessage::parse(&message.payload[..12]),
+                            "garlic message received to obep",
+                        );
+                        continue;
+                    }
                     message_type => {
                         tracing::warn!(?message_type, "unsupported message type");
                         continue;
@@ -510,7 +519,9 @@ mod tests {
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
             },
-            pool::{TunnelPool, TunnelPoolContext, TunnelPoolHandle, TunnelPoolKind},
+            pool::{
+                TunnelPool, TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle,
+            },
             tests::make_router,
         },
     };
@@ -597,7 +608,11 @@ mod tests {
         let (local_hash, local_pk, local_noise, _) = make_router();
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let (context, handle) = TunnelPoolContext::new(TunnelPoolKind::Exploratory);
+        let TunnelPoolBuildParameters {
+            context,
+            context_handle: handle,
+            ..
+        } = TunnelPoolBuildParameters::new(Default::default());
         let (tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =

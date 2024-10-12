@@ -39,6 +39,13 @@ pub struct Ntcp2Config {
     pub iv: [u8; 16],
 }
 
+/// IC2P configuration.
+#[derive(Debug, Clone)]
+pub struct I2cpConfig {
+    /// I2CP server listen port.
+    pub port: u16,
+}
+
 /// Router configuration.
 pub struct Config {
     /// Router static key.
@@ -47,8 +54,13 @@ pub struct Config {
     /// Router signing key.
     pub signing_key: Vec<u8>,
 
-    /// NTCP2 config
+    /// NTCP2 configuration.
     pub ntcp2_config: Option<Ntcp2Config>,
+
+    /// I2CP configuration.
+    ///
+    /// `None` if I2CP is disabled.
+    pub i2cp_config: Option<I2cpConfig>,
 
     /// Known routers.
     pub routers: Vec<Vec<u8>>,

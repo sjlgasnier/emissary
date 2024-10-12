@@ -16,30 +16,39 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
-#![allow(unused)]
+use crate::{
+    i2cp::message::{MessageType, I2CP_HEADER_SIZE},
+    primitives::{Date, Str},
+};
 
-extern crate alloc;
+use bytes::{BufMut, BytesMut};
 
-pub type Result<T> = core::result::Result<T, Error>;
+/// `BandwidthLimits` message.
+///
+/// https://geti2p.net/spec/i2cp#bandwidthlimitsmessage
+pub struct BandwidthLimits(());
 
-pub use config::{Config, I2cpConfig, Ntcp2Config};
-pub use error::Error;
+impl BandwidthLimits {
+    /// Create new [`BandwidthLimits`] message.
+    pub fn new() -> BytesMut {
+        let mut out = BytesMut::with_capacity(I2CP_HEADER_SIZE + 16 * 4);
 
-mod config;
-mod crypto;
-mod destination;
-mod error;
-mod i2cp;
-mod netdb;
-mod router_storage;
-mod subsystem;
-mod transports;
-mod tunnel;
-mod util;
+        out.put_u32(16 * 4);
+        out.put_u8(MessageType::BandwidthLimits.as_u8());
 
-pub mod i2np;
-pub mod primitives;
-pub mod router;
-pub mod runtime;
+        out.put_u32(50); // client inbound limit (KBps)
+        out.put_u32(50); // client outbound limit (KBps)
+        out.put_u32(20); // router inbound limit (KBps)
+        out.put_u32(20); // router inbound burst limit (KBps)
+        out.put_u32(20); // router outbound limit (KBps)
+        out.put_u32(20); // router outbound burst limit (KBps)
+        out.put_u32(0); // router burst time (seconds)
+
+        // nine 4-byte integers, undefined
+        for _ in 0..9 {
+            out.put_u32(0);
+        }
+
+        out
+    }
+}

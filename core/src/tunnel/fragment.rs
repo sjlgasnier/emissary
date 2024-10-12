@@ -214,6 +214,7 @@ mod tests {
     };
     use alloc::collections::VecDeque;
     use chacha20poly1305::aead::Buffer;
+    use std::time::Duration;
 
     fn split(num_fragments: usize, message: Vec<u8>) -> VecDeque<Vec<u8>> {
         let remainder = message.len() % num_fragments;
@@ -235,7 +236,7 @@ mod tests {
 
     #[test]
     fn simple_fragmentation() {
-        let expiration = MockRuntime::time_since_epoch().as_secs();
+        let expiration = MockRuntime::time_since_epoch();
 
         let mut message = MessageBuilder::standard()
             .with_expiration(expiration)
@@ -266,7 +267,10 @@ mod tests {
         let (message, delivery_instructions) =
             handler.last_fragment(message_id, 3, &fragments.pop_front().unwrap()).unwrap();
 
-        assert_eq!(message.expiration, expiration);
+        assert_eq!(
+            message.expiration,
+            Duration::from_millis(expiration.as_millis() as u64)
+        );
         assert_eq!(message.message_id, 1338u32);
         assert_eq!(message.message_type, MessageType::Data);
         assert_eq!(message.payload, vec![0u8; 1337]);
@@ -274,7 +278,7 @@ mod tests {
 
     #[test]
     fn first_and_last_fragment() {
-        let expiration = MockRuntime::time_since_epoch().as_secs();
+        let expiration = MockRuntime::time_since_epoch();
 
         let mut message = MessageBuilder::standard()
             .with_expiration(expiration)
@@ -300,7 +304,10 @@ mod tests {
         let (message, delivery_instructions) =
             handler.last_fragment(message_id, 1, &fragments.pop_front().unwrap()).unwrap();
 
-        assert_eq!(message.expiration, expiration);
+        assert_eq!(
+            message.expiration,
+            Duration::from_millis(expiration.as_millis() as u64)
+        );
         assert_eq!(message.message_id, 1339u32);
         assert_eq!(message.message_type, MessageType::Data);
         assert_eq!(message.payload, vec![0xaau8; 1335]);
@@ -308,7 +315,7 @@ mod tests {
 
     #[test]
     fn out_of_order_last_is_first() {
-        let expiration = MockRuntime::time_since_epoch().as_secs();
+        let expiration = MockRuntime::time_since_epoch();
 
         let mut message = MessageBuilder::standard()
             .with_expiration(expiration)
@@ -337,7 +344,10 @@ mod tests {
             .first_fragment(message_id, &DeliveryInstructions::Local, &first)
             .unwrap();
 
-        assert_eq!(message.expiration, expiration);
+        assert_eq!(
+            message.expiration,
+            Duration::from_millis(expiration.as_millis() as u64)
+        );
         assert_eq!(message.message_id, 1338u32);
         assert_eq!(message.message_type, MessageType::Data);
         assert_eq!(message.payload, vec![0u8; 30_005]);
@@ -345,7 +355,7 @@ mod tests {
 
     #[test]
     fn middle_fragment_delivered_last() {
-        let expiration = MockRuntime::time_since_epoch().as_secs();
+        let expiration = MockRuntime::time_since_epoch();
 
         let mut message = MessageBuilder::standard()
             .with_expiration(expiration)
@@ -376,7 +386,10 @@ mod tests {
         let (message, delivery_instructions) =
             handler.middle_fragment(message_id, 2, &fragments.pop_front().unwrap()).unwrap();
 
-        assert_eq!(message.expiration, expiration);
+        assert_eq!(
+            message.expiration,
+            Duration::from_millis(expiration.as_millis() as u64)
+        );
         assert_eq!(message.message_id, 1338u32);
         assert_eq!(message.message_type, MessageType::Data);
         assert_eq!(message.payload, vec![0u8; 1337]);

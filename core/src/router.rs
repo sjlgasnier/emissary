@@ -18,14 +18,15 @@
 
 use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
+    i2cp::I2cpServer,
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
     router_storage::RouterStorage,
     runtime::{MetricType, Runtime},
     subsystem::SubsystemKind,
     transports::TransportManager,
-    tunnel::TunnelManager,
-    Config,
+    tunnel::{TunnelManager, TunnelManagerHandle},
+    Config, I2cpConfig,
 };
 
 use futures::{FutureExt, Stream, StreamExt};
@@ -57,6 +58,9 @@ pub struct Router<R: Runtime> {
 
     /// Local router info.
     local_router_info: RouterInfo,
+
+    /// Handle to [`TunnelManager`].
+    _tunnel_manager_handle: TunnelManagerHandle,
 }
 
 impl<R: Runtime> Router<R> {
@@ -67,6 +71,7 @@ impl<R: Runtime> Router<R> {
         let test = config.signing_key.clone();
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
         let ntcp2_config = config.ntcp2_config.clone();
+        let i2cp_config = config.i2cp_config.clone();
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -107,34 +112,44 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         //
         // acquire handle to exploratory tunnel pool which is given to `NetDb`
-        let (exploratory_pool_handle, rx) = {
+        let (tunnel_manager_handle, exploratory_pool_handle) = {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
-            let (tunnel_manager, pool_handle, rx) = TunnelManager::<R>::new(
-                transport_service,
-                local_router_info.clone(), // TODO: should be cheap
-                local_key,
-                metrics_handle.clone(),
-                router_storage.clone(),
-            );
+            let (tunnel_manager, tunnel_manager_handle, tunnel_pool_handle) =
+                TunnelManager::<R>::new(
+                    transport_service,
+                    local_router_info.clone(),
+                    local_key,
+                    metrics_handle.clone(),
+                    router_storage.clone(),
+                );
 
             R::spawn(tunnel_manager);
 
-            (pool_handle, rx)
+            (tunnel_manager_handle, tunnel_pool_handle)
         };
 
         // initialize and start netdb
-        {
+        let netdb_handle = {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
-            let (netdb, _netdb_handle) = NetDb::<R>::new(
+            let (netdb, netdb_handle) = NetDb::<R>::new(
                 local_router_id,
                 transport_service,
                 router_storage.clone(),
                 metrics_handle.clone(),
                 exploratory_pool_handle,
-                rx,
             );
 
             R::spawn(netdb);
+
+            netdb_handle
+        };
+
+        // initialize i2cp server if it was enabled
+        if let Some(I2cpConfig { port }) = i2cp_config {
+            let i2cp_server =
+                I2cpServer::<R>::new(port, netdb_handle, tunnel_manager_handle.clone()).await?;
+
+            R::spawn(i2cp_server);
         }
 
         // initialize and start ntcp2
@@ -147,6 +162,7 @@ impl<R: Runtime> Router<R> {
                 runtime,
                 local_router_info,
                 transport_manager,
+                _tunnel_manager_handle: tunnel_manager_handle,
             },
             serialized_router_info,
         ))

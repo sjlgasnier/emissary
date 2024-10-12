@@ -17,53 +17,38 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base32_decode, base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
-        SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
-    },
-    destination::{
-        protocol::{streaming::Stream, Protocol},
-        session::{KeyContext, OutboundSession},
-        Destination,
-    },
-    error::{ChannelError, QueryError},
+    crypto::base32_encode,
+    error::QueryError,
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType},
-            store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStorePayload},
+            store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         },
-        garlic::{
-            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
-            GarlicMessageBuilder,
-        },
-        Message, MessageBuilder, MessageType,
+        Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::{
         dht::Dht,
-        handle::{QueryKind, QueryRecycle},
+        handle::{NetDbAction, NetDbActionRecycle},
         metrics::*,
     },
-    primitives::{
-        Lease2, LeaseSet2, LeaseSet2Header, MessageId, RouterId, RouterIdentity, RouterInfo,
-    },
+    primitives::{LeaseSet2, RouterId},
     router_storage::RouterStorage,
-    runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
+    runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::TunnelPoolHandle,
-    util::gzip::{GzipEncoderBuilder, GzipPayload},
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
-use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
-use futures::{FutureExt, StreamExt};
+use bytes::Bytes;
+use futures::StreamExt;
 use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -82,6 +67,9 @@ mod types;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb";
 
+/// `NetDb` query timeout.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Floodfill state.
 #[derive(Debug)]
 enum RouterState {
@@ -89,19 +77,53 @@ enum RouterState {
     Connected,
 
     /// FloodFill is being dialed.
+    //
+    // TODO: remove?
     Dialing {
         /// Pending messages.
         pending_messages: Vec<Vec<u8>>,
     },
 }
 
+/// Query kind.
+enum QueryKind {
+    /// Leaseset query.
+    Leaseset {
+        /// Oneshot sender for sending the result to caller.
+        tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
+    },
+}
+
+impl fmt::Debug for QueryKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Leaseset { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Network database (NetDB).
 pub struct NetDb<R: Runtime> {
+    /// Active queries.
+    active: HashMap<Bytes, QueryKind>,
+
     /// Kademlia DHT implementation.
     dht: Dht<R>,
 
+    /// Exploratory tunnel pool handle.
+    exploratory_pool_handle: TunnelPoolHandle,
+
+    /// RX channel for receiving queries from other subsystems.
+    handle_rx: mpsc::Receiver<NetDbAction, NetDbActionRecycle>,
+
+    /// Local router ID.
+    local_router_id: RouterId,
+
     /// Metrics handle.
     metrics: R::MetricsHandle,
+
+    /// Query timers.
+    query_timers: R::JoinSet<Bytes>,
 
     /// Router storage.
     router_storage: RouterStorage,
@@ -111,18 +133,6 @@ pub struct NetDb<R: Runtime> {
 
     /// Transport service.
     service: TransportService,
-
-    /// Exploratory tunnel pool handle.
-    exploratory_pool_handle: TunnelPoolHandle,
-
-    /// RX channel for receiving queries from other subsystems.
-    handle_rx: mpsc::Receiver<QueryKind, QueryRecycle>,
-
-    key: Vec<u8>,
-    timer: futures::future::BoxFuture<'static, ()>,
-    local_router_id: RouterId,
-    rx: Option<mpsc::Receiver<Message>>,
-    tmp: Option<(OutboundSession<R>, Stream<R>)>,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -133,7 +143,6 @@ impl<R: Runtime> NetDb<R> {
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
-        rx: mpsc::Receiver<Message>,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_storage
             .routers()
@@ -149,25 +158,20 @@ impl<R: Runtime> NetDb<R> {
             "starting netdb",
         );
 
-        let key = "larnrirsp5fikx7n6fg3aczdxrurt5nyaaleqo4vqmnuo3xd5qeq";
-        let key = base32_decode(&key).unwrap();
-
-        let (handle_tx, handle_rx) = mpsc::with_recycle(64, QueryRecycle::default());
+        let (handle_tx, handle_rx) = mpsc::with_recycle(64, NetDbActionRecycle::default());
 
         (
             Self {
+                active: HashMap::new(),
                 dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
                 exploratory_pool_handle,
-                timer: Box::pin(R::delay(core::time::Duration::from_secs(20))),
-                local_router_id,
                 handle_rx,
-                key,
+                local_router_id,
                 metrics,
+                query_timers: R::join_set(),
                 routers: HashMap::new(),
                 router_storage,
                 service,
-                rx: Some(rx),
-                tmp: None,
             },
             NetDbHandle::new(handle_tx),
         )
@@ -205,7 +209,7 @@ impl<R: Runtime> NetDb<R> {
                         );
                     }
                 },
-            Some(state) => {
+            Some(_) => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
@@ -246,30 +250,44 @@ impl<R: Runtime> NetDb<R> {
     fn on_message(&mut self, message: Message) {
         match message.message_type {
             MessageType::DatabaseStore => {
-                let DatabaseStore {
-                    key,
-                    payload,
-                    reply,
-                    ..
-                } = DatabaseStore::<R>::parse(&message.payload).unwrap();
+                let Some(DatabaseStore { key, payload, .. }) =
+                    DatabaseStore::<R>::parse(&message.payload)
+                else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "malformed database store received",
+                    );
 
-                tracing::trace!("database store");
-
-                let leaseset = match payload {
-                    DatabaseStorePayload::RouterInfo { router_info } => {
-                        tracing::warn!("ignore routerinfo");
-                        return;
-                    }
-                    DatabaseStorePayload::LeaseSet2 { leaseset } => leaseset,
+                    return;
                 };
 
-                R::spawn(Destination::<R>::new(
-                    self.key.clone(),
-                    self.exploratory_pool_handle.clone(),
-                    self.rx.take().expect("to exist"),
-                    leaseset,
-                    self.metrics.clone(),
-                ));
+                match self.active.remove(&key) {
+                    None => tracing::trace!(
+                        target: LOG_TARGET,
+                        %payload,
+                        "database store"
+                    ),
+                    Some(kind) => match (payload, kind) {
+                        (
+                            DatabaseStorePayload::LeaseSet2 { leaseset },
+                            QueryKind::Leaseset { tx },
+                        ) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                id = ?leaseset.header.destination.id(),
+                                "leaseset reply received",
+                            );
+
+                            let _ = tx.send(Ok(leaseset));
+                        }
+                        (payload, query) => tracing::warn!(
+                            target: LOG_TARGET,
+                            %payload,
+                            ?query,
+                            "unhandled database store kind",
+                        ),
+                    },
+                }
             }
             MessageType::DatabaseLookup => {
                 tracing::trace!("database lookup");
@@ -284,46 +302,119 @@ impl<R: Runtime> NetDb<R> {
             ),
         }
     }
+
+    /// Query `LeaseSet2` under `key` from `NetDb` and return result to caller via `tx`
+    fn on_query_leaseset(
+        &mut self,
+        key: Bytes,
+        tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
+    ) {
+        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            key = ?base32_encode(&key),
+            num_floodfills = ?floodfills.len(),
+            "query leaseset",
+        );
+
+        let message = DatabaseLookupBuilder::new(
+            key.clone(),
+            self.local_router_id.clone(),
+            LookupType::Leaseset,
+        )
+        .build();
+
+        let message_id = R::rng().next_u32();
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(message_id)
+            .with_payload(&message)
+            .build();
+
+        match floodfills.is_empty() {
+            true => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "cannot query leaseset, no floodfill",
+                );
+
+                let _ = tx.send(Err(QueryError::NoFloodfills));
+            }
+            false => {
+                // TODO: send over exploratory tunnel pool
+                // TODO: send to multiple floodfills
+                match self.service.send(&floodfills[0], message) {
+                    Err(error) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to send query",
+                        );
+
+                        // TODO: correct error, retry later
+                        let _ = tx.send(Err(QueryError::Timeout));
+                    }
+                    Ok(()) => {
+                        // store leaseset query into active queries and start timer for the query
+                        self.active.insert(key.clone(), QueryKind::Leaseset { tx });
+                        self.query_timers.push(async move {
+                            R::delay(QUERY_TIMEOUT).await;
+                            key
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Store `leaseset` under `key` in `NetDb`.
+    fn on_store_leaseset(&mut self, key: Bytes, leaseset: Bytes) {
+        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            key = ?base32_encode(&key),
+            num_floodfills = ?floodfills.len(),
+            "store leaseset in netdb",
+        );
+
+        let message =
+            DatabaseStoreBuilder::new(key, DatabaseStoreKind::LeaseSet2 { leaseset }).build();
+
+        let message_id = R::rng().next_u32();
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseStore)
+            .with_message_id(message_id)
+            .with_payload(&message)
+            .build();
+
+        match floodfills.is_empty() {
+            true => tracing::warn!(
+                target: LOG_TARGET,
+                "cannot store leaseset, no floodfills",
+            ),
+            false =>
+                if let Err(error) = self.service.send(&floodfills[0], message) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to store leaseset",
+                    );
+                },
+        }
+    }
 }
 
 impl<R: Runtime> Future for NetDb<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Poll::Ready(_) = self.timer.poll_unpin(cx) {
-            let key = self.key.clone();
-            let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
-
-            let message =
-                DatabaseLookupBuilder::new(key, self.local_router_id.clone(), LookupType::Leaseset)
-                    .build();
-
-            let message_id = R::rng().next_u32();
-            let message = MessageBuilder::short()
-                .with_expiration(
-                    (R::time_since_epoch() + core::time::Duration::from_secs(8)).as_secs(),
-                )
-                .with_message_type(MessageType::DatabaseLookup)
-                .with_message_id(message_id)
-                .with_payload(&message)
-                .build();
-
-            tracing::error!(
-                ?message_id,
-                "send query to closest floodfills = {floodfills:?}"
-            );
-
-            if let Err(error) = self.service.send(&floodfills[0], message) {
-                tracing::error!("failed to send message");
-            }
-
-            self.timer = Box::pin(R::delay(core::time::Duration::from_secs(15)));
-            let _ = self.timer.poll_unpin(cx);
-        }
-
         loop {
             match self.service.poll_next_unpin(cx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => break,
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| self.on_message(message)),
                 Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
@@ -333,5 +424,53 @@ impl<R: Runtime> Future for NetDb<R> {
                 _ => {}
             }
         }
+
+        // events from the exploratory pool are not interesting to `NetDb`
+        loop {
+            match self.exploratory_pool_handle.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(_)) => {}
+            }
+        }
+
+        loop {
+            match self.handle_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(NetDbAction::QueryLeaseSet2 { key, tx })) =>
+                    self.on_query_leaseset(key, tx),
+                Poll::Ready(Some(NetDbAction::StoreLeaseSet2 { key, leaseset })) =>
+                    self.on_store_leaseset(key, leaseset),
+                Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
+            }
+        }
+
+        loop {
+            match self.query_timers.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(key)) => match self.active.remove(&key) {
+                    Some(kind) => match kind {
+                        QueryKind::Leaseset { tx } => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?key,
+                                "leaseset query timed out",
+                            );
+
+                            let _ = tx.send(Err(QueryError::Timeout));
+                        }
+                    },
+                    None => tracing::trace!(
+                        target: LOG_TARGET,
+                        ?key,
+                        "active query doesnt exist",
+                    ),
+                },
+            }
+        }
+
+        Poll::Pending
     }
 }

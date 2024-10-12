@@ -26,10 +26,12 @@ use crate::{
     transports::TransportService,
     tunnel::{
         garlic::{DeliveryInstructions, GarlicHandler},
+        handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
         noise::NoiseContext,
         pool::{
-            ExploratorySelector, TunnelPool, TunnelPoolConfig, TunnelPoolContext, TunnelPoolKind,
+            ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters,
+            TunnelPoolContext,
         },
         routing_table::RoutingTable,
         transit::TransitTunnelManager,
@@ -38,7 +40,7 @@ use crate::{
 
 use futures::StreamExt;
 use hashbrown::{HashMap, HashSet};
-use thingbuf::mpsc::{channel, Receiver};
+use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{vec, vec::Vec};
 use core::{
@@ -50,6 +52,7 @@ use core::{
 
 mod fragment;
 mod garlic;
+mod handle;
 mod hop;
 mod metrics;
 mod noise;
@@ -60,7 +63,9 @@ mod transit;
 #[cfg(test)]
 mod tests;
 
-pub use pool::TunnelPoolHandle;
+// TODO: remove `TunnelPoolContextHandle` re-export
+pub use handle::TunnelManagerHandle;
+pub use pool::{TunnelPoolConfig, TunnelPoolContextHandle, TunnelPoolEvent, TunnelPoolHandle};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
@@ -86,6 +91,12 @@ pub enum RouterState {
 
 /// Tunnel manager.
 pub struct TunnelManager<R: Runtime> {
+    /// RX channel for receiving tunneling-related commands from other subsystems.
+    command_rx: Receiver<TunnelManagerCommand, CommandRecycle>,
+
+    /// Exploratory tunnel/hop selector.
+    exploratory_selector: ExploratorySelector,
+
     /// Garlic message handler.
     garlic: GarlicHandler<R>,
 
@@ -95,6 +106,9 @@ pub struct TunnelManager<R: Runtime> {
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
 
+    /// Noise context for tunnels.
+    noise: NoiseContext,
+
     /// Pending inbound tunnels.
     pending_inbound: HashSet<MessageId>,
 
@@ -103,6 +117,9 @@ pub struct TunnelManager<R: Runtime> {
 
     /// Local router info.
     router_info: RouterInfo,
+
+    /// Router storage.
+    router_storage: RouterStorage,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -117,15 +134,15 @@ pub struct TunnelManager<R: Runtime> {
 impl<R: Runtime> TunnelManager<R> {
     /// Create new [`TunnelManager`].
     ///
-    /// Returns a [`TunnelManager`] object and a handle for the exploratory tunnel pool.
+    /// Returns a [`TunnelManager`] object, a [`TunnelManagerHandle`] which can be used to create
+    /// new tunnel pools and a [`TunnelPoolHandle`] for the exploratory tunnel pool.
     pub fn new(
         service: TransportService,
         router_info: RouterInfo,
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
-        // TODO: remove
-    ) -> (Self, TunnelPoolHandle, thingbuf::mpsc::Receiver<Message>) {
+    ) -> (Self, TunnelManagerHandle, TunnelPoolHandle) {
         tracing::trace!(
             target: LOG_TARGET,
             "starting tunnel manager",
@@ -151,46 +168,48 @@ impl<R: Runtime> TunnelManager<R> {
             metrics_handle.clone(),
         ));
 
-        // TODO: remove
-        let (tx, rx) = thingbuf::mpsc::channel(64);
-
         // start exploratory tunnel pool
         //
         // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
-        let pool_handle = {
-            // TODO: convert back to `Exploratory`
-            // let (pool_context, pool_handle) =
-            // TunnelPoolContext::new(TunnelPoolKind::Exploratory);
-            let (pool_context, pool_handle) = TunnelPoolContext::new(TunnelPoolKind::Client(tx));
-            let selector = ExploratorySelector::new(router_storage.clone(), pool_handle.clone());
-
-            R::spawn(TunnelPool::<R, _>::new(
-                TunnelPoolConfig::default(),
-                selector,
-                pool_context,
+        let (pool_handle, exploratory_selector) = {
+            let build_parameters = TunnelPoolBuildParameters::new(TunnelPoolConfig::default());
+            let selector = ExploratorySelector::new(
+                router_storage.clone(),
+                build_parameters.context_handle.clone(),
+            );
+            let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
+                build_parameters,
+                selector.clone(),
                 routing_table.clone(),
                 noise.clone(),
                 metrics_handle.clone(),
-            ));
+            );
+            R::spawn(tunnel_pool);
 
-            pool_handle
+            (tunnel_pool_handle, selector)
         };
+
+        // create handle which other subsystems can use to create new tunnel pools
+        let (manager_handle, command_rx) = TunnelManagerHandle::new();
 
         (
             Self {
+                command_rx,
+                exploratory_selector,
                 garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
                 message_rx,
                 metrics_handle: metrics_handle.clone(),
+                noise,
                 pending_inbound: HashSet::new(),
                 pending_outbound: HashSet::new(),
                 router_info,
                 routers: HashMap::new(),
+                router_storage,
                 routing_table,
                 service,
             },
+            manager_handle,
             pool_handle,
-            // TODO: remove
-            rx,
         )
     }
 
@@ -349,6 +368,33 @@ impl<R: Runtime> TunnelManager<R> {
         });
     }
 
+    /// Create new [`TunnelPool`] for a client destination.
+    ///
+    /// Returns a [`TunnelPoolHandle`] for the tunnel pool that is sent over destination.
+    fn on_create_tunnel_pool(&self, config: TunnelPoolConfig) -> TunnelPoolHandle {
+        tracing::info!(
+            target: LOG_TARGET,
+            ?config,
+            "create tunnel pool",
+        );
+
+        let build_parameters = TunnelPoolBuildParameters::new(config);
+        let selector = ClientSelector::new(
+            self.exploratory_selector.clone(),
+            build_parameters.context_handle.clone(),
+        );
+        let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
+            build_parameters,
+            selector,
+            self.routing_table.clone(),
+            self.noise.clone(),
+            self.metrics_handle.clone(),
+        );
+        R::spawn(tunnel_pool);
+
+        tunnel_pool_handle
+    }
+
     /// Handle received message from one of the open connections.
     fn on_message(&mut self, message: Message) {
         self.metrics_handle.counter(NUM_TUNNEL_MESSAGES).increment(1);
@@ -387,18 +433,32 @@ impl<R: Runtime> Future for TunnelManager<R> {
         }
 
         loop {
-            match futures::ready!(self.service.poll_next_unpin(cx)) {
-                Some(SubsystemEvent::ConnectionEstablished { router }) =>
+            match self.service.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
                     self.on_connection_established(router),
-                Some(SubsystemEvent::ConnectionClosed { router }) =>
+                Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
                     self.on_connection_closed(&router),
-                Some(SubsystemEvent::I2Np { messages }) =>
+                Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| self.on_message(message)),
-                Some(SubsystemEvent::ConnectionFailure { router }) =>
+                Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
                     self.on_connection_failure(&router),
-                Some(SubsystemEvent::Dummy) => unreachable!(),
-                None => return Poll::Ready(()),
+                Poll::Ready(Some(SubsystemEvent::Dummy)) => unreachable!(),
+                Poll::Ready(None) => return Poll::Ready(()),
             }
         }
+
+        loop {
+            match self.command_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(TunnelManagerCommand::CreateTunnelPool { config, tx })) => {
+                    tx.send(self.on_create_tunnel_pool(config));
+                }
+                Poll::Ready(Some(TunnelManagerCommand::Dummy)) => unreachable!(),
+            }
+        }
+
+        Poll::Pending
     }
 }

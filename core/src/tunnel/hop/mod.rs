@@ -23,7 +23,7 @@ use crate::{
     runtime::Runtime,
     tunnel::{
         noise::{NoiseContext, OutboundSession},
-        pool::TunnelPoolHandle,
+        pool::TunnelPoolContextHandle,
     },
 };
 
@@ -136,13 +136,13 @@ pub enum ReceiverKind {
         message_rx: Receiver<Message>,
 
         /// Tunnel pool handle.
-        handle: TunnelPoolHandle,
+        handle: TunnelPoolContextHandle,
     },
 }
 
 impl ReceiverKind {
     /// Destruct [`ReceiverKind`] into an RX channel for an inbound tunnel.
-    pub fn inbound(self) -> (Receiver<Message>, TunnelPoolHandle) {
+    pub fn inbound(self) -> (Receiver<Message>, TunnelPoolContextHandle) {
         match self {
             Self::Inbound { message_rx, handle } => (message_rx, handle),
             _ => panic!("state mismatch"),

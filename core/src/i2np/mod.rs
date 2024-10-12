@@ -38,7 +38,7 @@ use nom::{
 use rand_core::RngCore;
 
 use alloc::{vec, vec::Vec};
-use core::fmt;
+use core::{fmt, time::Duration};
 
 pub mod database;
 pub mod delivery_status;
@@ -77,6 +77,11 @@ const I2NP_SHORT_HEADER_LEN: usize = 9usize;
 
 /// I2NP standard header size.
 const I2NP_STANDARD_HEADER_LEN: usize = 16usize;
+
+/// I2NP message expiration timeout.
+///
+/// Defaults to 8000 milliseconds.
+pub const I2NP_MESSAGE_EXPIRATION: Duration = Duration::from_millis(8000);
 
 /// Message type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +228,7 @@ pub enum MessageBuilder<'a> {
         message_id: Option<u32>,
 
         /// Expiration.
-        expiration: Option<u64>,
+        expiration: Option<Duration>,
 
         /// Raw, unparsed payload.
         payload: Option<&'a [u8]>,
@@ -238,7 +243,7 @@ pub enum MessageBuilder<'a> {
         message_id: Option<u32>,
 
         /// Expiration.
-        expiration: Option<u64>,
+        expiration: Option<Duration>,
 
         /// Raw, unparsed payload.
         payload: Option<&'a [u8]>,
@@ -267,7 +272,7 @@ impl<'a> MessageBuilder<'a> {
     }
 
     /// Add expiration.
-    pub fn with_expiration<T: Into<u64>>(mut self, message_expiration: T) -> Self {
+    pub fn with_expiration(mut self, message_expiration: Duration) -> Self {
         match self {
             Self::Standard {
                 expiration: ref mut exp,
@@ -276,7 +281,7 @@ impl<'a> MessageBuilder<'a> {
             | Self::Short {
                 expiration: ref mut exp,
                 ..
-            } => *exp = Some(message_expiration.into()),
+            } => *exp = Some(message_expiration),
         }
 
         self
@@ -344,7 +349,7 @@ impl<'a> MessageBuilder<'a> {
 
                 out.put_u8(message_type.expect("to exist").as_u8());
                 out.put_u32(message_id.expect("to exist"));
-                out.put_u64(expiration.expect("to exist"));
+                out.put_u64(expiration.expect("to exist").as_millis() as u64);
                 out.put_u16((payload.len() as u16));
                 out.put_u8(0x00); // checksum
                 out.put_slice(&payload);
@@ -365,7 +370,7 @@ impl<'a> MessageBuilder<'a> {
                 out.put_u16((payload.len() + I2NP_SHORT_HEADER_LEN) as u16);
                 out.put_u8(message_type.expect("to exist").as_u8());
                 out.put_u32(message_id.expect("to exist"));
-                out.put_u32(expiration.expect("to exist") as u32);
+                out.put_u32(expiration.expect("to exist").as_secs() as u32);
                 out.put_slice(&payload);
 
                 out.freeze().to_vec()
@@ -387,7 +392,7 @@ pub struct Message {
     pub message_id: u32,
 
     /// Expiration.
-    pub expiration: u64,
+    pub expiration: Duration,
 
     /// Raw, unparsed payload.
     pub payload: Vec<u8>,
@@ -398,7 +403,7 @@ impl Default for Message {
         Self {
             message_type: MessageType::Data,
             message_id: 0u32,
-            expiration: 0u64,
+            expiration: Duration::new(0u64, 0u32),
             payload: Vec::new(),
         }
     }
@@ -437,7 +442,7 @@ impl Message {
             Message {
                 message_type,
                 message_id,
-                expiration: expiration as u64,
+                expiration: Duration::from_secs(expiration as u64),
                 payload: payload.to_vec(),
             },
         ))
@@ -466,7 +471,7 @@ impl Message {
             Message {
                 message_type,
                 message_id,
-                expiration,
+                expiration: Duration::from_millis(expiration),
                 payload: payload.to_vec(),
             },
         ))
@@ -511,18 +516,24 @@ impl Message {
             .with_payload(&self.payload)
             .build()
     }
+
+    /// Returns `true` if [`Message`] is expired.
+    pub fn is_expired<R: Runtime>(&self) -> bool {
+        self.expiration < R::time_since_epoch()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::mock::MockRuntime;
 
     #[test]
     fn parse_short_as_standard() {
         let message = MessageBuilder::short()
             .with_message_type(MessageType::DeliveryStatus)
             .with_message_id(1337u32)
-            .with_expiration(0xdeadbeefu64)
+            .with_expiration(Duration::from_secs(0xdeadbeefu64))
             .with_payload(&vec![1, 2, 3, 4])
             .build();
 
@@ -534,7 +545,7 @@ mod tests {
         let message = MessageBuilder::standard()
             .with_message_type(MessageType::DeliveryStatus)
             .with_message_id(1337u32)
-            .with_expiration(0xdeadbeefu64)
+            .with_expiration(Duration::from_secs(0xdeadbeefu64))
             .with_payload(&vec![1, 2, 3, 4])
             .build();
 
@@ -603,5 +614,29 @@ mod tests {
         let serialized = out.freeze().to_vec();
 
         assert!(Message::parse_short(&serialized).is_none());
+    }
+
+    #[test]
+    fn i2np_message_expired_short() {
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::DeliveryStatus)
+            .with_message_id(1337u32)
+            .with_expiration(MockRuntime::time_since_epoch() - Duration::from_secs(10))
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        assert!(Message::parse_short(&message).unwrap().is_expired::<MockRuntime>());
+    }
+
+    #[test]
+    fn i2np_message_expired_standard() {
+        let message = MessageBuilder::standard()
+            .with_message_type(MessageType::DeliveryStatus)
+            .with_message_id(1337u32)
+            .with_expiration(MockRuntime::time_since_epoch() - I2NP_MESSAGE_EXPIRATION)
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        assert!(Message::parse_standard(&message).unwrap().is_expired::<MockRuntime>());
     }
 }

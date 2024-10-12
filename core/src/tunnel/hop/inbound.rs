@@ -31,7 +31,7 @@ use crate::{
     tunnel::{
         fragment::{FragmentHandler, OwnedDeliveryInstructions},
         hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
-        pool::TunnelPoolHandle,
+        pool::TunnelPoolContextHandle,
         TUNNEL_EXPIRATION,
     },
     Error,
@@ -61,7 +61,7 @@ pub struct InboundTunnel {
     fragment: FragmentHandler,
 
     /// Tunnel pool handle.
-    handle: TunnelPoolHandle,
+    handle: TunnelPoolContextHandle,
 
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
@@ -363,7 +363,7 @@ mod tests {
         let original = (0..3 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
 
         let message = MessageBuilder::standard()
-            .with_expiration((MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs())
+            .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(8))
             .with_message_type(MessageType::Data)
             .with_message_id(MessageId::from(MockRuntime::rng().next_u32()))
             .with_payload(&original)
@@ -378,7 +378,7 @@ mod tests {
         let message = Message {
             message_type: MessageType::TunnelGateway,
             message_id: MockRuntime::rng().next_u32(),
-            expiration: (MockRuntime::time_since_epoch() + Duration::from_secs(8)).as_secs(),
+            expiration: MockRuntime::time_since_epoch() + Duration::from_secs(8),
             payload: message,
         };
 

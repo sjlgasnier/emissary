@@ -24,6 +24,21 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// I2CP error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum I2cpError {
+    /// Invalid control byte read from the client.
+    InvalidProtocolByte(u8),
+}
+
+impl fmt::Display for I2cpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidProtocolByte(byte) => write!(f, "invalid protocol byte ({byte})"),
+        }
+    }
+}
+
 /// Query error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum QueryError {
@@ -216,11 +231,12 @@ pub enum Error {
     EssentialTaskClosed,
     RouterDoesntExist,
     DialFailure,
+    Timeout,
     Tunnel(TunnelError),
     Channel(ChannelError),
     Streaming(StreamingError),
     Query(QueryError),
-    Timeout,
+    I2cp(I2cpError),
 }
 
 impl fmt::Display for Error {
@@ -242,6 +258,7 @@ impl fmt::Display for Error {
             Self::Channel(error) => write!(f, "channel error: {error}"),
             Self::Streaming(error) => write!(f, "streaming protocol error: {error}"),
             Self::Query(error) => write!(f, "query error: {error}"),
+            Self::I2cp(error) => write!(f, "i2cp error: {error}"),
         }
     }
 }
