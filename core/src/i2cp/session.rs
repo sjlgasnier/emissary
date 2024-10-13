@@ -79,9 +79,10 @@ impl<R: Runtime> I2cpSession<R> {
             mut socket,
             options,
             tunnel_pool_handle,
+            private_keys,
+            leaseset,
+            destination_id,
         } = context;
-
-        assert!(!inbound.is_empty(), "no inbound tunnels");
 
         tracing::info!(
             target: LOG_TARGET,
@@ -91,18 +92,9 @@ impl<R: Runtime> I2cpSession<R> {
             "start active i2cp session",
         );
 
-        // request `LeaseSet2` from i2cp client
-        {
-            tracing::trace!(
-                target: LOG_TARGET,
-                ?session_id,
-                "send leaseset request to client",
-            );
-
-            socket.send_message(RequestVariableLeaseSet::new(
-                session_id,
-                inbound.values().cloned().collect::<Vec<_>>(),
-            ));
+        // TODO: remove
+        for (key, value) in &options {
+            tracing::info!("{key}={value}");
         }
 
         Self {
@@ -210,6 +202,8 @@ impl<R: Runtime> I2cpSession<R> {
                         "failed to store leaseset to netdb",
                     );
                 }
+
+                // TODO: handle correctly
             }
             Message::SendMessageExpires {
                 session_id,

@@ -25,15 +25,21 @@
 //! session is created from the pending context.
 
 use crate::{
+    crypto::StaticPrivateKey,
     i2cp::{
-        message::{BandwidthLimits, Message, SessionId, SessionStatus, SessionStatusKind, SetDate},
+        message::{
+            BandwidthLimits, Message, RequestVariableLeaseSet, SessionId, SessionStatus,
+            SessionStatusKind, SetDate,
+        },
         socket::I2cpSocket,
     },
-    primitives::{Date, Lease, Str, TunnelId},
+    netdb::NetDbHandle,
+    primitives::{Date, DestinationId, Lease, Str, TunnelId},
     runtime::Runtime,
     tunnel::{TunnelManagerHandle, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
 };
 
+use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 
@@ -52,14 +58,23 @@ const LOG_TARGET: &str = "emissary::i2cp::pending-session";
 
 /// I2CP client session context.
 pub struct I2cpSessionContext<R: Runtime> {
+    /// Destination ID.
+    pub destination_id: DestinationId,
+
     /// Active inbound tunnels and their leases.
     pub inbound: HashMap<TunnelId, Lease>,
+
+    /// Serialized [`LeaseSet2`].
+    pub leaseset: Bytes,
 
     /// Session options.
     pub options: HashMap<Str, Str>,
 
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
+
+    /// Private keys of the destination.
+    pub private_keys: Vec<StaticPrivateKey>,
 
     /// Session ID.
     pub session_id: u16,
@@ -102,10 +117,34 @@ enum PendingSessionState<R: Runtime> {
 
     /// Tunnels of the tunnel pool are being built.
     ///
-    /// As soon as the the first inbound tunnel is built, the pending I2CP session
-    /// future returns [`I2cpSessionContext`] to `I2cpServer` which starts
-    /// the actual I2CP client session event loop
+    /// As soon as one inbound and one outbound tunnel has been built, the client is sent
+    /// `RequestVariableLeaseSet` message which instructs it to create a [`LeaseSet2`] for the
+    /// inbound tunnel(s) and send private key(s) of the `Destination`.
     BuildingTunnels {
+        /// Session ID.
+        session_id: u16,
+
+        /// I2CP socket.
+        socket: I2cpSocket<R>,
+
+        /// Session options.
+        options: HashMap<Str, Str>,
+
+        /// Handle to the built tunnel pool.
+        handle: TunnelPoolHandle,
+
+        /// Active inbound tunnels and their leases.
+        inbound: HashMap<TunnelId, Lease>,
+
+        /// Active outbound tunnels.
+        outbound: HashSet<TunnelId>,
+    },
+
+    /// Awaiting to receive a lease set for client destination and an associated private key(s).
+    ///
+    /// After these are received, the pending I2CP session is destroyed and the `I2cpServer`
+    /// is returned [`I2cpSessionContext`] which allows it to create an active I2CP session.
+    AwaitingLeaseSet {
         /// Session ID.
         session_id: u16,
 
@@ -144,6 +183,10 @@ impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
                 .debug_struct("PendingSessionState::BuildingTunnels")
                 .field("session_id", &session_id)
                 .finish_non_exhaustive(),
+            Self::AwaitingLeaseSet { session_id, .. } => f
+                .debug_struct("PendingSessionState::AwaitingLeaseSet")
+                .field("session_id", &session_id)
+                .finish_non_exhaustive(),
             Self::Poisoned =>
                 f.debug_struct("PendingSessionState::Poisoned").finish_non_exhaustive(),
         }
@@ -159,6 +202,7 @@ impl<R: Runtime> PendingSessionState<R> {
             Self::Inactive { socket, .. } => socket,
             Self::BuildingPool { socket, .. } => socket,
             Self::BuildingTunnels { socket, .. } => socket,
+            Self::AwaitingLeaseSet { socket, .. } => socket,
             Self::Poisoned => unreachable!(),
         }
     }
@@ -171,6 +215,7 @@ impl<R: Runtime> PendingSessionState<R> {
             Self::Inactive { session_id, .. } => *session_id,
             Self::BuildingPool { session_id, .. } => *session_id,
             Self::BuildingTunnels { session_id, .. } => *session_id,
+            Self::AwaitingLeaseSet { session_id, .. } => *session_id,
             Self::Poisoned => unreachable!(),
         }
     }
@@ -178,11 +223,14 @@ impl<R: Runtime> PendingSessionState<R> {
 
 /// Pending I2CP client session.
 pub struct PendingI2cpSession<R: Runtime> {
-    /// Handle to `TunnelManager`.
-    tunnel_manager_handle: TunnelManagerHandle,
+    /// Handle to `NetDb`.
+    netdb_handle: NetDbHandle,
 
     /// State of the pending session.
     state: PendingSessionState<R>,
+
+    /// Handle to `TunnelManager`.
+    tunnel_manager_handle: TunnelManagerHandle,
 }
 
 impl<R: Runtime> PendingI2cpSession<R> {
@@ -191,15 +239,17 @@ impl<R: Runtime> PendingI2cpSession<R> {
         session_id: u16,
         socket: I2cpSocket<R>,
         tunnel_manager_handle: TunnelManagerHandle,
+        netdb_handle: NetDbHandle,
     ) -> Self {
         Self {
-            tunnel_manager_handle,
+            netdb_handle,
             state: PendingSessionState::Inactive { session_id, socket },
+            tunnel_manager_handle,
         }
     }
 
     /// Handle I2CP message received from the client.
-    fn on_message(&mut self, message: Message) {
+    fn on_message(&mut self, message: Message) -> Option<I2cpSessionContext<R>> {
         match message {
             Message::GetDate { version, options } => {
                 tracing::trace!(
@@ -328,8 +378,70 @@ impl<R: Runtime> PendingI2cpSession<R> {
                     self.state = state;
                 }
             },
+            Message::CreateLeaseSet2 {
+                session_id,
+                key,
+                leaseset,
+                private_keys,
+            } => match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
+                PendingSessionState::AwaitingLeaseSet {
+                    session_id,
+                    socket,
+                    options,
+                    handle,
+                    inbound,
+                    outbound,
+                } => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        num_private_keys = ?private_keys.len(),
+                        "store leaseset to netdb",
+                    );
+
+                    // store the leaseset received from the client into `NetDb` and return i2cp
+                    // session context parameters, destroying the pending session and creating an
+                    // active i2cp session
+                    //
+                    // TODO: retry if `store_leaseset` fails
+                    if let Err(error) =
+                        self.netdb_handle.store_leaseset(key.clone(), leaseset.clone())
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            ?error,
+                            "failed to store leaseset to netdb",
+                        );
+                    }
+
+                    return Some(I2cpSessionContext {
+                        inbound,
+                        options,
+                        outbound,
+                        private_keys,
+                        session_id,
+                        socket,
+                        tunnel_pool_handle: handle,
+                        destination_id: DestinationId::from(key),
+                        leaseset,
+                    });
+                }
+                state => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?state,
+                        "`CreateLeaseSet2` received but not awaiting lease set",
+                    );
+                    debug_assert!(false);
+
+                    self.state = state;
+                }
+            },
             _ => {}
         }
+
+        None
     }
 }
 
@@ -341,7 +453,10 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
             match self.state.socket().poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(message)) => self.on_message(message),
+                Poll::Ready(Some(message)) =>
+                    if let Some(context) = self.on_message(message) {
+                        return Poll::Ready(Some(context));
+                    },
             }
         }
 
@@ -385,7 +500,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                 },
                 PendingSessionState::BuildingTunnels {
                     session_id,
-                    socket,
+                    mut socket,
                     options,
                     mut handle,
                     mut inbound,
@@ -412,26 +527,38 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         );
                         inbound.insert(tunnel_id, lease);
 
-                        // create active i2cp session if there's at least one outbound
-                        // and one inbound tunnel
-                        if !inbound.is_empty() && !outbound.is_empty() {
-                            return Poll::Ready(Some(I2cpSessionContext {
-                                inbound,
-                                options,
-                                outbound,
+                        // `RequestVariableLeaseSet` shall not be sent until there is
+                        // at least one inbound and outbound tunnel built
+                        if inbound.is_empty() || outbound.is_empty() {
+                            self.state = PendingSessionState::BuildingTunnels {
                                 session_id,
                                 socket,
-                                tunnel_pool_handle: handle,
-                            }));
+                                options,
+                                handle,
+                                inbound,
+                                outbound,
+                            };
+                            continue;
                         }
 
-                        self.state = PendingSessionState::BuildingTunnels {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            "send leaseset request to client",
+                        );
+
+                        socket.send_message(RequestVariableLeaseSet::new(
+                            session_id,
+                            inbound.values().cloned().collect::<Vec<_>>(),
+                        ));
+
+                        self.state = PendingSessionState::AwaitingLeaseSet {
+                            inbound,
+                            options,
+                            outbound,
                             session_id,
                             socket,
-                            options,
                             handle,
-                            inbound,
-                            outbound,
                         };
                     }
                     Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
@@ -443,26 +570,38 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         );
                         outbound.insert(tunnel_id);
 
-                        // create active i2cp session if there's at least one outbound
-                        // and one inbound tunnel
-                        if !inbound.is_empty() && !outbound.is_empty() {
-                            return Poll::Ready(Some(I2cpSessionContext {
-                                inbound,
-                                options,
-                                outbound,
+                        // `RequestVariableLeaseSet` shall not be sent until there is
+                        // at least one inbound and outbound tunnel built
+                        if inbound.is_empty() || outbound.is_empty() {
+                            self.state = PendingSessionState::BuildingTunnels {
                                 session_id,
                                 socket,
-                                tunnel_pool_handle: handle,
-                            }));
+                                options,
+                                handle,
+                                inbound,
+                                outbound,
+                            };
+                            continue;
                         }
 
-                        self.state = PendingSessionState::BuildingTunnels {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            "send leaseset request to client",
+                        );
+
+                        socket.send_message(RequestVariableLeaseSet::new(
+                            session_id,
+                            inbound.values().cloned().collect::<Vec<_>>(),
+                        ));
+
+                        self.state = PendingSessionState::AwaitingLeaseSet {
+                            inbound,
+                            options,
+                            outbound,
                             session_id,
                             socket,
-                            options,
                             handle,
-                            inbound,
-                            outbound,
                         };
                     }
                     Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
@@ -519,6 +658,9 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         };
                     }
                 },
+                state @ PendingSessionState::AwaitingLeaseSet { .. } => {
+                    self.state = state;
+                }
                 PendingSessionState::Poisoned => {
                     tracing::warn!(
                         target: LOG_TARGET,

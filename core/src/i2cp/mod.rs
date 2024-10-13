@@ -174,9 +174,10 @@ impl<R: Runtime> Future for I2cpServer<R> {
                 ),
                 Poll::Ready(Some(Ok(stream))) => {
                     let session_id = self.next_session_id();
-                    let handle = self.tunnel_manager_handle.clone();
+                    let tunnel_manager_handle = self.tunnel_manager_handle.clone();
+                    let netdb_handle = self.netdb_handle.clone();
 
-                    tracing::debug!(
+                    tracing::trace!(
                         target: LOG_TARGET,
                         ?session_id,
                         "i2cp client session accepted",
@@ -185,7 +186,8 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     self.pending_session.push(PendingI2cpSession::<R>::new(
                         session_id,
                         I2cpSocket::new(stream),
-                        handle,
+                        tunnel_manager_handle,
+                        netdb_handle,
                     ));
                 }
             }
