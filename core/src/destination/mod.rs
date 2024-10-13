@@ -23,7 +23,7 @@ use crate::{
             streaming::{Stream, StreamEvent},
             Protocol,
         },
-        session::{KeyContext, OutboundSession},
+        session::{KeyContext, OutboundSession, SessionManager},
     },
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
@@ -34,7 +34,8 @@ use crate::{
         Message, MessageBuilder, MessageType,
     },
     primitives::{
-        Destination as Dest, Lease, LeaseSet2, LeaseSet2Header, MessageId, RouterIdentity,
+        Destination as Dest, DestinationId, Lease, LeaseSet2, LeaseSet2Header, MessageId, RouterId,
+        RouterIdentity, TunnelId,
     },
     runtime::Runtime,
     tunnel::TunnelPoolContextHandle,
@@ -43,14 +44,15 @@ use crate::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
+use hashbrown::HashMap;
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -347,5 +349,94 @@ impl<R: Runtime> Future for Destination<R> {
         }
 
         Poll::Pending
+    }
+}
+
+/// Events emitted by [`NewDestination`].
+pub enum DestinationEvent {
+    /// Send message to remote `Destination`.
+    SendMessage {
+        /// Router ID of the destination gateway.
+        router_id: RouterId,
+
+        /// Tunnel ID of the destination gateway.
+        tunnel_id: TunnelId,
+
+        /// Message to send.
+        message: Vec<u8>,
+    },
+}
+
+/// Client destination.
+pub struct NewDestination<R: Runtime> {
+    /// Destination ID of the client.
+    destination_id: DestinationId,
+
+    /// Session manager.
+    session_manager: SessionManager<R>,
+
+    /// Serialized [`LeaseSet2`] for client's inbound tunnels.
+    leaseset: Bytes,
+
+    /// Pending events.
+    pending_events: VecDeque<DestinationEvent>,
+}
+
+impl<R: Runtime> NewDestination<R> {
+    /// Create new [`NewDestination`].
+    ///
+    /// `private_key` is the private key of the client destination and `lease`
+    /// is a serialized [`LeaseSet2`] for the client's inbound tunnel(s).
+    pub fn new(
+        destination_id: DestinationId,
+        private_key: StaticPrivateKey,
+        leaseset: Bytes,
+    ) -> Self {
+        Self {
+            destination_id: destination_id.clone(),
+            session_manager: SessionManager::new(destination_id, private_key),
+            leaseset,
+            pending_events: VecDeque::new(),
+        }
+    }
+
+    /// Handle garlic messages received into one of the [`NewDestination`]'s inbound tunnels.
+    pub fn handle_message(&mut self, message: Message) -> crate::Result<()> {
+        tracing::trace!(
+            target: LOG_TARGET,
+            message_id = ?message.message_id,
+            "garlic message",
+        );
+        debug_assert_eq!(message.message_type, MessageType::Garlic);
+
+        // TODO: decrypt message, whatever that means
+        // TODO:
+        // TODO: needs more thinking, this message could be:
+        // TODO:  * `NewSessionRequest` (with or without binding)
+        // TODO:  * `NewSessionReply`
+        // TODO:  * `ExistingSession`
+        // TODO:
+        // TODO: how to distinguish between the types?
+        // TODO: how to use correct session to handle message
+        // TODO:
+        // TODO:
+        // TODO:
+
+        todo!();
+    }
+
+    /// Send `message` to remote `destination`.
+    pub fn send_message(&mut self, destination: Dest, message: GzipPayload) {
+        todo!();
+    }
+}
+
+impl<R: Runtime> futures::Stream for NewDestination<R> {
+    type Item = DestinationEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.pending_events
+            .pop_front()
+            .map_or(Poll::Pending, |event| Poll::Ready(Some(event)))
     }
 }
