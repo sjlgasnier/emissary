@@ -22,13 +22,19 @@
 
 use crate::{
     crypto::StaticPrivateKey,
-    i2np::{garlic::GarlicMessage, Message, MessageType},
+    error::Error,
+    i2np::{
+        database::store::{DatabaseStore, DatabaseStorePayload},
+        garlic::{GarlicMessage, GarlicMessageBlock},
+        Message, MessageType,
+    },
     primitives::DestinationId,
     runtime::Runtime,
 };
 
 use bytes::Bytes;
 use hashbrown::HashMap;
+use inbound::InboundSession;
 
 use core::marker::PhantomData;
 
@@ -57,6 +63,9 @@ pub struct SessionManager<R: Runtime> {
 
     /// Key context.
     key_context: KeyContext<R>,
+
+    /// Pending inbound sessions.
+    pending_inbound: HashMap<DestinationId, InboundSession<R>>,
 }
 
 impl<R: Runtime> SessionManager<R> {
@@ -66,6 +75,7 @@ impl<R: Runtime> SessionManager<R> {
             destination_id,
             garlic_tags: HashMap::new(),
             key_context: KeyContext::from_private_key(private_key),
+            pending_inbound: HashMap::new(),
         }
     }
 
@@ -81,6 +91,8 @@ impl<R: Runtime> SessionManager<R> {
     ///
     /// [`SessionManager::decrypt()`] assumes that the caller has validated `message` to be a garlic
     /// message of appropriate length, containing at least the message length and a garlic tag.
+    ///
+    /// On success, returns a serialized garlic clove set.
     pub fn decrypt(&mut self, message: Message) -> crate::Result<Vec<u8>> {
         // extract garlic tag and attempt to find session key for the tag
         //
@@ -99,12 +111,66 @@ impl<R: Runtime> SessionManager<R> {
             None => {
                 tracing::trace!(
                     target: LOG_TARGET,
+                    id = %self.destination_id,
                     ?garlic_tag,
                     "session key not found, asssume new session",
                 );
 
-                let (_session, payload) =
+                // parse `NewSession` and attempt to create an inbound session
+                //
+                // the returned session is either a bound or an unbound inbound session
+                //
+                // if it's a bound session, the parsed garlic clove set must include a `LeaseSet2`
+                // so a reply can be sent to the remote destination and if `LeaseSet2` is not
+                // bundled, the inbound session is rejected
+                let (session, payload) =
                     self.key_context.create_inbound_session(message.payload)?;
+
+                // attempt to parse `payload` into clove set
+                let clove_set = GarlicMessage::parse(&payload).ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        id = %self.destination_id,
+                        "failed to parse `NewSession` payload into a clove set",
+                    );
+
+                    Error::InvalidData
+                })?;
+
+                // locate `DatabaseStore` i2np message from the clove set
+                let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                    clove_set.blocks.iter().find(|clove| match clove {
+                        GarlicMessageBlock::GarlicClove { message_type, .. }
+                            if message_type == &MessageType::DatabaseStore =>
+                            true,
+                        _ => false,
+                    })
+                else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        id = %self.destination_id,
+                        "clove set doesn't contain `DatabaseStore`, cannot reply",
+                    );
+
+                    return Err(Error::InvalidData);
+                };
+
+                // attempt to parse the `DatabaseStore` as `LeaseSet2`
+                let Some(DatabaseStore {
+                    payload: DatabaseStorePayload::LeaseSet2 { leaseset },
+                    ..
+                }) = DatabaseStore::<R>::parse(&message_body)
+                else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        id = %self.destination_id,
+                        "`DatabaseStore` is not a valid `LeaseSet2` store, cannot reply",
+                    );
+
+                    return Err(Error::InvalidData);
+                };
+
+                self.pending_inbound.insert(leaseset.header.destination.id(), session);
 
                 Ok(payload)
             }
@@ -124,7 +190,14 @@ impl<R: Runtime> SessionManager<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::{
+        i2np::{
+            database::store::{DatabaseStoreBuilder, DatabaseStoreKind},
+            garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder},
+        },
+        primitives::{LeaseSet2, MessageId},
+        runtime::mock::MockRuntime,
+    };
     use bytes::{BufMut, BytesMut};
     use core::time::Duration;
     use rand::{thread_rng, RngCore};
@@ -139,9 +212,46 @@ mod tests {
         let remote_private_key = StaticPrivateKey::new(thread_rng());
         let mut key_context = KeyContext::<MockRuntime>::from_private_key(remote_private_key);
 
+        let (remote_leaseset, remote_signing_key) = LeaseSet2::random();
+        let remote_destination_id = remote_leaseset.header.destination.id();
+
+        let database_store = DatabaseStoreBuilder::new(
+            Bytes::from(remote_leaseset.header.destination.id().to_vec()),
+            DatabaseStoreKind::LeaseSet2 {
+                leaseset: Bytes::from(remote_leaseset.serialize(&remote_signing_key)),
+            },
+        )
+        .build();
+
+        let mut payload = GarlicMessageBuilder::new()
+            .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::DatabaseStore,
+                MessageId::from(MockRuntime::rng().next_u32()),
+                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                GarlicDeliveryInstructions::Local,
+                &database_store,
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                MessageId::from(MockRuntime::rng().next_u32()),
+                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                GarlicDeliveryInstructions::Local,
+                &{
+                    let payload = vec![1, 2, 3, 4];
+                    let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                    out.put_u32(payload.len() as u32);
+                    out.put_slice(&payload);
+
+                    out.freeze().to_vec()
+                },
+            )
+            .build();
+
         let (outbound_session, message) = {
             let (outbound, message) =
-                key_context.create_oubound_session(destination_id, public_key, &[1, 2, 3, 4]);
+                key_context.create_oubound_session(destination_id, public_key, &payload);
             let mut payload = BytesMut::with_capacity(message.len() + 4);
             payload.put_u32(message.len() as u32);
             payload.put_slice(&message);
@@ -157,10 +267,32 @@ mod tests {
             )
         };
 
-        assert_eq!(session.decrypt(message).unwrap(), vec![1, 2, 3, 4]);
+        let payload = session.decrypt(message).unwrap();
+        let clove_set = GarlicMessage::parse(&payload).unwrap();
+
+        // verify message is valid
+        {
+            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                clove_set.blocks.iter().find(|clove| match clove {
+                    GarlicMessageBlock::GarlicClove { message_type, .. }
+                        if message_type == &MessageType::Data =>
+                        true,
+                    _ => false,
+                })
+            else {
+                panic!("message not found");
+            };
+
+            assert_eq!(&message_body[4..], &vec![1, 2, 3, 4]);
+        }
+
+        // verify pending inbound session exists for the destination
+        assert!(session.pending_inbound.contains_key(&remote_destination_id));
     }
 
+    // TODO: remove or enable when anonymous datagrams work
     #[test]
+    #[ignore]
     fn new_inbound_session_empty_payload() {
         let private_key = StaticPrivateKey::new(thread_rng());
         let public_key = private_key.public();
