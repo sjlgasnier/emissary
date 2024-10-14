@@ -21,6 +21,7 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::{
+        inbound::InboundSession,
         outbound::{OutboundSession, OutboundSessionState},
         tagset::{PendingTagSet, TagSet, TagSetEntry},
     },
@@ -40,13 +41,30 @@ use x25519_dalek::PublicKey;
 use zeroize::Zeroize;
 
 use alloc::vec::Vec;
-use core::{fmt, marker::PhantomData, mem};
+use core::{
+    fmt,
+    marker::PhantomData,
+    mem,
+    ops::{Range, RangeFrom},
+};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination::session::context";
 
 /// Noise protocol name.
 const PROTOCOL_NAME: &str = "Noise_IKelg2+hs2_25519_ChaChaPoly_SHA256";
+
+/// Ephemeral public key offset in `NewSession` message.
+const NS_EPHEMERAL_PUBKEY_OFFSET: Range<usize> = 4..36;
+
+/// Static public key offset in `NewSession` message, including Poly1305 MAC.
+const NS_STATIC_PUBKEY_OFFSET: Range<usize> = 36..84;
+
+/// Payload section offset in `NewSession` message, including Poly1305 MAC.
+const NS_PAYLOAD_OFFSET: RangeFrom<usize> = 84..;
+
+/// Minimum size for `NewSession` message.
+const NS_MINIMUM_SIZE: usize = 100usize;
 
 /// Key context for an ECIES-X25519-AEAD-Ratchet session.
 #[derive(Clone)]
@@ -259,15 +277,112 @@ impl<R: Runtime> KeyContext<R> {
         )
     }
 
-    /// Create inbound session.
+    /// Create inbound session from serialized `NewSession` message.
     ///
     /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
-    pub fn create_inbound_session(&self, representative: [u8; 32]) {
-        let new_pubkey = Randomized::from_representative(&representative).unwrap().to_montgomery();
-        let public_key = StaticPublicKey::from(new_pubkey.0);
+    pub fn create_inbound_session(
+        &self,
+        message: Vec<u8>,
+    ) -> crate::Result<(InboundSession<R>, Vec<u8>)> {
+        if message.len() < NS_MINIMUM_SIZE {
+            tracing::warn!(
+                target: LOG_TARGET,
+                message_len = ?message.len(),
+                "`NewSession` message is too short",
+            );
 
+            return Err(Error::InvalidData);
+        }
+
+        // extract and decode elligator2-encoded public key
+        let public_key = {
+            // conversion must succeed as `message` has been ensured to be long enough
+            // to hold the elligator2-encoded ephemeral public key
+            let representative =
+                TryInto::<[u8; 32]>::try_into(message[NS_EPHEMERAL_PUBKEY_OFFSET].to_vec())
+                    .expect("to succeed");
+
+            let new_pubkey = Randomized::from_representative(&representative)
+                .into_option()
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?representative,
+                        "failed to elligator2-decode public key",
+                    );
+
+                    Error::InvalidData
+                })?
+                .to_montgomery();
+
+            StaticPublicKey::from(new_pubkey.0)
+        };
+
+        // calculate new state based on remote's ephemeral public key
         let state = Sha256::new().update(&self.inbound_state).update(&public_key).finalize();
-        let shared = self.private_key.diffie_hellman(&public_key);
+
+        // generate chaining key and cipher key for decrypting remote's public key
+        let (chaining_key, mut cipher_key) = {
+            let mut shared = self.private_key.diffie_hellman(&public_key);
+            let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
+            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let mut cipher_key = Hmac::new(&temp_key)
+                .update(&chaining_key)
+                .update(&b"")
+                .update(&[0x02])
+                .finalize();
+
+            shared.zeroize();
+            temp_key.zeroize();
+
+            (chaining_key, cipher_key)
+        };
+
+        // decrypt remote's static key and calculate new state
+        let (static_key, state) = {
+            let mut static_key = message[NS_STATIC_PUBKEY_OFFSET].to_vec();
+            ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut static_key)?;
+
+            cipher_key.zeroize();
+
+            (
+                StaticPublicKey::from_bytes(static_key).expect("to succeed"),
+                Sha256::new()
+                    .update(&state)
+                    .update(&message[NS_STATIC_PUBKEY_OFFSET])
+                    .finalize(),
+            )
+        };
+
+        // decrypt payload section
+        let (chaining_key, payload) = {
+            let mut shared = self.private_key.diffie_hellman(&static_key);
+            let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let mut cipher_key = Hmac::new(&temp_key)
+                .update(&chaining_key)
+                .update(&b"")
+                .update(&[0x02])
+                .finalize();
+
+            let mut payload = message[NS_PAYLOAD_OFFSET].to_vec();
+            ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut payload)?;
+
+            shared.zeroize();
+            temp_key.zeroize();
+            cipher_key.zeroize();
+
+            (chaining_key, payload)
+        };
+
+        Ok((
+            InboundSession::new(
+                self.private_key.clone(),
+                chaining_key,
+                Sha256::new().update(&state).update(&message[NS_PAYLOAD_OFFSET]).finalize(),
+            ),
+            payload,
+        ))
     }
 
     /// Get static public key.

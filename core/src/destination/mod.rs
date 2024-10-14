@@ -40,6 +40,7 @@ use crate::{
     runtime::Runtime,
     tunnel::TunnelPoolContextHandle,
     util::gzip::{GzipEncoderBuilder, GzipPayload},
+    Error,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -400,6 +401,11 @@ impl<R: Runtime> NewDestination<R> {
         }
     }
 
+    /// Send `message` to remote `destination`.
+    pub fn send_message(&mut self, destination: Dest, message: GzipPayload) {
+        todo!();
+    }
+
     /// Handle garlic messages received into one of the [`NewDestination`]'s inbound tunnels.
     pub fn handle_message(&mut self, message: Message) -> crate::Result<()> {
         tracing::trace!(
@@ -409,25 +415,22 @@ impl<R: Runtime> NewDestination<R> {
         );
         debug_assert_eq!(message.message_type, MessageType::Garlic);
 
-        // TODO: decrypt message, whatever that means
-        // TODO:
-        // TODO: needs more thinking, this message could be:
-        // TODO:  * `NewSessionRequest` (with or without binding)
-        // TODO:  * `NewSessionReply`
-        // TODO:  * `ExistingSession`
-        // TODO:
-        // TODO: how to distinguish between the types?
-        // TODO: how to use correct session to handle message
-        // TODO:
-        // TODO:
-        // TODO:
+        if message.payload.len() <= 12 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                id = %self.destination_id,
+                payload_len = ?message.payload.len(),
+                "garlic message is too short",
+            );
+            return Err(Error::InvalidData);
+        }
 
-        todo!();
-    }
+        match self.session_manager.decrypt(message) {
+            Err(error) => {}
+            Ok(_) => {}
+        }
 
-    /// Send `message` to remote `destination`.
-    pub fn send_message(&mut self, destination: Dest, message: GzipPayload) {
-        todo!();
+        Ok(())
     }
 }
 
