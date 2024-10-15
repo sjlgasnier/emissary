@@ -121,8 +121,7 @@ impl<R: Runtime> OutboundSession<R> {
                 let mut out = BytesMut::with_capacity(message.len() + 16 + 8);
 
                 let mac = ChaChaPoly::with_nonce(&key, index as u64)
-                    .encrypt_with_ad(&tag, &mut message)
-                    .unwrap();
+                    .encrypt_with_ad(&tag, &mut message)?;
 
                 out.put_slice(&tag);
                 out.put_slice(&message);

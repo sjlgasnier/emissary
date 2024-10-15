@@ -23,6 +23,7 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::{
+        session::PendingSessionEvent,
         tagset::{TagSet, TagSetEntry},
         KeyContext,
     },
@@ -34,10 +35,13 @@ use bytes::{BufMut, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use zeroize::Zeroize;
 
-use core::{marker::PhantomData, mem};
+use core::{fmt, iter, marker::PhantomData, mem};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination::session::inbound";
+
+/// Number of garlic tags to generate.
+const NUM_TAGS_TO_GENERATE: usize = 4;
 
 /// State of the inbound session.
 enum InboundSessionState {
@@ -79,6 +83,21 @@ enum InboundSessionState {
     Poisoned,
 }
 
+impl fmt::Debug for InboundSessionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AwaitingNewSessionReplyTransmit { .. } => f
+                .debug_struct("InboundSessionState::AwaitingNewSessionReplyTransmit ")
+                .finish_non_exhaustive(),
+            Self::NewSessionReplySent { .. } => f
+                .debug_struct("InboundSessionState::NewSessionReplySent ")
+                .finish_non_exhaustive(),
+            Self::Poisoned =>
+                f.debug_struct("InboundSessionState::Poisoned ").finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Inbound session.
 pub struct InboundSession<R: Runtime> {
     /// Static private key of the session.
@@ -115,7 +134,10 @@ impl<R: Runtime> InboundSession<R> {
     /// Create `NewSessionReply`.
     ///
     /// TODO: documentation
-    pub fn create_new_session_reply(&mut self, mut payload: Vec<u8>) -> crate::Result<Vec<u8>> {
+    pub fn create_new_session_reply(
+        &mut self,
+        mut payload: Vec<u8>,
+    ) -> crate::Result<impl Iterator<Item = PendingSessionEvent>> {
         match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
             InboundSessionState::AwaitingNewSessionReplyTransmit {
                 chaining_key,
@@ -201,7 +223,7 @@ impl<R: Runtime> InboundSession<R> {
 
                 // initialize send and receive tag sets
                 let mut send_tag_set = TagSet::new(0u16, &chaining_key, &send_key);
-                let recv_tag_set = TagSet::new(0u16, chaining_key, recv_key);
+                let mut recv_tag_set = TagSet::new(0u16, chaining_key, recv_key);
 
                 // decode payload of the `NewSessionReply` message
                 let mut temp_key = Hmac::new(&send_key).update(&[]).finalize();
@@ -226,25 +248,58 @@ impl<R: Runtime> InboundSession<R> {
                     out.freeze().to_vec()
                 };
 
+                // generate garlic tag/session key pairs for reception
+                //
+                // `next_entry()` must succeed as this is a fresh tagset and `NUM_TAGS_TO_GENERATE`
+                // is smaller than the maximum tag count in a `Tagset`
+                let tags = (0..NUM_TAGS_TO_GENERATE)
+                    .map(|_| {
+                        let entry = recv_tag_set.next_entry().expect("to succeed");
+                        let tag =
+                            TryInto::<[u8; 8]>::try_into(entry.tag.as_ref()).expect("to succeed");
+
+                        (u64::from_le_bytes(tag), entry.key)
+                    })
+                    .collect::<Vec<_>>();
+
                 self.state = InboundSessionState::NewSessionReplySent {
                     send_tag_set,
                     recv_tag_set,
                 };
 
-                Ok(payload)
+                Ok(vec![
+                    PendingSessionEvent::StoreTags { tags },
+                    PendingSessionEvent::SendMessage { message: payload },
+                ]
+                .into_iter())
             }
-            InboundSessionState::NewSessionReplySent {
-                send_tag_set,
-                recv_tag_set,
-            } => todo!(),
-            InboundSessionState::Poisoned => {
+            state => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    "inbound state has been poisoned",
+                    ?state,
+                    "invalid state for `NewSessionReply` message",
                 );
                 debug_assert!(false);
                 Err(Error::InvalidState)
             }
         }
+    }
+
+    /// Handle `ExistingSession` message.
+    pub fn handle_existing_session(&mut self, mut payload: Vec<u8>) -> crate::Result<()> {
+        let InboundSessionState::NewSessionReplySent {
+            send_tag_set,
+            recv_tag_set,
+        } = mem::replace(&mut self.state, InboundSessionState::Poisoned)
+        else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "invalid state for `ExistingSession` message",
+            );
+            debug_assert!(false);
+            return Err(Error::InvalidState);
+        };
+
+        Ok(())
     }
 }

@@ -22,7 +22,7 @@
 
 use crate::{
     crypto::StaticPrivateKey,
-    destination::session::session::{PendingSession, Session},
+    destination::session::session::{PendingSession, PendingSessionEvent, Session},
     error::Error,
     i2np::{
         database::store::{DatabaseStore, DatabaseStorePayload},
@@ -96,7 +96,18 @@ impl<R: Runtime> SessionManager<R> {
         match self.active.get_mut(destination_id) {
             Some(session) => todo!("handle active session"),
             None => match self.pending.get_mut(destination_id) {
-                Some(session) => session.advance_outbound(message),
+                Some(session) => session
+                    .advance_outbound(message)?
+                    .filter_map(|event| match event {
+                        PendingSessionEvent::StoreTags { tags } => {
+                            self.garlic_tags.extend(tags.into_iter());
+                            None
+                        }
+                        PendingSessionEvent::SendMessage { message } => Some(message),
+                    })
+                    .take(1)
+                    .next()
+                    .ok_or(Error::InvalidState),
                 None => todo!("outbound sessions not supported"),
             },
         }
@@ -327,24 +338,42 @@ mod tests {
 
         // verify pending inbound session exists for the destination
         assert!(session.pending.contains_key(&remote_destination_id));
-        let payload = {
+        let message = {
             let payload = session.encrypt(&remote_destination_id, vec![1, 2, 3, 4]).unwrap();
             let mut out = BytesMut::with_capacity(payload.len() + 4);
             out.put_u32(payload.len() as u32);
             out.put_slice(&payload);
 
-            out.freeze().to_vec()
-        };
-
-        let message = Message {
-            payload,
-            ..Default::default()
+            Message {
+                payload: out.freeze().to_vec(),
+                ..Default::default()
+            }
         };
 
         assert_eq!(
             outbound_session.decrypt_message(message).unwrap(),
             [1, 2, 3, 4]
         );
+
+        let message = {
+            let message = outbound_session.encrypt_message(vec![5, 6, 7, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+
+            Message {
+                payload: out.freeze().to_vec(),
+                ..Default::default()
+            }
+        };
+
+        let _ = session.decrypt(message).unwrap();
+    }
+
+    #[test]
+    fn messages_out_of_order() {
+        todo!();
     }
 
     // TODO: remove or enable when anonymous datagrams work

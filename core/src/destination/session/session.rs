@@ -26,6 +26,7 @@ use crate::{
     runtime::Runtime,
 };
 
+use bytes::Bytes;
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 
 use core::{marker::PhantomData, mem};
@@ -36,6 +37,12 @@ pub enum PendingSessionEvent {
     SendMessage {
         /// Serialized message.
         message: Vec<u8>,
+    },
+
+    /// Store garlic tags into `SessionManager`.
+    StoreTags {
+        /// (Garlic tags, session key) tuples to store.
+        tags: Vec<(u64, Bytes)>,
     },
 }
 
@@ -99,7 +106,10 @@ impl<R: Runtime> PendingSession<R> {
     /// Advance the state of [`PendingSession`] with an outbound `message`.
     ///
     /// TODO: more documentation
-    pub fn advance_outbound(&mut self, message: Vec<u8>) -> crate::Result<Vec<u8>> {
+    pub fn advance_outbound(
+        &mut self,
+        message: Vec<u8>,
+    ) -> crate::Result<impl Iterator<Item = PendingSessionEvent>> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive { mut inbound } => {
                 tracing::trace!(
@@ -132,7 +142,33 @@ impl<R: Runtime> PendingSession<R> {
     /// This is either a `NewSessionReply` for outbound sessions or a `ExistingSession`
     /// for inbound session.
     pub fn advance_inbound(&mut self, message: Vec<u8>) -> crate::Result<Vec<u8>> {
-        todo!();
+        match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
+            PendingSessionState::InboundActive { mut inbound } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    "send `NewSessionReply`",
+                );
+
+                let _ = inbound.handle_existing_session(message);
+
+                todo!();
+            }
+            PendingSessionState::OutboundActive { outbound } => {
+                todo!();
+            }
+            PendingSessionState::Poisoned => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    "session state has been poisoned",
+                );
+                debug_assert!(false);
+                return Err(Error::InvalidState);
+            }
+        }
     }
 }
 
