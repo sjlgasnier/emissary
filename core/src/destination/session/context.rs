@@ -135,7 +135,9 @@ impl<R: Runtime> KeyContext<R> {
     }
 
     /// Generate private key which can be Elligator2-encoded.
-    fn generate_ephemeral_keypair() -> ([u8; 32], u8) {
+    //
+    // TODO: move this into `src/crypto`
+    pub fn generate_ephemeral_keypair() -> ([u8; 32], u8) {
         let mut rng = R::rng();
         let tweak = rng.next_u32() as u8;
 
@@ -378,6 +380,8 @@ impl<R: Runtime> KeyContext<R> {
         Ok((
             InboundSession::new(
                 self.private_key.clone(),
+                static_key,
+                public_key,
                 chaining_key,
                 Sha256::new().update(&state).update(&message[NS_PAYLOAD_OFFSET]).finalize(),
             ),

@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::StaticPublicKey,
-    i2np::{MessageType, LOG_TARGET},
+    i2np::{Message, MessageType, LOG_TARGET},
     primitives::MessageId,
 };
 
@@ -532,6 +532,15 @@ impl<'a> GarlicMessage<'a> {
         Some(Self {
             blocks: Self::parse_inner(input, Vec::new())?,
         })
+    }
+
+    /// Extract garlic tag from `message`.
+    ///
+    /// Panics if `message` isn't long enough to contain a garlic tag.
+    pub fn garlic_tag(message: &Message) -> u64 {
+        u64::from_be_bytes(
+            TryInto::<[u8; 8]>::try_into(&message.payload[4..12]).expect("valid garlic message"),
+        )
     }
 }
 

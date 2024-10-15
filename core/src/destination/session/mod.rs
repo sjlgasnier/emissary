@@ -22,6 +22,7 @@
 
 use crate::{
     crypto::StaticPrivateKey,
+    destination::session::session::{PendingSession, Session},
     error::Error,
     i2np::{
         database::store::{DatabaseStore, DatabaseStorePayload},
@@ -42,6 +43,7 @@ mod context;
 mod inbound;
 mod message;
 mod outbound;
+mod session;
 mod tagset;
 
 // TODO: remove re-exports
@@ -55,6 +57,9 @@ const LOG_TARGET: &str = "emissary::destination::session";
 ///
 /// Handles both inbound and outbound sessions.
 pub struct SessionManager<R: Runtime> {
+    /// Active sessions.
+    active: HashMap<DestinationId, Session<R>>,
+
     /// Destination ID.
     destination_id: DestinationId,
 
@@ -64,18 +69,36 @@ pub struct SessionManager<R: Runtime> {
     /// Key context.
     key_context: KeyContext<R>,
 
-    /// Pending inbound sessions.
-    pending_inbound: HashMap<DestinationId, InboundSession<R>>,
+    /// Pending sessions.
+    pending: HashMap<DestinationId, PendingSession<R>>,
 }
 
 impl<R: Runtime> SessionManager<R> {
     /// Create new [`SessionManager`].
     pub fn new(destination_id: DestinationId, private_key: StaticPrivateKey) -> Self {
         Self {
+            active: HashMap::new(),
             destination_id,
             garlic_tags: HashMap::new(),
             key_context: KeyContext::from_private_key(private_key),
-            pending_inbound: HashMap::new(),
+            pending: HashMap::new(),
+        }
+    }
+
+    /// Encrypt `message` destined to `destination_id`.
+    ///
+    /// TODO: more documentation
+    pub fn encrypt(
+        &mut self,
+        destination_id: &DestinationId,
+        message: Vec<u8>,
+    ) -> crate::Result<Vec<u8>> {
+        match self.active.get_mut(destination_id) {
+            Some(session) => todo!("handle active session"),
+            None => match self.pending.get_mut(destination_id) {
+                Some(session) => session.advance_outbound(message),
+                None => todo!("outbound sessions not supported"),
+            },
         }
     }
 
@@ -170,7 +193,21 @@ impl<R: Runtime> SessionManager<R> {
                     return Err(Error::InvalidData);
                 };
 
-                self.pending_inbound.insert(leaseset.header.destination.id(), session);
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    id = %self.destination_id,
+                    remote_id = %leaseset.header.destination.id(),
+                    "inbound session created",
+                );
+
+                self.pending.insert(
+                    leaseset.header.destination.id(),
+                    PendingSession::new_inbound(
+                        self.destination_id.clone(),
+                        leaseset.header.destination.id(),
+                        session,
+                    ),
+                );
 
                 Ok(payload)
             }
@@ -204,6 +241,8 @@ mod tests {
 
     #[test]
     fn new_inbound_session() {
+        crate::util::init_logger();
+
         let private_key = StaticPrivateKey::new(thread_rng());
         let public_key = private_key.public();
         let destination_id = DestinationId::from(vec![1, 2, 3, 4]);
@@ -249,7 +288,7 @@ mod tests {
             )
             .build();
 
-        let (outbound_session, message) = {
+        let (mut outbound_session, message) = {
             let (outbound, message) =
                 key_context.create_oubound_session(destination_id, public_key, &payload);
             let mut payload = BytesMut::with_capacity(message.len() + 4);
@@ -287,7 +326,25 @@ mod tests {
         }
 
         // verify pending inbound session exists for the destination
-        assert!(session.pending_inbound.contains_key(&remote_destination_id));
+        assert!(session.pending.contains_key(&remote_destination_id));
+        let payload = {
+            let payload = session.encrypt(&remote_destination_id, vec![1, 2, 3, 4]).unwrap();
+            let mut out = BytesMut::with_capacity(payload.len() + 4);
+            out.put_u32(payload.len() as u32);
+            out.put_slice(&payload);
+
+            out.freeze().to_vec()
+        };
+
+        let message = Message {
+            payload,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            outbound_session.decrypt_message(message).unwrap(),
+            [1, 2, 3, 4]
+        );
     }
 
     // TODO: remove or enable when anonymous datagrams work
