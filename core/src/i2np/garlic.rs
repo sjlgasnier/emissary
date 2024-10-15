@@ -538,7 +538,8 @@ impl<'a> GarlicMessage<'a> {
     ///
     /// Panics if `message` isn't long enough to contain a garlic tag.
     pub fn garlic_tag(message: &Message) -> u64 {
-        u64::from_be_bytes(
+        // TODO: is this correct
+        u64::from_le_bytes(
             TryInto::<[u8; 8]>::try_into(&message.payload[4..12]).expect("valid garlic message"),
         )
     }

@@ -64,7 +64,7 @@ pub struct SessionManager<R: Runtime> {
     destination_id: DestinationId,
 
     /// Mapping from garlic tags to session keys.
-    garlic_tags: HashMap<u64, Bytes>,
+    garlic_tags: HashMap<u64, DestinationId>,
 
     /// Key context.
     key_context: KeyContext<R>,
@@ -96,18 +96,15 @@ impl<R: Runtime> SessionManager<R> {
         match self.active.get_mut(destination_id) {
             Some(session) => todo!("handle active session"),
             None => match self.pending.get_mut(destination_id) {
-                Some(session) => session
-                    .advance_outbound(message)?
-                    .filter_map(|event| match event {
-                        PendingSessionEvent::StoreTags { tags } => {
-                            self.garlic_tags.extend(tags.into_iter());
-                            None
-                        }
-                        PendingSessionEvent::SendMessage { message } => Some(message),
-                    })
-                    .take(1)
-                    .next()
-                    .ok_or(Error::InvalidState),
+                Some(session) => match session.advance_outbound(message)? {
+                    PendingSessionEvent::StoreTags { message, tags } => {
+                        self.garlic_tags
+                            .extend(tags.into_iter().map(|tag| (tag, destination_id.clone())));
+
+                        Ok(message)
+                    }
+                    PendingSessionEvent::CreateSession { message, session } => todo!(),
+                },
                 None => todo!("outbound sessions not supported"),
             },
         }
@@ -135,7 +132,7 @@ impl<R: Runtime> SessionManager<R> {
 
         tracing::trace!(
             target: LOG_TARGET,
-            id = %self.destination_id,
+            local = %self.destination_id,
             message_id = ?message.message_id,
             ?garlic_tag,
             "garlic message",
@@ -206,8 +203,8 @@ impl<R: Runtime> SessionManager<R> {
 
                 tracing::debug!(
                     target: LOG_TARGET,
-                    id = %self.destination_id,
-                    remote_id = %leaseset.header.destination.id(),
+                    local = %self.destination_id,
+                    remote = %leaseset.header.destination.id(),
                     "inbound session created",
                 );
 
@@ -222,15 +219,38 @@ impl<R: Runtime> SessionManager<R> {
 
                 Ok(payload)
             }
-            Some(_) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    ?garlic_tag,
-                    "garlic tag found"
-                );
+            Some(destination_id) => match self.active.get_mut(&destination_id) {
+                Some(_) => todo!("active sessions not implemented"),
+                None => match self.pending.get_mut(&destination_id) {
+                    Some(session) => match session.advance_inbound(garlic_tag, message.payload)? {
+                        PendingSessionEvent::StoreTags { message, tags } => todo!(),
+                        PendingSessionEvent::CreateSession { message, session } => {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                remote = %destination_id,
+                                "new session opened",
+                            );
 
-                todo!();
-            }
+                            self.pending.remove(&destination_id);
+                            self.active.insert(destination_id, session);
+
+                            Ok(message)
+                        }
+                    },
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            remote = %destination_id,
+                            ?garlic_tag,
+                            "destination for garlic tag doesn't exist",
+                        );
+                        debug_assert!(false);
+                        Err(Error::InvalidState)
+                    }
+                },
+            },
         }
     }
 }
@@ -368,7 +388,8 @@ mod tests {
             }
         };
 
-        let _ = session.decrypt(message).unwrap();
+        let message = session.decrypt(message).unwrap();
+        assert_eq!(message, [5, 6, 7, 8]);
     }
 
     #[test]

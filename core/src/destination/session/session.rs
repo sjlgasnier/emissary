@@ -19,7 +19,11 @@
 use crate::{
     crypto::{StaticPrivateKey, StaticPublicKey},
     destination::session::{
-        context::KeyContext, inbound::InboundSession, outbound::OutboundSession, LOG_TARGET,
+        context::KeyContext,
+        inbound::InboundSession,
+        outbound::OutboundSession,
+        tagset::{TagSet, TagSetEntry},
+        LOG_TARGET,
     },
     error::Error,
     primitives::DestinationId,
@@ -28,21 +32,28 @@ use crate::{
 
 use bytes::Bytes;
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
+use hashbrown::HashMap;
 
 use core::{marker::PhantomData, mem};
 
 /// Event emitted by [`PendingSession`].
-pub enum PendingSessionEvent {
-    /// Send message to remote destination.
-    SendMessage {
+pub enum PendingSessionEvent<R: Runtime> {
+    /// Send message to remote destination and store garlic tags into `SessionManager`
+    StoreTags {
         /// Serialized message.
         message: Vec<u8>,
+
+        /// Garlic tags to store.
+        tags: Vec<u64>,
     },
 
-    /// Store garlic tags into `SessionManager`.
-    StoreTags {
-        /// (Garlic tags, session key) tuples to store.
-        tags: Vec<(u64, Bytes)>,
+    /// Create new active `Session` and send `message` to remote destination.
+    CreateSession {
+        /// Serialized message.
+        message: Vec<u8>,
+
+        /// Active [`Session`].
+        session: Session<R>,
     },
 }
 
@@ -52,6 +63,9 @@ enum PendingSessionState<R: Runtime> {
     InboundActive {
         /// Inbound session.
         inbound: InboundSession<R>,
+
+        /// Garlic tag -> session key mapping for inbound messages.
+        tag_set_entries: HashMap<u64, TagSetEntry>,
     },
 
     /// Outbound session established to remote destination.
@@ -86,7 +100,10 @@ impl<R: Runtime> PendingSession<R> {
         Self {
             local,
             remote,
-            state: PendingSessionState::InboundActive { inbound },
+            state: PendingSessionState::InboundActive {
+                inbound,
+                tag_set_entries: HashMap::new(),
+            },
         }
     }
 
@@ -106,12 +123,12 @@ impl<R: Runtime> PendingSession<R> {
     /// Advance the state of [`PendingSession`] with an outbound `message`.
     ///
     /// TODO: more documentation
-    pub fn advance_outbound(
-        &mut self,
-        message: Vec<u8>,
-    ) -> crate::Result<impl Iterator<Item = PendingSessionEvent>> {
+    pub fn advance_outbound(&mut self, message: Vec<u8>) -> crate::Result<PendingSessionEvent<R>> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
-            PendingSessionState::InboundActive { mut inbound } => {
+            PendingSessionState::InboundActive {
+                mut inbound,
+                mut tag_set_entries,
+            } => {
                 tracing::trace!(
                     target: LOG_TARGET,
                     local = %self.local,
@@ -119,7 +136,18 @@ impl<R: Runtime> PendingSession<R> {
                     "send `NewSessionReply`",
                 );
 
-                inbound.create_new_session_reply(message)
+                // TODO: explain this code
+                // TODO: refactor
+                let (message, entries) = inbound.create_new_session_reply(message)?;
+                let tags = entries.iter().map(|entry| entry.tag).collect::<Vec<_>>();
+
+                tag_set_entries.extend(entries.into_iter().map(|entry| (entry.tag, entry)));
+                self.state = PendingSessionState::InboundActive {
+                    inbound,
+                    tag_set_entries,
+                };
+
+                Ok(PendingSessionEvent::StoreTags { message, tags })
             }
             PendingSessionState::OutboundActive { outbound } => {
                 todo!();
@@ -141,9 +169,16 @@ impl<R: Runtime> PendingSession<R> {
     ///
     /// This is either a `NewSessionReply` for outbound sessions or a `ExistingSession`
     /// for inbound session.
-    pub fn advance_inbound(&mut self, message: Vec<u8>) -> crate::Result<Vec<u8>> {
+    pub fn advance_inbound(
+        &mut self,
+        garlic_tag: u64,
+        message: Vec<u8>,
+    ) -> crate::Result<PendingSessionEvent<R>> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
-            PendingSessionState::InboundActive { mut inbound } => {
+            PendingSessionState::InboundActive {
+                mut inbound,
+                mut tag_set_entries,
+            } => {
                 tracing::trace!(
                     target: LOG_TARGET,
                     local = %self.local,
@@ -151,9 +186,26 @@ impl<R: Runtime> PendingSession<R> {
                     "send `NewSessionReply`",
                 );
 
-                let _ = inbound.handle_existing_session(message);
+                let session_key = tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %self.local,
+                        remote = %self.remote,
+                        ?garlic_tag,
+                        "session key doesn't exist",
+                    );
 
-                todo!();
+                    debug_assert!(false);
+                    Error::InvalidState
+                })?;
+
+                let (message, send_tag_set, recv_tag_set) =
+                    inbound.handle_existing_session(session_key, message)?;
+
+                Ok(PendingSessionEvent::CreateSession {
+                    message,
+                    session: Session::new(send_tag_set, recv_tag_set, tag_set_entries),
+                })
             }
             PendingSessionState::OutboundActive { outbound } => {
                 todo!();
@@ -174,5 +226,31 @@ impl<R: Runtime> PendingSession<R> {
 
 /// Active ECIES-X25519-AEAD-Ratchet session.
 pub struct Session<R: Runtime> {
-    _marker: PhantomData<R>,
+    /// `TagSet` for inbound messages.
+    recv_tag_set: TagSet,
+
+    /// `TagSet` for outbound messages.
+    send_tag_set: TagSet,
+
+    /// `TagSet` entries for inbound messages.
+    tag_set_entries: HashMap<u64, TagSetEntry>,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> Session<R> {
+    /// Create new [`Session`].
+    pub fn new(
+        send_tag_set: TagSet,
+        recv_tag_set: TagSet,
+        tag_set_entries: HashMap<u64, TagSetEntry>,
+    ) -> Self {
+        Self {
+            send_tag_set,
+            recv_tag_set,
+            tag_set_entries,
+            _runtime: Default::default(),
+        }
+    }
 }

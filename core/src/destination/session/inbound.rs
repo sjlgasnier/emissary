@@ -31,7 +31,7 @@ use crate::{
     runtime::Runtime,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use zeroize::Zeroize;
 
@@ -137,7 +137,7 @@ impl<R: Runtime> InboundSession<R> {
     pub fn create_new_session_reply(
         &mut self,
         mut payload: Vec<u8>,
-    ) -> crate::Result<impl Iterator<Item = PendingSessionEvent>> {
+    ) -> crate::Result<(Vec<u8>, Vec<TagSetEntry>)> {
         match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
             InboundSessionState::AwaitingNewSessionReplyTransmit {
                 chaining_key,
@@ -254,11 +254,7 @@ impl<R: Runtime> InboundSession<R> {
                 // `next_entry()` must succeed as this is a fresh tagset and `NUM_TAGS_TO_GENERATE`
                 // is smaller than the maximum tag count in a `Tagset`
                 let tags = (0..NUM_TAGS_TO_GENERATE)
-                    .map(|_| {
-                        let entry = recv_tag_set.next_entry().expect("to succeed");
-
-                        (entry.tag, entry.key)
-                    })
+                    .map(|_| recv_tag_set.next_entry().expect("to succeed"))
                     .collect::<Vec<_>>();
 
                 self.state = InboundSessionState::NewSessionReplySent {
@@ -266,11 +262,7 @@ impl<R: Runtime> InboundSession<R> {
                     recv_tag_set,
                 };
 
-                Ok(vec![
-                    PendingSessionEvent::StoreTags { tags },
-                    PendingSessionEvent::SendMessage { message: payload },
-                ]
-                .into_iter())
+                Ok((payload, tags))
             }
             state => {
                 tracing::warn!(
@@ -285,7 +277,15 @@ impl<R: Runtime> InboundSession<R> {
     }
 
     /// Handle `ExistingSession` message.
-    pub fn handle_existing_session(&mut self, mut payload: Vec<u8>) -> crate::Result<()> {
+    ///
+    /// Decrypt `message` using `session_key` and return the decrypted payload and the inner state
+    /// of `InboundSession`, allowing the caller to create a new `Session` object which contains
+    /// both send and receive `TagSet`s.
+    pub fn handle_existing_session(
+        &mut self,
+        tag_set_entry: TagSetEntry,
+        mut payload: Vec<u8>,
+    ) -> crate::Result<(Vec<u8>, TagSet, TagSet)> {
         let InboundSessionState::NewSessionReplySent {
             send_tag_set,
             recv_tag_set,
@@ -299,6 +299,11 @@ impl<R: Runtime> InboundSession<R> {
             return Err(Error::InvalidState);
         };
 
-        Ok(())
+        let mut payload = payload[12..].to_vec();
+
+        ChaChaPoly::with_nonce(&tag_set_entry.key, tag_set_entry.index as u64)
+            .decrypt_with_ad(&tag_set_entry.tag.to_le_bytes(), &mut payload)?;
+
+        Ok((payload, send_tag_set, recv_tag_set))
     }
 }
