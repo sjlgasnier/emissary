@@ -121,9 +121,9 @@ impl<R: Runtime> OutboundSession<R> {
                 let mut out = BytesMut::with_capacity(message.len() + 16 + 8);
 
                 let mac = ChaChaPoly::with_nonce(&key, index as u64)
-                    .encrypt_with_ad(&tag, &mut message)?;
+                    .encrypt_with_ad(&tag.to_le_bytes(), &mut message)?;
 
-                out.put_slice(&tag);
+                out.put_slice(&tag.to_le_bytes());
                 out.put_slice(&message);
                 out.put_slice(&mac);
 
@@ -273,7 +273,7 @@ impl<R: Runtime> OutboundSession<R> {
                 // TODO: lookup for garlic tag
 
                 ChaChaPoly::with_nonce(&key, index as u64)
-                    .decrypt_with_ad(&tag, &mut payload)
+                    .decrypt_with_ad(&tag.to_le_bytes(), &mut payload)
                     .unwrap();
 
                 self.state = OutboundSessionState::Active {

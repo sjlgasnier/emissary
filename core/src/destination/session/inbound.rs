@@ -203,7 +203,8 @@ impl<R: Runtime> InboundSession<R> {
 
                 // calculate new state encrypting the empty key section
                 let state = {
-                    let state = Sha256::new().update(&state).update(&garlic_tag).finalize();
+                    let state =
+                        Sha256::new().update(&state).update(&garlic_tag.to_le_bytes()).finalize();
 
                     Sha256::new()
                         .update(&state)
@@ -240,7 +241,7 @@ impl<R: Runtime> InboundSession<R> {
                             .saturating_add(mac.len())
                             .saturating_add(payload.len()),
                     );
-                    out.put_slice(&garlic_tag);
+                    out.put_slice(&garlic_tag.to_le_bytes());
                     out.put_slice(&representative);
                     out.put_slice(&mac);
                     out.put_slice(&payload);
@@ -255,10 +256,8 @@ impl<R: Runtime> InboundSession<R> {
                 let tags = (0..NUM_TAGS_TO_GENERATE)
                     .map(|_| {
                         let entry = recv_tag_set.next_entry().expect("to succeed");
-                        let tag =
-                            TryInto::<[u8; 8]>::try_into(entry.tag.as_ref()).expect("to succeed");
 
-                        (u64::from_le_bytes(tag), entry.key)
+                        (entry.tag, entry.key)
                     })
                     .collect::<Vec<_>>();
 

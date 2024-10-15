@@ -91,7 +91,7 @@ pub struct TagSetEntry {
     pub key: Bytes,
 
     /// Session tag.
-    pub tag: Bytes,
+    pub tag: u64,
 }
 
 /// Tag set.
@@ -227,7 +227,9 @@ impl TagSet {
         Some(TagSetEntry {
             index: tag_index,
             key: symmetric_key,
-            tag: garlic_tag,
+            tag: u64::from_le_bytes(
+                TryInto::<[u8; 8]>::try_into(garlic_tag.as_ref()).expect("to succeed"),
+            ),
         })
     }
 
