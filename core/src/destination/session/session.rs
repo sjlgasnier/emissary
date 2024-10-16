@@ -34,17 +34,20 @@ use bytes::Bytes;
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use hashbrown::HashMap;
 
+#[cfg(feature = "std")]
+use parking_lot::RwLock;
+#[cfg(feature = "no_std")]
+use spin::rwlock::RwLock;
+
+use alloc::sync::Arc;
 use core::{marker::PhantomData, mem};
 
 /// Event emitted by [`PendingSession`].
-pub enum PendingSessionEvent<R: Runtime> {
-    /// Send message to remote destination and store garlic tags into `SessionManager`
-    StoreTags {
+pub enum PendingSessionEvent {
+    /// Send message to remote destination.
+    SendMessage {
         /// Serialized message.
         message: Vec<u8>,
-
-        /// Garlic tags to store.
-        tags: Vec<u64>,
     },
 
     /// Create new active `Session` and send `message` to remote destination.
@@ -52,8 +55,8 @@ pub enum PendingSessionEvent<R: Runtime> {
         /// Serialized message.
         message: Vec<u8>,
 
-        /// Active [`Session`].
-        session: Session<R>,
+        /// Session context.
+        context: SessionContext,
     },
 }
 
@@ -64,6 +67,9 @@ enum PendingSessionState<R: Runtime> {
         /// Inbound session.
         inbound: InboundSession<R>,
 
+        /// Garlic tags, global mapping for all active and pending sessions.
+        garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
+
         /// Garlic tag -> session key mapping for inbound messages.
         tag_set_entries: HashMap<u64, TagSetEntry>,
     },
@@ -72,6 +78,9 @@ enum PendingSessionState<R: Runtime> {
     OutboundActive {
         /// Outbound session.
         outbound: OutboundSession<R>,
+
+        /// Garlic tags, global mapping for all active and pending sessions.
+        garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
     },
 
     /// State has been poisoned.
@@ -96,6 +105,7 @@ impl<R: Runtime> PendingSession<R> {
         local: DestinationId,
         remote: DestinationId,
         inbound: InboundSession<R>,
+        garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
     ) -> Self {
         Self {
             local,
@@ -103,6 +113,7 @@ impl<R: Runtime> PendingSession<R> {
             state: PendingSessionState::InboundActive {
                 inbound,
                 tag_set_entries: HashMap::new(),
+                garlic_tags,
             },
         }
     }
@@ -112,22 +123,27 @@ impl<R: Runtime> PendingSession<R> {
         local: DestinationId,
         remote: DestinationId,
         outbound: OutboundSession<R>,
+        garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
     ) -> Self {
         Self {
             local,
             remote,
-            state: PendingSessionState::OutboundActive { outbound },
+            state: PendingSessionState::OutboundActive {
+                outbound,
+                garlic_tags,
+            },
         }
     }
 
     /// Advance the state of [`PendingSession`] with an outbound `message`.
     ///
     /// TODO: more documentation
-    pub fn advance_outbound(&mut self, message: Vec<u8>) -> crate::Result<PendingSessionEvent<R>> {
+    pub fn advance_outbound(&mut self, message: Vec<u8>) -> crate::Result<PendingSessionEvent> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive {
                 mut inbound,
                 mut tag_set_entries,
+                mut garlic_tags,
             } => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -136,20 +152,34 @@ impl<R: Runtime> PendingSession<R> {
                     "send `NewSessionReply`",
                 );
 
-                // TODO: explain this code
-                // TODO: refactor
+                // create `NewSessionReply` and garlic receive tags
                 let (message, entries) = inbound.create_new_session_reply(message)?;
-                let tags = entries.iter().map(|entry| entry.tag).collect::<Vec<_>>();
 
-                tag_set_entries.extend(entries.into_iter().map(|entry| (entry.tag, entry)));
+                // store receive garlic tags both in the global storage common for all destinations
+                // so `SessionManager` can dispatch received messages to the correct `Session` and
+                // also in the session's own `TagSetEntry` storage so the session has access to the
+                // session key and associated context to decrypt the message
+                {
+                    let mut inner = garlic_tags.write();
+
+                    entries.into_iter().for_each(|entry| {
+                        inner.insert(entry.tag, self.remote.clone());
+                        tag_set_entries.insert(entry.tag, entry);
+                    })
+                }
+
                 self.state = PendingSessionState::InboundActive {
                     inbound,
                     tag_set_entries,
+                    garlic_tags,
                 };
 
-                Ok(PendingSessionEvent::StoreTags { message, tags })
+                Ok(PendingSessionEvent::SendMessage { message })
             }
-            PendingSessionState::OutboundActive { outbound } => {
+            PendingSessionState::OutboundActive {
+                outbound,
+                garlic_tags,
+            } => {
                 todo!();
             }
             PendingSessionState::Poisoned => {
@@ -173,11 +203,12 @@ impl<R: Runtime> PendingSession<R> {
         &mut self,
         garlic_tag: u64,
         message: Vec<u8>,
-    ) -> crate::Result<PendingSessionEvent<R>> {
+    ) -> crate::Result<PendingSessionEvent> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive {
                 mut inbound,
                 mut tag_set_entries,
+                garlic_tags,
             } => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -204,10 +235,18 @@ impl<R: Runtime> PendingSession<R> {
 
                 Ok(PendingSessionEvent::CreateSession {
                     message,
-                    session: Session::new(send_tag_set, recv_tag_set, tag_set_entries),
+                    context: SessionContext {
+                        recv_tag_set,
+                        send_tag_set,
+                        tag_set_entries,
+                        garlic_tags,
+                    },
                 })
             }
-            PendingSessionState::OutboundActive { outbound } => {
+            PendingSessionState::OutboundActive {
+                outbound,
+                garlic_tags,
+            } => {
                 todo!();
             }
             PendingSessionState::Poisoned => {
@@ -222,6 +261,21 @@ impl<R: Runtime> PendingSession<R> {
             }
         }
     }
+}
+
+/// Session context, passed into [`Session::new()`].
+pub struct SessionContext {
+    /// `TagSet` for inbound messages.
+    recv_tag_set: TagSet,
+
+    /// `TagSet` for outbound messages.
+    send_tag_set: TagSet,
+
+    /// `TagSet` entries for inbound messages.
+    tag_set_entries: HashMap<u64, TagSetEntry>,
+
+    /// Garlic tags, global mapping for all active and pending sessions.
+    garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
 }
 
 /// Active ECIES-X25519-AEAD-Ratchet session.
@@ -241,11 +295,14 @@ pub struct Session<R: Runtime> {
 
 impl<R: Runtime> Session<R> {
     /// Create new [`Session`].
-    pub fn new(
-        send_tag_set: TagSet,
-        recv_tag_set: TagSet,
-        tag_set_entries: HashMap<u64, TagSetEntry>,
-    ) -> Self {
+    pub fn new(context: SessionContext) -> Self {
+        let SessionContext {
+            recv_tag_set,
+            send_tag_set,
+            tag_set_entries,
+            garlic_tags,
+        } = context;
+
         Self {
             send_tag_set,
             recv_tag_set,

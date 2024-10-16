@@ -37,6 +37,12 @@ use bytes::Bytes;
 use hashbrown::HashMap;
 use inbound::InboundSession;
 
+#[cfg(feature = "std")]
+use parking_lot::RwLock;
+#[cfg(feature = "no_std")]
+use spin::rwlock::RwLock;
+
+use alloc::sync::Arc;
 use core::marker::PhantomData;
 
 mod context;
@@ -64,7 +70,7 @@ pub struct SessionManager<R: Runtime> {
     destination_id: DestinationId,
 
     /// Mapping from garlic tags to session keys.
-    garlic_tags: HashMap<u64, DestinationId>,
+    garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
 
     /// Key context.
     key_context: KeyContext<R>,
@@ -79,7 +85,7 @@ impl<R: Runtime> SessionManager<R> {
         Self {
             active: HashMap::new(),
             destination_id,
-            garlic_tags: HashMap::new(),
+            garlic_tags: Default::default(),
             key_context: KeyContext::from_private_key(private_key),
             pending: HashMap::new(),
         }
@@ -97,13 +103,8 @@ impl<R: Runtime> SessionManager<R> {
             Some(session) => todo!("handle active session"),
             None => match self.pending.get_mut(destination_id) {
                 Some(session) => match session.advance_outbound(message)? {
-                    PendingSessionEvent::StoreTags { message, tags } => {
-                        self.garlic_tags
-                            .extend(tags.into_iter().map(|tag| (tag, destination_id.clone())));
-
-                        Ok(message)
-                    }
-                    PendingSessionEvent::CreateSession { message, session } => todo!(),
+                    PendingSessionEvent::SendMessage { message } => Ok(message),
+                    PendingSessionEvent::CreateSession { message, context } => todo!(),
                 },
                 None => todo!("outbound sessions not supported"),
             },
@@ -138,7 +139,7 @@ impl<R: Runtime> SessionManager<R> {
             "garlic message",
         );
 
-        match self.garlic_tags.remove(&garlic_tag) {
+        match self.garlic_tags.write().remove(&garlic_tag) {
             None => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -214,6 +215,7 @@ impl<R: Runtime> SessionManager<R> {
                         self.destination_id.clone(),
                         leaseset.header.destination.id(),
                         session,
+                        Arc::clone(&self.garlic_tags),
                     ),
                 );
 
@@ -223,17 +225,17 @@ impl<R: Runtime> SessionManager<R> {
                 Some(_) => todo!("active sessions not implemented"),
                 None => match self.pending.get_mut(&destination_id) {
                     Some(session) => match session.advance_inbound(garlic_tag, message.payload)? {
-                        PendingSessionEvent::StoreTags { message, tags } => todo!(),
-                        PendingSessionEvent::CreateSession { message, session } => {
+                        PendingSessionEvent::SendMessage { message } => todo!(),
+                        PendingSessionEvent::CreateSession { message, context } => {
                             tracing::info!(
                                 target: LOG_TARGET,
                                 local = %self.destination_id,
                                 remote = %destination_id,
-                                "new session opened",
+                                "new session started",
                             );
 
                             self.pending.remove(&destination_id);
-                            self.active.insert(destination_id, session);
+                            self.active.insert(destination_id, Session::new(context));
 
                             Ok(message)
                         }
@@ -394,6 +396,11 @@ mod tests {
 
     #[test]
     fn messages_out_of_order() {
+        todo!();
+    }
+
+    #[test]
+    fn generate_more_tags() {
         todo!();
     }
 

@@ -41,7 +41,7 @@ use core::{fmt, iter, marker::PhantomData, mem};
 const LOG_TARGET: &str = "emissary::destination::session::inbound";
 
 /// Number of garlic tags to generate.
-const NUM_TAGS_TO_GENERATE: usize = 4;
+const NUM_TAGS_TO_GENERATE: usize = 128;
 
 /// State of the inbound session.
 enum InboundSessionState {
