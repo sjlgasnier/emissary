@@ -30,7 +30,7 @@ use crate::{
     runtime::Runtime,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use hashbrown::HashMap;
 
@@ -41,6 +41,11 @@ use spin::rwlock::RwLock;
 
 use alloc::sync::Arc;
 use core::{marker::PhantomData, mem};
+
+/// Garlic message overheard.
+///
+/// 8 bytes for garlic tag and 16 bytes Poly1305 MAC.
+const GARLIC_MESSAGE_OVERHEAD: usize = 24usize;
 
 /// Event emitted by [`PendingSession`].
 pub enum PendingSessionEvent {
@@ -335,23 +340,48 @@ impl<R: Runtime> Session<R> {
 
     /// Decrypt `message` using `garlic_tag` which identifies a `TagSetEntry`.
     pub fn decrypt(&mut self, garlic_tag: u64, message: Vec<u8>) -> crate::Result<Vec<u8>> {
-        let tag_set_entry = self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+        let TagSetEntry { index, key, tag } =
+            self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    ?garlic_tag,
+                    "`TagSetEntry` doesn't exist",
+                );
+
+                debug_assert!(false);
+                Error::InvalidState
+            })?;
+
+        let mut payload = message[12..].to_vec();
+
+        ChaChaPoly::with_nonce(&key, index as u64)
+            .decrypt_with_ad(&tag.to_le_bytes(), &mut payload)
+            .map(|_| payload)
+    }
+
+    /// Encrypt `message`.
+    pub fn encrypt(&mut self, mut message: Vec<u8>) -> crate::Result<Vec<u8>> {
+        let TagSetEntry { index, key, tag } = self.send_tag_set.next_entry().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,
-                ?garlic_tag,
-                "`TagSetEntry` doesn't exist",
+                "`TagSet` ran out of tags",
             );
-
             debug_assert!(false);
             Error::InvalidState
         })?;
 
-        let mut payload = message[12..].to_vec();
+        let mut out = BytesMut::with_capacity(message.len() + GARLIC_MESSAGE_OVERHEAD);
 
-        ChaChaPoly::with_nonce(&tag_set_entry.key, tag_set_entry.index as u64)
-            .decrypt_with_ad(&tag_set_entry.tag.to_le_bytes(), &mut payload)
-            .map(|_| payload)
+        ChaChaPoly::with_nonce(&key, index as u64)
+            .encrypt_with_ad_new(&tag.to_le_bytes(), &mut message)?;
+
+        out.put_u64_le(tag);
+        out.put_slice(&message);
+
+        Ok(out.freeze().to_vec())
     }
 }

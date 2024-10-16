@@ -100,7 +100,7 @@ impl<R: Runtime> SessionManager<R> {
         message: Vec<u8>,
     ) -> crate::Result<Vec<u8>> {
         match self.active.get_mut(destination_id) {
-            Some(session) => todo!("handle active session"),
+            Some(session) => session.encrypt(message),
             None => match self.pending.get_mut(destination_id) {
                 Some(session) => match session.advance_outbound(message)? {
                     PendingSessionEvent::SendMessage { message } => Ok(message),
@@ -539,12 +539,27 @@ mod tests {
             let message = session.decrypt(message).unwrap();
             assert_eq!(message, [i as u8; 4]);
         });
+
+        // send message from the inbound session
+        let message = session.encrypt(&remote_destination_id, vec![1, 3, 3, 7]).unwrap();
+
+        let mut out = BytesMut::with_capacity(message.len() + 4);
+        out.put_u32(message.len() as u32);
+        out.put_slice(&message);
+
+        let message = Message {
+            payload: out.freeze().to_vec(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            outbound_session.decrypt_message(message).unwrap(),
+            vec![1, 3, 3, 7]
+        );
     }
 
     #[test]
-    fn generate_more_tags() {
-        todo!();
-    }
+    fn new_outbound_session() {}
 
     // TODO: remove or enable when anonymous datagrams work
     #[test]
