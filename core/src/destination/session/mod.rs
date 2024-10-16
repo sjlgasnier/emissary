@@ -222,7 +222,7 @@ impl<R: Runtime> SessionManager<R> {
                 Ok(payload)
             }
             Some(destination_id) => match self.active.get_mut(&destination_id) {
-                Some(_) => todo!("active sessions not implemented"),
+                Some(session) => session.decrypt(garlic_tag, message.payload),
                 None => match self.pending.get_mut(&destination_id) {
                     Some(session) => match session.advance_inbound(garlic_tag, message.payload)? {
                         PendingSessionEvent::SendMessage { message } => todo!(),
@@ -274,8 +274,6 @@ mod tests {
 
     #[test]
     fn new_inbound_session() {
-        crate::util::init_logger();
-
         let private_key = StaticPrivateKey::new(thread_rng());
         let public_key = private_key.public();
         let destination_id = DestinationId::from(vec![1, 2, 3, 4]);
@@ -396,7 +394,151 @@ mod tests {
 
     #[test]
     fn messages_out_of_order() {
-        todo!();
+        let private_key = StaticPrivateKey::new(thread_rng());
+        let public_key = private_key.public();
+        let destination_id = DestinationId::from(vec![1, 2, 3, 4]);
+        let mut session = SessionManager::<MockRuntime>::new(destination_id.clone(), private_key);
+
+        let remote_private_key = StaticPrivateKey::new(thread_rng());
+        let mut key_context = KeyContext::<MockRuntime>::from_private_key(remote_private_key);
+
+        let (remote_leaseset, remote_signing_key) = LeaseSet2::random();
+        let remote_destination_id = remote_leaseset.header.destination.id();
+
+        let database_store = DatabaseStoreBuilder::new(
+            Bytes::from(remote_leaseset.header.destination.id().to_vec()),
+            DatabaseStoreKind::LeaseSet2 {
+                leaseset: Bytes::from(remote_leaseset.serialize(&remote_signing_key)),
+            },
+        )
+        .build();
+
+        let mut payload = GarlicMessageBuilder::new()
+            .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::DatabaseStore,
+                MessageId::from(MockRuntime::rng().next_u32()),
+                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                GarlicDeliveryInstructions::Local,
+                &database_store,
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                MessageId::from(MockRuntime::rng().next_u32()),
+                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                GarlicDeliveryInstructions::Local,
+                &{
+                    let payload = vec![1, 2, 3, 4];
+                    let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                    out.put_u32(payload.len() as u32);
+                    out.put_slice(&payload);
+
+                    out.freeze().to_vec()
+                },
+            )
+            .build();
+
+        let (mut outbound_session, message) = {
+            let (outbound, message) =
+                key_context.create_oubound_session(destination_id, public_key, &payload);
+            let mut payload = BytesMut::with_capacity(message.len() + 4);
+            payload.put_u32(message.len() as u32);
+            payload.put_slice(&message);
+
+            (
+                outbound,
+                Message {
+                    message_type: MessageType::Garlic,
+                    message_id: thread_rng().next_u32(),
+                    expiration: Duration::from_secs(1337),
+                    payload: payload.freeze().to_vec(),
+                },
+            )
+        };
+
+        let payload = session.decrypt(message).unwrap();
+        let clove_set = GarlicMessage::parse(&payload).unwrap();
+
+        // verify message is valid
+        {
+            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                clove_set.blocks.iter().find(|clove| match clove {
+                    GarlicMessageBlock::GarlicClove { message_type, .. }
+                        if message_type == &MessageType::Data =>
+                        true,
+                    _ => false,
+                })
+            else {
+                panic!("message not found");
+            };
+
+            assert_eq!(&message_body[4..], &vec![1, 2, 3, 4]);
+        }
+
+        // verify pending inbound session exists for the destination
+        assert!(session.pending.contains_key(&remote_destination_id));
+
+        let message = {
+            let payload = session.encrypt(&remote_destination_id, vec![1, 2, 3, 4]).unwrap();
+            let mut out = BytesMut::with_capacity(payload.len() + 4);
+            out.put_u32(payload.len() as u32);
+            out.put_slice(&payload);
+
+            Message {
+                payload: out.freeze().to_vec(),
+                ..Default::default()
+            }
+        };
+
+        assert_eq!(
+            outbound_session.decrypt_message(message).unwrap(),
+            [1, 2, 3, 4]
+        );
+
+        let message = {
+            let message = outbound_session.encrypt_message(vec![5, 6, 7, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+
+            Message {
+                payload: out.freeze().to_vec(),
+                ..Default::default()
+            }
+        };
+
+        // verify pending inbound session still exists for the destination
+        assert!(session.pending.contains_key(&remote_destination_id));
+
+        let message = session.decrypt(message).unwrap();
+        assert_eq!(message, [5, 6, 7, 8]);
+
+        // verify that the inbound session is now considered active
+        assert!(session.active.contains_key(&remote_destination_id));
+        assert!(session.pending.is_empty());
+
+        // generate three messages and send them in reverse order
+        let messages = (0..3)
+            .map(|i| {
+                let message = outbound_session.encrypt_message(vec![i as u8; 4]).unwrap();
+
+                let mut out = BytesMut::with_capacity(message.len() + 4);
+                out.put_u32(message.len() as u32);
+                out.put_slice(&message);
+
+                Message {
+                    payload: out.freeze().to_vec(),
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        messages.into_iter().enumerate().rev().for_each(|(i, message)| {
+            let message = session.decrypt(message).unwrap();
+            assert_eq!(message, [i as u8; 4]);
+        });
     }
 
     #[test]

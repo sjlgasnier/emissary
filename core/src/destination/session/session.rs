@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{StaticPrivateKey, StaticPublicKey},
+    crypto::{chachapoly::ChaChaPoly, StaticPrivateKey, StaticPublicKey},
     destination::session::{
         context::KeyContext,
         inbound::InboundSession,
@@ -223,7 +223,7 @@ impl<R: Runtime> PendingSession<R> {
                         local = %self.local,
                         remote = %self.remote,
                         ?garlic_tag,
-                        "session key doesn't exist",
+                        "`TagSetEntry` doesn't exist",
                     );
 
                     debug_assert!(false);
@@ -240,6 +240,8 @@ impl<R: Runtime> PendingSession<R> {
                         send_tag_set,
                         tag_set_entries,
                         garlic_tags,
+                        local: self.local.clone(),
+                        remote: self.remote.clone(),
                     },
                 })
             }
@@ -265,23 +267,38 @@ impl<R: Runtime> PendingSession<R> {
 
 /// Session context, passed into [`Session::new()`].
 pub struct SessionContext {
+    /// Garlic tags, global mapping for all active and pending sessions.
+    garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
+
+    /// ID of the local destination.
+    local: DestinationId,
+
     /// `TagSet` for inbound messages.
     recv_tag_set: TagSet,
+
+    /// ID of the remote destination.
+    remote: DestinationId,
 
     /// `TagSet` for outbound messages.
     send_tag_set: TagSet,
 
     /// `TagSet` entries for inbound messages.
     tag_set_entries: HashMap<u64, TagSetEntry>,
-
-    /// Garlic tags, global mapping for all active and pending sessions.
-    garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
 }
 
 /// Active ECIES-X25519-AEAD-Ratchet session.
 pub struct Session<R: Runtime> {
+    /// Garlic tags, global mapping for all active and pending sessions.
+    garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
+
+    /// ID of the local destination.
+    local: DestinationId,
+
     /// `TagSet` for inbound messages.
     recv_tag_set: TagSet,
+
+    /// ID of the remote destination.
+    remote: DestinationId,
 
     /// `TagSet` for outbound messages.
     send_tag_set: TagSet,
@@ -297,17 +314,44 @@ impl<R: Runtime> Session<R> {
     /// Create new [`Session`].
     pub fn new(context: SessionContext) -> Self {
         let SessionContext {
+            garlic_tags,
+            local,
             recv_tag_set,
+            remote,
             send_tag_set,
             tag_set_entries,
-            garlic_tags,
         } = context;
 
         Self {
-            send_tag_set,
+            garlic_tags,
+            local,
             recv_tag_set,
+            remote,
+            send_tag_set,
             tag_set_entries,
             _runtime: Default::default(),
         }
+    }
+
+    /// Decrypt `message` using `garlic_tag` which identifies a `TagSetEntry`.
+    pub fn decrypt(&mut self, garlic_tag: u64, message: Vec<u8>) -> crate::Result<Vec<u8>> {
+        let tag_set_entry = self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                ?garlic_tag,
+                "`TagSetEntry` doesn't exist",
+            );
+
+            debug_assert!(false);
+            Error::InvalidState
+        })?;
+
+        let mut payload = message[12..].to_vec();
+
+        ChaChaPoly::with_nonce(&tag_set_entry.key, tag_set_entry.index as u64)
+            .decrypt_with_ad(&tag_set_entry.tag.to_le_bytes(), &mut payload)
+            .map(|_| payload)
     }
 }
