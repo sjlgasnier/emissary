@@ -435,6 +435,22 @@ impl<R: Runtime> Session<R> {
                 Error::InvalidState
             })?;
 
+        // generate new tag for the used tag if there are tags left
+        {
+            match self.recv_tag_set.next_entry() {
+                None => tracing::debug!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    "receive tag set ran out of tags",
+                ),
+                Some(entry) => {
+                    self.garlic_tags.write().insert(entry.tag, self.remote.clone());
+                    self.tag_set_entries.insert(entry.tag, entry);
+                }
+            }
+        }
+
         let mut payload = message[12..].to_vec();
 
         ChaChaPoly::with_nonce(&key, index as u64)
