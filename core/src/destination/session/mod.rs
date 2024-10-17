@@ -293,6 +293,8 @@ impl<R: Runtime> SessionManager<R> {
                     Error::InvalidData
                 })?;
 
+                // TODO: verify `DateTime`
+
                 // locate `DatabaseStore` i2np message from the clove set
                 let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
                     clove_set.blocks.iter().find(|clove| match clove {
@@ -830,5 +832,530 @@ mod tests {
             .unwrap();
 
         assert_eq!(message, [1, 3, 3, 8]);
+    }
+
+    #[test]
+    fn two_simultaneous_inbound_sessions() {
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create first outbound `SessionManager`
+        let outbound1_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound1_public_key = outbound1_private_key.public();
+        let (outbound1_leaseset, outbound1_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let outbound1_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound1_destination_id,
+            )
+        };
+        let mut outbound1_session = SessionManager::<MockRuntime>::new(
+            outbound1_destination_id.clone(),
+            outbound1_private_key,
+            outbound1_leaseset,
+        );
+        outbound1_session
+            .add_remote_destination(inbound_destination_id.clone(), inbound_public_key.clone());
+
+        // create second outbound `SessionManager`
+        let outbound2_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound2_public_key = outbound2_private_key.public();
+        let (outbound2_leaseset, outbound2_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let outbound2_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound2_destination_id,
+            )
+        };
+        let mut outbound2_session = SessionManager::<MockRuntime>::new(
+            outbound2_destination_id.clone(),
+            outbound2_private_key,
+            outbound2_leaseset,
+        );
+        outbound2_session
+            .add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // initialize first outbound session and create `NewSession` message
+        let message = {
+            let message =
+                outbound1_session.encrypt(&inbound_destination_id, vec![1, 2, 3, 4]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+
+            out.freeze().to_vec()
+        };
+
+        // handle `NewSession` message, initialize inbound session
+        // and create `NewSessionReply` message
+        let outbound1_nsr = {
+            let message = inbound_session
+                .decrypt(Message {
+                    payload: message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let clove_set = GarlicMessage::parse(&message).unwrap();
+            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                clove_set.blocks.iter().find(|clove| match clove {
+                    GarlicMessageBlock::GarlicClove { message_type, .. }
+                        if message_type == &MessageType::Data =>
+                        true,
+                    _ => false,
+                })
+            else {
+                panic!("data message not found");
+            };
+
+            assert_eq!(message_body, &[0, 0, 0, 4, 1, 2, 3, 4]);
+
+            // create response to `NewSession`
+            let message =
+                inbound_session.encrypt(&outbound1_destination_id, vec![5, 6, 7, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // initialize second outbound session and create `NewSession` message
+        let message = {
+            let message =
+                outbound2_session.encrypt(&inbound_destination_id, vec![1, 2, 3, 4]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+
+            out.freeze().to_vec()
+        };
+
+        // handle `NewSession` message, initialize inbound session
+        // and create `NewSessionReply` message
+        let outbound2_nsr = {
+            let message = inbound_session
+                .decrypt(Message {
+                    payload: message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let clove_set = GarlicMessage::parse(&message).unwrap();
+            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                clove_set.blocks.iter().find(|clove| match clove {
+                    GarlicMessageBlock::GarlicClove { message_type, .. }
+                        if message_type == &MessageType::Data =>
+                        true,
+                    _ => false,
+                })
+            else {
+                panic!("data message not found");
+            };
+
+            assert_eq!(message_body, &[0, 0, 0, 4, 1, 2, 3, 4]);
+
+            // create response to `NewSession`
+            let message =
+                inbound_session.encrypt(&outbound2_destination_id, vec![5, 6, 7, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `NewSessionReply` and finalize outbound for the first session
+        let message = {
+            let message = outbound1_session
+                .decrypt(Message {
+                    payload: outbound1_nsr,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            assert_eq!(message, &[5, 6, 7, 8]);
+        };
+
+        // handle `NewSessionReply` and finalize outbound for the first session
+        let message = {
+            let message = outbound2_session
+                .decrypt(Message {
+                    payload: outbound2_nsr,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            assert_eq!(message, &[5, 6, 7, 8]);
+        };
+
+        // finalize inbound session by sending an `ExistingSession` message
+        let message = {
+            let message =
+                outbound1_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `ExistingSession` message
+        let message = inbound_session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(message, [1, 3, 3, 7]);
+
+        // send `ExistingSession` from inbound session
+        // finalize inbound session by sending an `ExistingSession` message
+        let message = {
+            let message =
+                inbound_session.encrypt(&outbound1_destination_id, vec![1, 3, 3, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `ExistingSession` message
+        let message = outbound1_session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(message, [1, 3, 3, 8]);
+
+        // verify there's one pending inbound session
+        assert_eq!(inbound_session.active.len(), 1);
+        assert_eq!(inbound_session.pending.len(), 1);
+        assert_eq!(outbound1_session.active.len(), 1);
+        assert_eq!(outbound1_session.pending.len(), 0);
+        assert_eq!(outbound2_session.active.len(), 1);
+        assert_eq!(outbound2_session.pending.len(), 0);
+
+        // finalize inbound session by sending an `ExistingSession` message
+        let message = {
+            let message =
+                outbound2_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `ExistingSession` message
+        let message = inbound_session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(message, [1, 3, 3, 7]);
+
+        // send `ExistingSession` from inbound session
+        // finalize inbound session by sending an `ExistingSession` message
+        let message = {
+            let message =
+                inbound_session.encrypt(&outbound2_destination_id, vec![1, 3, 3, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `ExistingSession` message
+        let message = outbound2_session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // verify there's one pending inbound session
+        assert_eq!(inbound_session.active.len(), 2);
+        assert_eq!(inbound_session.pending.len(), 0);
+        assert_eq!(outbound1_session.active.len(), 1);
+        assert_eq!(outbound1_session.pending.len(), 0);
+        assert_eq!(outbound2_session.active.len(), 1);
+        assert_eq!(outbound2_session.pending.len(), 0);
+    }
+
+    #[test]
+    fn two_simultaneous_outbound_sessions() {
+        // create first inbound `SessionManager`
+        let inbound1_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound1_public_key = inbound1_private_key.public();
+        let (inbound1_leaseset, inbound1_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound1_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound1_destination_id,
+            )
+        };
+        let mut inbound1_session = SessionManager::<MockRuntime>::new(
+            inbound1_destination_id.clone(),
+            inbound1_private_key,
+            inbound1_leaseset,
+        );
+
+        // create second inbound `SessionManager`
+        let inbound2_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound2_public_key = inbound2_private_key.public();
+        let (inbound2_leaseset, inbound2_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound2_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound2_destination_id,
+            )
+        };
+        let mut inbound2_session = SessionManager::<MockRuntime>::new(
+            inbound2_destination_id.clone(),
+            inbound2_private_key,
+            inbound2_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (outbound_leaseset, outbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key,
+            outbound_leaseset,
+        );
+        outbound_session
+            .add_remote_destination(inbound1_destination_id.clone(), inbound1_public_key);
+        outbound_session
+            .add_remote_destination(inbound2_destination_id.clone(), inbound2_public_key);
+
+        // initialize first outbound session and create `NewSession` message
+        let ns1 = {
+            let message =
+                outbound_session.encrypt(&inbound1_destination_id, vec![1, 1, 1, 1]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+
+            out.freeze().to_vec()
+        };
+
+        // initialize second outbound session and create `NewSession` message
+        let ns2 = {
+            let message =
+                outbound_session.encrypt(&inbound2_destination_id, vec![2, 2, 2, 2]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+
+            out.freeze().to_vec()
+        };
+
+        // handle `NewSession` message, initialize the first inbound session
+        // and create `NewSessionReply` message
+        let nsr1 = {
+            let message = inbound1_session
+                .decrypt(Message {
+                    payload: ns1,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let clove_set = GarlicMessage::parse(&message).unwrap();
+            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                clove_set.blocks.iter().find(|clove| match clove {
+                    GarlicMessageBlock::GarlicClove { message_type, .. }
+                        if message_type == &MessageType::Data =>
+                        true,
+                    _ => false,
+                })
+            else {
+                panic!("data message not found");
+            };
+
+            assert_eq!(message_body, &[0, 0, 0, 4, 1, 1, 1, 1]);
+
+            // create response to `NewSession`
+            let message =
+                inbound1_session.encrypt(&outbound_destination_id, vec![3, 3, 3, 3]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `NewSession` message, initialize the first inbound session
+        // and create `NewSessionReply` message
+        let nsr2 = {
+            let message = inbound2_session
+                .decrypt(Message {
+                    payload: ns2,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let clove_set = GarlicMessage::parse(&message).unwrap();
+            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
+                clove_set.blocks.iter().find(|clove| match clove {
+                    GarlicMessageBlock::GarlicClove { message_type, .. }
+                        if message_type == &MessageType::Data =>
+                        true,
+                    _ => false,
+                })
+            else {
+                panic!("data message not found");
+            };
+
+            assert_eq!(message_body, &[0, 0, 0, 4, 2, 2, 2, 2]);
+
+            // create response to `NewSession`
+            let message =
+                inbound2_session.encrypt(&outbound_destination_id, vec![4, 4, 4, 4]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `NewSessionReply` from first inbound session and finalize outbound session
+        {
+            let message = outbound_session
+                .decrypt(Message {
+                    payload: nsr1,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            assert_eq!(message, &[3, 3, 3, 3]);
+        }
+
+        // handle `NewSessionReply` from second session and finalize outbound session
+        {
+            let message = outbound_session
+                .decrypt(Message {
+                    payload: nsr2,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            assert_eq!(message, &[4, 4, 4, 4]);
+        }
+
+        assert_eq!(inbound1_session.active.len(), 0);
+        assert_eq!(inbound1_session.pending.len(), 1);
+        assert_eq!(inbound2_session.active.len(), 0);
+        assert_eq!(inbound2_session.pending.len(), 1);
+        assert_eq!(outbound_session.active.len(), 2);
+        assert_eq!(outbound_session.pending.len(), 0);
+
+        // finalize first inbound session by sending an `ExistingSession` message
+        let es1 = {
+            let message =
+                outbound_session.encrypt(&inbound1_destination_id, vec![1, 3, 3, 7]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `ExistingSession` message
+        let message = inbound1_session
+            .decrypt(Message {
+                payload: es1,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(message, [1, 3, 3, 7]);
+        assert_eq!(inbound1_session.active.len(), 1);
+        assert_eq!(inbound1_session.pending.len(), 0);
+        assert_eq!(inbound2_session.active.len(), 0);
+        assert_eq!(inbound2_session.pending.len(), 1);
+        assert_eq!(outbound_session.active.len(), 2);
+        assert_eq!(outbound_session.pending.len(), 0);
+
+        // finalize second inbound session by sending an `ExistingSession` message
+        let es2 = {
+            let message =
+                outbound_session.encrypt(&inbound2_destination_id, vec![1, 3, 3, 8]).unwrap();
+
+            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+            out.put_u32(message.len() as u32);
+            out.put_slice(&message);
+            out.freeze().to_vec()
+        };
+
+        // handle `ExistingSession` message
+        let message = inbound2_session
+            .decrypt(Message {
+                payload: es2,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(message, [1, 3, 3, 8]);
+        assert_eq!(inbound1_session.active.len(), 1);
+        assert_eq!(inbound1_session.pending.len(), 0);
+        assert_eq!(inbound2_session.active.len(), 1);
+        assert_eq!(inbound2_session.pending.len(), 0);
+        assert_eq!(outbound_session.active.len(), 2);
+        assert_eq!(outbound_session.pending.len(), 0);
     }
 }
