@@ -23,7 +23,7 @@ use crate::{
         inbound::InboundSession,
         outbound::OutboundSession,
         tagset::{TagSet, TagSetEntry},
-        LOG_TARGET,
+        LOG_TARGET, NUM_TAGS_TO_GENERATE,
     },
     error::Error,
     primitives::DestinationId,
@@ -40,7 +40,7 @@ use parking_lot::RwLock;
 use spin::rwlock::RwLock;
 
 use alloc::sync::Arc;
-use core::{marker::PhantomData, mem};
+use core::{fmt, marker::PhantomData, mem};
 
 /// Garlic message overheard.
 ///
@@ -86,10 +86,32 @@ enum PendingSessionState<R: Runtime> {
 
         /// Garlic tags, global mapping for all active and pending sessions.
         garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
+
+        /// Garlic tag -> session key mapping for `NewSessionReply` message(s).
+        tag_set_entries: HashMap<u64, TagSetEntry>,
     },
 
     /// State has been poisoned.
     Poisoned,
+}
+
+impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InboundActive {
+                inbound,
+                garlic_tags,
+                tag_set_entries,
+            } => f.debug_struct("PendingSessionState::InboundActive").finish_non_exhaustive(),
+            Self::OutboundActive {
+                outbound,
+                garlic_tags,
+                tag_set_entries,
+            } => f.debug_struct("PendingSessionState::OutboundActive").finish_non_exhaustive(),
+            Self::Poisoned =>
+                f.debug_struct("PendingSessionState::Poisoned").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// Pending ECIES-X25519-AEAD-Ratchet session.
@@ -130,12 +152,26 @@ impl<R: Runtime> PendingSession<R> {
         outbound: OutboundSession<R>,
         garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
     ) -> Self {
+        // generate and store tag set entries for `NewSessionReply`
+        let tag_set_entries = {
+            let mut inner = garlic_tags.write();
+
+            outbound
+                .generate_new_session_reply_tags()
+                .map(|tag_set| {
+                    inner.insert(tag_set.tag, remote.clone());
+                    (tag_set.tag, tag_set)
+                })
+                .collect()
+        };
+
         Self {
             local,
             remote,
             state: PendingSessionState::OutboundActive {
                 outbound,
                 garlic_tags,
+                tag_set_entries,
             },
         }
     }
@@ -181,18 +217,13 @@ impl<R: Runtime> PendingSession<R> {
 
                 Ok(PendingSessionEvent::SendMessage { message })
             }
-            PendingSessionState::OutboundActive {
-                outbound,
-                garlic_tags,
-            } => {
-                todo!();
-            }
-            PendingSessionState::Poisoned => {
+            state => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
-                    "session state has been poisoned",
+                    ?state,
+                    "invalid session state",
                 );
                 debug_assert!(false);
                 return Err(Error::InvalidState);
@@ -222,13 +253,13 @@ impl<R: Runtime> PendingSession<R> {
                     "send `NewSessionReply`",
                 );
 
-                let session_key = tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+                let tag_set_entry = tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         local = %self.local,
                         remote = %self.remote,
                         ?garlic_tag,
-                        "`TagSetEntry` doesn't exist",
+                        "`TagSetEntry` doesn't exist for `ExistingSession`",
                     );
 
                     debug_assert!(false);
@@ -236,7 +267,7 @@ impl<R: Runtime> PendingSession<R> {
                 })?;
 
                 let (message, send_tag_set, recv_tag_set) =
-                    inbound.handle_existing_session(session_key, message)?;
+                    inbound.handle_existing_session(tag_set_entry, message)?;
 
                 Ok(PendingSessionEvent::CreateSession {
                     message,
@@ -251,10 +282,52 @@ impl<R: Runtime> PendingSession<R> {
                 })
             }
             PendingSessionState::OutboundActive {
-                outbound,
+                mut outbound,
+                mut tag_set_entries,
                 garlic_tags,
             } => {
-                todo!();
+                let tag_set_entry = tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %self.local,
+                        remote = %self.remote,
+                        ?garlic_tag,
+                        "`TagSetEntry` doesn't exist for `NewSessionReply`",
+                    );
+
+                    debug_assert!(false);
+                    Error::InvalidState
+                })?;
+
+                let (message, send_tag_set, mut recv_tag_set) =
+                    outbound.handle_new_session_reply(tag_set_entry, message)?;
+
+                // generate tag set entries for inbound messages and store remote's id in the global
+                // storage under the generated garlic tags and store the tag set entries themselves
+                // inside the `Session`'s storage
+                {
+                    let mut inner = garlic_tags.write();
+
+                    // `next_entry()` must succeed as `recv_tag_set` is a fresh `TagSet`
+                    (0..NUM_TAGS_TO_GENERATE).for_each(|_| {
+                        let entry = recv_tag_set.next_entry().expect("to succeed");
+
+                        inner.insert(entry.tag, self.remote.clone());
+                        tag_set_entries.insert(entry.tag, entry);
+                    });
+                }
+
+                Ok(PendingSessionEvent::CreateSession {
+                    message,
+                    context: SessionContext {
+                        recv_tag_set,
+                        send_tag_set,
+                        tag_set_entries,
+                        garlic_tags,
+                        local: self.local.clone(),
+                        remote: self.remote.clone(),
+                    },
+                })
             }
             PendingSessionState::Poisoned => {
                 tracing::warn!(
@@ -340,6 +413,14 @@ impl<R: Runtime> Session<R> {
 
     /// Decrypt `message` using `garlic_tag` which identifies a `TagSetEntry`.
     pub fn decrypt(&mut self, garlic_tag: u64, message: Vec<u8>) -> crate::Result<Vec<u8>> {
+        tracing::trace!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            ?garlic_tag,
+            "inbound garlic message",
+        );
+
         let TagSetEntry { index, key, tag } =
             self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
                 tracing::warn!(
@@ -373,6 +454,14 @@ impl<R: Runtime> Session<R> {
             debug_assert!(false);
             Error::InvalidState
         })?;
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            garlic_tag = ?tag,
+            "outbound garlic message",
+        );
 
         let mut out = BytesMut::with_capacity(message.len() + GARLIC_MESSAGE_OVERHEAD);
 

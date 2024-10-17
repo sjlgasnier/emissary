@@ -157,9 +157,9 @@ impl<R: Runtime> Destination<R> {
             .build();
 
         // TODO:
-        let (session, payload) = key_context.create_oubound_session(
+        let (session, payload) = key_context.create_outbound_session(
             destination_id,
-            leaseset.public_keys.get(0).unwrap().clone(),
+            &leaseset.public_keys.get(0).unwrap(),
             &payload,
         );
 
@@ -395,7 +395,7 @@ impl<R: Runtime> NewDestination<R> {
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
-            session_manager: SessionManager::new(destination_id, private_key),
+            session_manager: SessionManager::new(destination_id, private_key, leaseset.clone()),
             leaseset,
             pending_events: VecDeque::new(),
         }
@@ -403,6 +403,7 @@ impl<R: Runtime> NewDestination<R> {
 
     /// Send `message` to remote `destination`.
     pub fn send_message(&mut self, destination: Dest, message: GzipPayload) {
+        // TODO: check if
         todo!();
     }
 

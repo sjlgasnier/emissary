@@ -154,10 +154,10 @@ impl<R: Runtime> KeyContext<R> {
     /// Create new outbound session.
     ///
     /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
-    pub fn create_oubound_session(
+    pub fn create_outbound_session(
         &mut self,
         destination_id: DestinationId,
-        pubkey: StaticPublicKey,
+        remote_public_key: &StaticPublicKey,
         payload: &[u8],
     ) -> (OutboundSession<R>, Vec<u8>) {
         // generate new elligator2-encodable ephemeral keypair
@@ -178,7 +178,7 @@ impl<R: Runtime> KeyContext<R> {
         let state = {
             let state = Sha256::new()
                 .update(&self.outbound_state)
-                .update::<&[u8]>(pubkey.as_ref())
+                .update::<&[u8]>(remote_public_key.as_ref())
                 .finalize();
 
             Sha256::new().update(&state).update(&public_key).finalize()
@@ -186,7 +186,7 @@ impl<R: Runtime> KeyContext<R> {
 
         // derive keys for encrypting initiator's static key
         let (chaining_key, static_key_ciphertext) = {
-            let mut shared = private_key.diffie_hellman(&pubkey);
+            let mut shared = private_key.diffie_hellman(remote_public_key);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
             let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
             let mut cipher_key = Hmac::new(&temp_key)
@@ -221,7 +221,7 @@ impl<R: Runtime> KeyContext<R> {
 
         // encrypt payload section
         let (chaining_key, payload_ciphertext) = {
-            let shared = self.private_key.diffie_hellman(&pubkey);
+            let shared = self.private_key.diffie_hellman(remote_public_key);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
             let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
             let cipher_key = Hmac::new(&temp_key)

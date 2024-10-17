@@ -25,7 +25,7 @@ use crate::{
     destination::session::{
         session::PendingSessionEvent,
         tagset::{TagSet, TagSetEntry},
-        KeyContext,
+        KeyContext, NUM_TAGS_TO_GENERATE,
     },
     error::Error,
     runtime::Runtime,
@@ -39,9 +39,6 @@ use core::{fmt, iter, marker::PhantomData, mem};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination::session::inbound";
-
-/// Number of garlic tags to generate.
-const NUM_TAGS_TO_GENERATE: usize = 128;
 
 /// State of the inbound session.
 enum InboundSessionState {
@@ -176,6 +173,12 @@ impl<R: Runtime> InboundSession<R> {
                     nsr_tag_set.next_entry().expect("to succeed").tag
                 };
 
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    ?garlic_tag,
+                    "garlic tag for `NewSessionReply`",
+                );
+
                 // calculate keys from shared secrets derived from ee & es
                 let (chaining_key, keydata) = {
                     // ephemeral-ephemeral
@@ -251,8 +254,9 @@ impl<R: Runtime> InboundSession<R> {
 
                 // generate garlic tag/session key pairs for reception
                 //
-                // `next_entry()` must succeed as this is a fresh tagset and `NUM_TAGS_TO_GENERATE`
-                // is smaller than the maximum tag count in a `Tagset`
+                // `next_entry()` must succeed as this is a fresh `TagSet` and
+                // `NUM_TAGS_TO_GENERATE` is smaller than the maximum tag count
+                // in a `Tagset`
                 let tags = (0..NUM_TAGS_TO_GENERATE)
                     .map(|_| recv_tag_set.next_entry().expect("to succeed"))
                     .collect::<Vec<_>>();
