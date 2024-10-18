@@ -25,6 +25,7 @@ use crate::{
         },
         session::{KeyContext, OutboundSession, SessionManager},
     },
+    error::Error,
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         garlic::{
@@ -40,7 +41,6 @@ use crate::{
     runtime::Runtime,
     tunnel::TunnelPoolContextHandle,
     util::gzip::{GzipEncoderBuilder, GzipPayload},
-    Error,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -140,9 +140,7 @@ impl<R: Runtime> Destination<R> {
                 GarlicDeliveryInstructions::Destination { hash: &key },
                 &{
                     let payload = GzipEncoderBuilder::<R>::new(&payload)
-                        .with_source_port(0)
-                        .with_destination_port(0)
-                        .with_protocol(Protocol::Streaming.as_u8())
+                        .with_protocol(Protocol::Streaming)
                         .build()
                         .unwrap();
 
@@ -308,9 +306,7 @@ impl<R: Runtime> Future for Destination<R> {
                             GarlicDeliveryInstructions::Destination { hash: &self.key },
                             &{
                                 let payload = GzipEncoderBuilder::<R>::new(&packet)
-                                    .with_source_port(0)
-                                    .with_destination_port(0)
-                                    .with_protocol(Protocol::Streaming.as_u8())
+                                    .with_protocol(Protocol::Streaming)
                                     .build()
                                     .unwrap();
 

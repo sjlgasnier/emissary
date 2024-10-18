@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::runtime::Runtime;
+use crate::{destination::protocol::Protocol, runtime::Runtime};
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -26,16 +26,16 @@ use core::marker::PhantomData;
 /// Compresses the payload and modifies the gzip header to contains I2CP protocol fields.
 pub struct GzipEncoderBuilder<'a, R: Runtime> {
     /// Destination port.
-    dst_port: Option<u16>,
+    dst_port: u16,
 
     /// Payload.
     payload: &'a [u8],
 
     /// Protocol.
-    protocol: Option<u8>,
+    protocol: Option<Protocol>,
 
     /// Source port.
-    src_port: Option<u16>,
+    src_port: u16,
 
     /// Marker for `Runtime`.
     _runtime: PhantomData<R>,
@@ -45,28 +45,28 @@ impl<'a, R: Runtime> GzipEncoderBuilder<'a, R> {
     /// Create new [`GzipEncoderBuilder`].
     pub fn new(payload: &'a [u8]) -> Self {
         Self {
-            dst_port: None,
+            dst_port: 0u16,
             payload,
             protocol: None,
-            src_port: None,
+            src_port: 0u16,
             _runtime: Default::default(),
         }
     }
 
     /// Specify source port.
     pub fn with_source_port(mut self, src_port: u16) -> Self {
-        self.src_port = Some(src_port);
+        self.src_port = src_port;
         self
     }
 
     /// Specify destination port.
     pub fn with_destination_port(mut self, dst_port: u16) -> Self {
-        self.dst_port = Some(dst_port);
+        self.dst_port = dst_port;
         self
     }
 
     /// Specify protocol.
-    pub fn with_protocol(mut self, protocol: u8) -> Self {
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = Some(protocol);
         self
     }
@@ -75,14 +75,10 @@ impl<'a, R: Runtime> GzipEncoderBuilder<'a, R> {
     ///
     /// All fields are expected to exist.
     pub fn build(mut self) -> Option<Vec<u8>> {
-        let protocol = self.protocol.take().expect("protocol to exist");
-        let dst_port = self.dst_port.take().expect("destination port to exist");
-        let src_port = self.src_port.take().expect("source port to exist");
-
         R::gzip_compress(self.payload).map(|mut compressed| {
-            compressed[4..6].copy_from_slice(&src_port.to_be_bytes());
-            compressed[6..8].copy_from_slice(&dst_port.to_be_bytes());
-            compressed[9] = protocol;
+            compressed[4..6].copy_from_slice(&self.src_port.to_be_bytes());
+            compressed[6..8].copy_from_slice(&self.dst_port.to_be_bytes());
+            compressed[9] = self.protocol.take().expect("protocol to exist").as_u8();
 
             compressed
         })
@@ -100,7 +96,7 @@ pub struct GzipPayload {
     pub payload: Vec<u8>,
 
     /// Protocol.
-    pub protocol: u8,
+    pub protocol: Protocol,
 
     /// Source port.
     pub src_port: u16,
@@ -122,7 +118,7 @@ impl GzipPayload {
         Some(Self {
             src_port: u16::from_be_bytes(src_port),
             dst_port: u16::from_be_bytes(dst_port),
-            protocol,
+            protocol: Protocol::from_u8(protocol)?,
             payload: R::gzip_decompress(&payload)?,
         })
     }
@@ -140,8 +136,7 @@ mod tests {
 
         let compressed = GzipEncoderBuilder::<MockRuntime>::new(&payload)
             .with_source_port(13)
-            .with_destination_port(37)
-            .with_protocol(6)
+            .with_protocol(Protocol::Streaming)
             .build()
             .unwrap();
 
@@ -160,9 +155,24 @@ mod tests {
             panic!("invalid data");
         };
 
-        assert_eq!(dst_port, 37);
-        assert_eq!(src_port, 13);
-        assert_eq!(protocol, 6);
+        assert_eq!(dst_port, 0u16);
+        assert_eq!(src_port, 13u16);
+        assert_eq!(protocol, Protocol::Streaming);
         assert_eq!(payload, "hello, world".as_bytes());
+    }
+
+    #[test]
+    fn invalid_protocol() {
+        let payload = "hello, world".as_bytes();
+
+        let mut compressed = GzipEncoderBuilder::<MockRuntime>::new(&payload)
+            .with_source_port(13)
+            .with_protocol(Protocol::Streaming)
+            .build()
+            .unwrap();
+
+        compressed[9] = 0xaa;
+
+        assert!(GzipPayload::decompress::<MockRuntime>(&compressed).is_none());
     }
 }

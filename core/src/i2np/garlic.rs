@@ -267,7 +267,7 @@ impl NextKeyKind {
             NextKeyKind::ForwardKey { public_key, .. }
             | NextKeyKind::ReverseKey { public_key, .. }
                 if public_key.is_some() =>
-                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key */
+                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key
             _ => GARLIC_HEADER_LEN + 3usize, // flag + key id
         }
     }
