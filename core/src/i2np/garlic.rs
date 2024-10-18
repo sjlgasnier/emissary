@@ -130,6 +130,52 @@ pub enum DeliveryInstructions<'a> {
     },
 }
 
+/// Owned garlic clove delivery instructions.
+#[derive(Debug)]
+pub enum OwnedDeliveryInstructions {
+    /// Clove meant for the local node
+    Local,
+
+    /// Clove meant for a `Destination`.
+    Destination {
+        /// Hash of the destination.
+        hash: Vec<u8>,
+    },
+
+    /// Clove meant for a router.
+    Router {
+        /// Hash of the router.
+        hash: Vec<u8>,
+    },
+
+    /// Clove meant for a tunnel.
+    Tunnel {
+        /// Hash of the tunnel.
+        hash: Vec<u8>,
+
+        /// Tunnel ID.
+        tunnel_id: u32,
+    },
+}
+
+impl<'a> From<&'a DeliveryInstructions<'a>> for OwnedDeliveryInstructions {
+    fn from(value: &'a DeliveryInstructions<'a>) -> Self {
+        match value {
+            DeliveryInstructions::Local => OwnedDeliveryInstructions::Local,
+            DeliveryInstructions::Destination { hash } => OwnedDeliveryInstructions::Destination {
+                hash: hash.to_vec(),
+            },
+            DeliveryInstructions::Router { hash } => OwnedDeliveryInstructions::Router {
+                hash: hash.to_vec(),
+            },
+            DeliveryInstructions::Tunnel { hash, tunnel_id } => OwnedDeliveryInstructions::Tunnel {
+                hash: hash.to_vec(),
+                tunnel_id: *tunnel_id,
+            },
+        }
+    }
+}
+
 impl<'a> DeliveryInstructions<'a> {
     /// Get serialized length of the delivery instructions.
     fn serialized_len(&self) -> usize {
@@ -697,4 +743,22 @@ impl<'a> GarlicMessageBuilder<'a> {
 
         out.freeze().to_vec()
     }
+}
+
+/// Garlic clove.
+pub struct GarlicClove {
+    /// I2NP message type.
+    pub message_type: MessageType,
+
+    /// Message ID.
+    pub message_id: MessageId,
+
+    /// Message expiration, seconds since UNIX epoch.
+    pub expiration: Duration,
+
+    /// Delivery instructions.
+    pub delivery_instructions: OwnedDeliveryInstructions,
+
+    /// Message body.
+    pub message_body: Vec<u8>,
 }

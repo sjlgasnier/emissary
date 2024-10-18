@@ -404,7 +404,10 @@ impl<R: Runtime> NewDestination<R> {
     }
 
     /// Handle garlic messages received into one of the [`NewDestination`]'s inbound tunnels.
-    pub fn handle_message(&mut self, message: Message) -> crate::Result<()> {
+    pub fn handle_message(
+        &mut self,
+        message: Message,
+    ) -> crate::Result<impl Iterator<Item = Vec<u8>>> {
         tracing::trace!(
             target: LOG_TARGET,
             message_id = ?message.message_id,
@@ -422,12 +425,23 @@ impl<R: Runtime> NewDestination<R> {
             return Err(Error::InvalidData);
         }
 
-        match self.session_manager.decrypt(message) {
-            Err(error) => {}
-            Ok(_) => {}
-        }
+        let message = self.session_manager.decrypt(message)?;
+        // let data_cloves = GarlicMessage::parse(&message).ok_or_else(|| {
+        //     tracing::warn!(
+        //         target: LOG_TARGET,
+        //         id = %self.destination_id,
+        //         "malformed garlic message",
+        //     );
+        //     Error::InvalidData
+        // })?.blocks.into_iter().filter_map(|clove| match clove {
+        //     });
 
-        Ok(())
+        // match  {
+        //     Err(error) => {}
+        //     Ok(_) => {}
+        // }
+
+        Ok(vec![].into_iter())
     }
 }
 
