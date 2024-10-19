@@ -22,9 +22,16 @@ use crate::{
 };
 
 use bytes::{Bytes, BytesMut};
+use zeroize::Zeroize;
 
 use alloc::vec::Vec;
-use zeroize::Zeroize;
+
+/// Maximum number of tags that can be generated from a [`TagSet`]:
+///
+/// "The maximum number of messages before the DH must ratchet is 65535." [1]
+///
+/// [1]: https://geti2p.net/spec/ecies#new-session-tags-and-comparison-to-signal
+const MAX_TAGS: usize = 65535;
 
 /// Pending tag set.
 ///
@@ -181,7 +188,6 @@ impl TagSet {
     ///
     /// Returns `None` if all tags have been used.
     pub fn next_entry(&mut self) -> Option<TagSetEntry> {
-        // TODO: fix, can only be used for `MAX_TAGS - 1` many tags
         let tag_index = {
             let tag_index = self.tag_index;
             self.tag_index = self.tag_index.checked_add(1)?;
@@ -241,5 +247,18 @@ impl TagSet {
     /// Create new [`PendingTagSet`] from current [`TagSet`].
     pub fn create_pending_tagset<R: Runtime>(&self) -> PendingTagSet {
         PendingTagSet::new::<R>(self.key_id, self.next_root_key.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maximum_tags_generated() {
+        let mut tag_set = TagSet::new(0u16, [1u8; 32], [2u8; 32]);
+        let tags = (0..u16::MAX).map(|_| tag_set.next_entry().unwrap()).collect::<Vec<_>>();
+
+        assert_eq!(tags.len(), MAX_TAGS);
     }
 }
