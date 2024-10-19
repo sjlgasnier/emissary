@@ -169,22 +169,6 @@ impl TagSet {
         }
     }
 
-    /// Extend [`TagSet`] with `num_tags` many tags.
-    pub fn extend(&mut self, num_tags: usize) {}
-
-    /// Remove tags and keys that are too old.
-    pub fn expire(&mut self) {}
-
-    /// Calculate next session tag based on the previous session tag.
-    pub fn ratchet_tag(&mut self) {}
-
-    /// Calculate next session key based on the previouis session key.
-    ///
-    /// https://geti2p.net/spec/ecies#dh-ratchet-kdf
-    pub fn ratchet_key(&mut self) {
-        // TODO: return `PendingTagSet`?
-    }
-
     /// Get next [`TagSetEntry`].
     ///
     /// Returns `None` if all tags have been used.
@@ -238,11 +222,6 @@ impl TagSet {
                 TryInto::<[u8; 8]>::try_into(garlic_tag.as_ref()).expect("to succeed"),
             ),
         })
-    }
-
-    /// Get session key for for a session `tag`.
-    pub fn session_key(&mut self, tag: Bytes) -> Option<StaticPrivateKey> {
-        None
     }
 
     /// Create new [`PendingTagSet`] from current [`TagSet`].
