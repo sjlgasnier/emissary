@@ -95,8 +95,6 @@ impl PendingTagSet {
 
 /// Key state of [`TagSet`].
 ///
-/// TODO: explain in more detail
-///
 /// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
 enum KeyState {
     /// Initial sessions keys have not been exchanged
@@ -113,17 +111,43 @@ enum KeyState {
         /// Receive key ID.
         recv_key_id: u16,
 
-        /// Our private key.
+        /// Local private key.
         private_key: StaticPrivateKey,
     },
 
-    /// Key state is active and a DH ratchet can be performed if tags have been exhausted.
+    /// New local key has been created and a `NextKey` block with that key has been sent to remote
+    /// destination *without* request to send their reverse key back, causing the remote
+    /// destination to reuse their previous key.
+    ///
+    /// Once the `NextKey` confirmation has been received, a DH ratchet is performed.
+    AwaitingReverseKeyConfirmation {
+        /// Send key ID.
+        send_key_id: u16,
+
+        /// Receive key ID.
+        recv_key_id: u16,
+
+        /// Local private key.
+        private_key: StaticPrivateKey,
+
+        /// Remote public key.
+        public_key: StaticPublicKey,
+    },
+
+    /// Key state is active and a new `NextKey` request can be sent if the tag count threshold for
+    /// the [`TagSet`] has been crossed.
     Active {
         /// Send key ID.
         send_key_id: u16,
 
         /// Receive key ID.
         recv_key_id: u16,
+
+        /// Local private key.
+        private_key: StaticPrivateKey,
+
+        /// Remote public key.
+        public_key: StaticPublicKey,
     },
 
     /// Key state is is poisoned due to invalid state transition.
@@ -132,8 +156,13 @@ enum KeyState {
 
 impl KeyState {
     /// Is the [`KeyState`] pending?
+    ///
+    /// If the key state is pending, no `NextKey` requests can be made.
     fn is_pending(&self) -> bool {
-        std::matches!(self, KeyState::AwaitingReverseKey { .. })
+        std::matches!(
+            self,
+            KeyState::AwaitingReverseKey { .. } | KeyState::AwaitingReverseKeyConfirmation { .. }
+        )
     }
 }
 
@@ -150,9 +179,19 @@ impl fmt::Debug for KeyState {
                 .field("send_key_id", &send_key_id)
                 .field("recv_key_id", &recv_key_id)
                 .finish_non_exhaustive(),
+            Self::AwaitingReverseKeyConfirmation {
+                send_key_id,
+                recv_key_id,
+                ..
+            } => f
+                .debug_struct("KeyState::AwaitingReverseKeyConfirmation")
+                .field("send_key_id", &send_key_id)
+                .field("recv_key_id", &recv_key_id)
+                .finish_non_exhaustive(),
             Self::Active {
                 send_key_id,
                 recv_key_id,
+                ..
             } => f
                 .debug_struct("KeyState::Active")
                 .field("send_key_id", &send_key_id)
@@ -222,6 +261,7 @@ impl KeyContext {
 }
 
 /// Session tag entry.
+#[derive(Debug, PartialEq, Eq)]
 pub struct TagSetEntry {
     /// Index.
     pub index: u16,
@@ -379,26 +419,104 @@ impl TagSet {
             KeyState::Active {
                 send_key_id,
                 recv_key_id,
+                private_key: old_private_key,
+                public_key: old_public_key,
             } => {
-                tracing::error!("active not handled {} {}", self.tag_index, self.tag_set_id);
-                todo!();
+                // for even-numbered tag sets, send a new forward key to remote destination and do a
+                // dh ratchet with the previous key received the from remote destination
+                //
+                // for odd-numbered tag sets, send a reverse key request to remote destination, wait
+                // until a new key is received and once it's received, do a dh ratchet
+                //
+                // https://geti2p.net/spec/ecies#dh-ratchet-message-flow
+                match self.tag_set_id % 2 != 0 {
+                    true => {
+                        let private_key = StaticPrivateKey::new(R::rng());
+                        let public_key = private_key.public();
+
+                        self.key_state = KeyState::AwaitingReverseKeyConfirmation {
+                            send_key_id: send_key_id + 1,
+                            recv_key_id,
+                            private_key,
+                            public_key: old_public_key,
+                        };
+
+                        Ok(Some(
+                            NextKeyBuilder::forward(send_key_id + 1)
+                                .with_public_key(public_key)
+                                .build(),
+                        ))
+                    }
+                    false => {
+                        self.key_state = KeyState::AwaitingReverseKey {
+                            send_key_id,
+                            recv_key_id: recv_key_id + 1,
+                            private_key: old_private_key,
+                        };
+
+                        Ok(Some(
+                            NextKeyBuilder::forward(recv_key_id + 1)
+                                .with_request_reverse_key(true)
+                                .build(),
+                        ))
+                    }
+                }
             }
-            KeyState::AwaitingReverseKey {
-                send_key_id,
-                recv_key_id,
-                private_key,
-            } => {
-                tracing::error!("awaitin receiver key not handled");
-                todo!();
-            }
-            KeyState::Poisoned => {
+            state => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    "key state is poisoned",
+                    ?state,
+                    "invalid state for tag set when generating next key",
                 );
                 debug_assert!(false);
                 Err(Error::InvalidState)
             }
+        }
+    }
+
+    /// Reinitialize [`TagSet`] by performing a DH ratchet
+    ///
+    /// Do DH key exchange between `private_key` and `public_key` to generate a new tag set key
+    /// which is used, together with the previous root key to generate a new state for the
+    /// [`TagSet`].
+    ///
+    /// Caller must ensure that `send_key_id` and `recv_key_id` are valid for this DH ratchet.
+    fn reinitialize_tag_set(
+        &mut self,
+        private_key: StaticPrivateKey,
+        public_key: StaticPublicKey,
+        send_key_id: u16,
+        recv_key_id: u16,
+    ) {
+        let tag_set_key = {
+            let mut shared = private_key.diffie_hellman(&public_key);
+            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+            let mut tagset_key =
+                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
+
+            temp_key.zeroize();
+
+            tagset_key
+        };
+
+        // perform a dh ratchet and reset `TagSet`'s state
+        {
+            self.key_context = KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+            // tag set id is calculated as `1 + send key id receive key id`
+            //
+            // https://geti2p.net/spec/ecies#key-and-tag-set-ids
+            self.tag_set_id = 1u16 + send_key_id + recv_key_id;
+            self.key_state = KeyState::Active {
+                send_key_id,
+                recv_key_id,
+                private_key,
+                public_key: public_key.clone(),
+            };
+
+            // for the new tag set, tag numbers start again from zero
+            // and progress towards `NUM_TAGS_TO_GENERATE`
+            self.tag_index = 0u16;
         }
     }
 
@@ -441,6 +559,8 @@ impl TagSet {
                     self.key_state = KeyState::Active {
                         send_key_id: 0u16,
                         recv_key_id: 0u16,
+                        private_key,
+                        public_key: remote_public_key.clone(),
                     };
 
                     // for the new tag set, tag numbers start again from zero
@@ -453,6 +573,14 @@ impl TagSet {
                     public_key: Some(public_key),
                 }))
             }
+            // requested reverse key has been received from remote
+            //
+            // this is the first dh ratchet done after the session has been initialized and the
+            // dstinations have done a key exchange in both directions (sending a forward key and
+            // receiving a reverse key)
+            //
+            // after this dh ratchet is performed, the destinations alternate between who creates
+            // a new key and who reuses and old key
             (
                 KeyState::AwaitingReverseKey {
                     send_key_id,
@@ -489,6 +617,8 @@ impl TagSet {
                     self.key_state = KeyState::Active {
                         send_key_id,
                         recv_key_id,
+                        private_key,
+                        public_key: public_key.clone(),
                     };
 
                     // for the new tag set, tag numbers start again from zero
@@ -497,6 +627,174 @@ impl TagSet {
                 }
 
                 Ok(None)
+            }
+            // `NextKey` confirmation has been received for the request
+            //
+            // local destination has sent a new key to remote destination without requesting a
+            // reverse key, causing remote destination to reuse the old key
+            (
+                KeyState::AwaitingReverseKeyConfirmation {
+                    send_key_id,
+                    recv_key_id,
+                    private_key,
+                    public_key,
+                },
+                NextKeyKind::ReverseKey {
+                    key_id,
+                    public_key: None,
+                },
+            ) => {
+                let tag_set_key = {
+                    let mut shared = private_key.diffie_hellman(&public_key);
+                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+                    let mut tagset_key = Hmac::new(&temp_key)
+                        .update(&b"XDHRatchetTagSet")
+                        .update(&[0x01])
+                        .finalize();
+
+                    temp_key.zeroize();
+
+                    tagset_key
+                };
+
+                // perform a dh ratchet and reset `TagSet`'s state
+                {
+                    self.key_context =
+                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+                    // tag set id is calculated as `1 + send key id receive key id`
+                    //
+                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
+                    self.tag_set_id = 1u16 + send_key_id + recv_key_id;
+                    self.key_state = KeyState::Active {
+                        send_key_id,
+                        recv_key_id,
+                        private_key,
+                        public_key,
+                    };
+
+                    // for the new tag set, tag numbers start again from zero
+                    // and progress towards `NUM_TAGS_TO_GENERATE`
+                    self.tag_index = 0u16;
+                }
+
+                Ok(None)
+            }
+            // active key state and remote destination has requested a dh ratchet
+            //
+            // this is the first kind where remote has sent their new public key without requesting
+            // a reverse key, asking the local destination to use the previous key for the dh
+            // ratchet
+            //
+            // the `NextKey` is replied only with a confirmation, without a reverse key
+            (
+                KeyState::Active {
+                    send_key_id,
+                    recv_key_id,
+                    private_key,
+                    ..
+                },
+                NextKeyKind::ForwardKey {
+                    key_id,
+                    public_key: Some(remote_public_key),
+                    reverse_key_requested: false,
+                },
+            ) => {
+                let tag_set_key = {
+                    let mut shared = private_key.diffie_hellman(&remote_public_key);
+                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+                    let mut tagset_key = Hmac::new(&temp_key)
+                        .update(&b"XDHRatchetTagSet")
+                        .update(&[0x01])
+                        .finalize();
+
+                    temp_key.zeroize();
+
+                    tagset_key
+                };
+
+                // perform a dh ratchet and reset `TagSet`'s state
+                {
+                    self.key_context =
+                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+                    // tag set id is calculated as `1 + send key id receive key id`
+                    //
+                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
+                    self.tag_set_id = 1u16 + key_id + recv_key_id;
+                    self.key_state = KeyState::Active {
+                        send_key_id: *key_id,
+                        recv_key_id,
+                        private_key,
+                        public_key: remote_public_key.clone(),
+                    };
+
+                    // for the new tag set, tag numbers start again from zero
+                    // and progress towards `NUM_TAGS_TO_GENERATE`
+                    self.tag_index = 0u16;
+                }
+
+                Ok(Some(NextKeyBuilder::reverse(*key_id).build()))
+            }
+            // active key state and remote destination has requested a dh ratchet
+            //
+            // this is the second kind where the remote destination is reusing their previous key
+            // and is asking us to create a new key, send it to them and do a dh ratchet
+            //
+            // the `NextKey` is replied with the new public key used for the dh ratchet
+            (
+                KeyState::Active {
+                    send_key_id,
+                    recv_key_id,
+                    public_key: remote_public_key,
+                    ..
+                },
+                NextKeyKind::ForwardKey {
+                    key_id,
+                    public_key: None,
+                    reverse_key_requested: true,
+                },
+            ) => {
+                let private_key = StaticPrivateKey::new(R::rng());
+                let public_key = private_key.public();
+
+                let tag_set_key = {
+                    let mut shared = private_key.diffie_hellman(&remote_public_key);
+                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+                    let mut tagset_key = Hmac::new(&temp_key)
+                        .update(&b"XDHRatchetTagSet")
+                        .update(&[0x01])
+                        .finalize();
+
+                    temp_key.zeroize();
+
+                    tagset_key
+                };
+
+                // perform a dh ratchet and reset `TagSet`'s state
+                {
+                    self.key_context =
+                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+                    // tag set id is calculated as `1 + send key id receive key id`
+                    //
+                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
+                    self.tag_set_id = 1u16 + send_key_id + key_id;
+                    self.key_state = KeyState::Active {
+                        send_key_id,
+                        recv_key_id: *key_id,
+                        private_key,
+                        public_key: remote_public_key.clone(),
+                    };
+
+                    // for the new tag set, tag numbers start again from zero
+                    // and progress towards `NUM_TAGS_TO_GENERATE`
+                    self.tag_index = 0u16;
+                }
+
+                Ok(Some(
+                    NextKeyBuilder::reverse(*key_id).with_public_key(public_key).build(),
+                ))
             }
             (state, kind) => {
                 tracing::warn!(
@@ -515,6 +813,7 @@ impl TagSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::mock::MockRuntime;
 
     #[test]
     fn maximum_tags_generated() {
@@ -522,5 +821,280 @@ mod tests {
         let tags = (0..u16::MAX).map(|_| tag_set.next_entry().unwrap()).collect::<Vec<_>>();
 
         assert_eq!(tags.len(), MAX_TAGS);
+    }
+
+    #[test]
+    fn full_dh_ratchet_cycle() {
+        let mut send_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
+        let mut recv_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
+
+        // generate tags until the first dh ratchet can be done
+        loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            let Some(kind) = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap() else {
+                continue;
+            };
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 0u16,
+                    public_key: Some(_),
+                    reverse_key_requested: true,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ReverseKey {
+                    key_id: 0u16,
+                    public_key: Some(_),
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+            break;
+        }
+
+        // verify state is correct after the first dh ratchet
+        //
+        // * send and receive key ids are 0
+        // * tag set id 1
+        // * tag index is 0
+        // * tag sets have each other's public keys stored
+        assert_eq!(send_tag_set.tag_index, 0);
+        assert_eq!(recv_tag_set.tag_index, 0);
+        assert_eq!(send_tag_set.tag_set_id, 1);
+        assert_eq!(recv_tag_set.tag_set_id, 1);
+
+        let (s_priv, s_pub) = match &send_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 0,
+                recv_key_id: 0,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        let (r_priv, r_pub) = match &recv_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 0,
+                recv_key_id: 0,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
+        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+
+        // generate tags until the second dh ratchet can be done
+        //
+        // during this ratchet, owner of the send tag set sends their new key to remote
+        loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            let Some(kind) = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap() else {
+                continue;
+            };
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 1u16,
+                    public_key: Some(_),
+                    reverse_key_requested: false,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ReverseKey {
+                    key_id: 1u16,
+                    public_key: None,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+            break;
+        }
+
+        // verify state is correct after the first dh ratchet
+        //
+        // * send key id is 1
+        // * receive key ids is 0
+        // * tag set id 2
+        // * tag index is 0
+        // * tag sets have each other's public keys stored
+        assert_eq!(send_tag_set.tag_index, 0);
+        assert_eq!(recv_tag_set.tag_index, 0);
+        assert_eq!(send_tag_set.tag_set_id, 2);
+        assert_eq!(recv_tag_set.tag_set_id, 2);
+
+        let (s_priv, s_pub) = match &send_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 1u16,
+                recv_key_id: 0u16,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        let (r_priv, r_pub) = match &recv_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 1u16,
+                recv_key_id: 0u16,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
+        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+
+        // generate tags until the second dh ratchet can be done
+        //
+        // during this ratchet, owner of the send tag set requests a reverse key from remote
+        loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            let Some(kind) = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap() else {
+                continue;
+            };
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 1u16,
+                    public_key: None,
+                    reverse_key_requested: true,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ReverseKey {
+                    key_id: 1u16,
+                    public_key: Some(_),
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+            break;
+        }
+
+        // verify state is correct after the first dh ratchet
+        //
+        // * send key id is 1
+        // * receive key ids is 1
+        // * tag set id 3
+        // * tag index is 0
+        // * tag sets have each other's public keys stored
+        assert_eq!(send_tag_set.tag_index, 0);
+        assert_eq!(recv_tag_set.tag_index, 0);
+        assert_eq!(send_tag_set.tag_set_id, 3);
+        assert_eq!(recv_tag_set.tag_set_id, 3);
+
+        let (s_priv, s_pub) = match &send_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 1u16,
+                recv_key_id: 1u16,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        let (r_priv, r_pub) = match &recv_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 1u16,
+                recv_key_id: 1u16,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
+        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+
+        // generate tags until the second dh ratchet can be done
+        //
+        // during this ratchet, the process cycles back to tag owner sending a key to remote
+        loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            let Some(kind) = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap() else {
+                continue;
+            };
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 2u16,
+                    public_key: Some(_),
+                    reverse_key_requested: false,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ReverseKey {
+                    key_id: 2u16,
+                    public_key: None,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+            break;
+        }
+
+        // verify state is correct after the first dh ratchet
+        //
+        // * send key id is 1
+        // * receive key ids is 1
+        // * tag set id 3
+        // * tag index is 0
+        // * tag sets have each other's public keys stored
+        assert_eq!(send_tag_set.tag_index, 0);
+        assert_eq!(recv_tag_set.tag_index, 0);
+        assert_eq!(send_tag_set.tag_set_id, 4);
+        assert_eq!(recv_tag_set.tag_set_id, 4);
+
+        let (s_priv, s_pub) = match &send_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 2u16,
+                recv_key_id: 1u16,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        let (r_priv, r_pub) = match &recv_tag_set.key_state {
+            KeyState::Active {
+                send_key_id: 2u16,
+                recv_key_id: 1u16,
+                private_key,
+                public_key,
+            } => (private_key.clone(), public_key.clone()),
+            state => panic!("invalid state: {state:?}"),
+        };
+
+        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
+        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
     }
 }

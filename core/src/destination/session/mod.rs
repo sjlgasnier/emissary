@@ -1522,8 +1522,6 @@ mod tests {
 
     #[test]
     fn dh_ratchet() {
-        crate::util::init_logger();
-
         // create inbound `SessionManager`
         let inbound_private_key = StaticPrivateKey::new(thread_rng());
         let inbound_public_key = inbound_private_key.public();
@@ -1620,42 +1618,46 @@ mod tests {
         };
         assert_eq!(message_body[4..], [1, 3, 3, 7]);
 
-        // send twice as many messages as there were initial tags
-        // and verify that all messages are decrypted correctly
-        let mut responded_to_nextkey = false;
+        // run the dh ratchet five times to exercise all state transitions
+        for _ in 0..5 {
+            // send twice as many messages as there were initial tags
+            // and verify that all messages are decrypted correctly
+            let mut responded_to_nextkey = false;
 
-        for i in 0..SESSION_DH_RATCHET_THRESHOLD + 5 {
-            // send `ExistingSession` from inbound session
-            // finalize inbound session by sending an `ExistingSession` message
-            let message =
-                inbound_session.encrypt(&outbound_destination_id, vec![i as u8; 4]).unwrap();
+            for i in 0..SESSION_DH_RATCHET_THRESHOLD + 5 {
+                // send `ExistingSession` from inbound session
+                // finalize inbound session by sending an `ExistingSession` message
+                let message =
+                    inbound_session.encrypt(&outbound_destination_id, vec![i as u8; 4]).unwrap();
 
-            // handle `ExistingSession` message
-            let mut message = outbound_session
-                .decrypt(Message {
-                    payload: message,
-                    ..Default::default()
-                })
-                .unwrap();
-
-            let Some(GarlicClove { message_body, .. }) =
-                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
-            else {
-                panic!("message not found");
-            };
-            assert_eq!(message_body[4..], [i as u8; 4]);
-
-            if i > SESSION_DH_RATCHET_THRESHOLD && !responded_to_nextkey {
-                let message = outbound_session.encrypt(&inbound_destination_id, vec![4]).unwrap();
-
-                let mut message = inbound_session
+                // handle `ExistingSession` message
+                let mut message = outbound_session
                     .decrypt(Message {
                         payload: message,
                         ..Default::default()
                     })
                     .unwrap();
 
-                responded_to_nextkey = true;
+                let Some(GarlicClove { message_body, .. }) =
+                    message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+                else {
+                    panic!("message not found");
+                };
+                assert_eq!(message_body[4..], [i as u8; 4]);
+
+                if i > SESSION_DH_RATCHET_THRESHOLD && !responded_to_nextkey {
+                    let message =
+                        outbound_session.encrypt(&inbound_destination_id, vec![4]).unwrap();
+
+                    let mut message = inbound_session
+                        .decrypt(Message {
+                            payload: message,
+                            ..Default::default()
+                        })
+                        .unwrap();
+
+                    responded_to_nextkey = true;
+                }
             }
         }
     }
