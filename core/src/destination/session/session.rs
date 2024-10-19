@@ -26,6 +26,7 @@ use crate::{
         LOG_TARGET, NUM_TAGS_TO_GENERATE,
     },
     error::Error,
+    i2np::garlic::{GarlicMessage, GarlicMessageBlock, GarlicMessageBuilder, NextKeyKind},
     primitives::DestinationId,
     runtime::Runtime,
 };
@@ -372,6 +373,11 @@ pub struct Session<R: Runtime> {
     /// ID of the local destination.
     local: DestinationId,
 
+    /// Pending `NextKey` block, if any.
+    ///
+    /// Set to `Some(NextKeyKind)` if remote has sent a `NextKey` block that warrants a response.
+    pending_next_key: Option<NextKeyKind>,
+
     /// `TagSet` for inbound messages.
     recv_tag_set: TagSet,
 
@@ -403,11 +409,12 @@ impl<R: Runtime> Session<R> {
         Self {
             garlic_tags,
             local,
+            pending_next_key: None,
             recv_tag_set,
             remote,
+            _runtime: Default::default(),
             send_tag_set,
             tag_set_entries,
-            _runtime: Default::default(),
         }
     }
 
@@ -452,14 +459,74 @@ impl<R: Runtime> Session<R> {
         }
 
         let mut payload = message[12..].to_vec();
-
-        ChaChaPoly::with_nonce(&key, index as u64)
+        let payload = ChaChaPoly::with_nonce(&key, index as u64)
             .decrypt_with_ad(&tag.to_le_bytes(), &mut payload)
-            .map(|_| payload)
+            .map(|_| payload)?;
+
+        // parse `payload` into garlic message and check if it contains a `NextKey` block
+        let message = GarlicMessage::parse(&payload).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                "malformed garlic message",
+            );
+
+            Error::InvalidData
+        })?;
+
+        // handle `NextKey` blocks
+        //
+        // forward keys are handled by the receive tag set and reverse keys by the send tag set
+        message.blocks.iter().try_for_each(|block| match block {
+            GarlicMessageBlock::NextKey { kind } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    ?kind,
+                    "handle `NextKey` block",
+                );
+
+                match kind {
+                    NextKeyKind::ForwardKey { .. } => {
+                        // handle `NextKey` block which does a DH ratchet and creates a new
+                        // `TagSet`, replacing the old one
+                        self.pending_next_key = self.recv_tag_set.handle_next_key::<R>(kind)?;
+
+                        // generate tag set entries for the new tag set
+                        //
+                        // associate `self.remote` with the new tags in the global tag storage
+                        // and store the `TagSetEntry` objects into
+                        // `Session`'s own storage
+                        {
+                            let mut inner = self.garlic_tags.write();
+
+                            // `next_entry()` must succeed as `recv_tag_set` is a fresh `TagSet`
+                            (0..NUM_TAGS_TO_GENERATE).for_each(|_| {
+                                let entry = self.recv_tag_set.next_entry().expect("to succeed");
+
+                                inner.insert(entry.tag, self.remote.clone());
+                                self.tag_set_entries.insert(entry.tag, entry);
+                            });
+                        }
+                    }
+                    NextKeyKind::ReverseKey { .. } => {
+                        // TODO: explain
+                        self.pending_next_key = self.send_tag_set.handle_next_key::<R>(kind)?;
+                    }
+                }
+
+                Ok::<_, Error>(())
+            }
+            _ => Ok::<_, Error>(()),
+        })?;
+
+        Ok(payload)
     }
 
     /// Encrypt `message`.
-    pub fn encrypt(&mut self, mut message: Vec<u8>) -> crate::Result<Vec<u8>> {
+    pub fn encrypt(&mut self, mut message_builder: GarlicMessageBuilder) -> crate::Result<Vec<u8>> {
         let TagSetEntry { index, key, tag } = self.send_tag_set.next_entry().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -479,6 +546,41 @@ impl<R: Runtime> Session<R> {
             "outbound garlic message",
         );
 
+        // check if a dh ratchet should be performed because enought tags have been generated from
+        // the active `TagSet`
+        //
+        // `TagSet` keeps track of the ratchet states and if a dh ratchet should be performed, it
+        // returns the appropriate `NextKeyKind` which needs to added to into the garlic message
+        message_builder = match self.send_tag_set.try_generate_next_key::<R>()? {
+            Some(kind) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    "send forward key",
+                );
+
+                message_builder.with_next_key(kind)
+            }
+            None => message_builder,
+        };
+
+        // add any potential pending next key block for receive tag set
+        message_builder = match self.pending_next_key.take() {
+            Some(kind) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    "send reverse `NextKey` block",
+                );
+
+                message_builder.with_next_key(kind)
+            }
+            None => message_builder,
+        };
+
+        let mut message = message_builder.build();
         let mut out = BytesMut::with_capacity(message.len() + GARLIC_MESSAGE_OVERHEAD);
 
         ChaChaPoly::with_nonce(&key, index as u64)

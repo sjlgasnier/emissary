@@ -18,7 +18,9 @@
 
 use crate::{
     crypto::{hmac::Hmac, StaticPrivateKey, StaticPublicKey},
-    destination::session::SESSION_DH_RATCHET_THRESHOLD,
+    destination::session::{LOG_TARGET, SESSION_DH_RATCHET_THRESHOLD},
+    error::Error,
+    i2np::garlic::{NextKeyBuilder, NextKeyKind},
     runtime::Runtime,
 };
 
@@ -26,6 +28,7 @@ use bytes::{Bytes, BytesMut};
 use zeroize::Zeroize;
 
 use alloc::vec::Vec;
+use core::{fmt, mem};
 
 /// Maximum number of tags that can be generated from a [`TagSet`]:
 ///
@@ -86,29 +89,82 @@ impl PendingTagSet {
             tagset_key
         };
 
-        TagSet::new(self.key_id, self.root_key, tagset_key)
+        TagSet::new(self.root_key, tagset_key)
     }
 }
 
-/// Session tag entry.
-pub struct TagSetEntry {
-    /// Index.
-    pub index: u16,
+/// Key state of [`TagSet`].
+///
+/// TODO: explain in more detail
+///
+/// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
+enum KeyState {
+    /// Initial sessions keys have not been exchanged
+    Uninitialized,
 
-    /// Session key.
-    pub key: Bytes,
+    /// Awaiting for a requested reverse key to be received from remote destination.
+    ///
+    /// Once the reverse key is received, DH is performed between the reverse key and
+    /// `private_key` and the [`TagSet`] does a DH ratchet.
+    AwaitingReverseKey {
+        /// Send key ID.
+        send_key_id: u16,
 
-    /// Session tag.
-    pub tag: u64,
+        /// Receive key ID.
+        recv_key_id: u16,
+
+        /// Our private key.
+        private_key: StaticPrivateKey,
+    },
+
+    /// Key state is active and a DH ratchet can be performed if tags have been exhausted.
+    Active {
+        /// Send key ID.
+        send_key_id: u16,
+
+        /// Receive key ID.
+        recv_key_id: u16,
+    },
+
+    /// Key state is is poisoned due to invalid state transition.
+    Poisoned,
 }
 
-/// Tag set.
-///
-/// https://geti2p.net/spec/ecies#sample-implementation
-pub struct TagSet {
-    /// Key ID.
-    key_id: u16,
+impl KeyState {
+    /// Is the [`KeyState`] pending?
+    fn is_pending(&self) -> bool {
+        std::matches!(self, KeyState::AwaitingReverseKey { .. })
+    }
+}
 
+impl fmt::Debug for KeyState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uninitialized => f.debug_struct("KeyState::Uninitialized").finish(),
+            Self::AwaitingReverseKey {
+                send_key_id,
+                recv_key_id,
+                private_key,
+            } => f
+                .debug_struct("KeyState::AwaitingReverseKey")
+                .field("send_key_id", &send_key_id)
+                .field("recv_key_id", &recv_key_id)
+                .finish_non_exhaustive(),
+            Self::Active {
+                send_key_id,
+                recv_key_id,
+            } => f
+                .debug_struct("KeyState::Active")
+                .field("send_key_id", &send_key_id)
+                .field("recv_key_id", &recv_key_id)
+                .finish_non_exhaustive(),
+            Self::Poisoned => f.debug_struct("KeyState::Poisoned").finish(),
+        }
+    }
+}
+
+/// Key context for a [`TagSet`].
+struct KeyContext {
     /// Next root key.
     next_root_key: Bytes,
 
@@ -123,14 +179,11 @@ pub struct TagSet {
 
     /// Symmetric key.
     symmetric_key: Vec<u8>,
-
-    /// Next tag index.
-    tag_index: u16,
 }
 
-impl TagSet {
-    /// Create new [`TagSet`].
-    pub fn new(key_id: u16, root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
+impl KeyContext {
+    /// Create new [`KeyContext`] for a [`TagSet`].
+    pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
         let mut temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
         let next_root_key =
             Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
@@ -159,14 +212,70 @@ impl TagSet {
             .finalize();
 
         Self {
-            key_id,
             next_root_key: Bytes::from(next_root_key),
             session_key_data: Bytes::from(session_key_data),
             session_tag_constant,
             session_tag_key,
             symmetric_key,
+        }
+    }
+}
+
+/// Session tag entry.
+pub struct TagSetEntry {
+    /// Index.
+    pub index: u16,
+
+    /// Session key.
+    pub key: Bytes,
+
+    /// Session tag.
+    pub tag: u64,
+}
+
+/// Tag set.
+///
+/// https://geti2p.net/spec/ecies#sample-implementation
+pub struct TagSet {
+    /// Key context
+    key_context: KeyContext,
+
+    /// Key state, see [`KeyState`] for more details.
+    key_state: KeyState,
+
+    /// Receive key ID.
+    ///
+    /// `None` if new session keys haven't been exchanged.
+    recv_key_id: Option<u16>,
+
+    /// Send key ID.
+    ///
+    /// `None` if new session keys haven't been exchanged.
+    send_key_id: Option<u16>,
+
+    /// Next tag index.
+    tag_index: u16,
+
+    /// ID of the tag set.
+    tag_set_id: u16,
+}
+
+impl TagSet {
+    /// Create new [`TagSet`].
+    pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
+        Self {
+            key_state: KeyState::Uninitialized,
+            key_context: KeyContext::new(root_key, tag_set_key),
+            recv_key_id: None,
+            send_key_id: None,
+            tag_set_id: 0u16,
             tag_index: 0u16,
         }
+    }
+
+    /// Get ID of the [`TagSet`].
+    pub fn tag_set_id(&self) -> u16 {
+        self.tag_set_id
     }
 
     /// Get next [`TagSetEntry`].
@@ -182,16 +291,17 @@ impl TagSet {
 
         // ratchet next tag
         let garlic_tag = {
-            let mut temp_key =
-                Hmac::new(&self.session_key_data).update(&self.session_tag_constant).finalize();
+            let mut temp_key = Hmac::new(&self.key_context.session_key_data)
+                .update(&self.key_context.session_tag_constant)
+                .finalize();
 
             // store session key data for the next session tag ratchet
-            self.session_key_data = Bytes::from(
+            self.key_context.session_key_data = Bytes::from(
                 Hmac::new(&temp_key).update(&b"SessionTagKeyGen").update(&[0x01]).finalize(),
             );
 
             let session_tag_key_data = Hmac::new(&temp_key)
-                .update(&self.session_key_data)
+                .update(&self.key_context.session_key_data)
                 .update(&b"SessionTagKeyGen")
                 .update(&[0x02])
                 .finalize();
@@ -200,14 +310,14 @@ impl TagSet {
         };
 
         let symmetric_key = {
-            let mut temp_key = Hmac::new(&self.symmetric_key).update(&[]).finalize();
+            let mut temp_key = Hmac::new(&self.key_context.symmetric_key).update(&[]).finalize();
 
             // store symmetric key for the next key ratchet
-            self.symmetric_key =
+            self.key_context.symmetric_key =
                 Hmac::new(&temp_key).update(&b"SymmetricRatchet").update(&[0x01]).finalize();
 
             let symmetric_key = Hmac::new(&temp_key)
-                .update(&self.symmetric_key)
+                .update(&self.key_context.symmetric_key)
                 .update(&b"SymmetricRatchet")
                 .update(&[0x02])
                 .finalize();
@@ -225,14 +335,180 @@ impl TagSet {
     }
 
     /// Create new [`PendingTagSet`] from current [`TagSet`].
+    //
+    // TODO: remove
     pub fn create_pending_tagset<R: Runtime>(&self) -> PendingTagSet {
-        PendingTagSet::new::<R>(self.key_id, self.next_root_key.clone())
+        PendingTagSet::new::<R>(
+            self.send_key_id.unwrap_or(0),
+            self.key_context.next_root_key.clone(),
+        )
     }
 
-    /// Check if DH ratchet should be performed because the number of generated tags from this
-    /// [`TagSet`] is above the DH ratchet threshold.
-    pub fn should_dh_ratchet(&self) -> bool {
-        self.tag_index as usize > SESSION_DH_RATCHET_THRESHOLD
+    /// Attempt to generate new key for the next DH ratchet.
+    ///
+    /// If the [`TagSet`] still has enough tags, the function returns early and the session can keep
+    /// using the [`Tagset`].
+    ///
+    /// TODO: finish this comment
+    ///
+    /// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
+    pub fn try_generate_next_key<R: Runtime>(&mut self) -> crate::Result<Option<NextKeyKind>> {
+        // more tags can be generated from the current dh ratchet
+        if self.tag_index as usize <= SESSION_DH_RATCHET_THRESHOLD || self.key_state.is_pending() {
+            return Ok(None);
+        }
+
+        match mem::replace(&mut self.key_state, KeyState::Poisoned) {
+            KeyState::Uninitialized => {
+                let private_key = StaticPrivateKey::new(R::rng());
+                let public_key = private_key.public();
+
+                self.key_state = KeyState::AwaitingReverseKey {
+                    send_key_id: 0u16,
+                    recv_key_id: 0u16,
+                    private_key,
+                };
+
+                Ok(Some(
+                    NextKeyBuilder::forward(0u16)
+                        .with_public_key(public_key)
+                        .with_request_reverse_key(true)
+                        .build(),
+                ))
+            }
+            KeyState::Active {
+                send_key_id,
+                recv_key_id,
+            } => {
+                tracing::error!("active not handled {} {}", self.tag_index, self.tag_set_id);
+                todo!();
+            }
+            KeyState::AwaitingReverseKey {
+                send_key_id,
+                recv_key_id,
+                private_key,
+            } => {
+                tracing::error!("awaitin receiver key not handled");
+                todo!();
+            }
+            KeyState::Poisoned => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "key state is poisoned",
+                );
+                debug_assert!(false);
+                Err(Error::InvalidState)
+            }
+        }
+    }
+
+    /// Handle `NextKey` block received from remote peer.
+    pub fn handle_next_key<R: Runtime>(
+        &mut self,
+        kind: &NextKeyKind,
+    ) -> crate::Result<Option<NextKeyKind>> {
+        match (mem::replace(&mut self.key_state, KeyState::Poisoned), kind) {
+            (
+                KeyState::Uninitialized,
+                NextKeyKind::ForwardKey {
+                    key_id: 0u16,
+                    public_key: Some(remote_public_key),
+                    reverse_key_requested: true,
+                },
+            ) => {
+                let private_key = StaticPrivateKey::new(R::rng());
+                let public_key = private_key.public();
+                let tag_set_key = {
+                    let mut shared = private_key.diffie_hellman(&remote_public_key);
+                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+                    let mut tagset_key = Hmac::new(&temp_key)
+                        .update(&b"XDHRatchetTagSet")
+                        .update(&[0x01])
+                        .finalize();
+
+                    temp_key.zeroize();
+
+                    tagset_key
+                };
+
+                // perform a dh ratchet and reset `TagSet`'s state
+                {
+                    self.key_context =
+                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+                    // for the first dh ratchet, send and receive key ids are set to 0
+                    self.tag_set_id = 1u16;
+                    self.key_state = KeyState::Active {
+                        send_key_id: 0u16,
+                        recv_key_id: 0u16,
+                    };
+
+                    // for the new tag set, tag numbers start again from zero
+                    // and progress towards `NUM_TAGS_TO_GENERATE`
+                    self.tag_index = 0u16;
+                }
+
+                Ok(Some(NextKeyKind::ReverseKey {
+                    key_id: 0u16,
+                    public_key: Some(public_key),
+                }))
+            }
+            (
+                KeyState::AwaitingReverseKey {
+                    send_key_id,
+                    recv_key_id,
+                    private_key,
+                },
+                NextKeyKind::ReverseKey {
+                    key_id,
+                    public_key: Some(public_key),
+                },
+            ) => {
+                let tag_set_key = {
+                    let mut shared = private_key.diffie_hellman(&public_key);
+                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+                    let mut tagset_key = Hmac::new(&temp_key)
+                        .update(&b"XDHRatchetTagSet")
+                        .update(&[0x01])
+                        .finalize();
+
+                    temp_key.zeroize();
+
+                    tagset_key
+                };
+
+                // perform a dh ratchet and reset `TagSet`'s state
+                {
+                    self.key_context =
+                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+                    // tag set id is calculated as `1 + send key id receive key id`
+                    //
+                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
+                    self.tag_set_id = 1u16 + send_key_id + recv_key_id;
+                    self.key_state = KeyState::Active {
+                        send_key_id,
+                        recv_key_id,
+                    };
+
+                    // for the new tag set, tag numbers start again from zero
+                    // and progress towards `NUM_TAGS_TO_GENERATE`
+                    self.tag_index = 0u16;
+                }
+
+                Ok(None)
+            }
+            (state, kind) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?state,
+                    ?kind,
+                    "invalid key state/next key kind combination",
+                );
+                debug_assert!(false);
+                Err(Error::InvalidState)
+            }
+        }
     }
 }
 
@@ -242,22 +518,9 @@ mod tests {
 
     #[test]
     fn maximum_tags_generated() {
-        let mut tag_set = TagSet::new(0u16, [1u8; 32], [2u8; 32]);
+        let mut tag_set = TagSet::new([1u8; 32], [2u8; 32]);
         let tags = (0..u16::MAX).map(|_| tag_set.next_entry().unwrap()).collect::<Vec<_>>();
 
         assert_eq!(tags.len(), MAX_TAGS);
-    }
-
-    #[test]
-    fn should_dh_ratchet() {
-        let mut tag_set = TagSet::new(0u16, [1u8; 32], [2u8; 32]);
-
-        for _ in 0..SESSION_DH_RATCHET_THRESHOLD {
-            let _ = tag_set.next_entry().unwrap();
-            assert!(!tag_set.should_dh_ratchet());
-        }
-
-        let _ = tag_set.next_entry().unwrap();
-        assert!(tag_set.should_dh_ratchet());
     }
 }

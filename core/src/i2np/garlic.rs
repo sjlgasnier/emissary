@@ -322,14 +322,21 @@ impl NextKeyKind {
 impl fmt::Debug for NextKeyKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ForwardKey { key_id, .. } => f
+            Self::ForwardKey {
+                key_id,
+                public_key,
+                reverse_key_requested,
+            } => f
                 .debug_struct("NextKeyKind::ForwardKey")
                 .field("key_id", &key_id)
-                .finish_non_exhaustive(),
-            Self::ReverseKey { key_id, .. } => f
+                .field("key_exists", &public_key.is_some())
+                .field("reverse_requested", &reverse_key_requested)
+                .finish(),
+            Self::ReverseKey { key_id, public_key } => f
                 .debug_struct("NextKeyKind::ReverseKey")
                 .field("key_id", &key_id)
-                .finish_non_exhaustive(),
+                .field("key_exists", &public_key.is_some())
+                .finish(),
         }
     }
 }

@@ -256,8 +256,8 @@ impl<R: Runtime> OutboundSession<R> {
                     Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
 
                 // initialize send and receive tag sets
-                let send_tag_set = TagSet::new(0u16, &chaining_key, send_key);
-                let recv_tag_set = TagSet::new(0u16, chaining_key, &recv_key);
+                let send_tag_set = TagSet::new(&chaining_key, send_key);
+                let recv_tag_set = TagSet::new(chaining_key, &recv_key);
 
                 // decode payload of the `NewSessionReply` message
                 let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
@@ -423,7 +423,7 @@ impl<R: Runtime> OutboundSession<R> {
         let mut tagset_key =
             Hmac::new(&temp_key).update(&b"SessionReplyTags").update(&[0x01]).finalize();
 
-        let mut nsr_tag_set = TagSet::new(0u16, &chaining_key, tagset_key);
+        let mut nsr_tag_set = TagSet::new(&chaining_key, tagset_key);
 
         (0..NSR_TAG_COUNT).map(move |_| nsr_tag_set.next_entry().expect("to succeed"))
     }
@@ -533,8 +533,8 @@ impl<R: Runtime> OutboundSession<R> {
                     Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
 
                 // initialize send and receive tag sets
-                let send_tag_set = TagSet::new(0u16, &chaining_key, send_key);
-                let recv_tag_set = TagSet::new(0u16, chaining_key, &recv_key);
+                let send_tag_set = TagSet::new(&chaining_key, send_key);
+                let recv_tag_set = TagSet::new(chaining_key, &recv_key);
 
                 // decode payload of the `NewSessionReply` message
                 let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
