@@ -53,7 +53,6 @@ use core::{marker::PhantomData, time::Duration};
 
 mod context;
 mod inbound;
-mod message;
 mod outbound;
 mod session;
 mod tagset;
