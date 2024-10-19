@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{hmac::Hmac, StaticPrivateKey, StaticPublicKey},
+    destination::session::SESSION_DH_RATCHET_THRESHOLD,
     runtime::Runtime,
 };
 
@@ -248,6 +249,12 @@ impl TagSet {
     pub fn create_pending_tagset<R: Runtime>(&self) -> PendingTagSet {
         PendingTagSet::new::<R>(self.key_id, self.next_root_key.clone())
     }
+
+    /// Check if DH ratchet should be performed because the number of generated tags from this
+    /// [`TagSet`] is above the DH ratchet threshold.
+    pub fn should_dh_ratchet(&self) -> bool {
+        self.tag_index as usize > SESSION_DH_RATCHET_THRESHOLD
+    }
 }
 
 #[cfg(test)]
@@ -260,5 +267,18 @@ mod tests {
         let tags = (0..u16::MAX).map(|_| tag_set.next_entry().unwrap()).collect::<Vec<_>>();
 
         assert_eq!(tags.len(), MAX_TAGS);
+    }
+
+    #[test]
+    fn should_dh_ratchet() {
+        let mut tag_set = TagSet::new(0u16, [1u8; 32], [2u8; 32]);
+
+        for _ in 0..SESSION_DH_RATCHET_THRESHOLD {
+            let _ = tag_set.next_entry().unwrap();
+            assert!(!tag_set.should_dh_ratchet());
+        }
+
+        let _ = tag_set.next_entry().unwrap();
+        assert!(tag_set.should_dh_ratchet());
     }
 }
