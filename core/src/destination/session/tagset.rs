@@ -103,7 +103,7 @@ impl KeyState {
     ///
     /// If the key state is pending, no `NextKey` requests can be made.
     fn is_pending(&self) -> bool {
-        std::matches!(
+        core::matches!(
             self,
             KeyState::AwaitingReverseKey { .. } | KeyState::AwaitingReverseKeyConfirmation { .. }
         )

@@ -43,7 +43,7 @@ use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 
-use alloc::{boxed::Box, string::ToString};
+use alloc::{boxed::Box, string::ToString, vec::Vec};
 use core::{
     fmt,
     future::Future,

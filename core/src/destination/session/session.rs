@@ -40,7 +40,7 @@ use parking_lot::RwLock;
 #[cfg(feature = "no_std")]
 use spin::rwlock::RwLock;
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::{fmt, marker::PhantomData, mem};
 
 /// Garlic message overheard.

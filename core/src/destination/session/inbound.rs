@@ -35,6 +35,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
 use zeroize::Zeroize;
 
+use alloc::{vec, vec::Vec};
 use core::{fmt, iter, marker::PhantomData, mem};
 
 /// Logging target for the file.
