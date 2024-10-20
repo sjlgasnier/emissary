@@ -34,7 +34,7 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::fmt;
 
 /// Null certificate.

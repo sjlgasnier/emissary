@@ -50,14 +50,3 @@ impl RequestVariableLeaseSet {
         out
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn serialize_deserialize() {}
-
-    #[test]
-    fn invalid_message() {}
-}

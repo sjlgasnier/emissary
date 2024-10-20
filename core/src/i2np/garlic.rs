@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::StaticPublicKey,
-    i2np::{MessageType, LOG_TARGET},
+    i2np::{Message, MessageType, LOG_TARGET},
     primitives::MessageId,
 };
 
@@ -60,7 +60,7 @@ pub enum GarlicMessageType {
     Ack,
 
     /// ACK request.
-    ACKRequest,
+    AckRequest,
 
     /// Garlic clove.
     GarlicClove,
@@ -79,7 +79,7 @@ impl GarlicMessageType {
             6 => Some(Self::MessageNumber),
             7 => Some(Self::NextKey),
             8 => Some(Self::Ack),
-            9 => Some(Self::ACKRequest),
+            9 => Some(Self::AckRequest),
             11 => Some(Self::GarlicClove),
             254 => Some(Self::Padding),
             _ => None,
@@ -95,7 +95,7 @@ impl GarlicMessageType {
             Self::MessageNumber => 6,
             Self::NextKey => 7,
             Self::Ack => 8,
-            Self::ACKRequest => 9,
+            Self::AckRequest => 9,
             Self::GarlicClove => 11,
             Self::Padding => 254,
         }
@@ -128,6 +128,52 @@ pub enum DeliveryInstructions<'a> {
         /// Tunnel ID.
         tunnel_id: u32,
     },
+}
+
+/// Owned garlic clove delivery instructions.
+#[derive(Debug)]
+pub enum OwnedDeliveryInstructions {
+    /// Clove meant for the local node
+    Local,
+
+    /// Clove meant for a `Destination`.
+    Destination {
+        /// Hash of the destination.
+        hash: Vec<u8>,
+    },
+
+    /// Clove meant for a router.
+    Router {
+        /// Hash of the router.
+        hash: Vec<u8>,
+    },
+
+    /// Clove meant for a tunnel.
+    Tunnel {
+        /// Hash of the tunnel.
+        hash: Vec<u8>,
+
+        /// Tunnel ID.
+        tunnel_id: u32,
+    },
+}
+
+impl<'a> From<&'a DeliveryInstructions<'a>> for OwnedDeliveryInstructions {
+    fn from(value: &'a DeliveryInstructions<'a>) -> Self {
+        match value {
+            DeliveryInstructions::Local => OwnedDeliveryInstructions::Local,
+            DeliveryInstructions::Destination { hash } => OwnedDeliveryInstructions::Destination {
+                hash: hash.to_vec(),
+            },
+            DeliveryInstructions::Router { hash } => OwnedDeliveryInstructions::Router {
+                hash: hash.to_vec(),
+            },
+            DeliveryInstructions::Tunnel { hash, tunnel_id } => OwnedDeliveryInstructions::Tunnel {
+                hash: hash.to_vec(),
+                tunnel_id: *tunnel_id,
+            },
+        }
+    }
 }
 
 impl<'a> DeliveryInstructions<'a> {
@@ -267,7 +313,7 @@ impl NextKeyKind {
             NextKeyKind::ForwardKey { public_key, .. }
             | NextKeyKind::ReverseKey { public_key, .. }
                 if public_key.is_some() =>
-                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key */
+                GARLIC_HEADER_LEN + 3usize + 32usize, // flag + key id + public key
             _ => GARLIC_HEADER_LEN + 3usize, // flag + key id
         }
     }
@@ -276,14 +322,21 @@ impl NextKeyKind {
 impl fmt::Debug for NextKeyKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ForwardKey { key_id, .. } => f
+            Self::ForwardKey {
+                key_id,
+                public_key,
+                reverse_key_requested,
+            } => f
                 .debug_struct("NextKeyKind::ForwardKey")
                 .field("key_id", &key_id)
-                .finish_non_exhaustive(),
-            Self::ReverseKey { key_id, .. } => f
+                .field("key_exists", &public_key.is_some())
+                .field("reverse_requested", &reverse_key_requested)
+                .finish(),
+            Self::ReverseKey { key_id, public_key } => f
                 .debug_struct("NextKeyKind::ReverseKey")
                 .field("key_id", &key_id)
-                .finish_non_exhaustive(),
+                .field("key_exists", &public_key.is_some())
+                .finish(),
         }
     }
 }
@@ -312,10 +365,13 @@ pub enum GarlicMessageBlock<'a> {
     },
 
     /// ACK.
-    ACK {},
+    Ack {
+        /// Vector of (tag set ID, tag index) tuples
+        acks: Vec<(u16, u16)>,
+    },
 
     /// ACK request.
-    ACKRequest,
+    AckRequest,
 
     /// Garlic clove.
     GarlicClove {
@@ -369,8 +425,11 @@ impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
             Self::MessageNumber {} => f.debug_struct("GarlicMessageBlock::MessageNumber").finish(),
             Self::NextKey { kind } =>
                 f.debug_struct("GarlicMessageBlock::NextKey").field("kind", &kind).finish(),
-            Self::ACK {} => f.debug_struct("GarlicMessageBlock::ACK").finish(),
-            Self::ACKRequest => f.debug_struct("GarlicMessageBlock::ACKRequest").finish(),
+            Self::Ack { acks } => f
+                .debug_struct("GarlicMessageBlock::Ack")
+                .field("num_acks", &acks.len())
+                .finish(),
+            Self::AckRequest => f.debug_struct("GarlicMessageBlock::AckRequest").finish(),
         }
     }
 }
@@ -493,6 +552,37 @@ impl<'a> GarlicMessage<'a> {
         Ok((rest, GarlicMessageBlock::NextKey { kind }))
     }
 
+    /// Try to parse [`GarlicMessage::AckRequest`] from `input`.
+    fn parse_ack_request(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
+        let (rest, _size) = be_u16(input)?;
+        let (rest, _flag) = be_u8(rest)?;
+
+        Ok((rest, GarlicMessageBlock::AckRequest))
+    }
+
+    /// Try to parse [`GarlicMessage::Ack`] from `input`.
+    fn parse_ack(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+
+        if size % 4 != 0 {
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        let (rest, acks) = (0..size / 4)
+            .try_fold((rest, Vec::<(u16, u16)>::new()), |(rest, mut acks), _| {
+                let (rest, tag_set_id) = be_u16::<_, ()>(rest).ok()?;
+                let (rest, tag_index) = be_u16::<_, ()>(rest).ok()?;
+
+                acks.push((tag_set_id, tag_index));
+
+                Some((rest, acks))
+            })
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((rest, GarlicMessageBlock::Ack { acks }))
+    }
+
+    /// Attempt to parse [`GarlicMessageBlock`] from `input`.
     fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
         let (rest, message_type) = be_u8(input)?;
 
@@ -501,6 +591,8 @@ impl<'a> GarlicMessage<'a> {
             Some(GarlicMessageType::GarlicClove) => Self::parse_garlic_clove(rest),
             Some(GarlicMessageType::Padding) => Self::parse_padding(rest),
             Some(GarlicMessageType::NextKey) => Self::parse_next_key(rest),
+            Some(GarlicMessageType::AckRequest) => Self::parse_ack_request(rest),
+            Some(GarlicMessageType::Ack) => Self::parse_ack(rest),
             parsed_message_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -532,6 +624,16 @@ impl<'a> GarlicMessage<'a> {
         Some(Self {
             blocks: Self::parse_inner(input, Vec::new())?,
         })
+    }
+
+    /// Extract garlic tag from `message`.
+    ///
+    /// Panics if `message` isn't long enough to contain a garlic tag.
+    pub fn garlic_tag(message: &Message) -> u64 {
+        // TODO: is this correct
+        u64::from_le_bytes(
+            TryInto::<[u8; 8]>::try_into(&message.payload[4..12]).expect("valid garlic message"),
+        )
     }
 }
 
@@ -566,7 +668,7 @@ impl<'a> GarlicMessageBuilder<'a> {
         mut self,
         message_type: MessageType,
         message_id: MessageId,
-        expiration: u64,
+        expiration: Duration,
         delivery_instructions: DeliveryInstructions<'a>,
         message_body: &'a [u8],
     ) -> Self {
@@ -582,7 +684,7 @@ impl<'a> GarlicMessageBuilder<'a> {
         self.cloves.push(GarlicMessageBlock::GarlicClove {
             message_type,
             message_id,
-            expiration: Duration::from_secs(expiration as u64),
+            expiration,
             delivery_instructions,
             message_body,
         });
@@ -597,9 +699,17 @@ impl<'a> GarlicMessageBuilder<'a> {
         self
     }
 
+    /// Add [`GarlicMessageBlock::AckRequest`].
     pub fn with_ack_request(mut self) -> Self {
         self.message_size += GARLIC_HEADER_LEN + 1; // 1 byte flag
-        self.cloves.push(GarlicMessageBlock::ACKRequest);
+        self.cloves.push(GarlicMessageBlock::AckRequest);
+        self
+    }
+
+    /// Add [`GarlicMessageBlock::Ack`].
+    pub fn with_ack(mut self, acks: Vec<(u16, u16)>) -> Self {
+        self.message_size += GARLIC_HEADER_LEN + acks.len() * 4;
+        self.cloves.push(GarlicMessageBlock::Ack { acks });
         self
     }
 
@@ -676,10 +786,19 @@ impl<'a> GarlicMessageBuilder<'a> {
                         }
                     }
                 },
-                GarlicMessageBlock::ACKRequest => {
-                    out.put_u8(GarlicMessageType::ACKRequest.as_u8());
+                GarlicMessageBlock::AckRequest => {
+                    out.put_u8(GarlicMessageType::AckRequest.as_u8());
                     out.put_u16(1u16);
                     out.put_u8(0u8); // flag, unused
+                }
+                GarlicMessageBlock::Ack { acks } => {
+                    out.put_u8(GarlicMessageType::Ack.as_u8());
+                    out.put_u16(acks.len() as u16 * 4);
+
+                    for (tag_set_id, tag_index) in acks {
+                        out.put_u16(tag_set_id);
+                        out.put_u16(tag_index);
+                    }
                 }
                 block => todo!("unimplemented block: {block:?}"),
             }
@@ -687,4 +806,22 @@ impl<'a> GarlicMessageBuilder<'a> {
 
         out.freeze().to_vec()
     }
+}
+
+/// Garlic clove.
+pub struct GarlicClove {
+    /// I2NP message type.
+    pub message_type: MessageType,
+
+    /// Message ID.
+    pub message_id: MessageId,
+
+    /// Message expiration, seconds since UNIX epoch.
+    pub expiration: Duration,
+
+    /// Delivery instructions.
+    pub delivery_instructions: OwnedDeliveryInstructions,
+
+    /// Message body.
+    pub message_body: Vec<u8>,
 }

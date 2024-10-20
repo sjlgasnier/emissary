@@ -17,42 +17,27 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, SigningPublicKey, StaticPrivateKey},
-    destination::{
-        protocol::{
-            streaming::{Stream, StreamEvent},
-            Protocol,
-        },
-        session::{KeyContext, OutboundSession},
-    },
+    crypto::StaticPrivateKey,
+    destination::session::SessionManager,
+    error::{Error, QueryError},
     i2np::{
-        database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
-        garlic::{
-            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
-            GarlicMessageBuilder, NextKeyKind,
-        },
-        Message, MessageBuilder, MessageType,
+        database::store::{DatabaseStore, DatabaseStorePayload},
+        Message, MessageType,
     },
-    primitives::{
-        Destination as Dest, Lease, LeaseSet2, LeaseSet2Header, MessageId, RouterIdentity,
-    },
-    runtime::Runtime,
-    tunnel::TunnelPoolContextHandle,
-    util::gzip::{GzipEncoderBuilder, GzipPayload},
+    netdb::NetDbHandle,
+    primitives::{Destination as Dest, DestinationId, LeaseSet2, RouterId, TunnelId},
+    runtime::{JoinSet, Runtime},
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
-use futures::StreamExt;
-use rand_core::RngCore;
-use thingbuf::mpsc::Receiver;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
-    future::Future,
     pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
+    task::{Context, Poll, Waker},
 };
+use hashbrown::HashMap;
 
 pub mod protocol;
 pub mod session;
@@ -60,292 +45,264 @@ pub mod session;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination";
 
+/// Events emitted by [`Destination`].
+pub enum DestinationEvent {
+    /// Send message to remote `Destination`.
+    SendMessage {
+        /// Router ID of the destination gateway.
+        router_id: RouterId,
+
+        /// Tunnel ID of the destination gateway.
+        tunnel_id: TunnelId,
+
+        /// Message to send.
+        message: Vec<u8>,
+    },
+}
+
 /// Client destination.
 pub struct Destination<R: Runtime> {
-    /// Key context.
-    key_context: KeyContext<R>,
+    /// Destination ID of the client.
+    destination_id: DestinationId,
 
-    /// Metrics handle.
-    metrics: R::MetricsHandle,
+    /// Serialized [`LeaseSet2`] for client's inbound tunnels.
+    lease_set: Bytes,
 
-    /// Channel for receiving messages from the tunnel pool.
-    rx: Receiver<Message>,
+    /// Handle to [`NetDb`].
+    netdb_handle: NetDbHandle,
 
-    /// Streaming protocol handle.
-    stream: Stream<R>,
+    /// Pending events.
+    pending_events: VecDeque<DestinationEvent>,
 
-    /// Outbound ECIES-X25519-AEAD-Ratchet session.
-    session: OutboundSession<R>,
+    /// Pending `LeaseSet2` queries.
+    pending_queries: R::JoinSet<(DestinationId, Result<(LeaseSet2, Vec<u8>), QueryError>)>,
 
-    /// Tunnel pool handle.
-    tunnel_pool_handle: TunnelPoolContextHandle,
+    /// Known remote destinations.
+    remote_destinations: HashMap<DestinationId, LeaseSet2>,
 
-    key: Vec<u8>,
-    leaseset: LeaseSet2,
+    /// Session manager.
+    session_manager: SessionManager<R>,
+
+    /// Waker.
+    waker: Option<Waker>,
 }
 
 impl<R: Runtime> Destination<R> {
     /// Create new [`Destination`].
+    ///
+    /// `private_key` is the private key of the client destination and `lease`
+    /// is a serialized [`LeaseSet2`] for the client's inbound tunnel(s).
     pub fn new(
-        key: Vec<u8>,
-        tunnel_pool_handle: TunnelPoolContextHandle,
-        rx: Receiver<Message>,
-        leaseset: LeaseSet2,
-        metrics: R::MetricsHandle,
+        destination_id: DestinationId,
+        private_key: StaticPrivateKey,
+        lease_set: Bytes,
+        netdb_handle: NetDbHandle,
     ) -> Self {
-        let lease = tunnel_pool_handle.lease().expect("to succeed");
-        let mut key_context = KeyContext::new();
-
-        let signing_key = SigningPrivateKey::random(&mut R::rng());
-        let verifying_key = signing_key.public();
-        let destination = Dest::new(verifying_key);
-        let destination_id = destination.id();
-
-        let local_leaseset = LeaseSet2 {
-            header: LeaseSet2Header {
-                destination: destination.clone(),
-                published: R::time_since_epoch().as_secs() as u32,
-                expires: (R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs() as u32,
-            },
-            public_keys: vec![key_context.public_key()],
-            leases: vec![lease],
-        };
-
-        let database_store = DatabaseStoreBuilder::new(
-            Bytes::from(local_leaseset.header.destination.id().to_vec()),
-            DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(local_leaseset.serialize(&signing_key)),
-            },
-        )
-        .build();
-
-        let (stream, payload) = Stream::<R>::new_outbound(destination);
-
-        let mut payload = GarlicMessageBuilder::new()
-            .with_date_time(R::time_since_epoch().as_secs() as u32)
-            .with_garlic_clove(
-                MessageType::DatabaseStore,
-                MessageId::from(R::rng().next_u32()),
-                (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                GarlicDeliveryInstructions::Local,
-                &database_store,
-            )
-            .with_garlic_clove(
-                MessageType::Data,
-                MessageId::from(R::rng().next_u32()),
-                (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                GarlicDeliveryInstructions::Destination { hash: &key },
-                &{
-                    let payload = GzipEncoderBuilder::<R>::new(&payload)
-                        .with_source_port(0)
-                        .with_destination_port(0)
-                        .with_protocol(Protocol::Streaming.as_u8())
-                        .build()
-                        .unwrap();
-
-                    let mut out = BytesMut::with_capacity(payload.len() + 4);
-
-                    out.put_u32(payload.len() as u32);
-                    out.put_slice(&payload);
-
-                    out.freeze().to_vec()
-                },
-            )
-            .build();
-
-        // TODO:
-        let (session, payload) = key_context.create_oubound_session(
-            destination_id,
-            leaseset.public_keys.get(0).unwrap().clone(),
-            &payload,
-        );
-
-        let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
-        payload_new.put_u32(payload.len() as u32);
-        payload_new.put_slice(&payload);
-        let payload = payload_new.freeze().to_vec();
-
-        let payload = MessageBuilder::standard()
-            .with_expiration(R::time_since_epoch() + Duration::from_secs(10))
-            .with_message_id(R::rng().next_u32())
-            .with_message_type(MessageType::Garlic)
-            .with_payload(&payload)
-            .build();
-
-        let Lease {
-            router_id,
-            tunnel_id,
-            ..
-        } = leaseset.leases[0].clone();
-
-        tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload);
-
         Self {
-            key,
-            key_context,
-            metrics,
-            rx,
-            session,
-            tunnel_pool_handle,
-            stream,
-            leaseset,
+            destination_id: destination_id.clone(),
+            lease_set: lease_set.clone(),
+            netdb_handle,
+            pending_events: VecDeque::new(),
+            pending_queries: R::join_set(),
+            remote_destinations: HashMap::new(),
+            session_manager: SessionManager::new(destination_id, private_key, lease_set),
+            waker: None,
         }
     }
 
-    /// Handle garlic message send to the destination.
-    fn handle_garlic_message(&mut self, message: Message) {
-        let message = self.session.decrypt_message(message).unwrap();
-        let message = GarlicMessage::parse(&message).unwrap();
+    /// Encrypt `message` destined to `destination_id`.
+    ///
+    /// If `destination_id` is not known to `Destination`, a lease set query is initiated and polled
+    /// in the background. Once the query completes and if the lease set of the remote destination
+    /// was received, `message` is encrypted and `DestinationEvent::SendMessage` is returned from
+    /// [`Destinatin::poll_next()`].
+    ///
+    /// Caller must call [`Destination::poll_next()`] to drive progress forward.
+    pub fn encrypt_message(
+        &mut self,
+        destination_id: &DestinationId,
+        message: Vec<u8>,
+    ) -> crate::Result<()> {
+        let Some(LeaseSet2 { leases, .. }) = self.remote_destinations.get(destination_id) else {
+            match self.netdb_handle.query_leaseset(Bytes::from(destination_id.to_vec())) {
+                Ok(mut rx) => {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        %destination_id,
+                        "lease set query started",
+                    );
+                    let destination_id = destination_id.clone();
 
-        for block in message.blocks {
-            match block {
-                GarlicMessageBlock::Padding { .. } => {}
-                GarlicMessageBlock::DateTime { .. } => {}
-                GarlicMessageBlock::GarlicClove {
-                    message_type,
-                    message_id,
-                    expiration,
-                    delivery_instructions,
-                    message_body,
-                } => {
-                    assert_eq!(message_type, MessageType::Data);
-
-                    let GzipPayload {
-                        dst_port,
-                        payload,
-                        protocol,
-                        src_port,
-                    } = GzipPayload::decompress::<R>(&message_body[4..]).unwrap();
-
-                    if let Err(error) = self.stream.handle_packet(&payload) {
-                        tracing::error!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "failed to handle streaming protocol packet",
-                        );
-                    }
+                    self.pending_queries.push(async move {
+                        match rx.await {
+                            Err(error) => (destination_id, Err(QueryError::Timeout)),
+                            Ok(Err(error)) => (destination_id, Err(error)),
+                            Ok(Ok(lease_set)) => (destination_id, Ok((lease_set, message))),
+                        }
+                    });
                 }
-                GarlicMessageBlock::NextKey { kind } => {
-                    self.session.handle_next_key(kind);
-                }
-                message_block => {
-                    tracing::error!("\nunhandled message block {message_block:?}\n");
-                }
+                Err(error) => tracing::warn!(
+                    target: LOG_TARGET,
+                    %destination_id,
+                    ?error,
+                    "failed to start lease set query",
+                ),
             }
+
+            return Ok(());
+        };
+
+        let message = self.session_manager.encrypt(destination_id, message)?;
+
+        self.pending_events.push_back(DestinationEvent::SendMessage {
+            router_id: leases[0].router_id.clone(),
+            tunnel_id: leases[0].tunnel_id,
+            message,
+        });
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
         }
+
+        Ok(())
+    }
+
+    /// Handle garlic messages received into one of the [`Destination`]'s inbound tunnels.
+    pub fn decrypt_message(
+        &mut self,
+        message: Message,
+    ) -> crate::Result<impl Iterator<Item = Vec<u8>>> {
+        tracing::trace!(
+            target: LOG_TARGET,
+            message_id = ?message.message_id,
+            "garlic message",
+        );
+        debug_assert_eq!(message.message_type, MessageType::Garlic);
+
+        if message.payload.len() <= 12 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                payload_len = ?message.payload.len(),
+                "garlic message is too short",
+            );
+            return Err(Error::InvalidData);
+        }
+
+        let messages = self
+            .session_manager
+            .decrypt(message)?
+            .filter_map(|clove| match clove.message_type {
+                MessageType::DatabaseStore => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "ignoring database store",
+                    );
+
+                    match DatabaseStore::<R>::parse(&clove.message_body) {
+                        Some(DatabaseStore {
+                            payload: DatabaseStorePayload::LeaseSet2 { leaseset },
+                            ..
+                        }) => {
+                            if leaseset.leases.is_empty() {
+                                tracing::error!(
+                                    target: LOG_TARGET,
+                                    local = %self.destination_id,
+                                    remote = %leaseset.header.destination.id(),
+                                    "remote didn't send any leases",
+                                );
+                                return None;
+                            }
+
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                remote = %leaseset.header.destination.id(),
+                                "store lease set for remote destination",
+                            );
+
+                            self.remote_destinations
+                                .insert(leaseset.header.destination.id(), leaseset);
+                        }
+                        database_store => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                ?database_store,
+                                "ignoring `DatabaseStore`",
+                            )
+                        }
+                    }
+
+                    None
+                }
+                MessageType::Data => {
+                    if clove.message_body.len() <= 4 {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "empty i2np data message",
+                        );
+                        debug_assert!(false);
+                        return None;
+                    }
+
+                    Some(clove.message_body[4..].to_vec())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(messages.into_iter())
     }
 }
 
-impl<R: Runtime> Future for Destination<R> {
-    type Output = ();
+impl<R: Runtime> Stream for Destination<R> {
+    type Item = DestinationEvent;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            match self.rx.poll_recv(cx) {
+            match self.pending_queries.poll_next_unpin(cx) {
                 Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(message)) => self.handle_garlic_message(message),
-            }
-        }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((destination_id, result))) => match result {
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        %destination_id,
+                        ?error,
+                        "lease set query failed",
+                    ),
+                    Ok((lease_set, message)) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            "lease set query succeeded",
+                        );
 
-        loop {
-            match self.stream.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(StreamEvent::StreamOpened {
-                    recv_stream_id,
-                    send_stream_id,
-                })) => {
-                    tracing::info!(target: LOG_TARGET, "stream opened");
+                        self.session_manager.add_remote_destination(
+                            destination_id.clone(),
+                            lease_set.public_keys[0].clone(),
+                        );
+                        self.remote_destinations.insert(destination_id.clone(), lease_set);
 
-                    let next_key_kind = match self.session.generate_next_key() {
-                        Ok(kind) => kind,
-                        Err(error) => return Poll::Ready(()),
-                    };
-
-                    for _ in 0..5 {
-                        tracing::info!(target: LOG_TARGET, "SEND NEXT KEY");
+                        if let Err(error) = self.encrypt_message(&destination_id, message) {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                ?error,
+                                "failed to encrypt message",
+                            );
+                        }
                     }
-
-                    let mut payload =
-                        GarlicMessageBuilder::new().with_next_key(next_key_kind).build();
-
-                    let payload = self.session.encrypt_message(payload).unwrap();
-
-                    let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
-                    payload_new.put_u32(payload.len() as u32);
-                    payload_new.put_slice(&payload);
-
-                    let payload = payload_new.freeze().to_vec();
-                    let payload = MessageBuilder::standard()
-                        .with_expiration(R::time_since_epoch() + Duration::from_secs(10))
-                        .with_message_id(R::rng().next_u32())
-                        .with_message_type(MessageType::Garlic)
-                        .with_payload(&payload)
-                        .build();
-
-                    let Lease {
-                        router_id,
-                        tunnel_id,
-                        ..
-                    } = self.leaseset.leases[0].clone();
-
-                    self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload).unwrap();
-                }
-                Poll::Ready(Some(StreamEvent::StreamClosed {
-                    recv_stream_id,
-                    send_stream_id,
-                })) => {}
-                Poll::Ready(Some(StreamEvent::SendPacket { packet })) => {
-                    let mut payload = GarlicMessageBuilder::new()
-                        .with_garlic_clove(
-                            MessageType::Data,
-                            MessageId::from(R::rng().next_u32()),
-                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                            GarlicDeliveryInstructions::Destination { hash: &self.key },
-                            &{
-                                let payload = GzipEncoderBuilder::<R>::new(&packet)
-                                    .with_source_port(0)
-                                    .with_destination_port(0)
-                                    .with_protocol(Protocol::Streaming.as_u8())
-                                    .build()
-                                    .unwrap();
-
-                                let mut out = BytesMut::with_capacity(payload.len() + 4);
-
-                                out.put_u32(payload.len() as u32);
-                                out.put_slice(&payload);
-
-                                out.freeze().to_vec()
-                            },
-                        )
-                        .build();
-
-                    let payload = self.session.encrypt_message(payload).unwrap();
-
-                    let mut payload_new = BytesMut::with_capacity(payload.len() + 4);
-                    payload_new.put_u32(payload.len() as u32);
-                    payload_new.put_slice(&payload);
-                    let payload = payload_new.freeze().to_vec();
-
-                    let payload = MessageBuilder::standard()
-                        .with_expiration(R::time_since_epoch() + Duration::from_secs(10))
-                        .with_message_id(R::rng().next_u32())
-                        .with_message_type(MessageType::Garlic)
-                        .with_payload(&payload)
-                        .build();
-
-                    let Lease {
-                        router_id,
-                        tunnel_id,
-                        ..
-                    } = self.leaseset.leases[0].clone();
-
-                    self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, payload).unwrap();
-                }
+                },
             }
         }
 
-        Poll::Pending
+        self.pending_events.pop_front().map_or_else(
+            || {
+                self.waker = Some(cx.waker().clone());
+                Poll::Pending
+            },
+            |event| Poll::Ready(Some(event)),
+        )
     }
 }

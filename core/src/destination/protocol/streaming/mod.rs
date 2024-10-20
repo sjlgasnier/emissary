@@ -17,8 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    destination::protocol::streaming::packet::Packet, error::StreamingError,
-    primitives::Destination as Dest, runtime::Runtime, Error,
+    error::StreamingError,
+    // destination::protocol::streaming::packet::Packet, error::StreamingError,
+    primitives::Destination as Dest,
+    runtime::Runtime,
+    Error,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -39,6 +42,8 @@ use core::{
 
 mod config;
 mod packet;
+
+pub use packet::Packet;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::protocol::streaming";

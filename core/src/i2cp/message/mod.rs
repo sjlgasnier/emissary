@@ -18,10 +18,10 @@
 
 use crate::{
     crypto::StaticPrivateKey,
+    i2cp::payload::I2cpParameters,
     primitives::{Date, Destination, LeaseSet2, Mapping, Str},
     runtime::Runtime,
     tunnel::TunnelPoolConfig,
-    util::gzip::GzipPayload,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -39,12 +39,14 @@ use core::time::Duration;
 pub use bandwidth::BandwidthLimits;
 pub use host_reply::{HostReply, HostReplyKind};
 pub use leaseset::RequestVariableLeaseSet;
+pub use payload::MessagePayload;
 pub use session_status::{SessionStatus, SessionStatusKind};
 pub use set_date::SetDate;
 
 mod bandwidth;
 mod host_reply;
 mod leaseset;
+mod payload;
 mod session_status;
 mod set_date;
 
@@ -372,8 +374,11 @@ pub enum Message {
         /// Destination.
         destination: Destination,
 
-        /// Payload:
-        payload: GzipPayload,
+        /// I2CP protocol parameters.
+        parameters: I2cpParameters,
+
+        /// Serialized I2CP payload.
+        payload: Vec<u8>,
 
         /// Nonce.
         nonce: u32,
@@ -623,7 +628,7 @@ impl Message {
             Duration::from_millis(u64::from_be_bytes(extended))
         };
 
-        let Some(payload) = GzipPayload::decompress::<R>(payload) else {
+        let Some(parameters) = I2cpParameters::new(&payload) else {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?session_id,
@@ -635,7 +640,8 @@ impl Message {
         Some(Message::SendMessageExpires {
             session_id: SessionId::from(session_id),
             destination,
-            payload,
+            parameters,
+            payload: payload.to_vec(),
             nonce,
             options,
             expires,

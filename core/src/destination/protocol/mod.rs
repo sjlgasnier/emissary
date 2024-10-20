@@ -20,6 +20,7 @@ pub mod datagram;
 pub mod streaming;
 
 /// Protocol type.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Protocol {
     /// Streaming protocol.
     Streaming,

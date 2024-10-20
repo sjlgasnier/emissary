@@ -54,6 +54,23 @@ pub struct Packet<'a> {
     pub payload: &'a [u8],
 }
 
+impl<'a> core::fmt::Debug for Packet<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let test = core::str::from_utf8(self.payload).unwrap_or("falure");
+
+        f.debug_struct("Packet")
+            .field("send_stream_id", &self.send_stream_id)
+            .field("recv_stream_id", &self.recv_stream_id)
+            .field("seq_nro", &self.seq_nro)
+            .field("ack_through", &self.ack_through)
+            .field("nacks", &self.nacks)
+            .field("resend_delay", &self.resend_delay)
+            .field("flags", &self.flags)
+            .field("payload", &test)
+            .finish()
+    }
+}
+
 impl<'a> Packet<'a> {
     /// Attempt to parse [`Packet`] from `input`.
     ///

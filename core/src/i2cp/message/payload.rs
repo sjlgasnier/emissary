@@ -16,4 +16,37 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-mod new_session;
+use crate::{
+    i2cp::message::{MessageType, SessionId, I2CP_HEADER_SIZE, LOG_TARGET},
+    primitives::Lease,
+};
+
+use bytes::{BufMut, BytesMut};
+
+use alloc::vec::Vec;
+
+/// `MessagePayload` message.
+///
+/// https://geti2p.net/spec/i2cp#messagepayloadmessage
+pub struct MessagePayload(());
+
+impl MessagePayload {
+    /// Create new `MessagePayload` message.
+    pub fn new(session_id: u16, message_id: u32, message: Vec<u8>) -> BytesMut {
+        let payload_len = 2usize // session id
+            + 4usize // message id
+            + 4usize // payload size
+            + message.len();
+
+        let mut out = BytesMut::with_capacity(I2CP_HEADER_SIZE + payload_len);
+
+        out.put_u32(payload_len as u32);
+        out.put_u8(MessageType::MessagePayload.as_u8());
+        out.put_u16(session_id);
+        out.put_u32(message_id);
+        out.put_u32(message.len() as u32);
+        out.put_slice(&message);
+
+        out
+    }
+}

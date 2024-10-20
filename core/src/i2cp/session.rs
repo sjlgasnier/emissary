@@ -17,14 +17,17 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    destination::{protocol::Protocol, Destination, DestinationEvent},
     i2cp::{
         message::{
-            BandwidthLimits, HostReply, HostReplyKind, Message, RequestVariableLeaseSet, SessionId,
-            SessionStatus, SessionStatusKind, SetDate,
+            BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload,
+            RequestVariableLeaseSet, SessionId, SessionStatus, SessionStatusKind, SetDate,
         },
+        payload::I2cpParameters,
         pending::I2cpSessionContext,
         socket::I2cpSocket,
     },
+    i2np::{MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
     netdb::NetDbHandle,
     primitives::{Date, Lease, Str, TunnelId},
     runtime::Runtime,
@@ -41,17 +44,24 @@ use core::{
     str::FromStr,
     task::{Context, Poll},
 };
+use rand_core::RngCore;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp::session";
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
+    /// Destination.
+    destination: Destination<R>,
+
     /// Active inbound tunnels and their leases.
     inbound: HashMap<TunnelId, Lease>,
 
     /// Handle to `NetDb`.
     netdb_handle: NetDbHandle,
+
+    /// Next message ID.
+    next_message_id: u32,
 
     /// Session options.
     options: HashMap<Str, Str>,
@@ -79,9 +89,10 @@ impl<R: Runtime> I2cpSession<R> {
             mut socket,
             options,
             tunnel_pool_handle,
+            private_keys,
+            leaseset,
+            destination_id,
         } = context;
-
-        assert!(!inbound.is_empty(), "no inbound tunnels");
 
         tracing::info!(
             target: LOG_TARGET,
@@ -91,29 +102,40 @@ impl<R: Runtime> I2cpSession<R> {
             "start active i2cp session",
         );
 
-        // request `LeaseSet2` from i2cp client
-        {
-            tracing::trace!(
-                target: LOG_TARGET,
-                ?session_id,
-                "send leaseset request to client",
-            );
-
-            socket.send_message(RequestVariableLeaseSet::new(
-                session_id,
-                inbound.values().cloned().collect::<Vec<_>>(),
-            ));
+        // TODO: remove
+        for (key, value) in &options {
+            tracing::info!("{key}={value}");
         }
 
         Self {
+            destination: Destination::new(
+                destination_id,
+                private_keys[0].clone(),
+                leaseset,
+                netdb_handle.clone(),
+            ),
             inbound,
             netdb_handle,
+            next_message_id: 0u32,
             options,
             outbound,
             session_id,
             socket,
             tunnel_pool_handle,
         }
+    }
+
+    /// Send `MessagePayload` message to client.
+    fn send_payload_message(&mut self, payload: Vec<u8>) {
+        let message_id = {
+            let message_id = self.next_message_id;
+            self.next_message_id = self.next_message_id.wrapping_add(1);
+
+            message_id
+        };
+
+        self.socket
+            .send_message(MessagePayload::new(self.session_id, message_id, payload));
     }
 
     /// Handle I2CP message received from the client.
@@ -210,23 +232,42 @@ impl<R: Runtime> I2cpSession<R> {
                         "failed to store leaseset to netdb",
                     );
                 }
+
+                // TODO: handle correctly
             }
             Message::SendMessageExpires {
                 session_id,
                 destination,
+                parameters:
+                    I2cpParameters {
+                        dst_port,
+                        protocol,
+                        src_port,
+                    },
                 payload,
                 ..
-            } => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    ?session_id,
-                    destination = %destination.id(),
-                    src_port = ?payload.src_port,
-                    dst_port = ?payload.dst_port,
-                    protocol = ?payload.protocol,
-                    "send message with expiration",
-                );
-            }
+            } =>
+                if protocol == Protocol::Streaming {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        destination = %destination.id(),
+                        ?src_port,
+                        ?dst_port,
+                        ?protocol,
+                        "send message with expiration",
+                    );
+
+                    if let Err(error) = self.destination.encrypt_message(&destination.id(), payload)
+                    {
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            ?error,
+                            "failed to encrypt message",
+                        );
+                    }
+                },
             _ => {}
         }
     }
@@ -245,7 +286,26 @@ impl<R: Runtime> I2cpSession<R> {
             TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {}
             TunnelPoolEvent::InboundTunnelExpired { tunnel_id } => {}
             TunnelPoolEvent::OutboundTunnelExpired { tunnel_id } => {}
-            TunnelPoolEvent::Message { message } => {}
+            TunnelPoolEvent::Message { message } => match self.destination.decrypt_message(message)
+            {
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        ?error,
+                        "failed to handle garlic message"
+                    );
+                }
+                Ok(messages) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        "send messages to i2cp client",
+                    );
+
+                    messages.for_each(|message| self.send_payload_message(message));
+                }
+            },
             TunnelPoolEvent::TunnelPoolShutDown | TunnelPoolEvent::Dummy => unreachable!(),
         }
     }
@@ -277,6 +337,38 @@ impl<R: Runtime> Future for I2cpSession<R> {
                     return Poll::Ready(());
                 }
                 Poll::Ready(Some(event)) => self.on_tunnel_pool_event(event),
+            }
+        }
+
+        loop {
+            match self.destination.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(DestinationEvent::SendMessage {
+                    router_id,
+                    tunnel_id,
+                    message,
+                })) => {
+                    // wrap the garlic message inside a standard i2np message and send it over
+                    // the one of the pool's outbound tunnels to remote destination
+                    let message = MessageBuilder::standard()
+                        .with_message_type(MessageType::Garlic)
+                        .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                        .with_message_id(R::rng().next_u32())
+                        .with_payload(&message)
+                        .build();
+
+                    if let Err(error) =
+                        self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, message)
+                    {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            ?error,
+                            "failed to send message to tunnel",
+                        );
+                    }
+                }
             }
         }
 
