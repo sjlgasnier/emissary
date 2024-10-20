@@ -660,6 +660,7 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                 },
                 state @ PendingSessionState::AwaitingLeaseSet { .. } => {
                     self.state = state;
+                    break;
                 }
                 PendingSessionState::Poisoned => {
                     tracing::warn!(
