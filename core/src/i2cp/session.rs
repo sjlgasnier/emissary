@@ -17,10 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    destination::{Destination, DestinationEvent},
     i2cp::{
         message::{
-            BandwidthLimits, HostReply, HostReplyKind, Message, RequestVariableLeaseSet, SessionId,
-            SessionStatus, SessionStatusKind, SetDate,
+            BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload,
+            RequestVariableLeaseSet, SessionId, SessionStatus, SessionStatusKind, SetDate,
         },
         pending::I2cpSessionContext,
         socket::I2cpSocket,
@@ -47,11 +48,17 @@ const LOG_TARGET: &str = "emissary::i2cp::session";
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
+    /// Destination.
+    destination: Destination<R>,
+
     /// Active inbound tunnels and their leases.
     inbound: HashMap<TunnelId, Lease>,
 
     /// Handle to `NetDb`.
     netdb_handle: NetDbHandle,
+
+    /// Next message ID.
+    next_message_id: u32,
 
     /// Session options.
     options: HashMap<Str, Str>,
@@ -98,14 +105,29 @@ impl<R: Runtime> I2cpSession<R> {
         }
 
         Self {
+            destination: Destination::new(destination_id, private_keys[0].clone(), leaseset),
             inbound,
             netdb_handle,
+            next_message_id: 0u32,
             options,
             outbound,
             session_id,
             socket,
             tunnel_pool_handle,
         }
+    }
+
+    /// Send `MessagePayload` message to client.
+    fn send_payload_message(&mut self, payload: Vec<u8>) {
+        let message_id = {
+            let message_id = self.next_message_id;
+            self.next_message_id = self.next_message_id.wrapping_add(1);
+
+            message_id
+        };
+
+        self.socket
+            .send_message(MessagePayload::new(self.session_id, message_id, payload));
     }
 
     /// Handle I2CP message received from the client.
@@ -239,7 +261,26 @@ impl<R: Runtime> I2cpSession<R> {
             TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {}
             TunnelPoolEvent::InboundTunnelExpired { tunnel_id } => {}
             TunnelPoolEvent::OutboundTunnelExpired { tunnel_id } => {}
-            TunnelPoolEvent::Message { message } => {}
+            TunnelPoolEvent::Message { message } =>
+                match self.destination.handle_message(message) {
+                    Err(error) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            ?error,
+                            "failed to handle garlic message"
+                        );
+                    }
+                    Ok(messages) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            "send messages to i2cp client",
+                        );
+
+                        messages.for_each(|message| self.send_payload_message(message));
+                    }
+                },
             TunnelPoolEvent::TunnelPoolShutDown | TunnelPoolEvent::Dummy => unreachable!(),
         }
     }
@@ -271,6 +312,28 @@ impl<R: Runtime> Future for I2cpSession<R> {
                     return Poll::Ready(());
                 }
                 Poll::Ready(Some(event)) => self.on_tunnel_pool_event(event),
+            }
+        }
+
+        loop {
+            match self.destination.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(DestinationEvent::SendMessage {
+                    router_id,
+                    tunnel_id,
+                    message,
+                })) =>
+                    if let Err(error) =
+                        self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, message)
+                    {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            ?error,
+                            "failed to send message to tunnel",
+                        );
+                    },
             }
         }
 

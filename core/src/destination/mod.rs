@@ -26,6 +26,7 @@ use crate::{
 };
 
 use bytes::Bytes;
+use futures::Stream;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{
@@ -39,7 +40,7 @@ pub mod session;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination";
 
-/// Events emitted by [`NewDestination`].
+/// Events emitted by [`Destination`].
 pub enum DestinationEvent {
     /// Send message to remote `Destination`.
     SendMessage {
@@ -55,7 +56,7 @@ pub enum DestinationEvent {
 }
 
 /// Client destination.
-pub struct NewDestination<R: Runtime> {
+pub struct Destination<R: Runtime> {
     /// Destination ID of the client.
     destination_id: DestinationId,
 
@@ -69,8 +70,8 @@ pub struct NewDestination<R: Runtime> {
     pending_events: VecDeque<DestinationEvent>,
 }
 
-impl<R: Runtime> NewDestination<R> {
-    /// Create new [`NewDestination`].
+impl<R: Runtime> Destination<R> {
+    /// Create new [`Destination`].
     ///
     /// `private_key` is the private key of the client destination and `lease`
     /// is a serialized [`LeaseSet2`] for the client's inbound tunnel(s).
@@ -93,7 +94,7 @@ impl<R: Runtime> NewDestination<R> {
         todo!();
     }
 
-    /// Handle garlic messages received into one of the [`NewDestination`]'s inbound tunnels.
+    /// Handle garlic messages received into one of the [`Destination`]'s inbound tunnels.
     pub fn handle_message(
         &mut self,
         message: Message,
@@ -115,27 +116,39 @@ impl<R: Runtime> NewDestination<R> {
             return Err(Error::InvalidData);
         }
 
-        Ok(vec![].into_iter())
+        let messages = self
+            .session_manager
+            .decrypt(message)?
+            .filter_map(|clove| match clove.message_type {
+                MessageType::DatabaseStore => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "ignoring database store",
+                    );
 
-        // todo!();
-        // let messages = self
-        //     .session_manager
-        //     .decrypt(message)?
-        //     .filter_map(|clove| match clove.message_type {
-        //         MessageType::DatabaseStore => {
-        //             todo!();
-        //         }
-        //         MessageType::Data => {
-        //             todo!();
-        //         }
-        //         _ => None,
-        //     })
-        //     .collect();
-        // Ok(messages.into_iter())
+                    None
+                }
+                MessageType::Data => {
+                    if clove.message_body.len() <= 4 {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "empty i2np data message",
+                        );
+                        debug_assert!(false);
+                        return None;
+                    }
+
+                    Some(clove.message_body[4..].to_vec())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(messages.into_iter())
     }
 }
 
-impl<R: Runtime> futures::Stream for NewDestination<R> {
+impl<R: Runtime> Stream for Destination<R> {
     type Item = DestinationEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
