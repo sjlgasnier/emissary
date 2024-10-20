@@ -45,6 +45,7 @@ use core::{
 };
 
 mod message;
+mod payload;
 mod pending;
 mod session;
 mod socket;

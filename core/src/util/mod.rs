@@ -28,8 +28,6 @@ use core::{
     task::{Context, Poll},
 };
 
-pub mod gzip;
-
 pub trait AsyncReadExt: AsyncRead + Unpin {
     fn read_exact(&mut self, buffer: &mut [u8]) -> impl Future<Output = crate::Result<()>>;
 }

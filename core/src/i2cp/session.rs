@@ -23,6 +23,7 @@ use crate::{
             BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload,
             RequestVariableLeaseSet, SessionId, SessionStatus, SessionStatusKind, SetDate,
         },
+        payload::I2cpParameters,
         pending::I2cpSessionContext,
         socket::I2cpSocket,
     },
@@ -31,7 +32,6 @@ use crate::{
     primitives::{Date, Lease, Str, TunnelId},
     runtime::Runtime,
     tunnel::{TunnelManagerHandle, TunnelPoolEvent, TunnelPoolHandle},
-    util::gzip::GzipEncoderBuilder,
 };
 
 use futures::StreamExt;
@@ -233,26 +233,25 @@ impl<R: Runtime> I2cpSession<R> {
             Message::SendMessageExpires {
                 session_id,
                 destination,
+                parameters:
+                    I2cpParameters {
+                        dst_port,
+                        protocol,
+                        src_port,
+                    },
                 payload,
                 ..
             } =>
-                if payload.protocol == Protocol::Streaming {
+                if protocol == Protocol::Streaming {
                     tracing::trace!(
                         target: LOG_TARGET,
                         ?session_id,
                         destination = %destination.id(),
-                        src_port = ?payload.src_port,
-                        dst_port = ?payload.dst_port,
-                        protocol = ?payload.protocol,
+                        ?src_port,
+                        ?dst_port,
+                        ?protocol,
                         "send message with expiration",
                     );
-
-                    let payload = GzipEncoderBuilder::<R>::new(&payload.payload)
-                        .with_source_port(payload.src_port)
-                        .with_destination_port(payload.dst_port)
-                        .with_protocol(payload.protocol)
-                        .build()
-                        .unwrap();
 
                     if let Err(error) = self.destination.encrypt_message(&destination.id(), payload)
                     {
