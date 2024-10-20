@@ -22,7 +22,10 @@
 
 use crate::{
     crypto::{StaticPrivateKey, StaticPublicKey},
-    destination::session::session::{PendingSession, PendingSessionEvent, Session},
+    destination::session::{
+        context::KeyContext,
+        session::{PendingSession, PendingSessionEvent, Session},
+    },
     error::Error,
     i2np::{
         database::store::{
@@ -34,13 +37,12 @@ use crate::{
         },
         Message, MessageType,
     },
-    primitives::{DestinationId, LeaseSet2, MessageId},
+    primitives::{DestinationId, MessageId},
     runtime::Runtime,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
 use hashbrown::HashMap;
-use inbound::InboundSession;
 use rand_core::RngCore;
 
 #[cfg(feature = "std")]
@@ -49,17 +51,13 @@ use parking_lot::RwLock;
 use spin::rwlock::RwLock;
 
 use alloc::sync::Arc;
-use core::{marker::PhantomData, time::Duration};
+use core::time::Duration;
 
 mod context;
 mod inbound;
 mod outbound;
 mod session;
 mod tagset;
-
-// TODO: remove re-exports
-pub use context::KeyContext;
-pub use outbound::OutboundSession;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination::session";
@@ -512,62 +510,32 @@ mod tests {
         let remote_private_key = StaticPrivateKey::new(thread_rng());
         let mut key_context = KeyContext::<MockRuntime>::from_private_key(remote_private_key);
 
-        let (remote_leaseset, remote_signing_key) = LeaseSet2::random();
-        let remote_destination_id = remote_leaseset.header.destination.id();
-
-        let database_store = DatabaseStoreBuilder::new(
-            Bytes::from(remote_leaseset.header.destination.id().to_vec()),
-            DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(remote_leaseset.serialize(&remote_signing_key)),
-            },
-        )
-        .build();
-
-        let mut payload = GarlicMessageBuilder::new()
-            .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
-            .with_garlic_clove(
-                MessageType::DatabaseStore,
-                MessageId::from(MockRuntime::rng().next_u32()),
-                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                GarlicDeliveryInstructions::Local,
-                &database_store,
-            )
-            .with_garlic_clove(
-                MessageType::Data,
-                MessageId::from(MockRuntime::rng().next_u32()),
-                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                GarlicDeliveryInstructions::Local,
-                &{
-                    let payload = vec![1, 2, 3, 4];
-                    let mut out = BytesMut::with_capacity(payload.len() + 4);
-
-                    out.put_u32(payload.len() as u32);
-                    out.put_slice(&payload);
-
-                    out.freeze().to_vec()
-                },
-            )
-            .build();
-
-        let (mut outbound_session, message) = {
-            let (outbound, message) =
-                key_context.create_outbound_session(destination_id, &public_key, &payload);
-            let mut payload = BytesMut::with_capacity(message.len() + 4);
-            payload.put_u32(message.len() as u32);
-            payload.put_slice(&message);
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (outbound_leaseset, outbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let outbound_destination_id = leaseset.header.destination.id();
 
             (
-                outbound,
-                Message {
-                    message_type: MessageType::Garlic,
-                    message_id: thread_rng().next_u32(),
-                    expiration: Duration::from_secs(1337),
-                    payload: payload.freeze().to_vec(),
-                },
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
             )
         };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key,
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(destination_id.clone(), public_key);
+        let message = outbound_session.encrypt(&destination_id, vec![1, 2, 3, 4]).unwrap();
 
-        let mut cloves = session.decrypt(message).unwrap();
+        let mut cloves = session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
 
         // verify message is valid
         {
@@ -581,49 +549,28 @@ mod tests {
         }
 
         // verify pending inbound session exists for the destination
-        assert!(session.pending.contains_key(&remote_destination_id));
+        assert!(session.pending.contains_key(&outbound_destination_id));
         let message = Message {
-            payload: session.encrypt(&remote_destination_id, vec![1, 2, 3, 4]).unwrap(),
+            payload: session.encrypt(&outbound_destination_id, vec![1, 2, 3, 4]).unwrap(),
             ..Default::default()
         };
 
         {
-            let message = outbound_session.decrypt_message(message).unwrap();
-            let message = GarlicMessage::parse(&message).unwrap();
+            let mut message = outbound_session.decrypt(message).unwrap();
 
-            let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
-                message.blocks.into_iter().find(|clove| match clove {
-                    GarlicMessageBlock::GarlicClove { message_type, .. }
-                        if message_type == &MessageType::Data =>
-                        true,
-                    _ => false,
-                })
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
             else {
                 panic!("message not found");
             };
-
             assert_eq!(&message_body[4..], &vec![1, 2, 3, 4]);
         }
 
         let message = {
-            let message = GarlicMessageBuilder::new()
-                .with_garlic_clove(
-                    MessageType::Data,
-                    MessageId::from(1337),
-                    1337u64,
-                    GarlicDeliveryInstructions::Local,
-                    &[0, 0, 0, 4, 5, 6, 7, 8],
-                )
-                .build();
-
-            let message = outbound_session.encrypt_message(message).unwrap();
-
-            let mut out = BytesMut::with_capacity(message.len() + 4);
-            out.put_u32(message.len() as u32);
-            out.put_slice(&message);
+            let message = outbound_session.encrypt(&destination_id, vec![5, 6, 7, 8]).unwrap();
 
             Message {
-                payload: out.freeze().to_vec(),
+                payload: message,
                 ..Default::default()
             }
         };
@@ -637,6 +584,9 @@ mod tests {
                 .message_body,
             [0, 0, 0, 4, 5, 6, 7, 8]
         );
+
+        assert!(session.active.contains_key(&outbound_destination_id));
+        assert!(outbound_session.active.contains_key(&destination_id));
     }
 
     #[test]
@@ -649,65 +599,32 @@ mod tests {
         let mut session =
             SessionManager::<MockRuntime>::new(destination_id.clone(), private_key, leaseset);
 
-        let remote_private_key = StaticPrivateKey::new(thread_rng());
-        let mut key_context = KeyContext::<MockRuntime>::from_private_key(remote_private_key);
-
-        let (remote_leaseset, remote_signing_key) = LeaseSet2::random();
-        let remote_destination_id = remote_leaseset.header.destination.id();
-
-        let database_store = DatabaseStoreBuilder::new(
-            Bytes::from(remote_leaseset.header.destination.id().to_vec()),
-            DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(remote_leaseset.serialize(&remote_signing_key)),
-            },
-        )
-        .build();
-
-        let mut payload = GarlicMessageBuilder::new()
-            .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
-            .with_garlic_clove(
-                MessageType::DatabaseStore,
-                MessageId::from(MockRuntime::rng().next_u32()),
-                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                GarlicDeliveryInstructions::Local,
-                &database_store,
-            )
-            .with_garlic_clove(
-                MessageType::Data,
-                MessageId::from(MockRuntime::rng().next_u32()),
-                (MockRuntime::time_since_epoch() + Duration::from_secs(10)).as_secs(),
-                GarlicDeliveryInstructions::Local,
-                &{
-                    let payload = vec![1, 2, 3, 4];
-                    let mut out = BytesMut::with_capacity(payload.len() + 4);
-
-                    out.put_u32(payload.len() as u32);
-                    out.put_slice(&payload);
-
-                    out.freeze().to_vec()
-                },
-            )
-            .build();
-
-        let (mut outbound_session, message) = {
-            let (outbound, message) =
-                key_context.create_outbound_session(destination_id, &public_key, &payload);
-            let mut payload = BytesMut::with_capacity(message.len() + 4);
-            payload.put_u32(message.len() as u32);
-            payload.put_slice(&message);
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (outbound_leaseset, outbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let outbound_destination_id = leaseset.header.destination.id();
 
             (
-                outbound,
-                Message {
-                    message_type: MessageType::Garlic,
-                    message_id: thread_rng().next_u32(),
-                    expiration: Duration::from_secs(1337),
-                    payload: payload.freeze().to_vec(),
-                },
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
             )
         };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key,
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(destination_id.clone(), public_key);
+        let message = outbound_session.encrypt(&destination_id, vec![1, 2, 3, 4]).unwrap();
 
-        let mut payload = session.decrypt(message).unwrap();
+        let mut payload = session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
 
         // verify message is valid
         {
@@ -721,59 +638,37 @@ mod tests {
         }
 
         // verify pending inbound session exists for the destination
-        assert!(session.pending.contains_key(&remote_destination_id));
+        assert!(session.pending.contains_key(&outbound_destination_id));
 
         let message = Message {
-            payload: session.encrypt(&remote_destination_id, vec![1, 2, 3, 4]).unwrap(),
+            payload: session.encrypt(&outbound_destination_id, vec![1, 2, 3, 4]).unwrap(),
             ..Default::default()
         };
 
-        let message = outbound_session.decrypt_message(message).unwrap();
-        let message = GarlicMessage::parse(&message).unwrap();
-
-        let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
-            message.blocks.into_iter().find(|clove| match clove {
-                GarlicMessageBlock::GarlicClove { message_type, .. }
-                    if message_type == &MessageType::Data =>
-                    true,
-                _ => false,
-            })
+        let mut message = outbound_session.decrypt(message).unwrap();
+        let Some(GarlicClove { message_body, .. }) =
+            message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
         else {
             panic!("message not found");
         };
-
         assert_eq!(&message_body[4..], &vec![1, 2, 3, 4]);
 
         let message = {
-            let message = GarlicMessageBuilder::new()
-                .with_garlic_clove(
-                    MessageType::Data,
-                    MessageId::from(1337),
-                    1337u64,
-                    GarlicDeliveryInstructions::Local,
-                    &[0, 0, 0, 4, 5, 6, 7, 8],
-                )
-                .build();
-
-            let message = outbound_session.encrypt_message(message).unwrap();
-
-            let mut out = BytesMut::with_capacity(message.len() + 4);
-            out.put_u32(message.len() as u32);
-            out.put_slice(&message);
+            let message = outbound_session.encrypt(&destination_id, vec![5, 6, 7, 8]).unwrap();
 
             Message {
-                payload: out.freeze().to_vec(),
+                payload: message,
                 ..Default::default()
             }
         };
 
         // verify pending inbound session still exists for the destination
-        assert!(session.pending.contains_key(&remote_destination_id));
-
-        let mut message = session.decrypt(message).unwrap();
+        assert!(session.pending.contains_key(&outbound_destination_id));
 
         // verify message is valid
         {
+            let mut message = session.decrypt(message).unwrap();
+
             let Some(GarlicClove { message_body, .. }) =
                 message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
             else {
@@ -784,30 +679,16 @@ mod tests {
         }
 
         // verify that the inbound session is now considered active
-        assert!(session.active.contains_key(&remote_destination_id));
+        assert!(session.active.contains_key(&outbound_destination_id));
         assert!(session.pending.is_empty());
 
         // generate three messages and send them in reverse order
         let messages = (0..3)
             .map(|i| {
-                let message = GarlicMessageBuilder::new()
-                    .with_garlic_clove(
-                        MessageType::Data,
-                        MessageId::from(1337),
-                        1337u64,
-                        GarlicDeliveryInstructions::Local,
-                        &[0, 0, 0, 4, i as u8, i as u8, i as u8, i as u8],
-                    )
-                    .build();
-
-                let message = outbound_session.encrypt_message(message).unwrap();
-
-                let mut out = BytesMut::with_capacity(message.len() + 4);
-                out.put_u32(message.len() as u32);
-                out.put_slice(&message);
+                let message = outbound_session.encrypt(&destination_id, vec![i as u8; 4]).unwrap();
 
                 Message {
-                    payload: out.freeze().to_vec(),
+                    payload: message,
                     ..Default::default()
                 }
             })
@@ -826,24 +707,17 @@ mod tests {
 
         // send message from the inbound session
         let message = Message {
-            payload: session.encrypt(&remote_destination_id, vec![1, 3, 3, 7]).unwrap(),
+            payload: session.encrypt(&outbound_destination_id, vec![1, 3, 3, 7]).unwrap(),
             ..Default::default()
         };
 
-        let message = outbound_session.decrypt_message(message).unwrap();
-        let message = GarlicMessage::parse(&message).unwrap();
+        let mut message = outbound_session.decrypt(message).unwrap();
 
-        let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
-            message.blocks.into_iter().find(|clove| match clove {
-                GarlicMessageBlock::GarlicClove { message_type, .. }
-                    if message_type == &MessageType::Data =>
-                    true,
-                _ => false,
-            })
+        let Some(GarlicClove { message_body, .. }) =
+            message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
         else {
             panic!("message not found");
         };
-
         assert_eq!(&message_body[4..], &vec![1, 3, 3, 7]);
     }
 
@@ -1659,6 +1533,129 @@ mod tests {
                     responded_to_nextkey = true;
                 }
             }
+        }
+    }
+
+    #[test]
+    fn ack_request_and_ack() {
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (outbound_leaseset, outbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key,
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // initialize outbound session and create `NewSession` message
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 2, 3, 4]).unwrap();
+
+        // handle `NewSession` message, initialize inbound session
+        // and create `NewSessionReply` message
+        let message = {
+            let mut message = inbound_session
+                .decrypt(Message {
+                    payload: message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], [1, 2, 3, 4]);
+
+            // create response to `NewSession`
+            inbound_session.encrypt(&outbound_destination_id, vec![5, 6, 7, 8]).unwrap()
+        };
+
+        // handle `NewSessionReply` and finalize outbound session
+        let message = {
+            let mut message = outbound_session
+                .decrypt(Message {
+                    payload: message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], [5, 6, 7, 8]);
+        };
+
+        // finalize inbound session by sending an `ExistingSession` message
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
+
+        // handle `ExistingSession` message
+        let mut message = inbound_session
+            .decrypt(Message {
+                payload: message,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let Some(GarlicClove { message_body, .. }) =
+            message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+        else {
+            panic!("message not found");
+        };
+        assert_eq!(message_body[4..], [1, 3, 3, 7]);
+
+        // send twice as many messages as there were initial tags
+        // and verify that all messages are decrypted correctly
+        for i in 0..NUM_TAGS_TO_GENERATE * 2 {
+            // send `ExistingSession` from inbound session
+            // finalize inbound session by sending an `ExistingSession` message
+            let message =
+                inbound_session.encrypt(&outbound_destination_id, vec![i as u8; 4]).unwrap();
+
+            // handle `ExistingSession` message
+            let mut message = outbound_session
+                .decrypt(Message {
+                    payload: message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], [i as u8; 4]);
         }
     }
 }
