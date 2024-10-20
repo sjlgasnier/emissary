@@ -109,6 +109,32 @@ pub enum ReplyType {
     None,
 }
 
+impl fmt::Debug for ReplyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => f
+                .debug_struct("ReplyType::Tunnel")
+                .field("reply_token", &reply_token)
+                .field("router_id", &format_args!("{router_id}"))
+                .field("tunnel_id", &format_args!("{tunnel_id}"))
+                .finish_non_exhaustive(),
+            Self::Router {
+                reply_token,
+                router_id,
+            } => f
+                .debug_struct("ReplyType::Router")
+                .field("reply_token", &reply_token)
+                .field("router_id", &format_args!("{router_id}"))
+                .finish_non_exhaustive(),
+            Self::None => f.debug_struct("ReplyType::None").finish(),
+        }
+    }
+}
+
 impl ReplyType {
     fn serialized_len(&self) -> usize {
         match self {
@@ -176,6 +202,15 @@ pub struct DatabaseStore<R: Runtime> {
 
     /// Marker for `Runtime`.
     _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> fmt::Debug for DatabaseStore<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatabaseStore")
+            .field("payload", &format_args!("{}", self.payload))
+            .field("reply", &self.reply)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<R: Runtime> DatabaseStore<R> {

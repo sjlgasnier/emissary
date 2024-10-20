@@ -668,7 +668,7 @@ impl<'a> GarlicMessageBuilder<'a> {
         mut self,
         message_type: MessageType,
         message_id: MessageId,
-        expiration: u64,
+        expiration: Duration,
         delivery_instructions: DeliveryInstructions<'a>,
         message_body: &'a [u8],
     ) -> Self {
@@ -684,7 +684,7 @@ impl<'a> GarlicMessageBuilder<'a> {
         self.cloves.push(GarlicMessageBlock::GarlicClove {
             message_type,
             message_id,
-            expiration: Duration::from_secs(expiration as u64),
+            expiration,
             delivery_instructions,
             message_body,
         });

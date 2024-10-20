@@ -35,7 +35,7 @@ use crate::{
             DeliveryInstructions as GarlicDeliveryInstructions, GarlicClove, GarlicMessage,
             GarlicMessageBlock, GarlicMessageBuilder, OwnedDeliveryInstructions,
         },
-        Message, MessageType,
+        Message, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{DestinationId, MessageId},
     runtime::Runtime,
@@ -163,7 +163,7 @@ impl<R: Runtime> SessionManager<R> {
                 let message = GarlicMessageBuilder::new().with_garlic_clove(
                     MessageType::Data,
                     MessageId::from(R::rng().next_u32()),
-                    (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                    R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
                     GarlicDeliveryInstructions::Local,
                     &message,
                 );
@@ -182,7 +182,7 @@ impl<R: Runtime> SessionManager<R> {
                         .with_garlic_clove(
                             MessageType::Data,
                             MessageId::from(R::rng().next_u32()),
-                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
                             GarlicDeliveryInstructions::Local,
                             &{
                                 let mut out = BytesMut::with_capacity(message.len() + 4);
@@ -245,14 +245,14 @@ impl<R: Runtime> SessionManager<R> {
                         .with_garlic_clove(
                             MessageType::DatabaseStore,
                             MessageId::from(R::rng().next_u32()),
-                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
                             GarlicDeliveryInstructions::Local,
                             &database_store,
                         )
                         .with_garlic_clove(
                             MessageType::Data,
                             MessageId::from(R::rng().next_u32()),
-                            (R::time_since_epoch() + Duration::from_secs(10)).as_secs(),
+                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
                             GarlicDeliveryInstructions::Local,
                             &{
                                 let mut out = BytesMut::with_capacity(message.len() + 4);

@@ -20,8 +20,11 @@ use crate::{
     crypto::StaticPrivateKey,
     destination::session::SessionManager,
     error::Error,
-    i2np::{Message, MessageType},
-    primitives::{Destination as Dest, DestinationId, RouterId, TunnelId},
+    i2np::{
+        database::store::{DatabaseStore, DatabaseStorePayload},
+        Message, MessageType,
+    },
+    primitives::{Destination as Dest, DestinationId, LeaseSet2, RouterId, TunnelId},
     runtime::Runtime,
 };
 
@@ -31,8 +34,9 @@ use futures::Stream;
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
+use hashbrown::HashMap;
 
 pub mod protocol;
 pub mod session;
@@ -60,14 +64,20 @@ pub struct Destination<R: Runtime> {
     /// Destination ID of the client.
     destination_id: DestinationId,
 
-    /// Session manager.
-    session_manager: SessionManager<R>,
-
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
     leaseset: Bytes,
 
     /// Pending events.
     pending_events: VecDeque<DestinationEvent>,
+
+    /// Known remote destinations.
+    remote_destinations: HashMap<DestinationId, LeaseSet2>,
+
+    /// Session manager.
+    session_manager: SessionManager<R>,
+
+    /// Waker.
+    waker: Option<Waker>,
 }
 
 impl<R: Runtime> Destination<R> {
@@ -85,17 +95,48 @@ impl<R: Runtime> Destination<R> {
             session_manager: SessionManager::new(destination_id, private_key, leaseset.clone()),
             leaseset,
             pending_events: VecDeque::new(),
+            remote_destinations: HashMap::new(),
+            waker: None,
         }
     }
 
-    /// Send `message` to remote `destination`.
-    pub fn send_message(&mut self, destination: Dest, message: Vec<u8>) {
-        // TODO: check if
-        todo!();
+    /// Encrypt `message` destined to `destination_id`.
+    ///
+    /// If `destination_id` is not known to `Destination`, a lease set query is initiated and if the
+    /// lease set is fetched successfully, the message is sent to remote.
+    ///
+    /// Caller must call [`Destination::poll_next()`] to drive progress forward.
+    pub fn encrypt_message(
+        &mut self,
+        destination_id: &DestinationId,
+        message: Vec<u8>,
+    ) -> crate::Result<()> {
+        let Some(LeaseSet2 { leases, .. }) = self.remote_destinations.get(destination_id) else {
+            tracing::error!(
+                target: LOG_TARGET,
+                %destination_id,
+                "lease set lookup not implemented",
+            );
+            return Ok(());
+        };
+
+        let message = self.session_manager.encrypt(destination_id, message)?;
+
+        self.pending_events.push_back(DestinationEvent::SendMessage {
+            router_id: leases[0].router_id.clone(),
+            tunnel_id: leases[0].tunnel_id,
+            message,
+        });
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
+        }
+
+        Ok(())
     }
 
     /// Handle garlic messages received into one of the [`Destination`]'s inbound tunnels.
-    pub fn handle_message(
+    pub fn decrypt_message(
         &mut self,
         message: Message,
     ) -> crate::Result<impl Iterator<Item = Vec<u8>>> {
@@ -109,7 +150,7 @@ impl<R: Runtime> Destination<R> {
         if message.payload.len() <= 12 {
             tracing::warn!(
                 target: LOG_TARGET,
-                id = %self.destination_id,
+                local = %self.destination_id,
                 payload_len = ?message.payload.len(),
                 "garlic message is too short",
             );
@@ -125,6 +166,41 @@ impl<R: Runtime> Destination<R> {
                         target: LOG_TARGET,
                         "ignoring database store",
                     );
+
+                    match DatabaseStore::<R>::parse(&clove.message_body) {
+                        Some(DatabaseStore {
+                            payload: DatabaseStorePayload::LeaseSet2 { leaseset },
+                            ..
+                        }) => {
+                            if leaseset.leases.is_empty() {
+                                tracing::error!(
+                                    target: LOG_TARGET,
+                                    local = %self.destination_id,
+                                    remote = %leaseset.header.destination.id(),
+                                    "remote didn't send any leases",
+                                );
+                                return None;
+                            }
+
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                remote = %leaseset.header.destination.id(),
+                                "store lease set for remote destination",
+                            );
+
+                            self.remote_destinations
+                                .insert(leaseset.header.destination.id(), leaseset);
+                        }
+                        database_store => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                ?database_store,
+                                "ignoring `DatabaseStore`",
+                            )
+                        }
+                    }
 
                     None
                 }
@@ -152,8 +228,12 @@ impl<R: Runtime> Stream for Destination<R> {
     type Item = DestinationEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.pending_events
-            .pop_front()
-            .map_or(Poll::Pending, |event| Poll::Ready(Some(event)))
+        self.pending_events.pop_front().map_or_else(
+            || {
+                self.waker = Some(cx.waker().clone());
+                Poll::Pending
+            },
+            |event| Poll::Ready(Some(event)),
+        )
     }
 }
