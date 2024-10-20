@@ -22,7 +22,7 @@ use crate::{
     crypto::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
-    destination::session::tagset::{PendingTagSet, TagSet, TagSetEntry},
+    destination::session::tagset::{TagSet, TagSetEntry},
     i2np::{
         garlic::{NextKeyBuilder, NextKeyKind},
         Message,
@@ -94,9 +94,6 @@ pub enum OutboundSessionState {
 
         /// [`TagSet`] for inbound messages.
         recv_tag_set: TagSet,
-
-        /// Pending outbound [`TagSet`], if any.
-        pending_outbound_tagset: Option<PendingTagSet>,
     },
 
     /// State has been poisoned.

@@ -37,62 +37,6 @@ use core::{fmt, mem};
 /// [1]: https://geti2p.net/spec/ecies#new-session-tags-and-comparison-to-signal
 const MAX_TAGS: usize = 65535;
 
-/// Pending tag set.
-///
-/// Local router has sent `NextKey` message to remote and is waiting to receive
-/// remote's public key so the session can be ratcheted.
-pub struct PendingTagSet {
-    /// Key ID.
-    key_id: u16,
-
-    /// Private key for the pending tag set.
-    private_key: StaticPrivateKey,
-
-    /// Root key of the previous [`TagSet`].
-    root_key: Bytes,
-}
-
-impl PendingTagSet {
-    /// Create new [`PendingTagSet`].
-    pub fn new<R: Runtime>(key_id: u16, root_key: Bytes) -> Self {
-        Self {
-            key_id,
-            private_key: StaticPrivateKey::new(R::rng()),
-            root_key,
-        }
-    }
-
-    /// Get key ID of the [`PendingTagSet`].
-    pub fn key_id(&self) -> u16 {
-        self.key_id
-    }
-
-    /// Get [`StaticPublicKey`] of the [`PendingTagSet`].
-    pub fn public_key(&self) -> StaticPublicKey {
-        self.private_key.public()
-    }
-
-    /// Build [`Tagset`] from [`PendingTagSet`] using remote's `public_key`.
-    ///
-    /// https://geti2p.net/spec/ecies#dh-ratchet-kdf
-    pub fn into_tagset(self, public_key: StaticPublicKey) -> TagSet {
-        let shared = self.private_key.diffie_hellman(&public_key);
-
-        // derive new key for the new [`TagSet`]
-        let tagset_key = {
-            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-            let mut tagset_key =
-                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
-
-            temp_key.zeroize();
-
-            tagset_key
-        };
-
-        TagSet::new(self.root_key, tagset_key)
-    }
-}
-
 /// Key state of [`TagSet`].
 ///
 /// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
@@ -374,22 +318,56 @@ impl TagSet {
         })
     }
 
-    /// Create new [`PendingTagSet`] from current [`TagSet`].
-    //
-    // TODO: remove
-    pub fn create_pending_tagset<R: Runtime>(&self) -> PendingTagSet {
-        PendingTagSet::new::<R>(
-            self.send_key_id.unwrap_or(0),
-            self.key_context.next_root_key.clone(),
-        )
+    /// Reinitialize [`TagSet`] by performing a DH ratchet
+    ///
+    /// Do DH key exchange between `private_key` and `public_key` to generate a new tag set key
+    /// which is used, together with the previous root key to generate a new state for the
+    /// [`TagSet`].
+    ///
+    /// Caller must ensure that `send_key_id` and `recv_key_id` are valid for this DH ratchet.
+    fn reinitialize_tag_set(
+        &mut self,
+        private_key: StaticPrivateKey,
+        public_key: StaticPublicKey,
+        send_key_id: u16,
+        recv_key_id: u16,
+    ) {
+        let tag_set_key = {
+            let mut shared = private_key.diffie_hellman(&public_key);
+            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+            let mut tagset_key =
+                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
+
+            temp_key.zeroize();
+
+            tagset_key
+        };
+
+        // perform a dh ratchet and reset `TagSet`'s state
+        {
+            self.key_context = KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
+
+            // tag set id is calculated as `1 + send key id receive key id`
+            //
+            // https://geti2p.net/spec/ecies#key-and-tag-set-ids
+            self.tag_set_id = 1u16 + send_key_id + recv_key_id;
+            self.key_state = KeyState::Active {
+                send_key_id,
+                recv_key_id,
+                private_key,
+                public_key: public_key.clone(),
+            };
+
+            // for the new tag set, tag numbers start again from zero
+            // and progress towards `NUM_TAGS_TO_GENERATE`
+            self.tag_index = 0u16;
+        }
     }
 
     /// Attempt to generate new key for the next DH ratchet.
     ///
     /// If the [`TagSet`] still has enough tags, the function returns early and the session can keep
     /// using the [`Tagset`].
-    ///
-    /// TODO: finish this comment
     ///
     /// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
     pub fn try_generate_next_key<R: Runtime>(&mut self) -> crate::Result<Option<NextKeyKind>> {
@@ -474,52 +452,6 @@ impl TagSet {
         }
     }
 
-    /// Reinitialize [`TagSet`] by performing a DH ratchet
-    ///
-    /// Do DH key exchange between `private_key` and `public_key` to generate a new tag set key
-    /// which is used, together with the previous root key to generate a new state for the
-    /// [`TagSet`].
-    ///
-    /// Caller must ensure that `send_key_id` and `recv_key_id` are valid for this DH ratchet.
-    fn reinitialize_tag_set(
-        &mut self,
-        private_key: StaticPrivateKey,
-        public_key: StaticPublicKey,
-        send_key_id: u16,
-        recv_key_id: u16,
-    ) {
-        let tag_set_key = {
-            let mut shared = private_key.diffie_hellman(&public_key);
-            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-            let mut tagset_key =
-                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
-
-            temp_key.zeroize();
-
-            tagset_key
-        };
-
-        // perform a dh ratchet and reset `TagSet`'s state
-        {
-            self.key_context = KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
-
-            // tag set id is calculated as `1 + send key id receive key id`
-            //
-            // https://geti2p.net/spec/ecies#key-and-tag-set-ids
-            self.tag_set_id = 1u16 + send_key_id + recv_key_id;
-            self.key_state = KeyState::Active {
-                send_key_id,
-                recv_key_id,
-                private_key,
-                public_key: public_key.clone(),
-            };
-
-            // for the new tag set, tag numbers start again from zero
-            // and progress towards `NUM_TAGS_TO_GENERATE`
-            self.tag_index = 0u16;
-        }
-    }
-
     /// Handle `NextKey` block received from remote peer.
     pub fn handle_next_key<R: Runtime>(
         &mut self,
@@ -536,37 +468,8 @@ impl TagSet {
             ) => {
                 let private_key = StaticPrivateKey::new(R::rng());
                 let public_key = private_key.public();
-                let tag_set_key = {
-                    let mut shared = private_key.diffie_hellman(&remote_public_key);
-                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-                    let mut tagset_key = Hmac::new(&temp_key)
-                        .update(&b"XDHRatchetTagSet")
-                        .update(&[0x01])
-                        .finalize();
 
-                    temp_key.zeroize();
-
-                    tagset_key
-                };
-
-                // perform a dh ratchet and reset `TagSet`'s state
-                {
-                    self.key_context =
-                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
-
-                    // for the first dh ratchet, send and receive key ids are set to 0
-                    self.tag_set_id = 1u16;
-                    self.key_state = KeyState::Active {
-                        send_key_id: 0u16,
-                        recv_key_id: 0u16,
-                        private_key,
-                        public_key: remote_public_key.clone(),
-                    };
-
-                    // for the new tag set, tag numbers start again from zero
-                    // and progress towards `NUM_TAGS_TO_GENERATE`
-                    self.tag_index = 0u16;
-                }
+                self.reinitialize_tag_set(private_key, remote_public_key.clone(), 0u16, 0u16);
 
                 Ok(Some(NextKeyKind::ReverseKey {
                     key_id: 0u16,
@@ -592,39 +495,12 @@ impl TagSet {
                     public_key: Some(public_key),
                 },
             ) => {
-                let tag_set_key = {
-                    let mut shared = private_key.diffie_hellman(&public_key);
-                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-                    let mut tagset_key = Hmac::new(&temp_key)
-                        .update(&b"XDHRatchetTagSet")
-                        .update(&[0x01])
-                        .finalize();
-
-                    temp_key.zeroize();
-
-                    tagset_key
-                };
-
-                // perform a dh ratchet and reset `TagSet`'s state
-                {
-                    self.key_context =
-                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
-
-                    // tag set id is calculated as `1 + send key id receive key id`
-                    //
-                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
-                    self.tag_set_id = 1u16 + send_key_id + recv_key_id;
-                    self.key_state = KeyState::Active {
-                        send_key_id,
-                        recv_key_id,
-                        private_key,
-                        public_key: public_key.clone(),
-                    };
-
-                    // for the new tag set, tag numbers start again from zero
-                    // and progress towards `NUM_TAGS_TO_GENERATE`
-                    self.tag_index = 0u16;
-                }
+                self.reinitialize_tag_set(
+                    private_key,
+                    public_key.clone(),
+                    send_key_id,
+                    recv_key_id,
+                );
 
                 Ok(None)
             }
@@ -644,39 +520,7 @@ impl TagSet {
                     public_key: None,
                 },
             ) => {
-                let tag_set_key = {
-                    let mut shared = private_key.diffie_hellman(&public_key);
-                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-                    let mut tagset_key = Hmac::new(&temp_key)
-                        .update(&b"XDHRatchetTagSet")
-                        .update(&[0x01])
-                        .finalize();
-
-                    temp_key.zeroize();
-
-                    tagset_key
-                };
-
-                // perform a dh ratchet and reset `TagSet`'s state
-                {
-                    self.key_context =
-                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
-
-                    // tag set id is calculated as `1 + send key id receive key id`
-                    //
-                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
-                    self.tag_set_id = 1u16 + send_key_id + recv_key_id;
-                    self.key_state = KeyState::Active {
-                        send_key_id,
-                        recv_key_id,
-                        private_key,
-                        public_key,
-                    };
-
-                    // for the new tag set, tag numbers start again from zero
-                    // and progress towards `NUM_TAGS_TO_GENERATE`
-                    self.tag_index = 0u16;
-                }
+                self.reinitialize_tag_set(private_key, public_key, send_key_id, recv_key_id);
 
                 Ok(None)
             }
@@ -700,39 +544,12 @@ impl TagSet {
                     reverse_key_requested: false,
                 },
             ) => {
-                let tag_set_key = {
-                    let mut shared = private_key.diffie_hellman(&remote_public_key);
-                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-                    let mut tagset_key = Hmac::new(&temp_key)
-                        .update(&b"XDHRatchetTagSet")
-                        .update(&[0x01])
-                        .finalize();
-
-                    temp_key.zeroize();
-
-                    tagset_key
-                };
-
-                // perform a dh ratchet and reset `TagSet`'s state
-                {
-                    self.key_context =
-                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
-
-                    // tag set id is calculated as `1 + send key id receive key id`
-                    //
-                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
-                    self.tag_set_id = 1u16 + key_id + recv_key_id;
-                    self.key_state = KeyState::Active {
-                        send_key_id: *key_id,
-                        recv_key_id,
-                        private_key,
-                        public_key: remote_public_key.clone(),
-                    };
-
-                    // for the new tag set, tag numbers start again from zero
-                    // and progress towards `NUM_TAGS_TO_GENERATE`
-                    self.tag_index = 0u16;
-                }
+                self.reinitialize_tag_set(
+                    private_key,
+                    remote_public_key.clone(),
+                    *key_id,
+                    recv_key_id,
+                );
 
                 Ok(Some(NextKeyBuilder::reverse(*key_id).build()))
             }
@@ -758,39 +575,12 @@ impl TagSet {
                 let private_key = StaticPrivateKey::new(R::rng());
                 let public_key = private_key.public();
 
-                let tag_set_key = {
-                    let mut shared = private_key.diffie_hellman(&remote_public_key);
-                    let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-                    let mut tagset_key = Hmac::new(&temp_key)
-                        .update(&b"XDHRatchetTagSet")
-                        .update(&[0x01])
-                        .finalize();
-
-                    temp_key.zeroize();
-
-                    tagset_key
-                };
-
-                // perform a dh ratchet and reset `TagSet`'s state
-                {
-                    self.key_context =
-                        KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
-
-                    // tag set id is calculated as `1 + send key id receive key id`
-                    //
-                    // https://geti2p.net/spec/ecies#key-and-tag-set-ids
-                    self.tag_set_id = 1u16 + send_key_id + key_id;
-                    self.key_state = KeyState::Active {
-                        send_key_id,
-                        recv_key_id: *key_id,
-                        private_key,
-                        public_key: remote_public_key.clone(),
-                    };
-
-                    // for the new tag set, tag numbers start again from zero
-                    // and progress towards `NUM_TAGS_TO_GENERATE`
-                    self.tag_index = 0u16;
-                }
+                self.reinitialize_tag_set(
+                    private_key,
+                    remote_public_key.clone(),
+                    send_key_id,
+                    *key_id,
+                );
 
                 Ok(Some(
                     NextKeyBuilder::reverse(*key_id).with_public_key(public_key).build(),

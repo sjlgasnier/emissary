@@ -23,7 +23,7 @@ use crate::{
     destination::session::{
         inbound::InboundSession,
         outbound::{OutboundSession, OutboundSessionState},
-        tagset::{PendingTagSet, TagSet, TagSetEntry},
+        tagset::{TagSet, TagSetEntry},
     },
     i2np::{
         garlic::{NextKeyBuilder, NextKeyKind},
