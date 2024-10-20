@@ -153,12 +153,13 @@ impl From<&HashMap<Str, Str>> for TunnelPoolConfig {
             .cloned()
             .unwrap_or(Str::from("unspecified"));
 
+        // TODO: revert
         Self {
             name,
-            num_inbound,
-            num_inbound_hops,
-            num_outbound,
-            num_outbound_hops,
+            num_inbound: 1usize,
+            num_inbound_hops: 2usize,
+            num_outbound: 1usize,
+            num_outbound_hops: 2usize,
         }
     }
 }
