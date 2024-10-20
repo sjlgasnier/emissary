@@ -183,6 +183,8 @@ impl Lease {
 
 /// LeaseSet2
 ///
+/// Parse lease set is guaranteed to contain at least one lease.
+///
 /// https://geti2p.net/spec/common-structures#struct-leaseset2
 #[derive(Clone)]
 pub struct LeaseSet2 {
@@ -279,6 +281,17 @@ impl LeaseSet2 {
 
                 Err::Error(make_error(input, ErrorKind::Fail))
             })?;
+
+        // ensure that lease set contains at least one valid lease
+        // before returning so the caller doesn't have make this check.
+        if leases.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "lease set didn't contain any (valid) leases",
+            );
+
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
 
         // verify signature
         //
@@ -494,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn serialize_and_parse_leaset_no_leasesets() {
+    fn serialize_and_parse_leaset_no_leases() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let destination =
