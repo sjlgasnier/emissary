@@ -85,7 +85,7 @@ pub struct SessionManager<R: Runtime> {
     key_context: KeyContext<R>,
 
     /// Currently active, serialized `LeaseSet2` of the local destination.
-    leaseset: Bytes,
+    lease_set: Bytes,
 
     /// Known remote destinations and their public keys.
     remote_destinations: HashMap<DestinationId, StaticPublicKey>,
@@ -99,10 +99,10 @@ impl<R: Runtime> SessionManager<R> {
     pub fn new(
         destination_id: DestinationId,
         private_key: StaticPrivateKey,
-        leaseset: Bytes,
+        lease_set: Bytes,
     ) -> Self {
         Self {
-            leaseset,
+            lease_set,
             active: HashMap::new(),
             destination_id,
             garlic_tags: Default::default(),
@@ -113,8 +113,8 @@ impl<R: Runtime> SessionManager<R> {
     }
 
     /// Set new `LeaseSet2` for the local destination.
-    pub fn set_local_leaseset(&mut self, leaseset: Bytes) {
-        self.leaseset = leaseset;
+    pub fn set_local_leaseset(&mut self, lease_set: Bytes) {
+        self.lease_set = lease_set;
     }
 
     /// Add remote destination to [`SessionManager`].
@@ -235,7 +235,7 @@ impl<R: Runtime> SessionManager<R> {
                     let database_store = DatabaseStoreBuilder::new(
                         Bytes::from(self.destination_id.to_vec()),
                         DatabaseStoreKind::LeaseSet2 {
-                            leaseset: Bytes::from(self.leaseset.clone()),
+                            leaseset: Bytes::from(self.lease_set.clone()),
                         },
                     )
                     .build();

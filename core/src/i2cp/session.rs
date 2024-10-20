@@ -108,7 +108,12 @@ impl<R: Runtime> I2cpSession<R> {
         }
 
         Self {
-            destination: Destination::new(destination_id, private_keys[0].clone(), leaseset),
+            destination: Destination::new(
+                destination_id,
+                private_keys[0].clone(),
+                leaseset,
+                netdb_handle.clone(),
+            ),
             inbound,
             netdb_handle,
             next_message_id: 0u32,

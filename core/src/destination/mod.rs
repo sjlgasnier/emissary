@@ -19,17 +19,18 @@
 use crate::{
     crypto::StaticPrivateKey,
     destination::session::SessionManager,
-    error::Error,
+    error::{Error, QueryError},
     i2np::{
         database::store::{DatabaseStore, DatabaseStorePayload},
         Message, MessageType,
     },
+    netdb::NetDbHandle,
     primitives::{Destination as Dest, DestinationId, LeaseSet2, RouterId, TunnelId},
-    runtime::Runtime,
+    runtime::{JoinSet, Runtime},
 };
 
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{
@@ -65,10 +66,16 @@ pub struct Destination<R: Runtime> {
     destination_id: DestinationId,
 
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
-    leaseset: Bytes,
+    lease_set: Bytes,
+
+    /// Handle to [`NetDb`].
+    netdb_handle: NetDbHandle,
 
     /// Pending events.
     pending_events: VecDeque<DestinationEvent>,
+
+    /// Pending `LeaseSet2` queries.
+    pending_queries: R::JoinSet<(DestinationId, Result<(LeaseSet2, Vec<u8>), QueryError>)>,
 
     /// Known remote destinations.
     remote_destinations: HashMap<DestinationId, LeaseSet2>,
@@ -88,22 +95,27 @@ impl<R: Runtime> Destination<R> {
     pub fn new(
         destination_id: DestinationId,
         private_key: StaticPrivateKey,
-        leaseset: Bytes,
+        lease_set: Bytes,
+        netdb_handle: NetDbHandle,
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
-            session_manager: SessionManager::new(destination_id, private_key, leaseset.clone()),
-            leaseset,
+            lease_set: lease_set.clone(),
+            netdb_handle,
             pending_events: VecDeque::new(),
+            pending_queries: R::join_set(),
             remote_destinations: HashMap::new(),
+            session_manager: SessionManager::new(destination_id, private_key, lease_set),
             waker: None,
         }
     }
 
     /// Encrypt `message` destined to `destination_id`.
     ///
-    /// If `destination_id` is not known to `Destination`, a lease set query is initiated and if the
-    /// lease set is fetched successfully, the message is sent to remote.
+    /// If `destination_id` is not known to `Destination`, a lease set query is initiated and polled
+    /// in the background. Once the query completes and if the lease set of the remote destination
+    /// was received, `message` is encrypted and `DestinationEvent::SendMessage` is returned from
+    /// [`Destinatin::poll_next()`].
     ///
     /// Caller must call [`Destination::poll_next()`] to drive progress forward.
     pub fn encrypt_message(
@@ -112,11 +124,31 @@ impl<R: Runtime> Destination<R> {
         message: Vec<u8>,
     ) -> crate::Result<()> {
         let Some(LeaseSet2 { leases, .. }) = self.remote_destinations.get(destination_id) else {
-            tracing::error!(
-                target: LOG_TARGET,
-                %destination_id,
-                "lease set lookup not implemented",
-            );
+            match self.netdb_handle.query_leaseset(Bytes::from(destination_id.to_vec())) {
+                Ok(mut rx) => {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        %destination_id,
+                        "lease set query started",
+                    );
+                    let destination_id = destination_id.clone();
+
+                    self.pending_queries.push(async move {
+                        match rx.await {
+                            Err(error) => (destination_id, Err(QueryError::Timeout)),
+                            Ok(Err(error)) => (destination_id, Err(error)),
+                            Ok(Ok(lease_set)) => (destination_id, Ok((lease_set, message))),
+                        }
+                    });
+                }
+                Err(error) => tracing::warn!(
+                    target: LOG_TARGET,
+                    %destination_id,
+                    ?error,
+                    "failed to start lease set query",
+                ),
+            }
+
             return Ok(());
         };
 
@@ -228,6 +260,43 @@ impl<R: Runtime> Stream for Destination<R> {
     type Item = DestinationEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.pending_queries.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((destination_id, result))) => match result {
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        %destination_id,
+                        ?error,
+                        "lease set query failed",
+                    ),
+                    Ok((lease_set, message)) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            "lease set query succeeded",
+                        );
+
+                        self.session_manager.add_remote_destination(
+                            destination_id.clone(),
+                            lease_set.public_keys[0].clone(),
+                        );
+                        self.remote_destinations.insert(destination_id.clone(), lease_set);
+
+                        if let Err(error) = self.encrypt_message(&destination_id, message) {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                ?error,
+                                "failed to encrypt message",
+                            );
+                        }
+                    }
+                },
+            }
+        }
+
         self.pending_events.pop_front().map_or_else(
             || {
                 self.waker = Some(cx.waker().clone());
