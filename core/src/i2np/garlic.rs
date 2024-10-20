@@ -60,7 +60,7 @@ pub enum GarlicMessageType {
     Ack,
 
     /// ACK request.
-    ACKRequest,
+    AckRequest,
 
     /// Garlic clove.
     GarlicClove,
@@ -79,7 +79,7 @@ impl GarlicMessageType {
             6 => Some(Self::MessageNumber),
             7 => Some(Self::NextKey),
             8 => Some(Self::Ack),
-            9 => Some(Self::ACKRequest),
+            9 => Some(Self::AckRequest),
             11 => Some(Self::GarlicClove),
             254 => Some(Self::Padding),
             _ => None,
@@ -95,7 +95,7 @@ impl GarlicMessageType {
             Self::MessageNumber => 6,
             Self::NextKey => 7,
             Self::Ack => 8,
-            Self::ACKRequest => 9,
+            Self::AckRequest => 9,
             Self::GarlicClove => 11,
             Self::Padding => 254,
         }
@@ -365,10 +365,13 @@ pub enum GarlicMessageBlock<'a> {
     },
 
     /// ACK.
-    ACK {},
+    Ack {
+        /// Vector of (tag set ID, tag index) tuples
+        acks: Vec<(u16, u16)>,
+    },
 
     /// ACK request.
-    ACKRequest,
+    AckRequest,
 
     /// Garlic clove.
     GarlicClove {
@@ -422,8 +425,11 @@ impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
             Self::MessageNumber {} => f.debug_struct("GarlicMessageBlock::MessageNumber").finish(),
             Self::NextKey { kind } =>
                 f.debug_struct("GarlicMessageBlock::NextKey").field("kind", &kind).finish(),
-            Self::ACK {} => f.debug_struct("GarlicMessageBlock::ACK").finish(),
-            Self::ACKRequest => f.debug_struct("GarlicMessageBlock::ACKRequest").finish(),
+            Self::Ack { acks } => f
+                .debug_struct("GarlicMessageBlock::Ack")
+                .field("num_acks", &acks.len())
+                .finish(),
+            Self::AckRequest => f.debug_struct("GarlicMessageBlock::AckRequest").finish(),
         }
     }
 }
@@ -546,6 +552,37 @@ impl<'a> GarlicMessage<'a> {
         Ok((rest, GarlicMessageBlock::NextKey { kind }))
     }
 
+    /// Try to parse [`GarlicMessage::AckRequest`] from `input`.
+    fn parse_ack_request(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
+        let (rest, _size) = be_u16(input)?;
+        let (rest, _flag) = be_u8(rest)?;
+
+        Ok((rest, GarlicMessageBlock::AckRequest))
+    }
+
+    /// Try to parse [`GarlicMessage::Ack`] from `input`.
+    fn parse_ack(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+
+        if size % 4 != 0 {
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        let (rest, acks) = (0..size / 4)
+            .try_fold((rest, Vec::<(u16, u16)>::new()), |(rest, mut acks), _| {
+                let (rest, tag_set_id) = be_u16::<_, ()>(rest).ok()?;
+                let (rest, tag_index) = be_u16::<_, ()>(rest).ok()?;
+
+                acks.push((tag_set_id, tag_index));
+
+                Some((rest, acks))
+            })
+            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        Ok((rest, GarlicMessageBlock::Ack { acks }))
+    }
+
+    /// Attempt to parse [`GarlicMessageBlock`] from `input`.
     fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
         let (rest, message_type) = be_u8(input)?;
 
@@ -554,6 +591,8 @@ impl<'a> GarlicMessage<'a> {
             Some(GarlicMessageType::GarlicClove) => Self::parse_garlic_clove(rest),
             Some(GarlicMessageType::Padding) => Self::parse_padding(rest),
             Some(GarlicMessageType::NextKey) => Self::parse_next_key(rest),
+            Some(GarlicMessageType::AckRequest) => Self::parse_ack_request(rest),
+            Some(GarlicMessageType::Ack) => Self::parse_ack(rest),
             parsed_message_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -660,9 +699,17 @@ impl<'a> GarlicMessageBuilder<'a> {
         self
     }
 
+    /// Add [`GarlicMessageBlock::AckRequest`].
     pub fn with_ack_request(mut self) -> Self {
         self.message_size += GARLIC_HEADER_LEN + 1; // 1 byte flag
-        self.cloves.push(GarlicMessageBlock::ACKRequest);
+        self.cloves.push(GarlicMessageBlock::AckRequest);
+        self
+    }
+
+    /// Add [`GarlicMessageBlock::Ack`].
+    pub fn with_ack(mut self, acks: Vec<(u16, u16)>) -> Self {
+        self.message_size += GARLIC_HEADER_LEN + acks.len() * 4;
+        self.cloves.push(GarlicMessageBlock::Ack { acks });
         self
     }
 
@@ -739,10 +786,19 @@ impl<'a> GarlicMessageBuilder<'a> {
                         }
                     }
                 },
-                GarlicMessageBlock::ACKRequest => {
-                    out.put_u8(GarlicMessageType::ACKRequest.as_u8());
+                GarlicMessageBlock::AckRequest => {
+                    out.put_u8(GarlicMessageType::AckRequest.as_u8());
                     out.put_u16(1u16);
                     out.put_u8(0u8); // flag, unused
+                }
+                GarlicMessageBlock::Ack { acks } => {
+                    out.put_u8(GarlicMessageType::Ack.as_u8());
+                    out.put_u16(acks.len() as u16 * 4);
+
+                    for (tag_set_id, tag_index) in acks {
+                        out.put_u16(tag_set_id);
+                        out.put_u16(tag_index);
+                    }
                 }
                 block => todo!("unimplemented block: {block:?}"),
             }
