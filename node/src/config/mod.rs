@@ -56,20 +56,23 @@ pub struct Config {
     /// Base path.
     pub base_path: PathBuf,
 
-    /// Router info.
-    routers: Vec<Vec<u8>>,
+    /// I2CP config.
+    i2cp_config: Option<emissary::I2cpConfig>,
 
     /// NTCP2 config.
     ntcp2_config: Option<emissary::Ntcp2Config>,
 
-    /// I2CP config.
-    i2cp_config: Option<emissary::I2cpConfig>,
+    /// Router info.
+    routers: Vec<Vec<u8>>,
 
-    /// Static key.
-    static_key: Vec<u8>,
+    /// SAMv3 config.
+    sam_config: Option<emissary::SamConfig>,
 
     /// Signing key.
     signing_key: Vec<u8>,
+
+    /// Static key.
+    static_key: Vec<u8>,
 }
 
 impl Into<emissary::Config> for Config {
@@ -80,6 +83,7 @@ impl Into<emissary::Config> for Config {
             ntcp2_config: self.ntcp2_config,
             i2cp_config: self.i2cp_config,
             routers: self.routers,
+            samv3_config: self.sam_config,
         }
     }
 }
@@ -327,7 +331,11 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: Some(emissary::I2cpConfig { port: 7654 }),
+            i2cp_config: Some(emissary::I2cpConfig { port: 7654u16 }),
+            sam_config: Some(emissary::SamConfig {
+                tcp_port: 7656u16,
+                udp_port: 7655u16,
+            }),
             static_key,
             signing_key,
         })
@@ -374,7 +382,11 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: Some(emissary::I2cpConfig { port: 7654 }),
+            i2cp_config: Some(emissary::I2cpConfig { port: 7654u16 }),
+            sam_config: Some(emissary::SamConfig {
+                tcp_port: 7656u16,
+                udp_port: 7655u16,
+            }),
             static_key,
             signing_key,
         })

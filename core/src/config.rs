@@ -39,11 +39,21 @@ pub struct Ntcp2Config {
     pub iv: [u8; 16],
 }
 
-/// IC2P configuration.
+/// I2CP configuration.
 #[derive(Debug, Clone)]
 pub struct I2cpConfig {
     /// I2CP server listen port.
     pub port: u16,
+}
+
+/// SAMv3 configuration.
+#[derive(Debug, Clone)]
+pub struct SamConfig {
+    /// SAMv3 TCP server listen port.
+    pub tcp_port: u16,
+
+    /// SAMv3 UDP server listen port.
+    pub udp_port: u16,
 }
 
 /// Router configuration.
@@ -61,6 +71,11 @@ pub struct Config {
     ///
     /// `None` if I2CP is disabled.
     pub i2cp_config: Option<I2cpConfig>,
+
+    /// SAMv3 configuration.
+    ///
+    /// `None` if SAMv3 is disabled.
+    pub samv3_config: Option<SamConfig>,
 
     /// Known routers.
     pub routers: Vec<Vec<u8>>,
