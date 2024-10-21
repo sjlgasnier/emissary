@@ -39,6 +39,7 @@ use crate::{
         noise::{NoiseContext, TunnelKeys},
         routing_table::RoutingTable,
         transit::{inbound::InboundGateway, outbound::OutboundEndpoint, participant::Participant},
+        TUNNEL_EXPIRATION,
     },
     Error,
 };
@@ -79,6 +80,16 @@ const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 
 /// Transit tunnel channel size.
 const TUNNEL_CHANNEL_SIZE: usize = 64usize;
+
+/// Transit tunnel expiration.
+///
+/// Tunnels expire in 10 minutes but the expiration timer for transit tunnels are started as soon as
+/// the tunnel build requets is accepted. Tunnel creator might not start the timer quite as soon
+/// which could result in tunnel messages getting dropped towards the end of the tunnel's life time.
+///
+/// In order to prevent this from happening, increase the transit tunnel expiration by an additional
+/// 20 seconds to allow remaining traffic pass through the tunnel before it is destroyed.
+const TRANSIT_TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60 + 20);
 
 /// Common interface for transit tunnels.
 pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {

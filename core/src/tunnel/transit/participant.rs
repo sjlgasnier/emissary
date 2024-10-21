@@ -26,7 +26,9 @@ use crate::{
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
-        noise::TunnelKeys, routing_table::RoutingTable, transit::TransitTunnel, TUNNEL_EXPIRATION,
+        noise::TunnelKeys,
+        routing_table::RoutingTable,
+        transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
     Error,
 };
@@ -125,7 +127,7 @@ impl<R: Runtime> TransitTunnel<R> for Participant<R> {
         message_rx: Receiver<Message>,
     ) -> Self {
         Participant {
-            expiration_timer: Box::pin(R::delay(TUNNEL_EXPIRATION)),
+            expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
             message_rx,
             metrics_handle,
             next_router,

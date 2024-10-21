@@ -35,8 +35,7 @@ use crate::{
         fragment::{FragmentHandler, OwnedDeliveryInstructions},
         noise::TunnelKeys,
         routing_table::RoutingTable,
-        transit::TransitTunnel,
-        TUNNEL_EXPIRATION,
+        transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
     Error,
 };
@@ -293,7 +292,7 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
         message_rx: Receiver<Message>,
     ) -> Self {
         OutboundEndpoint {
-            expiration_timer: Box::pin(R::delay(TUNNEL_EXPIRATION)),
+            expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
             fragment: FragmentHandler::new(),
             message_rx,
             metrics_handle,
