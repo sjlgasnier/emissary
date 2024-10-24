@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream};
+use crate::{
+    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
+    sam::parser::{SamCommand, SamVersion},
+};
 
 use bytes::BytesMut;
 use futures::Stream;
@@ -85,7 +88,7 @@ impl<R: Runtime> SamSocket<R> {
 }
 
 impl<R: Runtime> Stream for SamSocket<R> {
-    type Item = String;
+    type Item = SamCommand;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
@@ -125,15 +128,16 @@ impl<R: Runtime> Stream for SamSocket<R> {
                         Some(pos) => {
                             let command = match core::str::from_utf8(&this.read_buffer[..pos]) {
                                 Ok(command) => {
-                                    // no leftover bytes in the read buffer
-                                    if command.len() == pos {
-                                        this.read_offset = 0usize;
-                                    } else {
-                                        // partial command read
-                                        this.read_offset += pos + 1;
-                                    }
+                                    this.read_offset = 0usize;
 
-                                    return Poll::Ready(Some(command.to_string()));
+                                    match SamCommand::parse(command) {
+                                        Some(command) => return Poll::Ready(Some(command)),
+                                        None => tracing::warn!(
+                                            target: LOG_TARGET,
+                                            %command,
+                                            "invalid sam command",
+                                        ),
+                                    }
                                 }
                                 Err(error) => {
                                     tracing::warn!(
@@ -186,7 +190,13 @@ mod tests {
         let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         match socket.next().await {
-            Some(command) => assert_eq!(command, String::from("HELLO VERSION")),
+            Some(command) => assert_eq!(
+                command,
+                SamCommand::Hello {
+                    min: None,
+                    max: None
+                }
+            ),
             None => panic!("socket exited"),
         }
 
@@ -221,10 +231,16 @@ mod tests {
         }
 
         // send rest of the command
-        stream.write_all("SION\n".as_bytes()).await.unwrap();
+        stream.write_all("SION MIN=3.1 MAX=3.3\n".as_bytes()).await.unwrap();
 
         match socket.next().await {
-            Some(command) => assert_eq!(command, String::from("HELLO VERSION")),
+            Some(command) => assert_eq!(
+                command,
+                SamCommand::Hello {
+                    min: Some(SamVersion::V31),
+                    max: Some(SamVersion::V33)
+                }
+            ),
             None => panic!("socket exited"),
         }
 

@@ -36,6 +36,7 @@ use core::{
 
 use alloc::string::String;
 
+mod parser;
 mod socket;
 
 /// Logging target for the file.
