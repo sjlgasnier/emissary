@@ -34,6 +34,7 @@ mod error;
 mod i2cp;
 mod netdb;
 mod router_storage;
+mod sam;
 mod subsystem;
 mod transports;
 mod tunnel;
