@@ -34,6 +34,10 @@ use core::{
     task::{Context, Poll},
 };
 
+use alloc::string::String;
+
+mod socket;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam";
 
