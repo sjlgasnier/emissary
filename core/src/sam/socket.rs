@@ -31,6 +31,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    mem,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -49,7 +50,7 @@ enum WriteState {
         offset: usize,
 
         /// SAMv3 message, potentially partially written.
-        message: BytesMut,
+        message: Vec<u8>,
     },
 
     /// [`WriteState`] has been poisoned due to a bug.
@@ -62,6 +63,9 @@ enum WriteState {
 ///
 /// Invalid or unsupported commands cause the socket to be closed.
 pub struct SamSocket<R: Runtime> {
+    /// Pending messages.
+    pending_messages: VecDeque<Vec<u8>>,
+
     /// Read buffer.
     read_buffer: Vec<u8>,
 
@@ -73,17 +77,32 @@ pub struct SamSocket<R: Runtime> {
 
     /// TCP stream.
     stream: R::TcpStream,
+
+    /// Write state.
+    write_state: WriteState,
 }
 
 impl<R: Runtime> SamSocket<R> {
     /// Create new [`SamSocket`] from an active TCP stream.
     pub fn new(stream: R::TcpStream) -> Self {
         Self {
+            pending_messages: VecDeque::new(),
             read_buffer: vec![0u8; 4096],
             read_offset: 0usize,
             start_offset: None,
             stream,
+            write_state: WriteState::GetMessage,
         }
+    }
+
+    /// Convert [`SamSocket`] into `TcpStream`.
+    pub fn into_inner(self) -> R::TcpStream {
+        self.stream
+    }
+
+    /// Send `message` to client.
+    pub fn send_message(&mut self, message: Vec<u8>) {
+        self.pending_messages.push_back(message);
     }
 }
 
@@ -150,6 +169,58 @@ impl<R: Runtime> Stream for SamSocket<R> {
                             };
                         }
                     }
+                }
+            }
+        }
+
+        loop {
+            match mem::replace(&mut this.write_state, WriteState::Poisoned) {
+                WriteState::GetMessage => match this.pending_messages.pop_front() {
+                    None => {
+                        this.write_state = WriteState::GetMessage;
+                        break;
+                    }
+                    Some(message) => {
+                        this.write_state = WriteState::SendMessage {
+                            offset: 0usize,
+                            message,
+                        };
+                    }
+                },
+                WriteState::SendMessage { offset, message } =>
+                    match stream.as_mut().poll_write(cx, &message[offset..]) {
+                        Poll::Pending => {
+                            this.write_state = WriteState::SendMessage { offset, message };
+                            break;
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(None),
+                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                "wrote zero bytes to socket",
+                            );
+
+                            return Poll::Ready(None);
+                        }
+                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
+                            true => {
+                                this.write_state = WriteState::GetMessage;
+                            }
+                            false => {
+                                this.write_state = WriteState::SendMessage {
+                                    offset: offset + nwritten,
+                                    message,
+                                };
+                            }
+                        },
+                    },
+                WriteState::Poisoned => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "write state is poisoned",
+                    );
+                    debug_assert!(false);
+                    return Poll::Ready(None);
                 }
             }
         }
