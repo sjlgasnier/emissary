@@ -20,7 +20,7 @@ use crate::{
     error::{ConnectionError, Error},
     runtime::Runtime,
     sam::{
-        parser::{SamCommand, SamVersion},
+        parser::{SamCommand, SamVersion, SessionKind},
         socket::SamSocket,
     },
 };
@@ -47,20 +47,6 @@ const MAX_SAMV3_VERSION: SamVersion = SamVersion::V33;
 
 /// Keep-alive timeout.
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Session kind.
-///
-/// NOTE: `Datagram` and `Anonymous` are currently unsupported
-pub enum SessionKind {
-    /// Streaming.
-    Stream,
-
-    /// Repliable datagram.
-    Datagram,
-
-    /// Anonymous datagrams.
-    Anonymous,
-}
 
 /// SAMv3 connection kind.
 pub enum ConnectionKind<R: Runtime> {

@@ -28,6 +28,7 @@ use nom::{
     Err, IResult, Parser,
 };
 
+use alloc::string::{String, ToString};
 use core::fmt;
 
 /// Logging target for the file.
@@ -52,8 +53,23 @@ struct ParsedCommand<'a> {
     key_value_pairs: HashMap<&'a str, &'a str>,
 }
 
-/// Supported SAM versions.
+/// Session kind.
+///
+/// NOTE: `Datagram` and `Anonymous` are currently unsupported
 #[derive(Debug, PartialEq, Eq)]
+pub enum SessionKind {
+    /// Streaming.
+    Stream,
+
+    /// Repliable datagram.
+    Datagram,
+
+    /// Anonymous datagrams.
+    Anonymous,
+}
+
+/// Supported SAM versions.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SamVersion {
     /// v3.1
     V31,
@@ -99,12 +115,33 @@ pub enum SamCommand {
         /// Maximum supported version, if specified.
         max: Option<SamVersion>,
     },
+
+    CreateSession {
+        /// Session ID.
+        session_id: String,
+
+        /// Session kind:
+        session_kind: SessionKind,
+
+        /// Session options.
+        options: HashMap<String, String>,
+    },
+}
+
+impl fmt::Display for SamCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hello { min, max } => write!(f, "SamCommand::Hello({:?}, {:?})", min, max),
+            Self::CreateSession { session_id, .. } =>
+                write!(f, "SamCommand::CreateSession({session_id})"),
+        }
+    }
 }
 
 impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
     type Error = ();
 
-    fn try_from(value: ParsedCommand<'a>) -> Result<Self, Self::Error> {
+    fn try_from(mut value: ParsedCommand<'a>) -> Result<Self, Self::Error> {
         match (value.command, value.subcommand) {
             ("HELLO", Some("VERSION")) => Ok(Self::Hello {
                 min: value
@@ -118,6 +155,55 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                     .map(|value| SamVersion::try_from(*value).ok())
                     .flatten(),
             }),
+            ("SESSION", Some("CREATE")) => {
+                let session_id = value
+                    .key_value_pairs
+                    .remove("ID")
+                    .ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "session id missing from `SESSION CREATE`",
+                        );
+                        ()
+                    })?
+                    .to_string();
+
+                let session_kind = match value.key_value_pairs.remove("STYLE") {
+                    Some("STREAM") => SessionKind::Stream,
+                    kind => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?kind,
+                            "unsupported session kind",
+                        );
+
+                        return Err(());
+                    }
+                };
+
+                match value.key_value_pairs.remove("DESTINATION") {
+                    Some("TRANSIENT") => {}
+                    kind => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?kind,
+                            "only transient destinations supported",
+                        );
+
+                        return Err(());
+                    }
+                }
+
+                Ok(SamCommand::CreateSession {
+                    session_id,
+                    session_kind,
+                    options: value
+                        .key_value_pairs
+                        .into_iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect(),
+                })
+            }
             (command, subcommand) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -140,7 +226,7 @@ impl SamCommand {
         let (rest, (command, _, subcommand, _, key_value_pairs)) = tuple((
             alt((tag("HELLO"), tag("SESSION"), tag("STREAM"))),
             opt(char(' ')),
-            opt(alt((tag("VERSION"), tag("STATUS")))),
+            opt(alt((tag("VERSION"), tag("CREATE")))),
             opt(char(' ')),
             opt(parse_key_value_pairs),
         ))(input)?;
@@ -174,7 +260,7 @@ fn parse_key_value(input: &str) -> IResult<&str, (&str, &str)> {
 fn parse_key(input: &str) -> IResult<&str, &str> {
     recognize(pair(
         alt((alpha1, tag("_"))),
-        many0_count(alt((alphanumeric1, tag("_")))),
+        many0_count(alt((alphanumeric1, tag("_"), tag(".")))),
     ))
     .parse(input)
 }
@@ -225,5 +311,53 @@ mod tests {
     #[test]
     fn unrecognized_command() {
         assert!(SamCommand::parse("TEST COMMAND KEY=VALUE").is_none());
+    }
+
+    #[test]
+    fn parse_session_create_stream() {
+        match SamCommand::parse(
+            "SESSION CREATE STYLE=STREAM ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
+        ) {
+            Some(SamCommand::CreateSession {
+                session_id,
+                session_kind: SessionKind::Stream,
+                options,
+            }) => {
+                assert_eq!(session_id.as_str(), "test");
+                assert_eq!(
+                    options.get("i2cp.leaseSetEncType"),
+                    Some(&"4,0".to_string())
+                );
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // non-transient destination
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=DATAGRAM ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
+
+        // session id missing
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=DATAGRAM DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_session_create_datagram() {
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=DATAGRAM ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_session_create_anonymous() {
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=RAW ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
     }
 }
