@@ -16,9 +16,12 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::runtime::{
-    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricsHandle,
-    Runtime, TcpListener, TcpStream,
+use crate::{
+    error::{ConnectionError, Error},
+    runtime::{
+        AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet,
+        MetricsHandle, Runtime, TcpListener, TcpStream,
+    },
 };
 
 use flate2::{
@@ -58,7 +61,7 @@ impl AsyncRead for MockTcpStream {
 
         match futures::ready!(pinned.poll_read(cx, buf)) {
             Ok(nread) => Poll::Ready(Ok(nread)),
-            Err(error) => Poll::Ready(Err(crate::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 }
@@ -73,7 +76,7 @@ impl AsyncWrite for MockTcpStream {
 
         match futures::ready!(pinned.poll_write(cx, buf)) {
             Ok(nwritten) => Poll::Ready(Ok(nwritten)),
-            Err(error) => Poll::Ready(Err(crate::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 
@@ -82,7 +85,7 @@ impl AsyncWrite for MockTcpStream {
 
         match futures::ready!(pinned.poll_flush(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(crate::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 
@@ -91,7 +94,7 @@ impl AsyncWrite for MockTcpStream {
 
         match futures::ready!(pinned.poll_close(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(crate::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 }

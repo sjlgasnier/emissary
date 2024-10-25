@@ -21,7 +21,7 @@
 //! https://geti2p.net/en/docs/api/samv3
 
 use crate::{
-    error::Error,
+    error::{ConnectionError, Error},
     netdb::NetDbHandle,
     runtime::{MetricsHandle, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
@@ -84,7 +84,7 @@ impl<R: Runtime> SamServer<R> {
         );
         let listener = R::TcpListener::bind(address)
             .await
-            .ok_or(Error::IoError(String::from("failed to bind sam socket")))?;
+            .ok_or(Error::Connection(ConnectionError::BindFailure))?;
 
         Ok(Self {
             listener,

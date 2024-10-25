@@ -70,7 +70,7 @@ impl AsyncRead for TokioTcpStream {
 
         match futures::ready!(pinned.poll_read(cx, buf)) {
             Ok(nread) => Poll::Ready(Ok(nread)),
-            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
         }
     }
 }
@@ -85,7 +85,7 @@ impl AsyncWrite for TokioTcpStream {
 
         match futures::ready!(pinned.poll_write(cx, buf)) {
             Ok(nwritten) => Poll::Ready(Ok(nwritten)),
-            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
         }
     }
 
@@ -94,7 +94,7 @@ impl AsyncWrite for TokioTcpStream {
 
         match futures::ready!(pinned.poll_flush(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
         }
     }
 
@@ -103,7 +103,7 @@ impl AsyncWrite for TokioTcpStream {
 
         match futures::ready!(pinned.poll_close(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(emissary::Error::IoError(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
         }
     }
 }

@@ -21,7 +21,7 @@
 //! https://geti2p.net/en/docs/protocol/i2cp
 
 use crate::{
-    error::I2cpError,
+    error::{ConnectionError, I2cpError},
     i2cp::{
         pending::{I2cpSessionContext, PendingI2cpSession},
         session::I2cpSession,
@@ -96,7 +96,7 @@ impl<R: Runtime> I2cpServer<R> {
         let address = SocketAddr::new("127.0.0.1".parse::<IpAddr>().expect("valid address"), port);
         let listener = R::TcpListener::bind(address)
             .await
-            .ok_or(Error::IoError(String::from("failed to bind i2cp socket")))?;
+            .ok_or(Error::Connection(ConnectionError::BindFailure))?;
 
         Ok(Self {
             listener,

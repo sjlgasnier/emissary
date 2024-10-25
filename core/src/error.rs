@@ -24,6 +24,29 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// Connection error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConnectionError {
+    /// Socket closed.
+    SocketClosed,
+
+    /// Failed to bind to socket.
+    BindFailure,
+
+    /// Keep-alive timeout.
+    KeepAliveTimeout,
+}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SocketClosed => write!(f, "socket closed"),
+            Self::BindFailure => write!(f, "failed to bind to socket"),
+            Self::KeepAliveTimeout => write!(f, "keep-alive timeout"),
+        }
+    }
+}
+
 /// I2CP error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum I2cpError {
@@ -222,8 +245,6 @@ impl fmt::Display for RoutingError {
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
     Chacha20Poly1305(chacha20poly1305::Error),
-    IoError(String),
-    Socket,
     InvalidData,
     InvalidState,
     NonceOverflow,
@@ -237,6 +258,8 @@ pub enum Error {
     Streaming(StreamingError),
     Query(QueryError),
     I2cp(I2cpError),
+    Connection(ConnectionError),
+    Custom(String),
 }
 
 impl fmt::Display for Error {
@@ -244,11 +267,9 @@ impl fmt::Display for Error {
         match self {
             Self::Ed25519(error) => write!(f, "ed25519 error: {error:?}"),
             Self::Chacha20Poly1305(error) => write!(f, "chacha20poly1305 error: {error:?}"),
-            Self::Socket => write!(f, "socket failure"),
             Self::InvalidData => write!(f, "invalid data"),
             Self::InvalidState => write!(f, "invalid state"),
             Self::NonceOverflow => write!(f, "nonce overflow"),
-            Self::IoError(error) => write!(f, "i/o error: {error:?}"),
             Self::NotSupported => write!(f, "protocol or operation not supported"),
             Self::EssentialTaskClosed => write!(f, "essential task closed"),
             Self::RouterDoesntExist => write!(f, "router doesn't exist"),
@@ -259,6 +280,8 @@ impl fmt::Display for Error {
             Self::Streaming(error) => write!(f, "streaming protocol error: {error}"),
             Self::Query(error) => write!(f, "query error: {error}"),
             Self::I2cp(error) => write!(f, "i2cp error: {error}"),
+            Self::Connection(error) => write!(f, "connection error: {error}"),
+            Self::Custom(error) => write!(f, "{error}"),
         }
     }
 }
