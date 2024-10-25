@@ -23,7 +23,7 @@
 use crate::{
     error::{ConnectionError, Error},
     netdb::NetDbHandle,
-    runtime::{MetricsHandle, Runtime, TcpListener},
+    runtime::{JoinSet, MetricsHandle, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
 };
 
@@ -42,12 +42,6 @@ mod socket;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam";
 
-/// Minimum supported version of SAMv3.
-const MIN_SAMV3_VERSION: &str = "3.1";
-
-/// Maximum supported version of SAMv3.
-const MAX_SAMV3_VERSION: &str = "3.3";
-
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
     /// TCP listener.
@@ -58,6 +52,9 @@ pub struct SamServer<R: Runtime> {
 
     /// Handle to `NetDb`.
     netdb_handle: NetDbHandle,
+
+    /// Pending SAMv3 connections.
+    pending_connections: R::JoinSet<crate::Result<R::TcpStream>>,
 
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
@@ -90,6 +87,7 @@ impl<R: Runtime> SamServer<R> {
             listener,
             metrics,
             netdb_handle,
+            pending_connections: R::join_set(),
             tunnel_manager_handle,
         })
     }
@@ -98,7 +96,17 @@ impl<R: Runtime> SamServer<R> {
 impl<R: Runtime> Future for SamServer<R> {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.listener.poll_accept(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(mut stream)) => {
+                    self.pending_connections.push(async move { Ok(stream) });
+                }
+            }
+        }
+
         Poll::Pending
     }
 }
