@@ -16,8 +16,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use core::fmt;
-
 use hashbrown::HashMap;
 use nom::{
     branch::alt,
@@ -29,6 +27,8 @@ use nom::{
     sequence::{delimited, pair, preceded, separated_pair, tuple},
     Err, IResult, Parser,
 };
+
+use core::fmt;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::parser";
@@ -74,6 +74,16 @@ impl TryFrom<&str> for SamVersion {
             "3.2" => Ok(SamVersion::V32),
             "3.3" => Ok(SamVersion::V33),
             _ => Err(()),
+        }
+    }
+}
+
+impl fmt::Display for SamVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V31 => write!(f, "3.1"),
+            Self::V32 => write!(f, "3.2"),
+            Self::V33 => write!(f, "3.3"),
         }
     }
 }
