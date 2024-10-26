@@ -20,7 +20,10 @@ use crate::{
     error::Error,
     primitives::{Lease, TunnelId},
     runtime::Runtime,
-    sam::{parser::SamVersion, socket::SamSocket},
+    sam::{
+        parser::{SamCommand, SamVersion},
+        socket::SamSocket,
+    },
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
@@ -34,6 +37,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::pending::session";
@@ -52,11 +56,17 @@ pub struct SamSessionContext<R: Runtime> {
     /// Session ID.
     pub session_id: Arc<str>,
 
+    /// Negotiated version.
+    pub version: SamVersion,
+
     /// SAMv3 socket.
     pub socket: SamSocket<R>,
 
     /// Tunnel pool handle.
     pub tunnel_pool_handle: TunnelPoolHandle,
+
+    /// RX channel for receiving commands to an active session.
+    pub receiver: Receiver<SamCommand>,
 }
 
 /// State of the pending I2CP client session.
@@ -79,6 +89,9 @@ enum PendingSessionState<R: Runtime> {
         ///
         /// Resolves to a `TunnelPoolHandle` once the pool has been built.
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
+
+        /// RX channel for receiving commands to an active session.
+        receiver: Receiver<SamCommand>,
     },
 
     /// Building tunnels.
@@ -97,6 +110,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// Handle to the built tunnel pool.
         handle: TunnelPoolHandle,
+
+        /// RX channel for receiving commands to an active session.
+        receiver: Receiver<SamCommand>,
 
         /// Active inbound tunnels and their leases.
         inbound: HashMap<TunnelId, Lease>,
@@ -126,6 +142,7 @@ impl<R: Runtime> PendingSamSession<R> {
         session_id: Arc<str>,
         options: HashMap<String, String>,
         version: SamVersion,
+        receiver: Receiver<SamCommand>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
     ) -> Self {
         Self {
@@ -134,6 +151,7 @@ impl<R: Runtime> PendingSamSession<R> {
                 session_id,
                 options,
                 version,
+                receiver,
                 tunnel_pool_future,
             },
         }
@@ -151,6 +169,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     session_id,
                     options,
                     version,
+                    receiver,
                     mut tunnel_pool_future,
                 } => match tunnel_pool_future.poll_unpin(cx) {
                     Poll::Ready(handle) => {
@@ -166,6 +185,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             version,
                             handle,
+                            receiver,
                             inbound: HashMap::new(),
                             outbound: HashSet::new(),
                         };
@@ -176,6 +196,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             options,
                             version,
+                            receiver,
                             tunnel_pool_future,
                         };
                         break;
@@ -186,6 +207,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     session_id,
                     options,
                     version,
+                    receiver,
                     mut handle,
                     mut inbound,
                     mut outbound,
@@ -196,6 +218,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             options,
                             version,
+                            receiver,
                             handle,
                             inbound,
                             outbound,
@@ -221,6 +244,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 options,
                                 version,
                                 handle,
+                                receiver,
                                 inbound,
                                 outbound,
                             };
@@ -239,8 +263,10 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             inbound,
                             options,
                             outbound,
+                            version,
                             session_id,
                             socket,
+                            receiver,
                             tunnel_pool_handle: handle,
                         }));
                     }
@@ -262,6 +288,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 options,
                                 version,
                                 handle,
+                                receiver,
                                 inbound,
                                 outbound,
                             };
@@ -280,8 +307,10 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             inbound,
                             options,
                             outbound,
+                            version,
                             session_id,
                             socket,
+                            receiver,
                             tunnel_pool_handle: handle,
                         }));
                     }
@@ -300,6 +329,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             version,
                             handle,
+                            receiver,
                             inbound,
                             outbound,
                         };
@@ -319,6 +349,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             version,
                             handle,
+                            receiver,
                             inbound,
                             outbound,
                         };
@@ -337,6 +368,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             version,
                             handle,
+                            receiver,
                             inbound,
                             outbound,
                         };

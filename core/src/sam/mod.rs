@@ -21,7 +21,7 @@
 //! https://geti2p.net/en/docs/api/samv3
 
 use crate::{
-    error::{ConnectionError, Error},
+    error::{ChannelError, ConnectionError, Error},
     netdb::NetDbHandle,
     primitives::Str,
     runtime::{JoinSet, MetricsHandle, Runtime, TcpListener},
@@ -31,12 +31,13 @@ use crate::{
             connection::{ConnectionKind, PendingSamConnection},
             session::{PendingSamSession, SamSessionContext},
         },
+        session::SamSession,
     },
     tunnel::{TunnelManagerHandle, TunnelPoolConfig},
 };
 
-use futures::StreamExt;
-use hashbrown::{HashMap, HashSet};
+use futures::{Stream, StreamExt};
+use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Sender};
 
 use alloc::{string::String, sync::Arc};
@@ -49,15 +50,80 @@ use core::{
 
 mod parser;
 mod pending;
+mod session;
 mod socket;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam";
 
+/// SAMv3 command channel size.
+const COMMAND_CHANNEL_SIZE: usize = 256;
+
+/// Session context.
+///
+/// Holds either pending or active sessions.
+pub struct SessionContext<R: Runtime, T: 'static + Send + Unpin> {
+    /// Sesison futures.
+    futures: R::JoinSet<T>,
+
+    /// TX channels for the session.
+    senders: HashMap<Arc<str>, Sender<SamCommand>>,
+}
+
+impl<R: Runtime, T: 'static + Send + Unpin> SessionContext<R, T> {
+    /// Create new [`SessionContext`].
+    fn new() -> Self {
+        Self {
+            senders: HashMap::new(),
+            futures: R::join_set(),
+        }
+    }
+
+    /// Returns `true` if [`SessionContext`] contains a session identified by `key`.
+    fn contains_key(&self, key: &Arc<str>) -> bool {
+        self.senders.contains_key(key)
+    }
+
+    /// Remove the command channel from [`SessionContext`] for `key` if it exists
+    fn remove(&mut self, key: &Arc<str>) -> Option<Sender<SamCommand>> {
+        self.senders.remove(key)
+    }
+
+    /// Insert new session identified by `session_id` in the [`SessionContext`].
+    fn insert(
+        &mut self,
+        session_id: Arc<str>,
+        tx: Sender<SamCommand>,
+        future: impl Future<Output = T> + 'static + Send,
+    ) {
+        self.senders.insert(session_id, tx);
+        self.futures.push(future);
+    }
+}
+
+impl<R: Runtime> SessionContext<R, Arc<str>> {
+    /// Send `command` to an active sesison identified by `session_id`.
+    fn send_command(&self, session_id: &Arc<str>, command: SamCommand) -> Result<(), ChannelError> {
+        self.senders
+            .get(session_id)
+            .ok_or(ChannelError::DoesntExist)?
+            .try_send(command)
+            .map_err(From::from)
+    }
+}
+
+impl<R: Runtime, T: 'static + Send + Unpin> Stream for SessionContext<R, T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.futures.poll_next_unpin(cx)
+    }
+}
+
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
-    /// Active SAMv3 sessions.
-    active_sessions: HashMap<Arc<str>, Sender<SamCommand>>,
+    /// Active SAMV3 sessions.
+    active_sessions: SessionContext<R, Arc<str>>,
 
     /// TCP listener.
     listener: R::TcpListener,
@@ -75,11 +141,8 @@ pub struct SamServer<R: Runtime> {
     /// state, ensuring, e.g., that the it's not a duplicate `SESSION CREATE` request.
     pending_inbound_connections: R::JoinSet<crate::Result<ConnectionKind<R>>>,
 
-    /// Session IDs of pending SAMv3 sessions.
-    pending_session_ids: HashSet<Arc<str>>,
-
     /// Pending SAMv3 sessions that are in the process of building a tunnel pool.
-    pending_sessions: R::JoinSet<crate::Result<SamSessionContext<R>>>,
+    pending_sessions: SessionContext<R, crate::Result<SamSessionContext<R>>>,
 
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
@@ -109,13 +172,12 @@ impl<R: Runtime> SamServer<R> {
             .ok_or(Error::Connection(ConnectionError::BindFailure))?;
 
         Ok(Self {
-            active_sessions: HashMap::new(),
+            active_sessions: SessionContext::new(),
             listener,
             metrics,
             netdb_handle,
             pending_inbound_connections: R::join_set(),
-            pending_session_ids: HashSet::new(),
-            pending_sessions: R::join_set(),
+            pending_sessions: SessionContext::new(),
             tunnel_manager_handle,
         })
     }
@@ -152,11 +214,11 @@ impl<R: Runtime> Future for SamServer<R> {
                         //
                         // reject connection by closing the socket
                         if self.active_sessions.contains_key(&session_id)
-                            || self.pending_session_ids.contains(&session_id)
+                            || self.pending_sessions.contains_key(&session_id)
                         {
                             tracing::warn!(
                                 target: LOG_TARGET,
-                                ?session_id,
+                                %session_id,
                                 "duplicate session id",
                             );
                             continue;
@@ -185,7 +247,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 Err(error) => {
                                     tracing::warn!(
                                         target: LOG_TARGET,
-                                        ?session_id,
+                                        %session_id,
                                         ?error,
                                         "failed to create tunnel pool for session",
                                     );
@@ -193,19 +255,25 @@ impl<R: Runtime> Future for SamServer<R> {
                                 }
                             };
 
-                        self.pending_session_ids.insert(Arc::clone(&session_id));
-                        self.pending_sessions.push(PendingSamSession::new(
-                            socket,
+                        let (tx, rx) = channel(COMMAND_CHANNEL_SIZE);
+
+                        self.pending_sessions.insert(
                             Arc::clone(&session_id),
-                            options,
-                            version,
-                            Box::pin(tunnel_pool_future),
-                        ));
+                            tx,
+                            PendingSamSession::new(
+                                socket,
+                                Arc::clone(&session_id),
+                                options,
+                                version,
+                                rx,
+                                Box::pin(tunnel_pool_future),
+                            ),
+                        )
                     }
                     kind => tracing::warn!(
                         target: LOG_TARGET,
                         ?kind,
-                        "currently unuspported connection",
+                        "currently unuspported command",
                     ),
                 },
                 Poll::Ready(Some(Err(error))) => tracing::trace!(
@@ -220,18 +288,44 @@ impl<R: Runtime> Future for SamServer<R> {
             match self.pending_sessions.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(Ok(context))) => {
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        session_id = ?context.session_id,
-                        "start active session",
-                    );
-                }
+                Poll::Ready(Some(Ok(context))) =>
+                    match self.pending_sessions.remove(&context.session_id) {
+                        Some(tx) => {
+                            self.active_sessions.insert(
+                                Arc::clone(&context.session_id),
+                                tx,
+                                SamSession::new(context),
+                            );
+                        }
+                        None => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                session_id = %context.session_id,
+                                "pending session doesn't exist"
+                            );
+                            debug_assert!(false);
+                        }
+                    },
                 Poll::Ready(Some(Err(error))) => tracing::warn!(
                     target: LOG_TARGET,
                     ?error,
                     "failed to create tunnel pool for session",
                 ),
+            }
+        }
+
+        loop {
+            match self.active_sessions.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(session_id)) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        %session_id,
+                        "session terminated",
+                    );
+                    self.active_sessions.remove(&session_id);
+                }
             }
         }
 

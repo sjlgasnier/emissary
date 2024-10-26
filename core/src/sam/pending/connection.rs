@@ -274,7 +274,7 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                     })) => {
                         tracing::info!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             ?session_kind,
                             "create session"
                         );
