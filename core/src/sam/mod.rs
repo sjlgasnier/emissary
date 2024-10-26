@@ -256,6 +256,7 @@ impl<R: Runtime> Future for SamServer<R> {
                             };
 
                         let (tx, rx) = channel(COMMAND_CHANNEL_SIZE);
+                        let netdb_handle = self.netdb_handle.clone();
 
                         self.pending_sessions.insert(
                             Arc::clone(&session_id),
@@ -267,6 +268,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 version,
                                 rx,
                                 Box::pin(tunnel_pool_future),
+                                netdb_handle,
                             ),
                         )
                     }

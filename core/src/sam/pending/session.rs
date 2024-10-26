@@ -18,6 +18,7 @@
 
 use crate::{
     error::Error,
+    netdb::NetDbHandle,
     primitives::{Lease, TunnelId},
     runtime::Runtime,
     sam::{
@@ -65,6 +66,9 @@ pub struct SamSessionContext<R: Runtime> {
     /// Tunnel pool handle.
     pub tunnel_pool_handle: TunnelPoolHandle,
 
+    /// Handle to `NetDb`.
+    pub netdb_handle: NetDbHandle,
+
     /// RX channel for receiving commands to an active session.
     pub receiver: Receiver<SamCommand>,
 }
@@ -84,6 +88,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// Negotiated version.
         version: SamVersion,
+
+        /// Handle to `NetDb`.
+        netdb_handle: NetDbHandle,
 
         /// Tunnel pool build future.
         ///
@@ -107,6 +114,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// Negotiated version.
         version: SamVersion,
+
+        /// Handle to `NetDb`.
+        netdb_handle: NetDbHandle,
 
         /// Handle to the built tunnel pool.
         handle: TunnelPoolHandle,
@@ -144,6 +154,7 @@ impl<R: Runtime> PendingSamSession<R> {
         version: SamVersion,
         receiver: Receiver<SamCommand>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
+        netdb_handle: NetDbHandle,
     ) -> Self {
         Self {
             state: PendingSessionState::BuildingTunnelPool {
@@ -153,6 +164,7 @@ impl<R: Runtime> PendingSamSession<R> {
                 version,
                 receiver,
                 tunnel_pool_future,
+                netdb_handle,
             },
         }
     }
@@ -170,6 +182,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     options,
                     version,
                     receiver,
+                    netdb_handle,
                     mut tunnel_pool_future,
                 } => match tunnel_pool_future.poll_unpin(cx) {
                     Poll::Ready(handle) => {
@@ -186,6 +199,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             version,
                             handle,
                             receiver,
+                            netdb_handle,
                             inbound: HashMap::new(),
                             outbound: HashSet::new(),
                         };
@@ -197,6 +211,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             version,
                             receiver,
+                            netdb_handle,
                             tunnel_pool_future,
                         };
                         break;
@@ -208,6 +223,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     options,
                     version,
                     receiver,
+                    netdb_handle,
                     mut handle,
                     mut inbound,
                     mut outbound,
@@ -218,6 +234,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             options,
                             version,
+                            netdb_handle,
                             receiver,
                             handle,
                             inbound,
@@ -243,6 +260,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 session_id,
                                 options,
                                 version,
+                                netdb_handle,
                                 handle,
                                 receiver,
                                 inbound,
@@ -256,7 +274,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             ?session_id,
                             num_inbound = ?inbound.len(),
                             num_outbound = ?outbound.len(),
-                            "enough tunnels built for a session",
+                            "publish destination's lease set",
                         );
 
                         return Poll::Ready(Ok(SamSessionContext {
@@ -267,6 +285,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             socket,
                             receiver,
+                            netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
                     }
@@ -287,6 +306,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 session_id,
                                 options,
                                 version,
+                                netdb_handle,
                                 handle,
                                 receiver,
                                 inbound,
@@ -300,7 +320,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             ?session_id,
                             num_inbound = ?inbound.len(),
                             num_outbound = ?outbound.len(),
-                            "enough tunnels built for a session",
+                            "publish destination's lease set",
                         );
 
                         return Poll::Ready(Ok(SamSessionContext {
@@ -311,6 +331,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             socket,
                             receiver,
+                            netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
                     }
@@ -328,6 +349,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             options,
                             version,
+                            netdb_handle,
                             handle,
                             receiver,
                             inbound,
@@ -348,6 +370,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             options,
                             version,
+                            netdb_handle,
                             handle,
                             receiver,
                             inbound,
@@ -367,6 +390,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_id,
                             options,
                             version,
+                            netdb_handle,
                             handle,
                             receiver,
                             inbound,

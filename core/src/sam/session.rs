@@ -17,6 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::{SigningPrivateKey, StaticPrivateKey},
+    destination::{Destination, DestinationEvent},
+    i2np::{
+        database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
+        MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
+    },
+    netdb::NetDbHandle,
+    primitives::{Destination as Dest, LeaseSet2, LeaseSet2Header},
     runtime::Runtime,
     sam::{
         parser::{SamCommand, SamVersion},
@@ -26,8 +34,10 @@ use crate::{
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
+use bytes::Bytes;
 use futures::StreamExt;
 use hashbrown::HashMap;
+use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
 use alloc::sync::Arc;
@@ -35,6 +45,7 @@ use core::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 /// Logging target for the file.
@@ -42,6 +53,9 @@ const LOG_TARGET: &str = "emissary::sam::session";
 
 /// Active SAMv3 session.
 pub struct SamSession<R: Runtime> {
+    /// [`Destination`] of the session.
+    destination: Destination<R>,
+
     /// Session options.
     options: HashMap<String, String>,
 
@@ -73,21 +87,68 @@ impl<R: Runtime> SamSession<R> {
             outbound,
             receiver,
             session_id,
-            socket,
+            mut socket,
             tunnel_pool_handle,
             version,
+            netdb_handle,
         } = context;
 
-        // TODO: crate new destination
-        // TODO: send `SESSION CREATE` response to client
+        let destination = {
+            // create encryption and signing keys as this is a transient session
+            let (encryption_key, signing_key) = {
+                let mut rng = R::rng();
 
-        tracing::info!(
-            target: LOG_TARGET,
-            %session_id,
-            "start active session",
-        );
+                let signing_key = SigningPrivateKey::random(&mut rng);
+                let encryption_key = StaticPrivateKey::new(rng);
+
+                (encryption_key, signing_key)
+            };
+
+            let destination = Dest::new(signing_key.public());
+            let destination_id = destination.id();
+
+            // create leaseset for the destination and store it in `NetDb`
+            let local_leaseset = Bytes::from(
+                LeaseSet2 {
+                    header: LeaseSet2Header {
+                        destination: destination.clone(),
+                        published: R::time_since_epoch().as_secs() as u32,
+                        expires: (R::time_since_epoch() + Duration::from_secs(10 * 60)).as_secs()
+                            as u32,
+                    },
+                    public_keys: vec![encryption_key.public()],
+                    leases: inbound.values().cloned().collect(),
+                }
+                .serialize(&signing_key),
+            );
+
+            if let Err(error) = netdb_handle
+                .store_leaseset(Bytes::from(destination_id.to_vec()), local_leaseset.clone())
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %destination_id,
+                    ?error,
+                    "failed to publish lease set"
+                );
+                todo!();
+            }
+
+            tracing::info!(
+                target: LOG_TARGET,
+                %session_id,
+                %destination_id,
+                "start active session",
+            );
+
+            Destination::new(destination_id, encryption_key, local_leaseset, netdb_handle)
+        };
+
+        socket
+            .send_message("SESSION STATUS RESULT=OK DESTINATION=hello_world\n".as_bytes().to_vec());
 
         Self {
+            destination,
             options,
             receiver,
             session_id,
@@ -141,7 +202,9 @@ impl<R: Runtime> Future for SamSession<R> {
             match self.receiver.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(_)) => {}
+                Poll::Ready(Some(
+                    SamCommand::Hello { .. } | SamCommand::CreateSession { .. } | SamCommand::Dummy,
+                )) => unreachable!(),
             }
         }
 
@@ -159,6 +222,38 @@ impl<R: Runtime> Future for SamSession<R> {
                     return Poll::Ready(Arc::clone(&self.session_id));
                 }
                 Poll::Ready(Some(event)) => self.on_tunnel_pool_event(event),
+            }
+        }
+
+        loop {
+            match self.destination.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
+                Poll::Ready(Some(DestinationEvent::SendMessage {
+                    router_id,
+                    tunnel_id,
+                    message,
+                })) => {
+                    // wrap the garlic message inside a standard i2np message and send it over
+                    // the one of the pool's outbound tunnels to remote destination
+                    let message = MessageBuilder::standard()
+                        .with_message_type(MessageType::Garlic)
+                        .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                        .with_message_id(R::rng().next_u32())
+                        .with_payload(&message)
+                        .build();
+
+                    if let Err(error) =
+                        self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, message)
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = %self.session_id,
+                            ?error,
+                            "failed to send message to tunnel",
+                        );
+                    }
+                }
             }
         }
 
