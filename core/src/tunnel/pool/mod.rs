@@ -103,19 +103,19 @@ pub struct TunnelPoolConfig {
     ///
     /// This is either set in I2CP options and if none is set,
     /// it's the short hash of the `Destination`.
-    name: Str,
+    pub name: Str,
 
     /// How many inbound tunnels the pool should have.
-    num_inbound: usize,
+    pub num_inbound: usize,
 
     /// How many hops should each inbound tunnel have.
-    num_inbound_hops: usize,
+    pub num_inbound_hops: usize,
 
     /// How many outbound tunnels the pool should have.
-    num_outbound: usize,
+    pub num_outbound: usize,
 
     /// How many hops should each outbound tunnel have.
-    num_outbound_hops: usize,
+    pub num_outbound_hops: usize,
 }
 
 impl Default for TunnelPoolConfig {

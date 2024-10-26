@@ -1,0 +1,358 @@
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+use crate::{
+    error::Error,
+    primitives::{Lease, TunnelId},
+    runtime::Runtime,
+    sam::{parser::SamVersion, socket::SamSocket},
+    tunnel::{TunnelPoolEvent, TunnelPoolHandle},
+};
+
+use futures::{future::BoxFuture, FutureExt, StreamExt};
+use hashbrown::{HashMap, HashSet};
+
+use alloc::{string::String, sync::Arc};
+use core::{
+    future::Future,
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::sam::pending::session";
+
+/// SAMv3 client session context.
+pub struct SamSessionContext<R: Runtime> {
+    /// Active inbound tunnels and their leases.
+    pub inbound: HashMap<TunnelId, Lease>,
+
+    /// Session options.
+    pub options: HashMap<String, String>,
+
+    /// Active outbound tunnels.
+    pub outbound: HashSet<TunnelId>,
+
+    /// Session ID.
+    pub session_id: Arc<str>,
+
+    /// SAMv3 socket.
+    pub socket: SamSocket<R>,
+
+    /// Tunnel pool handle.
+    pub tunnel_pool_handle: TunnelPoolHandle,
+}
+
+/// State of the pending I2CP client session.
+enum PendingSessionState<R: Runtime> {
+    /// Building tunnel pool.
+    BuildingTunnelPool {
+        /// SAMv3 socket associated with the session.
+        socket: SamSocket<R>,
+
+        /// ID of the client session.
+        session_id: Arc<str>,
+
+        /// Session options.
+        options: HashMap<String, String>,
+
+        /// Negotiated version.
+        version: SamVersion,
+
+        /// Tunnel pool build future.
+        ///
+        /// Resolves to a `TunnelPoolHandle` once the pool has been built.
+        tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
+    },
+
+    /// Building tunnels.
+    BuildingTunnels {
+        /// SAMv3 socket associated with the session.
+        socket: SamSocket<R>,
+
+        /// Session ID.
+        session_id: Arc<str>,
+
+        /// Session options.
+        options: HashMap<String, String>,
+
+        /// Negotiated version.
+        version: SamVersion,
+
+        /// Handle to the built tunnel pool.
+        handle: TunnelPoolHandle,
+
+        /// Active inbound tunnels and their leases.
+        inbound: HashMap<TunnelId, Lease>,
+
+        /// Active outbound tunnels.
+        outbound: HashSet<TunnelId>,
+    },
+
+    /// Pending connection state has been poisoned.
+    Poisoned,
+}
+
+/// Pending SAMv3 sessions.
+///
+/// Builds a tunnel pool and waits for one inbound and one outbound tunnel to be built before
+/// returning to [`SamSessionContext`] to `SamServer`, allowing it to start a `Destination`
+/// for the connected client.
+pub struct PendingSamSession<R: Runtime> {
+    /// Session state.
+    state: PendingSessionState<R>,
+}
+
+impl<R: Runtime> PendingSamSession<R> {
+    /// Create new [`PendingSamSession`].
+    pub fn new(
+        socket: SamSocket<R>,
+        session_id: Arc<str>,
+        options: HashMap<String, String>,
+        version: SamVersion,
+        tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
+    ) -> Self {
+        Self {
+            state: PendingSessionState::BuildingTunnelPool {
+                socket,
+                session_id,
+                options,
+                version,
+                tunnel_pool_future,
+            },
+        }
+    }
+}
+
+impl<R: Runtime> Future for PendingSamSession<R> {
+    type Output = crate::Result<SamSessionContext<R>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
+                PendingSessionState::BuildingTunnelPool {
+                    socket,
+                    session_id,
+                    options,
+                    version,
+                    mut tunnel_pool_future,
+                } => match tunnel_pool_future.poll_unpin(cx) {
+                    Poll::Ready(handle) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            "tunnel pool for the session has been built",
+                        );
+
+                        self.state = PendingSessionState::BuildingTunnels {
+                            socket,
+                            session_id,
+                            options,
+                            version,
+                            handle,
+                            inbound: HashMap::new(),
+                            outbound: HashSet::new(),
+                        };
+                    }
+                    Poll::Pending => {
+                        self.state = PendingSessionState::BuildingTunnelPool {
+                            socket,
+                            session_id,
+                            options,
+                            version,
+                            tunnel_pool_future,
+                        };
+                        break;
+                    }
+                },
+                PendingSessionState::BuildingTunnels {
+                    socket,
+                    session_id,
+                    options,
+                    version,
+                    mut handle,
+                    mut inbound,
+                    mut outbound,
+                } => match handle.poll_next_unpin(cx) {
+                    Poll::Pending => {
+                        self.state = PendingSessionState::BuildingTunnels {
+                            socket,
+                            session_id,
+                            options,
+                            version,
+                            handle,
+                            inbound,
+                            outbound,
+                        };
+                        break;
+                    }
+                    Poll::Ready(None) => return Poll::Ready(Err(Error::EssentialTaskClosed)),
+                    Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            %tunnel_id,
+                            "inbound tunnel built for pending session",
+                        );
+                        inbound.insert(tunnel_id, lease);
+
+                        // `SESSION STATUS` shall not be sent until there is
+                        // at least one inbound and outbound tunnel built
+                        if inbound.is_empty() || outbound.is_empty() {
+                            self.state = PendingSessionState::BuildingTunnels {
+                                socket,
+                                session_id,
+                                options,
+                                version,
+                                handle,
+                                inbound,
+                                outbound,
+                            };
+                            continue;
+                        }
+
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            num_inbound = ?inbound.len(),
+                            num_outbound = ?outbound.len(),
+                            "enough tunnels built for a session",
+                        );
+
+                        return Poll::Ready(Ok(SamSessionContext {
+                            inbound,
+                            options,
+                            outbound,
+                            session_id,
+                            socket,
+                            tunnel_pool_handle: handle,
+                        }));
+                    }
+                    Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            %tunnel_id,
+                            "outbound tunnel built for pending session",
+                        );
+                        outbound.insert(tunnel_id);
+
+                        // `SESSION STATUS` shall not be sent until there is
+                        // at least one inbound and outbound tunnel built
+                        if inbound.is_empty() || outbound.is_empty() {
+                            self.state = PendingSessionState::BuildingTunnels {
+                                socket,
+                                session_id,
+                                options,
+                                version,
+                                handle,
+                                inbound,
+                                outbound,
+                            };
+                            continue;
+                        }
+
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            num_inbound = ?inbound.len(),
+                            num_outbound = ?outbound.len(),
+                            "enough tunnels built for a session",
+                        );
+
+                        return Poll::Ready(Ok(SamSessionContext {
+                            inbound,
+                            options,
+                            outbound,
+                            session_id,
+                            socket,
+                            tunnel_pool_handle: handle,
+                        }));
+                    }
+                    Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            %tunnel_id,
+                            "inbound tunnel expired for pending session",
+                        );
+                        inbound.remove(&tunnel_id);
+
+                        self.state = PendingSessionState::BuildingTunnels {
+                            socket,
+                            session_id,
+                            options,
+                            version,
+                            handle,
+                            inbound,
+                            outbound,
+                        };
+                    }
+                    Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            %tunnel_id,
+                            "outbound tunnel expired for pending session",
+                        );
+                        outbound.remove(&tunnel_id);
+
+                        self.state = PendingSessionState::BuildingTunnels {
+                            socket,
+                            session_id,
+                            options,
+                            version,
+                            handle,
+                            inbound,
+                            outbound,
+                        };
+                    }
+                    Poll::Ready(Some(event)) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            ?event,
+                            "unexpected event",
+                        );
+
+                        self.state = PendingSessionState::BuildingTunnels {
+                            socket,
+                            session_id,
+                            options,
+                            version,
+                            handle,
+                            inbound,
+                            outbound,
+                        };
+                    }
+                },
+                PendingSessionState::Poisoned => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "pending session state has been poisoned",
+                    );
+                    debug_assert!(false);
+                    return Poll::Ready(Err(Error::InvalidState));
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+}

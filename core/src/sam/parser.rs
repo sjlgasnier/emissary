@@ -56,7 +56,7 @@ struct ParsedCommand<'a> {
 /// Session kind.
 ///
 /// NOTE: `Datagram` and `Anonymous` are currently unsupported
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SessionKind {
     /// Streaming.
     Stream,
@@ -105,7 +105,7 @@ impl fmt::Display for SamVersion {
 }
 
 /// SAMv3 commands received from the client.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SamCommand {
     /// `HELLO VERSION` message.
     Hello {
@@ -126,6 +126,15 @@ pub enum SamCommand {
         /// Session options.
         options: HashMap<String, String>,
     },
+
+    /// Dummy event
+    Dummy,
+}
+
+impl Default for SamCommand {
+    fn default() -> Self {
+        Self::Dummy
+    }
 }
 
 impl fmt::Display for SamCommand {
@@ -134,6 +143,7 @@ impl fmt::Display for SamCommand {
             Self::Hello { min, max } => write!(f, "SamCommand::Hello({:?}, {:?})", min, max),
             Self::CreateSession { session_id, .. } =>
                 write!(f, "SamCommand::CreateSession({session_id})"),
+            Self::Dummy => unreachable!(),
         }
     }
 }
