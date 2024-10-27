@@ -326,6 +326,14 @@ impl SigningPrivateKey {
     }
 }
 
+impl AsRef<[u8]> for SigningPrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Ed25519(key) => key.as_bytes(),
+        }
+    }
+}
+
 /// Signing public key.
 #[derive(Debug, Clone)]
 pub enum SigningPublicKey {

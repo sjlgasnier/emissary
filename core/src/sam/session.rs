@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
     destination::{Destination, DestinationEvent},
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
@@ -34,7 +34,7 @@ use crate::{
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use hashbrown::HashMap;
 use rand_core::RngCore;
@@ -93,7 +93,7 @@ impl<R: Runtime> SamSession<R> {
             netdb_handle,
         } = context;
 
-        let destination = {
+        let (destination, privkey) = {
             // create encryption and signing keys as this is a transient session
             let (encryption_key, signing_key) = {
                 let mut rng = R::rng();
@@ -106,6 +106,21 @@ impl<R: Runtime> SamSession<R> {
 
             let destination = Dest::new(signing_key.public());
             let destination_id = destination.id();
+
+            // from specification:
+            //
+            // "The $privkey is the base 64 of the concatenation of the Destination followed by the
+            // Private Key followed by the Signing Private Key, optionally followed by the Offline
+            // Signature, which is 663 or more bytes in binary and 884 or more bytes in base 64,
+            // depending on signature type. The binary format is specified in Private Key File."
+            let privkey = {
+                let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
+                out.put_slice(&destination.serialize());
+                out.put_slice(encryption_key.as_ref());
+                out.put_slice(signing_key.as_ref());
+
+                base64_encode(out)
+            };
 
             // create leaseset for the destination and store it in `NetDb`
             let local_leaseset = Bytes::from(
@@ -141,11 +156,15 @@ impl<R: Runtime> SamSession<R> {
                 "start active session",
             );
 
-            Destination::new(destination_id, encryption_key, local_leaseset, netdb_handle)
+            (
+                Destination::new(destination_id, encryption_key, local_leaseset, netdb_handle),
+                privkey,
+            )
         };
 
-        socket
-            .send_message("SESSION STATUS RESULT=OK DESTINATION=hello_world\n".as_bytes().to_vec());
+        socket.send_message(
+            format!("SESSION STATUS RESULT=OK DESTINATION={privkey}\n").as_bytes().to_vec(),
+        );
 
         Self {
             destination,
