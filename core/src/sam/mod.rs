@@ -31,14 +31,14 @@ use crate::{
             connection::{ConnectionKind, PendingSamConnection},
             session::{PendingSamSession, SamSessionContext},
         },
-        session::SamSession,
+        session::{SamSession, SamSessionCommand, SamSessionCommandRecycle},
     },
     tunnel::{TunnelManagerHandle, TunnelPoolConfig},
 };
 
 use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
-use thingbuf::mpsc::{channel, Sender};
+use thingbuf::mpsc::{with_recycle, Sender};
 
 use alloc::{string::String, sync::Arc};
 use core::{
@@ -67,7 +67,7 @@ pub struct SessionContext<R: Runtime, T: 'static + Send + Unpin> {
     futures: R::JoinSet<T>,
 
     /// TX channels for the session.
-    senders: HashMap<Arc<str>, Sender<SamCommand>>,
+    senders: HashMap<Arc<str>, Sender<SamSessionCommand<R>, SamSessionCommandRecycle>>,
 }
 
 impl<R: Runtime, T: 'static + Send + Unpin> SessionContext<R, T> {
@@ -85,7 +85,10 @@ impl<R: Runtime, T: 'static + Send + Unpin> SessionContext<R, T> {
     }
 
     /// Remove the command channel from [`SessionContext`] for `key` if it exists
-    fn remove(&mut self, key: &Arc<str>) -> Option<Sender<SamCommand>> {
+    fn remove(
+        &mut self,
+        key: &Arc<str>,
+    ) -> Option<Sender<SamSessionCommand<R>, SamSessionCommandRecycle>> {
         self.senders.remove(key)
     }
 
@@ -93,7 +96,7 @@ impl<R: Runtime, T: 'static + Send + Unpin> SessionContext<R, T> {
     fn insert(
         &mut self,
         session_id: Arc<str>,
-        tx: Sender<SamCommand>,
+        tx: Sender<SamSessionCommand<R>, SamSessionCommandRecycle>,
         future: impl Future<Output = T> + 'static + Send,
     ) {
         self.senders.insert(session_id, tx);
@@ -103,7 +106,11 @@ impl<R: Runtime, T: 'static + Send + Unpin> SessionContext<R, T> {
 
 impl<R: Runtime> SessionContext<R, Arc<str>> {
     /// Send `command` to an active sesison identified by `session_id`.
-    fn send_command(&self, session_id: &Arc<str>, command: SamCommand) -> Result<(), ChannelError> {
+    fn send_command(
+        &self,
+        session_id: &Arc<str>,
+        command: SamSessionCommand<R>,
+    ) -> Result<(), ChannelError> {
         self.senders
             .get(session_id)
             .ok_or(ChannelError::DoesntExist)?
@@ -255,7 +262,8 @@ impl<R: Runtime> Future for SamServer<R> {
                                 }
                             };
 
-                        let (tx, rx) = channel(COMMAND_CHANNEL_SIZE);
+                        let (tx, rx) =
+                            with_recycle(COMMAND_CHANNEL_SIZE, SamSessionCommandRecycle::default());
                         let netdb_handle = self.netdb_handle.clone();
 
                         self.pending_sessions.insert(
@@ -271,6 +279,29 @@ impl<R: Runtime> Future for SamServer<R> {
                                 netdb_handle,
                             ),
                         )
+                    }
+                    ConnectionKind::Stream {
+                        session_id,
+                        socket,
+                        version,
+                        destination,
+                        options,
+                    } => {
+                        if let Err(error) = self.active_sessions.send_command(
+                            &session_id,
+                            SamSessionCommand::Stream {
+                                socket,
+                                destination,
+                                options,
+                            },
+                        ) {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %session_id,
+                                ?error,
+                                "failed to send stream to active session",
+                            )
+                        }
                     }
                     kind => tracing::warn!(
                         target: LOG_TARGET,

@@ -23,6 +23,7 @@ use crate::{
     runtime::Runtime,
     sam::{
         parser::{SamCommand, SamVersion},
+        session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
@@ -70,7 +71,7 @@ pub struct SamSessionContext<R: Runtime> {
     pub netdb_handle: NetDbHandle,
 
     /// RX channel for receiving commands to an active session.
-    pub receiver: Receiver<SamCommand>,
+    pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 }
 
 /// State of the pending I2CP client session.
@@ -98,7 +99,7 @@ enum PendingSessionState<R: Runtime> {
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
 
         /// RX channel for receiving commands to an active session.
-        receiver: Receiver<SamCommand>,
+        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
     },
 
     /// Building tunnels.
@@ -122,7 +123,7 @@ enum PendingSessionState<R: Runtime> {
         handle: TunnelPoolHandle,
 
         /// RX channel for receiving commands to an active session.
-        receiver: Receiver<SamCommand>,
+        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
         /// Active inbound tunnels and their leases.
         inbound: HashMap<TunnelId, Lease>,
@@ -152,7 +153,7 @@ impl<R: Runtime> PendingSamSession<R> {
         session_id: Arc<str>,
         options: HashMap<String, String>,
         version: SamVersion,
-        receiver: Receiver<SamCommand>,
+        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
         netdb_handle: NetDbHandle,
     ) -> Self {

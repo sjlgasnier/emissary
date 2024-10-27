@@ -51,6 +51,62 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::session";
 
+/// Recycling strategy for [`SamSessionCommand`].
+#[derive(Default, Clone)]
+pub(super) struct SamSessionCommandRecycle(());
+
+impl<R: Runtime> thingbuf::Recycle<SamSessionCommand<R>> for SamSessionCommandRecycle {
+    fn new_element(&self) -> SamSessionCommand<R> {
+        SamSessionCommand::Dummy
+    }
+
+    fn recycle(&self, element: &mut SamSessionCommand<R>) {
+        *element = SamSessionCommand::Dummy;
+    }
+}
+
+/// SAMv3 session commands.
+pub enum SamSessionCommand<R: Runtime> {
+    /// Open virtual stream to `destination` over this connection.
+    Stream {
+        /// SAMv3 socket associated with the outbound stream.
+        socket: SamSocket<R>,
+
+        /// Destination.
+        destination: String,
+
+        /// Options.
+        options: HashMap<String, String>,
+    },
+
+    /// Accept inbond virtual stream over this connection.
+    Accept {
+        /// SAMv3 socket associated with the inbound stream.
+        socket: SamSocket<R>,
+
+        /// Options.
+        options: HashMap<String, String>,
+    },
+
+    /// Forward incoming virtual streams to a TCP listener listening to `port`.
+    Forward {
+        /// SAMv3 socket associated with forwarding.
+        socket: SamSocket<R>,
+
+        /// Port which the TCP listener is listening.
+        port: u16,
+    },
+
+    /// Dummy event, never constructed.
+    Dummy,
+}
+
+impl<R: Runtime> Default for SamSessionCommand<R> {
+    fn default() -> Self {
+        Self::Dummy
+    }
+}
+
 /// Active SAMv3 session.
 pub struct SamSession<R: Runtime> {
     /// [`Destination`] of the session.
@@ -63,7 +119,7 @@ pub struct SamSession<R: Runtime> {
     ///
     /// Commands are dispatched by `SamServer` which ensures that [`SamCommand::CreateSession`]
     /// is never received by an active session.
-    receiver: Receiver<SamCommand>,
+    receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
     /// Session ID.
     session_id: Arc<str>,
@@ -221,14 +277,29 @@ impl<R: Runtime> Future for SamSession<R> {
             match self.receiver.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(SamCommand::Connect {
-                    session_id,
+                Poll::Ready(Some(SamSessionCommand::Stream {
+                    socket,
                     destination,
                     options,
-                })) => {}
-                Poll::Ready(Some(
-                    SamCommand::Hello { .. } | SamCommand::CreateSession { .. } | SamCommand::Dummy,
-                )) => unreachable!(),
+                })) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        %destination,
+                        "connect to destination",
+                    );
+                }
+                Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) => tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = %self.session_id,
+                    "unhandled `STREAM ACCEPT`",
+                ),
+                Poll::Ready(Some(SamSessionCommand::Forward { socket, port })) => tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = %self.session_id,
+                    "unhandled `STREAM FORWARD`",
+                ),
+                Poll::Ready(Some(SamSessionCommand::Dummy)) => unreachable!(),
             }
         }
 
