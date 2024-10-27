@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::destination::protocol::streaming::LOG_TARGET;
+use crate::{destination::protocol::streaming::LOG_TARGET, primitives::Destination};
 
 use nom::{
     bytes::complete::take,
@@ -26,6 +26,126 @@ use nom::{
 };
 
 use alloc::vec::Vec;
+use core::{fmt, str};
+
+/// Flags of the streaming packet.
+pub struct Flags<'a> {
+    /// Included destination, if received.
+    destination: Option<Destination>,
+
+    /// Flags.
+    flags: u16,
+
+    /// Maximum packet size, if received.
+    max_packet_size: Option<u16>,
+
+    /// Offline signature, if received.
+    offline_signature: Option<&'a [u8]>,
+
+    /// Requested delay, if received.
+    requested_delay: Option<u16>,
+
+    /// Included signature, if received.
+    signature: Option<&'a [u8]>,
+}
+
+impl<'a> Flags<'a> {
+    fn new(flags: u16, options: &'a [u8]) -> IResult<&'a [u8], Self> {
+        let (rest, requested_delay) = match (flags >> 6) & 1 == 1 {
+            true => be_u16(options).map(|(rest, requested_delay)| (rest, Some(requested_delay)))?,
+            false => (options, None),
+        };
+
+        let (rest, destination) = match (flags >> 5) & 1 == 1 {
+            true => Destination::parse_frame(rest)
+                .map(|(rest, destination)| (rest, Some(destination)))?,
+            false => (rest, None),
+        };
+
+        let (rest, max_packet_size) = match (flags >> 7) & 1 == 1 {
+            true => be_u16(options).map(|(rest, max_packet_size)| (rest, Some(max_packet_size)))?,
+            false => (options, None),
+        };
+
+        let (rest, offline_signature) = match (flags >> 11) & 1 == 1 {
+            true => todo!("offline signatures not supported"),
+            false => (rest, None),
+        };
+
+        let (rest, signature) = match (flags >> 3) & 1 == 1 {
+            true => take(64usize)(rest).map(|(rest, signature)| (rest, Some(signature)))?,
+            false => (rest, None),
+        };
+
+        Ok((
+            rest,
+            Flags {
+                destination,
+                flags,
+                max_packet_size,
+                offline_signature,
+                requested_delay,
+                signature,
+            },
+        ))
+    }
+
+    /// Has `SYNCHRONIZE` flag been sent.
+    pub fn synchronize(&self) -> bool {
+        self.flags & 1 == 1
+    }
+
+    /// Has `CLOSE` flag been set.
+    pub fn close(&self) -> bool {
+        (self.flags >> 1) & 1 == 1
+    }
+
+    /// Has `RESET` flag been set.
+    pub fn reset(&self) -> bool {
+        (self.flags >> 2) & 1 == 1
+    }
+
+    /// Get included signature, if received.
+    pub fn signature(&self) -> Option<&'a [u8]> {
+        self.signature
+    }
+
+    /// Get included `Destination`, if received.
+    pub fn from_included(&self) -> &Option<Destination> {
+        &self.destination
+    }
+
+    /// Get requested delay, if received.
+    pub fn delay_requested(&self) -> Option<u16> {
+        self.requested_delay
+    }
+
+    /// Get maximum packet size, if received.
+    pub fn max_packet_size(&self) -> Option<u16> {
+        self.max_packet_size
+    }
+
+    /// Has `ECHO` flag been sent.
+    pub fn echo(&self) -> bool {
+        (self.flags >> 9) & 1 == 1
+    }
+
+    /// Has `NO_ACK` flag been sent.
+    pub fn no_ack(&self) -> bool {
+        (self.flags >> 10) & 1 == 1
+    }
+
+    /// Get included offline signature, if received.
+    pub fn offline_signature(&self) -> Option<&'a [u8]> {
+        self.offline_signature
+    }
+}
+
+impl<'a> fmt::Debug for Flags<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Flags").field("flags", &self.flags).finish()
+    }
+}
 
 /// Streaming protocol packet.
 pub struct Packet<'a> {
@@ -48,15 +168,15 @@ pub struct Packet<'a> {
     pub resend_delay: u8,
 
     /// Flags.
-    pub flags: u16,
+    pub flags: Flags<'a>,
 
     /// Payload.
     pub payload: &'a [u8],
 }
 
-impl<'a> core::fmt::Debug for Packet<'a> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let test = core::str::from_utf8(self.payload).unwrap_or("falure");
+impl<'a> fmt::Debug for Packet<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let test = str::from_utf8(self.payload).unwrap_or("falure");
 
         f.debug_struct("Packet")
             .field("send_stream_id", &self.send_stream_id)
@@ -75,7 +195,7 @@ impl<'a> Packet<'a> {
     /// Attempt to parse [`Packet`] from `input`.
     ///
     /// Returns the parsed message and rest of `input` on success.
-    fn parse_frame(input: &'a [u8]) -> IResult<&[u8], Self> {
+    fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (rest, send_stream_id) = be_u32(input)?;
         let (rest, recv_stream_id) = be_u32(rest)?;
         let (rest, seq_nro) = be_u32(rest)?;
@@ -101,9 +221,8 @@ impl<'a> Packet<'a> {
         let (rest, resend_delay) = be_u8(rest)?;
         let (rest, flags) = be_u16(rest)?;
         let (rest, options_size) = be_u16(rest)?;
-        let (rest, _options) = take(options_size)(rest)?;
-
-        // TODO: parse options
+        let (rest, options) = take(options_size)(rest)?;
+        let (rest, flags) = Flags::new(flags, options)?;
 
         Ok((
             &[],
