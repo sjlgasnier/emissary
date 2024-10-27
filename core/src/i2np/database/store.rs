@@ -284,7 +284,7 @@ impl<R: Runtime> DatabaseStore<R> {
                 ))
             }
             StoreType::LeaseSet2 => {
-                let (rest, leaseset) = LeaseSet2::parse_frame(rest).unwrap();
+                let (rest, leaseset) = LeaseSet2::parse_frame(rest)?;
 
                 Ok((
                     rest,
