@@ -140,6 +140,15 @@ pub enum SamCommand {
         options: HashMap<String, String>,
     },
 
+    /// `STREAM ACCEPT` message.
+    Accept {
+        /// Session ID.
+        session_id: String,
+
+        /// Session options.
+        options: HashMap<String, String>,
+    },
+
     /// Dummy event
     Dummy,
 }
@@ -158,6 +167,7 @@ impl fmt::Display for SamCommand {
                 write!(f, "SamCommand::CreateSession({session_id})"),
             Self::Connect { session_id, .. } =>
                 write!(f, "SamCommand::StreamConnect({session_id})"),
+            Self::Accept { session_id, .. } => write!(f, "SamCommand::StreamAccept({session_id})"),
             Self::Dummy => unreachable!(),
         }
     }
@@ -257,6 +267,25 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         .collect(),
                 })
             }
+            ("STREAM", Some("ACCEPT")) => {
+                let session_id = value.key_value_pairs.get("ID").ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "session id missing for `STREAM ACCEPT`"
+                    );
+
+                    ()
+                })?;
+
+                Ok(SamCommand::Accept {
+                    session_id: session_id.to_string(),
+                    options: value
+                        .key_value_pairs
+                        .into_iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect(),
+                })
+            }
             (command, subcommand) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -279,7 +308,12 @@ impl SamCommand {
         let (rest, (command, _, subcommand, _, key_value_pairs)) = tuple((
             alt((tag("HELLO"), tag("SESSION"), tag("STREAM"))),
             opt(char(' ')),
-            opt(alt((tag("VERSION"), tag("CREATE"), tag("CONNECT")))),
+            opt(alt((
+                tag("VERSION"),
+                tag("CREATE"),
+                tag("CONNECT"),
+                tag("ACCEPT"),
+            ))),
             opt(char(' ')),
             opt(parse_key_value_pairs),
         ))(input)?;
@@ -442,5 +476,22 @@ mod tests {
 
         // non-transient destination
         assert!(SamCommand::parse("STREAM CONNECT ID=MM9z52ZwnTTPwfeD SILENT=false",).is_none());
+    }
+
+    #[test]
+    fn parse_stream_accept() {
+        match SamCommand::parse("STREAM ACCEPT ID=MM9z52ZwnTTPwfeD SILENT=false") {
+            Some(SamCommand::Accept {
+                session_id,
+                options,
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // session id missing
+        assert!(SamCommand::parse("STREAM ACCEPT SILENT=false",).is_none());
     }
 }
