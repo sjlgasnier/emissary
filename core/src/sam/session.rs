@@ -221,6 +221,11 @@ impl<R: Runtime> Future for SamSession<R> {
             match self.receiver.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
+                Poll::Ready(Some(SamCommand::Connect {
+                    session_id,
+                    destination,
+                    options,
+                })) => {}
                 Poll::Ready(Some(
                     SamCommand::Hello { .. } | SamCommand::CreateSession { .. } | SamCommand::Dummy,
                 )) => unreachable!(),

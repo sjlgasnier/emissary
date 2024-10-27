@@ -116,12 +116,25 @@ pub enum SamCommand {
         max: Option<SamVersion>,
     },
 
+    /// `SESSION CREATE` message.
     CreateSession {
         /// Session ID.
         session_id: String,
 
         /// Session kind:
         session_kind: SessionKind,
+
+        /// Session options.
+        options: HashMap<String, String>,
+    },
+
+    /// `STREAM CONNECT` message.
+    Connect {
+        /// Session ID.
+        session_id: String,
+
+        /// Destination.
+        destination: String,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -143,6 +156,8 @@ impl fmt::Display for SamCommand {
             Self::Hello { min, max } => write!(f, "SamCommand::Hello({:?}, {:?})", min, max),
             Self::CreateSession { session_id, .. } =>
                 write!(f, "SamCommand::CreateSession({session_id})"),
+            Self::Connect { session_id, .. } =>
+                write!(f, "SamCommand::StreamConnect({session_id})"),
             Self::Dummy => unreachable!(),
         }
     }
@@ -214,6 +229,34 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         .collect(),
                 })
             }
+            ("STREAM", Some("CONNECT")) => {
+                let session_id = value.key_value_pairs.get("ID").ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "session id missing for `STREAM CONNECT`"
+                    );
+
+                    ()
+                })?;
+                let destination = value.key_value_pairs.get("DESTINATION").ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "destination missing for `STREAM CONNECT`"
+                    );
+
+                    ()
+                })?;
+
+                Ok(SamCommand::Connect {
+                    session_id: session_id.to_string(),
+                    destination: destination.to_string(),
+                    options: value
+                        .key_value_pairs
+                        .into_iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect(),
+                })
+            }
             (command, subcommand) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -236,7 +279,7 @@ impl SamCommand {
         let (rest, (command, _, subcommand, _, key_value_pairs)) = tuple((
             alt((tag("HELLO"), tag("SESSION"), tag("STREAM"))),
             opt(char(' ')),
-            opt(alt((tag("VERSION"), tag("CREATE")))),
+            opt(alt((tag("VERSION"), tag("CREATE"), tag("CONNECT")))),
             opt(char(' ')),
             opt(parse_key_value_pairs),
         ))(input)?;
@@ -369,5 +412,35 @@ mod tests {
             "SESSION CREATE STYLE=RAW ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         )
         .is_none());
+    }
+
+    #[test]
+    fn parse_stream_connect() {
+        match SamCommand::parse(
+            "STREAM CONNECT ID=MM9z52ZwnTTPwfeD DESTINATION=host.i2p SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                destination,
+                options,
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(destination.as_str(), "host.i2p");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // invalid subcommand
+        assert!(SamCommand::parse(
+            "STREAM CREATE ID=MM9z52ZwnTTPwfeD  DESTINATION=host.i2p SILENT=false",
+        )
+        .is_none());
+
+        // session id missing
+        assert!(SamCommand::parse("STREAM CONNECT DESTINATION=host.i2p SILENT=false",).is_none());
+
+        // non-transient destination
+        assert!(SamCommand::parse("STREAM CONNECT ID=MM9z52ZwnTTPwfeD SILENT=false",).is_none());
     }
 }
