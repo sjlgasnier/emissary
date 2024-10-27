@@ -19,6 +19,7 @@
 use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
     destination::{Destination, DestinationEvent},
+    i2cp::I2cpPayload,
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
@@ -247,8 +248,38 @@ impl<R: Runtime> SamSession<R> {
             TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {}
             TunnelPoolEvent::InboundTunnelExpired { tunnel_id } => {}
             TunnelPoolEvent::OutboundTunnelExpired { tunnel_id } => {}
-            TunnelPoolEvent::Message { message } =>
-                tracing::warn!(target: LOG_TARGET, "ignoring tunnel message"),
+            TunnelPoolEvent::Message { message } => match self.destination.decrypt_message(message)
+            {
+                Err(error) => tracing::debug!(
+                    target: LOG_TARGET,
+                    session_id = ?self.session_id,
+                    ?error,
+                    "failed to decrypt garlic message",
+                ),
+                Ok(messages) =>
+                    messages.for_each(|message| match I2cpPayload::decompress::<R>(message) {
+                        Some(I2cpPayload {
+                            dst_port,
+                            payload,
+                            protocol,
+                            src_port,
+                        }) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                session_id = ?self.session_id,
+                                ?dst_port,
+                                ?src_port,
+                                ?protocol,
+                                "handle protocol payload",
+                            );
+                        }
+                        None => tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            "failed to decompress i2cp payload",
+                        ),
+                    }),
+            },
             TunnelPoolEvent::TunnelPoolShutDown | TunnelPoolEvent::Dummy => unreachable!(),
         }
     }
