@@ -26,6 +26,7 @@ use crate::{
     },
     netdb::NetDbHandle,
     primitives::{Destination as Dest, LeaseSet2, LeaseSet2Header},
+    protocol::Protocol,
     runtime::Runtime,
     sam::{
         parser::{SamCommand, SamVersion},

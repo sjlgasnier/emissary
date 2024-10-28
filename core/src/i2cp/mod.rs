@@ -50,6 +50,8 @@ mod pending;
 mod session;
 mod socket;
 
+pub use payload::{I2cpPayload, I2cpPayloadBuilder};
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2cp";
 

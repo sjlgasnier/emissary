@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    destination::{protocol::Protocol, Destination, DestinationEvent},
+    destination::{Destination, DestinationEvent},
     i2cp::{
         message::{
             BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload,
@@ -30,6 +30,7 @@ use crate::{
     i2np::{MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
     netdb::NetDbHandle,
     primitives::{Date, Lease, Str, TunnelId},
+    protocol::Protocol,
     runtime::Runtime,
     tunnel::{TunnelManagerHandle, TunnelPoolEvent, TunnelPoolHandle},
 };

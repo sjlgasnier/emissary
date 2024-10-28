@@ -50,6 +50,7 @@ use core::{
 
 mod parser;
 mod pending;
+mod protocol;
 mod session;
 mod socket;
 

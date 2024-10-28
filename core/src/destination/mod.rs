@@ -39,7 +39,6 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub mod protocol;
 pub mod session;
 
 /// Logging target for the file.

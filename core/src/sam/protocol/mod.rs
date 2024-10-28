@@ -16,32 +16,5 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
-#![allow(unused)]
-
-extern crate alloc;
-
-pub type Result<T> = core::result::Result<T, Error>;
-
-pub use config::{Config, I2cpConfig, Ntcp2Config, SamConfig};
-pub use error::Error;
-
-mod config;
-mod crypto;
-mod destination;
-mod error;
-mod i2cp;
-mod netdb;
-mod router_storage;
-mod sam;
-mod subsystem;
-mod transports;
-mod tunnel;
-mod util;
-
-pub mod i2np;
-pub mod primitives;
-pub mod protocol;
-pub mod router;
-pub mod runtime;
+pub mod datagram;
+pub mod streaming;

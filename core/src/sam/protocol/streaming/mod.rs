@@ -380,6 +380,13 @@ impl<R: Runtime> StreamManager<R> {
             return Err(StreamingError::ReplayProtectionCheckFailed);
         }
 
+        tracing::info!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            payload_len = ?payload.len(),
+            "syn processed",
+        );
+
         Ok(())
     }
 
@@ -390,10 +397,6 @@ impl<R: Runtime> StreamManager<R> {
         dst_port: u16,
         payload: Vec<u8>,
     ) -> Result<(), StreamingError> {
-        tracing::trace!(
-            "streaing payload receievd, dsetination id = {:?}, payload = {payload:?}",
-            self.destination_id.to_vec()
-        );
         let packet = Packet::parse(&payload).ok_or(StreamingError::Malformed)?;
 
         // handle new stream
@@ -410,9 +413,8 @@ impl<R: Runtime> StreamManager<R> {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::mock::MockRuntime;
-
     use super::*;
+    use crate::runtime::mock::MockRuntime;
     use bytes::{BufMut, BytesMut};
 
     #[tokio::test]

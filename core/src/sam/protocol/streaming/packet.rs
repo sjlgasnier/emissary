@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{destination::protocol::streaming::LOG_TARGET, primitives::Destination};
+use crate::{primitives::Destination, sam::protocol::streaming::LOG_TARGET};
 
 use nom::{
     bytes::complete::take,
