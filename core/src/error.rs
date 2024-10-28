@@ -94,6 +94,26 @@ impl fmt::Display for QueryError {
 pub enum StreamingError {
     /// Mismatch between send and receive stream IDs.
     StreamIdMismatch(u32, u32),
+
+    /// Signature missing from `SYN` packet.
+    SignatureMissing,
+
+    /// Destination mssing from `SYN` packet.
+    DestinationMissing,
+
+    /// Verifying key missing from included destination.
+    VerifyingKeyMissing,
+
+    /// Replay protection check failed.
+    ///
+    /// NACk field didn't contain destination's ID.
+    ReplayProtectionCheckFailed,
+
+    /// Invalid signature.
+    InvalidSignature,
+
+    /// Malformed packet.
+    Malformed,
 }
 
 impl fmt::Display for StreamingError {
@@ -101,6 +121,13 @@ impl fmt::Display for StreamingError {
         match self {
             Self::StreamIdMismatch(send, recv) =>
                 write!(f, "stream mismatch: {send} (send) vs {recv} (recv)"),
+            Self::SignatureMissing => write!(f, "signature missing"),
+            Self::DestinationMissing => write!(f, "destination missing"),
+            Self::VerifyingKeyMissing => write!(f, "verifying key mssing"),
+            Self::ReplayProtectionCheckFailed =>
+                write!(f, "nack field didn't contain correct destination id"),
+            Self::InvalidSignature => write!(f, "invalid signature"),
+            Self::Malformed => write!(f, "malformed packet"),
         }
     }
 }
