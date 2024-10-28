@@ -63,8 +63,8 @@ impl<'a> Flags<'a> {
         };
 
         let (rest, max_packet_size) = match (flags >> 7) & 1 == 1 {
-            true => be_u16(options).map(|(rest, max_packet_size)| (rest, Some(max_packet_size)))?,
-            false => (options, None),
+            true => be_u16(rest).map(|(rest, max_packet_size)| (rest, Some(max_packet_size)))?,
+            false => (rest, None),
         };
 
         let (rest, offline_signature) = match (flags >> 11) & 1 == 1 {
