@@ -372,6 +372,17 @@ impl SigningPublicKey {
         }
     }
 
+    pub fn verify_new(&self, message: &[u8], signature: &[u8]) -> crate::Result<()> {
+        match self {
+            Self::Ed25519(key) => {
+                let signature: [u8; 64] = signature.try_into().map_err(|_| Error::InvalidData)?;
+                let signature = ed25519_dalek::Signature::from_bytes(&signature);
+
+                key.verify_strict(&message, &signature).map_err(From::from)
+            }
+        }
+    }
+
     /// Convert public key to byte array
     pub fn to_bytes(&self) -> [u8; 32] {
         match self {
