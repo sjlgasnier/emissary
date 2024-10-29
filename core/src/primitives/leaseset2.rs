@@ -302,7 +302,7 @@ impl LeaseSet2 {
         bytes.put_u8(3u8);
         bytes.put_slice(&input[..input.len() - rest.len()]);
 
-        match header.destination.signing_key() {
+        match header.destination.verifying_key() {
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,

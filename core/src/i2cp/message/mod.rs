@@ -459,11 +459,11 @@ impl Message {
         let (rest, date) = Date::parse_frame(rest).ok()?;
         let (rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
 
-        match destination.signing_key() {
+        match destination.verifying_key() {
             None => tracing::debug!(
                 target: LOG_TARGET,
                 id = %destination.id(),
-                "no signing key in destination, cannot verify signature",
+                "no verifying key in destination, cannot verify signature",
             ),
             Some(signing_key) =>
                 if let Err(error) = signing_key.verify(input.as_ref(), signature) {

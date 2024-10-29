@@ -102,8 +102,8 @@ impl<T: AsRef<[u8]>> From<T> for DestinationId {
 /// Destination.
 #[derive(Debug, Clone)]
 pub struct Destination {
-    /// Destination's signing key.
-    signing_key: Option<SigningPublicKey>,
+    /// Destination's verifying key.
+    verifying_key: Option<SigningPublicKey>,
 
     /// Destinations' identity hash.
     identity_hash: Bytes,
@@ -113,12 +113,12 @@ pub struct Destination {
 }
 
 impl Destination {
-    /// Create new [`Destination`] from `signing_key`.
-    pub fn new(signing_key: SigningPublicKey) -> Self {
+    /// Create new [`Destination`] from `verifying_key`.
+    pub fn new(verifying_key: SigningPublicKey) -> Self {
         let identity_hash = Sha256::new()
             .update(
                 Self {
-                    signing_key: Some(signing_key.clone()),
+                    verifying_key: Some(verifying_key.clone()),
                     identity_hash: Bytes::from(vec![0]),
                     destination_id: DestinationId::from(vec![0]),
                 }
@@ -127,7 +127,7 @@ impl Destination {
             .finalize();
 
         Self {
-            signing_key: Some(signing_key),
+            verifying_key: Some(verifying_key),
             identity_hash: Bytes::from(identity_hash.clone()),
             destination_id: DestinationId::from(identity_hash),
         }
@@ -153,7 +153,7 @@ impl Destination {
         let (rest, certificate_kind) = be_u8(rest)?;
         let (rest, certificate_len) = be_u16(rest)?;
 
-        let (rest, signing_key, destination_len) = match (certificate_kind, certificate_len) {
+        let (rest, verifying_key, destination_len) = match (certificate_kind, certificate_len) {
             (NULL_CERTIFICATE, _) => (rest, None, DESTINATION_WITH_NULL_CERT_LEN),
             (KEY_CERTIFICATE, KEY_CERTIFICATE_LEN) => {
                 let (rest, signing_key_kind) = be_u16(rest)?;
@@ -194,7 +194,7 @@ impl Destination {
         Ok((
             rest,
             Destination {
-                signing_key,
+                verifying_key,
                 identity_hash: identity_hash.clone(),
                 destination_id: DestinationId::from(identity_hash),
             },
@@ -213,9 +213,9 @@ impl Destination {
         out.put_slice(&[0u8; 32]);
         out.put_slice(&[0u8; 320]);
 
-        match &self.signing_key {
+        match &self.verifying_key {
             None => {
-                out.put_slice(&[0u8; 32]); // empty signing key
+                out.put_slice(&[0u8; 32]); // empty verifying key
                 out.put_u8(NULL_CERTIFICATE);
                 out.put_u16(NULL_CERTIFICATE_LEN);
             }
@@ -223,7 +223,7 @@ impl Destination {
                 out.put_slice(&signing_key.to_bytes());
                 out.put_u8(KEY_CERTIFICATE);
                 out.put_u16(KEY_CERTIFICATE_LEN);
-                out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519); // signing key type
+                out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519); // verifying key type
                 out.put_u16(0u16); // public key type
             }
         }
@@ -233,7 +233,7 @@ impl Destination {
 
     /// Get serialized length of [`Destination`].
     pub fn serialized_len(&self) -> usize {
-        let certificate_payload_len = self.signing_key.as_ref().map_or(0usize, |_| 4usize);
+        let certificate_payload_len = self.verifying_key.as_ref().map_or(0usize, |_| 4usize);
 
         32usize // all zeros public key
             .saturating_add(320usize) // padding
@@ -249,8 +249,8 @@ impl Destination {
     }
 
     /// Get reference to `SigningPublicKey` of the [`Destination`].
-    pub fn signing_key(&self) -> Option<&SigningPublicKey> {
-        self.signing_key.as_ref()
+    pub fn verifying_key(&self) -> Option<&SigningPublicKey> {
+        self.verifying_key.as_ref()
     }
 }
 
@@ -268,8 +268,8 @@ mod tests {
 
         assert_eq!(parsed.destination_id, destination.destination_id);
         assert_eq!(
-            parsed.signing_key.unwrap().to_bytes(),
-            destination.signing_key.unwrap().to_bytes()
+            parsed.verifying_key.unwrap().to_bytes(),
+            destination.verifying_key.unwrap().to_bytes()
         );
     }
 

@@ -339,7 +339,7 @@ impl<R: Runtime> StreamManager<R> {
     /// Additionally ensure that the NACK field contains local destination's ID.
     ///
     /// If validity checks pass, send the message to a listener if it exists.
-    fn on_synchronize(&mut self, payload: &[u8], packet: Packet) -> Result<(), StreamingError> {
+    fn on_synchronize(&mut self, original: &[u8], packet: Packet) -> Result<(), StreamingError> {
         let Packet {
             send_stream_id,
             recv_stream_id,
@@ -355,18 +355,6 @@ impl<R: Runtime> StreamManager<R> {
         let destination =
             flags.from_included().as_ref().ok_or(StreamingError::DestinationMissing)?;
 
-        match destination.signing_key() {
-            None => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "verifying key missing from destination",
-                );
-                return Err(StreamingError::VerifyingKeyMissing);
-            }
-            Some(_) => {} // TODO: verify signature
-        }
-
         let destination_id = nacks
             .into_iter()
             .fold(BytesMut::with_capacity(32), |mut acc, x| {
@@ -380,11 +368,46 @@ impl<R: Runtime> StreamManager<R> {
             return Err(StreamingError::ReplayProtectionCheckFailed);
         }
 
+        // verify signature
+        {
+            match destination.verifying_key() {
+                None => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        "verifying key missing from destination",
+                    );
+                    return Err(StreamingError::VerifyingKeyMissing);
+                }
+                Some(verifying_key) => {
+                    // signature field is the last field of options, meaning it starts at
+                    // `original.len() - payload.len() - SIGNATURE_LEN`
+                    //
+                    // in order to verify the signature, the calculated signature must be filled
+                    // with zeros
+                    let mut original = original.to_vec();
+                    let signature_start = original.len() - payload.len() - SIGNATURE_LEN;
+                    original[signature_start..signature_start + SIGNATURE_LEN]
+                        .copy_from_slice(&[0u8; 64]);
+
+                    verifying_key.verify_new(&original, signature).map_err(|error| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to verify packet signature"
+                        );
+
+                        StreamingError::InvalidSignature
+                    })?;
+                }
+            }
+        }
+
         tracing::info!(
             target: LOG_TARGET,
             local = %self.destination_id,
             payload_len = ?payload.len(),
-            "syn processed",
+            "inbound stream accepted",
         );
 
         Ok(())

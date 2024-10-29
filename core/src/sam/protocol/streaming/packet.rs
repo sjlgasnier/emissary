@@ -675,7 +675,7 @@ mod tests {
         let dest = flags.from_included().as_ref().unwrap();
 
         assert_eq!(
-            dest.signing_key().unwrap().to_bytes(),
+            dest.verifying_key().unwrap().to_bytes(),
             signing_key.public().to_bytes()
         );
         assert_eq!(dest.id(), destination.id());
@@ -739,7 +739,7 @@ mod tests {
         let dest = flags.from_included().as_ref().unwrap();
 
         assert_eq!(
-            dest.signing_key().unwrap().to_bytes(),
+            dest.verifying_key().unwrap().to_bytes(),
             signing_key.public().to_bytes()
         );
         assert_eq!(dest.id(), destination.id());
@@ -790,7 +790,7 @@ mod tests {
         // verify signature
         {
             let destination = packet.flags.from_included().clone().unwrap();
-            let verifying_key = destination.signing_key().clone().unwrap();
+            let verifying_key = destination.verifying_key().clone().unwrap();
             let signature = packet.flags.signature().clone().unwrap();
             let signature_offset = serialized.len() - SIGNATURE_LEN - packet.payload.len();
 
