@@ -149,6 +149,18 @@ pub enum SamCommand {
         options: HashMap<String, String>,
     },
 
+    /// `STREAM FORWARD` message.
+    Forward {
+        /// Session ID.
+        session_id: String,
+
+        /// Port where the TCP listener is listening on.
+        port: u16,
+
+        /// Session options.
+        options: HashMap<String, String>,
+    },
+
     /// Dummy event
     Dummy,
 }
@@ -168,6 +180,7 @@ impl fmt::Display for SamCommand {
             Self::Connect { session_id, .. } =>
                 write!(f, "SamCommand::StreamConnect({session_id})"),
             Self::Accept { session_id, .. } => write!(f, "SamCommand::StreamAccept({session_id})"),
+            Self::Forward { session_id, .. } => write!(f, "SamCommand::Forward({session_id})"),
             Self::Dummy => unreachable!(),
         }
     }
@@ -286,6 +299,39 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         .collect(),
                 })
             }
+            ("STREAM", Some("FORWARD")) => {
+                let session_id = value.key_value_pairs.get("ID").ok_or_else(|| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "session id missing for `STREAM FORWARD`"
+                    );
+
+                    ()
+                })?;
+                let port = value
+                    .key_value_pairs
+                    .get("PORT")
+                    .ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "destination missing for `STREAM FORWARD`"
+                        );
+
+                        ()
+                    })?
+                    .parse::<u16>()
+                    .map_err(|error| ())?;
+
+                Ok(SamCommand::Forward {
+                    session_id: session_id.to_string(),
+                    port,
+                    options: value
+                        .key_value_pairs
+                        .into_iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect(),
+                })
+            }
             (command, subcommand) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -313,6 +359,7 @@ impl SamCommand {
                 tag("CREATE"),
                 tag("CONNECT"),
                 tag("ACCEPT"),
+                tag("FORWARD"),
             ))),
             opt(char(' ')),
             opt(parse_key_value_pairs),
@@ -492,6 +539,28 @@ mod tests {
         }
 
         // session id missing
-        assert!(SamCommand::parse("STREAM ACCEPT SILENT=false",).is_none());
+        assert!(SamCommand::parse("STREAM ACCEPT SILENT=false").is_none());
+    }
+
+    #[test]
+    fn parse_stream_forward() {
+        match SamCommand::parse("STREAM FORWARD ID=MM9z52ZwnTTPwfeD PORT=8888 SILENT=false") {
+            Some(SamCommand::Forward {
+                session_id,
+                port,
+                options,
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(port, 8888);
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // session id missing
+        assert!(SamCommand::parse("STREAM FORWARD PORT=8888 SILENT=false").is_none());
+
+        // port missing
+        assert!(SamCommand::parse("STREAM FORWARD ID=MM9z52ZwnTTPwfeD SILENT=false").is_none());
     }
 }
