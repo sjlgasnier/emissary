@@ -97,6 +97,9 @@ pub enum SamSessionCommand<R: Runtime> {
 
         /// Port which the TCP listener is listening.
         port: u16,
+
+        /// Options.
+        options: HashMap<String, String>,
     },
 
     /// Dummy event, never constructed.
@@ -326,7 +329,11 @@ impl<R: Runtime> Future for SamSession<R> {
                     session_id = %self.session_id,
                     "unhandled `STREAM ACCEPT`",
                 ),
-                Poll::Ready(Some(SamSessionCommand::Forward { socket, port })) => tracing::warn!(
+                Poll::Ready(Some(SamSessionCommand::Forward {
+                    socket,
+                    port,
+                    options,
+                })) => tracing::warn!(
                     target: LOG_TARGET,
                     session_id = %self.session_id,
                     "unhandled `STREAM FORWARD`",

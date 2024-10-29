@@ -300,7 +300,48 @@ impl<R: Runtime> Future for SamServer<R> {
                                 target: LOG_TARGET,
                                 %session_id,
                                 ?error,
-                                "failed to send stream to active session",
+                                "failed to send `STREAM CONNECT` to active session",
+                            )
+                        }
+                    }
+                    ConnectionKind::Accept {
+                        session_id,
+                        socket,
+                        version,
+                        options,
+                    } => {
+                        if let Err(error) = self.active_sessions.send_command(
+                            &session_id,
+                            SamSessionCommand::Accept { socket, options },
+                        ) {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %session_id,
+                                ?error,
+                                "failed to send `STREAM ACCEPT` to active session",
+                            )
+                        }
+                    }
+                    ConnectionKind::Forward {
+                        session_id,
+                        socket,
+                        version,
+                        port,
+                        options,
+                    } => {
+                        if let Err(error) = self.active_sessions.send_command(
+                            &session_id,
+                            SamSessionCommand::Forward {
+                                socket,
+                                port,
+                                options,
+                            },
+                        ) {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %session_id,
+                                ?error,
+                                "failed to send `STREAM FORWARD` to active session",
                             )
                         }
                     }
