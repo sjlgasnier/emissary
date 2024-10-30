@@ -31,6 +31,7 @@ use crate::{
     sam::{
         parser::{SamCommand, SamVersion},
         pending::session::SamSessionContext,
+        protocol::streaming::StreamManager,
         socket::SamSocket,
     },
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
@@ -132,6 +133,9 @@ pub struct SamSession<R: Runtime> {
     /// Socket for reading session-related commands from the client.
     socket: SamSocket<R>,
 
+    /// I2P virtual stream manager.
+    stream_manager: StreamManager<R>,
+
     /// Tunnel pool handle.
     tunnel_pool_handle: TunnelPoolHandle,
 
@@ -154,7 +158,7 @@ impl<R: Runtime> SamSession<R> {
             netdb_handle,
         } = context;
 
-        let (destination, privkey) = {
+        let (destination, destination_id, privkey, signing_key) = {
             // create encryption and signing keys as this is a transient session
             let (encryption_key, signing_key) = {
                 let mut rng = R::rng();
@@ -218,8 +222,15 @@ impl<R: Runtime> SamSession<R> {
             );
 
             (
-                Destination::new(destination_id, encryption_key, local_leaseset, netdb_handle),
+                Destination::new(
+                    destination_id.clone(),
+                    encryption_key,
+                    local_leaseset,
+                    netdb_handle,
+                ),
+                destination_id,
                 privkey,
+                signing_key,
             )
         };
 
@@ -233,6 +244,7 @@ impl<R: Runtime> SamSession<R> {
             receiver,
             session_id,
             socket,
+            stream_manager: StreamManager::new(destination_id, signing_key),
             tunnel_pool_handle,
             version,
         }
@@ -271,11 +283,33 @@ impl<R: Runtime> SamSession<R> {
                             tracing::trace!(
                                 target: LOG_TARGET,
                                 session_id = ?self.session_id,
-                                ?dst_port,
                                 ?src_port,
+                                ?dst_port,
                                 ?protocol,
                                 "handle protocol payload",
                             );
+
+                            match protocol {
+                                Protocol::Streaming => {
+                                    if let Err(error) =
+                                        self.stream_manager.on_message(src_port, dst_port, payload)
+                                    {
+                                        tracing::warn!(
+                                            target: LOG_TARGET,
+                                            ?src_port,
+                                            ?dst_port,
+                                            session_id = ?self.session_id,
+                                            ?error,
+                                            "failed to handle streaming protocol packet",
+                                        );
+                                    }
+                                }
+                                protocol => tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?protocol,
+                                    "unsupported protocol",
+                                ),
+                            }
                         }
                         None => tracing::warn!(
                             target: LOG_TARGET,

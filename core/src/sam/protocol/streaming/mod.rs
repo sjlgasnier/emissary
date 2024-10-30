@@ -16,320 +16,107 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// use bytes::{BufMut, BytesMut};
-// use nom::{
-//     bytes::complete::take,
-//     error::{make_error, ErrorKind},
-//     number::complete::{be_u16, be_u32, be_u8},
-//     Err, IResult,
-// };
-// use rand_core::RngCore;
-
-// use alloc::{collections::VecDeque, vec::Vec};
-// use core::{
-//     marker::PhantomData,
-//     pin::Pin,
-//     task::{Context, Poll, Waker},
-// };
-
-// /// Logging target for the file.
-// const LOG_TARGET: &str = "emissary::protocol::streaming";
-
-// /// Stream state.
-// enum StreamState {
-//     /// Outbound stream has been initiated.
-//     OutboundInitiated {
-//         /// Receive stream ID.
-//         recv_stream_id: u32,
-
-//         /// Sequence number.
-//         seq_nro: u32,
-//     },
-
-//     /// Stream is open.
-//     Open {
-//         /// Receive stream ID.
-//         recv_stream_id: u32,
-
-//         /// Send stream ID.
-//         send_stream_id: u32,
-
-//         /// Sequence number.
-//         seq_nro: u32,
-//     },
-// }
-
-// impl StreamState {
-//     /// Get receive stream ID.
-//     fn recv_stream_id(&self) -> u32 {
-//         match self {
-//             Self::OutboundInitiated { recv_stream_id, .. } => *recv_stream_id,
-//             Self::Open { recv_stream_id, .. } => *recv_stream_id,
-//         }
-//     }
-// }
-
-// /// Streaming protocol instance.
-// pub struct Stream<R: Runtime> {
-//     /// Stream state.
-//     state: StreamState,
-
-//     /// Pending events.
-//     pending_events: VecDeque<StreamEvent>,
-
-//     /// Waker.
-//     waker: Option<Waker>,
-
-//     /// Marker for `Runtime`.
-//     _runtime: PhantomData<R>,
-// }
-
-// impl<R: Runtime> Stream<R> {
-//     /// Create new outbound [`Stream`].
-//     pub fn new_outbound(destination: Dest) -> (Self, BytesMut) {
-//         let mut payload = "GET / HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nUser-Agent:
-// Mozilla/5.0\r\nAccept: text/html\r\n\r\n".as_bytes();         let mut out =
-// BytesMut::with_capacity(payload.len() + 22 + destination.serialized_len());
-
-//         let recv_stream_id = R::rng().next_u32();
-//         let seq_nro = 0u32;
-
-//         out.put_u32(0u32); // send stream id
-//         out.put_u32(recv_stream_id);
-//         out.put_u32(seq_nro);
-//         out.put_u32(0u32); // ack through
-//         out.put_u8(0u8); // nack count
-
-//         // TODO: signature
-//         out.put_u8(10u8); // resend delay, in seconds
-//         out.put_u16(0x01 | 0x20); // flags: `SYN` + `FROM_INCLUDED`
-
-//         out.put_u16(destination.serialized_len() as u16);
-//         out.put_slice(&destination.serialize());
-//         out.put_slice(&payload);
-
-//         // out.put_u16(0x01 | 0x03 | 0x20); // flags: `SYN` + `SIGNATURE_INCLUDED` +
-// `FROM_INCLUDED`
-
-//         tracing::error!(
-//             target: LOG_TARGET,
-//             destination = %destination.id(),
-//             ?recv_stream_id,
-//             "new outbound stream",
-//         );
-
-//         (
-//             Self {
-//                 state: StreamState::OutboundInitiated {
-//                     recv_stream_id,
-//                     seq_nro,
-//                 },
-//                 pending_events: VecDeque::new(),
-//                 waker: None,
-//                 _runtime: Default::default(),
-//             },
-//             out,
-//         )
-//     }
-
-//     /// Handle streaming protocol packet.
-//     ///
-//     /// Returns a serialized [`Packet`] if `payload` warrants sending a reply to remote.
-//     pub fn handle_packet(&mut self, payload: &[u8]) -> crate::Result<()> {
-//         let Packet {
-//             send_stream_id,
-//             recv_stream_id,
-//             seq_nro,
-//             ack_through,
-//             flags,
-//             payload,
-//             nacks,
-//             ..
-//         } = Packet::parse(payload).ok_or_else(|| {
-//             tracing::warn!(
-//                 target: LOG_TARGET,
-//                 recv_stream_id = ?self.state.recv_stream_id(),
-//                 "failed to parse streaming protocol packet",
-//             );
-
-//             Error::InvalidData
-//         })?;
-
-//         if self.state.recv_stream_id() != send_stream_id {
-//             tracing::warn!(
-//                 target: LOG_TARGET,
-//                 recv_stream_id = ?self.state.recv_stream_id(),
-//                 ?send_stream_id,
-//                 "stream id mismatch",
-//             );
-
-//             return Err(Error::Streaming(StreamingError::StreamIdMismatch(
-//                 send_stream_id,
-//                 self.state.recv_stream_id(),
-//             )));
-//         }
-
-//         tracing::info!("ack received = {ack_through}, sequence number = {seq_nro:}");
-//         tracing::error!("payload = {:?}", core::str::from_utf8(payload));
-
-//         if (flags & 0x02) == 0x02 {
-//             tracing::info!("stream closed");
-
-//             self.pending_events.push_back(StreamEvent::StreamClosed {
-//                 recv_stream_id: self.state.recv_stream_id(),
-//                 send_stream_id: recv_stream_id,
-//             });
-//         }
-
-//         let mut out = BytesMut::with_capacity(22);
-
-//         out.put_u32(recv_stream_id); // send stream id
-//         out.put_u32(self.state.recv_stream_id());
-//         out.put_u32(0);
-//         out.put_u32(seq_nro); // ack through
-//         out.put_u8(0u8); // nack count
-
-//         out.put_u8(10u8); // resend delay, in seconds
-//         out.put_u16(0); // no flags
-
-//         if core::matches!(self.state, StreamState::OutboundInitiated { .. }) {
-//             self.pending_events.push_back(StreamEvent::StreamOpened {
-//                 recv_stream_id: self.state.recv_stream_id(),
-//                 send_stream_id: recv_stream_id,
-//             });
-//         }
-
-//         self.state = StreamState::Open {
-//             recv_stream_id: self.state.recv_stream_id(),
-//             send_stream_id: recv_stream_id,
-//             seq_nro: 1,
-//         };
-
-//         self.pending_events.push_back(StreamEvent::SendPacket { packet: out });
-//         self.waker.take().map(|waker| waker.wake_by_ref());
-
-//         Ok(())
-//     }
-// }
-
-// /// Events emitted by [`Stream`].
-// pub enum StreamEvent {
-//     /// Stream has been opened.
-//     StreamOpened {
-//         /// Receive stream ID.
-//         recv_stream_id: u32,
-
-//         /// Send stream ID.
-//         send_stream_id: u32,
-//     },
-
-//     /// Stream has been closed.
-//     StreamClosed {
-//         /// Receive stream ID.
-//         recv_stream_id: u32,
-
-//         /// Send stream ID.
-//         send_stream_id: u32,
-//     },
-
-//     /// Send packet to remote peer.
-//     SendPacket {
-//         /// Serialized [`Packet`].
-//         packet: BytesMut,
-//     },
-// }
-
-// impl<R: Runtime> futures::Stream for Stream<R> {
-//     type Item = StreamEvent;
-
-//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-//         self.pending_events.pop_front().map_or_else(
-//             || {
-//                 self.waker = Some(cx.waker().clone());
-//                 Poll::Pending
-//             },
-//             |event| Poll::Ready(Some(event)),
-//         )
-//     }
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::{
-//         crypto::{SigningPrivateKey, SigningPublicKey},
-//         runtime::{mock::MockRuntime, Runtime},
-//     };
-//     use futures::StreamExt;
-
-//     #[tokio::test]
-//     async fn stream_id_mismatch() {
-//         let destination =
-//             Dest::new(SigningPublicKey::from_private_ed25519(&vec![1u8; 32]).unwrap());
-//         let (mut stream, packet) = Stream::<MockRuntime>::new_outbound(destination.clone());
-//         let payload = "hello, world".as_bytes();
-
-//         let mut out = BytesMut::with_capacity(payload.len() + 22 + destination.serialized_len());
-
-//         let recv_stream_id = MockRuntime::rng().next_u32();
-//         let seq_nro = 0u32;
-
-//         out.put_u32(stream.state.recv_stream_id().overflowing_add(1).0);
-//         out.put_u32(recv_stream_id);
-//         out.put_u32(seq_nro);
-//         out.put_u32(0u32); // ack through
-//         out.put_u8(0u8); // nack count
-
-//         out.put_u8(10u8); // resend delay, in seconds
-//         out.put_u16(0x01 | 0x20); // flags: `SYN` + `FROM_INCLUDED`
-
-//         out.put_u16(destination.serialized_len() as u16);
-//         out.put_slice(&destination.serialize());
-//         out.put_slice(&payload);
-
-//         match stream.handle_packet(out.as_ref()).unwrap_err() {
-//             Error::Streaming(StreamingError::StreamIdMismatch(send, recv)) => {
-//                 assert_eq!(send, stream.state.recv_stream_id().overflowing_add(1).0);
-//                 assert_eq!(recv, stream.state.recv_stream_id());
-//             }
-//             _ => panic!("invalid error"),
-//         }
-//     }
-// }
-
 use crate::{
+    crypto::SigningPrivateKey,
     error::StreamingError,
     primitives::{Destination as Dest, DestinationId},
     runtime::Runtime,
+    sam::{
+        protocol::streaming::packet::{Packet, PacketBuilder, PeekInfo},
+        socket::SamSocket,
+    },
     Error,
 };
 
 use bytes::{BufMut, BytesMut};
+use hashbrown::HashMap;
+use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
+use core::{marker::PhantomData, time::Duration};
 
 mod config;
 mod packet;
-
-pub use packet::Packet;
+mod stream;
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::protocol::streaming";
+const LOG_TARGET: &str = "emissary::sam::streaming";
+
+/// [`StreamManager`]'s message channel size.
+///
+/// Size of the channel used by all virtual streams to send messages to the network.
+const STREAM_MANAGER_CHANNEL_SIZE: usize = 4096;
+
+/// [`Stream`]'s message channel size.
+///
+/// Size of the channel used to send messages received from the network to a virtual stream.
+const STREAM_CHANNEL_SIZE: usize = 512;
+
+/// How long is an inbound stream kept pending if there are no listeners before it's closed.
+const PENDING_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Signature length.
+const SIGNATURE_LEN: usize = 64usize;
+
+/// Virtual stream listener kind.
+pub enum ListenerKind<R: Runtime> {
+    /// Listener used to accept one inbound virtual stream (`STREAM ACCEPT`).
+    Ephemeral {
+        /// SAMv3 socket used to communicate with the client.
+        socket: SamSocket<R>,
+
+        /// Has the stream configured to be silent.
+        silent: bool,
+    },
+
+    /// Listener used to accept all inbound virtual stream (`STREAM FORWARD`).
+    Persistent {
+        /// SAMv3 socket used the client used to send the `STREAM FORWARD` command.
+        socket: SamSocket<R>,
+
+        /// Port which the persistent TCP listener is listening on.
+        port: u16,
+
+        /// Has the stream configured to be silent.
+        silent: bool,
+    },
+}
 
 /// I2P virtual stream manager.
 pub struct StreamManager<R: Runtime> {
+    /// TX channels for sending [`Packet`]'s to active streams.
+    ///
+    /// Indexed with receive stream ID.
+    active: HashMap<u32, Sender<Vec<u8>>>,
+
     /// ID of the `Destination` the stream manager is bound to.
     destination_id: DestinationId,
 
-    _runtime: core::marker::PhantomData<R>,
+    /// Ephemeral listeners.
+    listeners: VecDeque<SamSocket<R>>,
+
+    /// RX channel for receiving [`Packet`]s from active streams.
+    outbound_rx: Receiver<Vec<u8>>,
+
+    /// TX channel given to active streams they use for sending messages to the network.
+    outbound_tx: Sender<Vec<u8>>,
+
+    /// Signing key.
+    signing_key: SigningPrivateKey,
 }
 
 impl<R: Runtime> StreamManager<R> {
     /// Create new [`StreamManager`].
-    pub fn new(destination_id: DestinationId) -> Self {
+    pub fn new(destination_id: DestinationId, signing_key: SigningPrivateKey) -> Self {
+        let (outbound_tx, outbound_rx) = channel(STREAM_MANAGER_CHANNEL_SIZE);
+
         Self {
+            active: HashMap::new(),
             destination_id,
-            _runtime: Default::default(),
+            listeners: VecDeque::new(),
+            outbound_rx,
+            outbound_tx,
+            signing_key,
         }
     }
 
@@ -339,7 +126,7 @@ impl<R: Runtime> StreamManager<R> {
     /// Additionally ensure that the NACK field contains local destination's ID.
     ///
     /// If validity checks pass, send the message to a listener if it exists.
-    fn on_synchronize(&mut self, original: &[u8], packet: Packet) -> Result<(), StreamingError> {
+    fn on_synchronize(&mut self, packet: Vec<u8>) -> Result<(), StreamingError> {
         let Packet {
             send_stream_id,
             recv_stream_id,
@@ -349,23 +136,26 @@ impl<R: Runtime> StreamManager<R> {
             resend_delay,
             flags,
             payload,
-        } = packet;
+        } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
         let signature = flags.signature().ok_or(StreamingError::SignatureMissing)?;
         let destination =
             flags.from_included().as_ref().ok_or(StreamingError::DestinationMissing)?;
 
-        let destination_id = nacks
-            .into_iter()
-            .fold(BytesMut::with_capacity(32), |mut acc, x| {
-                acc.put_slice(&x.to_be_bytes());
-                acc
-            })
-            .freeze()
-            .to_vec();
+        // verify that the nacks field contains local destination id for replay protection
+        {
+            let destination_id = nacks
+                .into_iter()
+                .fold(BytesMut::with_capacity(32), |mut acc, x| {
+                    acc.put_slice(&x.to_be_bytes());
+                    acc
+                })
+                .freeze()
+                .to_vec();
 
-        if destination_id != self.destination_id.to_vec() {
-            return Err(StreamingError::ReplayProtectionCheckFailed);
+            if destination_id != self.destination_id.to_vec() {
+                return Err(StreamingError::ReplayProtectionCheckFailed);
+            }
         }
 
         // verify signature
@@ -385,7 +175,7 @@ impl<R: Runtime> StreamManager<R> {
                     //
                     // in order to verify the signature, the calculated signature must be filled
                     // with zeros
-                    let mut original = original.to_vec();
+                    let mut original = packet.to_vec();
                     let signature_start = original.len() - payload.len() - SIGNATURE_LEN;
                     original[signature_start..signature_start + SIGNATURE_LEN]
                         .copy_from_slice(&[0u8; 64]);
@@ -410,6 +200,44 @@ impl<R: Runtime> StreamManager<R> {
             "inbound stream accepted",
         );
 
+        // TODO: send `SYN` reply
+        // TODO: implement packet builder
+
+        // TODO: if there is an ephemeral listener, pop and create `Stream` future
+        // TODO: if there is a persistent listener, connect to the listener
+        // TODO: if there are no listeners, create timer for expiring a the connection
+        // TODO: if listener is persisten, how to do handle initialization cleanly?
+
+        Ok(())
+    }
+
+    /// Register listener into [`StreamManager`].
+    ///
+    /// If `kind` is [`ListenerKind::Ephemeral`], push the listener into a set of pending listeners
+    /// from which it will be taken when an inbound stream is received.
+    ///
+    /// If `kind` is [`ListenerKind::Persistent`], the store the port of the active TCP listener (on
+    /// client side) into [`StreamManager`]'s context and when an inbond stream is received,
+    /// establish new connection to the TCP listener.
+    ///
+    /// Active `STREAM ACCEPT` and `STREAM FORWARD` are mutually exclusive as per the specification.
+    //
+    // TODO: finish this comment
+    pub fn register_listener(&mut self, kind: ListenerKind<R>) -> Result<(), StreamingError> {
+        match (kind, self.listeners.is_empty()) {
+            (ListenerKind::Ephemeral { socket, silent }, true) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    "add new ephemeral listener",
+                );
+            }
+            (ListenerKind::Persistent { .. }, true) => {
+                todo!();
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 
@@ -420,14 +248,14 @@ impl<R: Runtime> StreamManager<R> {
         dst_port: u16,
         payload: Vec<u8>,
     ) -> Result<(), StreamingError> {
-        let packet = Packet::parse(&payload).ok_or(StreamingError::Malformed)?;
+        let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
         // handle new stream
         //
         // both deserialized packet and the original payload are returned
         // so the included signature can be verified
-        if packet.flags.synchronize() {
-            return self.on_synchronize(&payload, packet);
+        if packet.synchronize() {
+            return self.on_synchronize(payload);
         }
 
         Ok(())
@@ -437,8 +265,22 @@ impl<R: Runtime> StreamManager<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::runtime::{
+        mock::{MockRuntime, MockTcpStream},
+        TcpStream,
+    };
     use bytes::{BufMut, BytesMut};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn register_ephemeral_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let (mut stream, _) = stream1.unwrap();
+        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+    }
 
     #[tokio::test]
     async fn inbound_stream() {
@@ -446,7 +288,8 @@ mod tests {
             200, 35, 63, 139, 109, 209, 249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81,
             133, 124, 14, 246, 56, 138, 8, 201, 219, 160, 118, 181, 191, 27,
         ]);
-        let mut mananger = StreamManager::<MockRuntime>::new(destination_id);
+        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let mut mananger = StreamManager::<MockRuntime>::new(destination_id, signing_key);
 
         let payload = vec![
             0, 0, 0, 0, 148, 23, 180, 82, 0, 0, 0, 0, 0, 0, 0, 0, 8, 200, 35, 63, 139, 109, 209,
@@ -482,12 +325,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_signature() {
+        let destination_id = DestinationId::from([
+            200, 35, 63, 139, 109, 209, 249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81,
+            133, 124, 14, 246, 56, 138, 8, 201, 219, 160, 118, 181, 191, 27,
+        ]);
+        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let mut mananger = StreamManager::<MockRuntime>::new(destination_id, signing_key);
+
+        let payload = vec![
+            0, 0, 0, 0, 148, 23, 180, 82, 0, 0, 0, 0, 0, 0, 0, 0, 8, 200, 35, 63, 139, 109, 209,
+            249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81, 133, 124, 14, 246, 56, 138, 8,
+            201, 219, 160, 118, 181, 191, 27, 9, 4, 169, 1, 201, 38, 195, 17, 125, 194, 201, 147,
+            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
+            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
+            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
+            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
+            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
+            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
+            244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4,
+            113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44,
+            250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89,
+            81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195,
+            17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54,
+            252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147,
+            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
+            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
+            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
+            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
+            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
+            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
+            244, 107, 183, 252, 44, 250, 248, 138, 76, 180, 60, 50, 18, 127, 20, 227, 77, 70, 183,
+            45, 98, 87, 86, 53, 211, 46, 229, 46, 211, 83, 237, 74, 202, 66, 177, 167, 84, 212,
+            142, 59, 123, 5, 0, 4, 0, 7, 0, 0, 7, 20, 34, 64, 253, 113, 136, 137, 7, 144, 142, 165,
+            147, 51, 145, 79, 234, 74, 126, 166, 86, 159, 203, 103, 202, 205, 154, 245, 129, 74,
+            180, 253, 6, 52, 63, 37, 90, 147, 60, 180, 195, 134, 209, 104, 48, 24, 178, 46, 155,
+            216, 187, 51, 17, 73, 220, 156, 1, 23, 130, 84, 245, 197, 171, 40, 76, 6,
+        ];
+
+        assert_eq!(
+            mananger.on_message(13, 37, payload),
+            Err(StreamingError::InvalidSignature)
+        );
+    }
+
+    #[tokio::test]
     async fn invalid_destination_id() {
         let destination_id = DestinationId::from([
             200, 200, 200, 139, 109, 209, 249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81,
             133, 124, 14, 246, 56, 138, 8, 201, 219, 160, 118, 181, 191, 27,
         ]);
-        let mut mananger = StreamManager::<MockRuntime>::new(destination_id);
+        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let mut mananger = StreamManager::<MockRuntime>::new(destination_id, signing_key);
 
         let payload = vec![
             0, 0, 0, 0, 148, 23, 180, 82, 0, 0, 0, 0, 0, 0, 0, 0, 8, 200, 35, 63, 139, 109, 209,

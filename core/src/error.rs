@@ -114,6 +114,12 @@ pub enum StreamingError {
 
     /// Malformed packet.
     Malformed,
+
+    /// Listener kind mismatch.
+    ///
+    /// Persistent listener registered when one or more ephemeral listeners
+    /// are active or vice versa.
+    ListenerMismatch,
 }
 
 impl fmt::Display for StreamingError {
@@ -128,6 +134,7 @@ impl fmt::Display for StreamingError {
                 write!(f, "nack field didn't contain correct destination id"),
             Self::InvalidSignature => write!(f, "invalid signature"),
             Self::Malformed => write!(f, "malformed packet"),
+            Self::ListenerMismatch => write!(f, "listener kind mismatch"),
         }
     }
 }

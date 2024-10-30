@@ -31,13 +31,13 @@ use crate::{
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use hashbrown::HashMap;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use hashbrown::HashMap;
 
 pub mod session;
 
