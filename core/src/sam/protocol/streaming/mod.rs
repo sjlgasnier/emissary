@@ -22,7 +22,10 @@ use crate::{
     primitives::{Destination as Dest, DestinationId},
     runtime::Runtime,
     sam::{
-        protocol::streaming::packet::{Packet, PacketBuilder, PeekInfo},
+        protocol::streaming::{
+            listener::StreamListener,
+            packet::{Packet, PacketBuilder, PeekInfo},
+        },
         socket::SamSocket,
     },
     Error,
@@ -33,11 +36,14 @@ use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::{marker::PhantomData, time::Duration};
+use core::{fmt, marker::PhantomData, time::Duration};
 
 mod config;
+mod listener;
 mod packet;
 mod stream;
+
+pub use listener::ListenerKind;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::streaming";
@@ -58,30 +64,6 @@ const PENDING_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
 
-/// Virtual stream listener kind.
-pub enum ListenerKind<R: Runtime> {
-    /// Listener used to accept one inbound virtual stream (`STREAM ACCEPT`).
-    Ephemeral {
-        /// SAMv3 socket used to communicate with the client.
-        socket: SamSocket<R>,
-
-        /// Has the stream configured to be silent.
-        silent: bool,
-    },
-
-    /// Listener used to accept all inbound virtual stream (`STREAM FORWARD`).
-    Persistent {
-        /// SAMv3 socket used the client used to send the `STREAM FORWARD` command.
-        socket: SamSocket<R>,
-
-        /// Port which the persistent TCP listener is listening on.
-        port: u16,
-
-        /// Has the stream configured to be silent.
-        silent: bool,
-    },
-}
-
 /// I2P virtual stream manager.
 pub struct StreamManager<R: Runtime> {
     /// TX channels for sending [`Packet`]'s to active streams.
@@ -92,8 +74,8 @@ pub struct StreamManager<R: Runtime> {
     /// ID of the `Destination` the stream manager is bound to.
     destination_id: DestinationId,
 
-    /// Ephemeral listeners.
-    listeners: VecDeque<SamSocket<R>>,
+    /// Stream listener.
+    listener: StreamListener<R>,
 
     /// RX channel for receiving [`Packet`]s from active streams.
     outbound_rx: Receiver<Vec<u8>>,
@@ -112,8 +94,8 @@ impl<R: Runtime> StreamManager<R> {
 
         Self {
             active: HashMap::new(),
-            destination_id,
-            listeners: VecDeque::new(),
+            destination_id: destination_id.clone(),
+            listener: StreamListener::new(destination_id),
             outbound_rx,
             outbound_tx,
             signing_key,
@@ -125,7 +107,9 @@ impl<R: Runtime> StreamManager<R> {
     /// Ensure that signature and destination are in the message and verify their validity.
     /// Additionally ensure that the NACK field contains local destination's ID.
     ///
-    /// If validity checks pass, send the message to a listener if it exists.
+    /// If validity checks pass, send the message to a listener if it exists. If there are no active
+    /// listeners, mark the stream as pending and start a timer for waiting for a new listener to be
+    /// registered. If no listener is registered within the time window, the stream is closed.
     fn on_synchronize(&mut self, packet: Vec<u8>) -> Result<(), StreamingError> {
         let Packet {
             send_stream_id,
@@ -213,31 +197,10 @@ impl<R: Runtime> StreamManager<R> {
 
     /// Register listener into [`StreamManager`].
     ///
-    /// If `kind` is [`ListenerKind::Ephemeral`], push the listener into a set of pending listeners
-    /// from which it will be taken when an inbound stream is received.
-    ///
-    /// If `kind` is [`ListenerKind::Persistent`], the store the port of the active TCP listener (on
-    /// client side) into [`StreamManager`]'s context and when an inbond stream is received,
-    /// establish new connection to the TCP listener.
-    ///
-    /// Active `STREAM ACCEPT` and `STREAM FORWARD` are mutually exclusive as per the specification.
-    //
-    // TODO: finish this comment
+    /// This function calls [`StreamListener::register_listener()`] which either rejects `kind`
+    /// because it's in conflict with an active listener kind, puts the listener on hold because
+    /// there are no active streams or starts an active stream for a pending inbound stream.
     pub fn register_listener(&mut self, kind: ListenerKind<R>) -> Result<(), StreamingError> {
-        match (kind, self.listeners.is_empty()) {
-            (ListenerKind::Ephemeral { socket, silent }, true) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "add new ephemeral listener",
-                );
-            }
-            (ListenerKind::Persistent { .. }, true) => {
-                todo!();
-            }
-            _ => {}
-        }
-
         Ok(())
     }
 
