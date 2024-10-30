@@ -158,6 +158,60 @@ impl<'a> fmt::Debug for Flags<'a> {
     }
 }
 
+/// [`Packet`] peek info.
+///
+/// Used to peek into packet so it can be handled correctly without fully deserializing it.
+pub struct PeekInfo {
+    /// Packet flags.
+    flags: u16,
+
+    /// Receive stream ID.
+    recv_stream_id: u32,
+
+    /// Send stream ID.
+    send_stream_id: u32,
+
+    /// Sequence number of the packet.
+    seq_nro: u32,
+}
+
+impl PeekInfo {
+    /// Has `SYNCHRONIZE` flag been sent.
+    pub fn synchronize(&self) -> bool {
+        self.flags & 1 == 1
+    }
+
+    /// Has `CLOSE` flag been set.
+    pub fn close(&self) -> bool {
+        (self.flags >> 1) & 1 == 1
+    }
+
+    /// Has `RESET` flag been set.
+    pub fn reset(&self) -> bool {
+        (self.flags >> 2) & 1 == 1
+    }
+
+    /// Has `ECHO` flag been sent.
+    pub fn echo(&self) -> bool {
+        (self.flags >> 9) & 1 == 1
+    }
+
+    /// Get send stream ID of the packet.
+    pub fn send_stream_id(&self) -> u32 {
+        self.send_stream_id
+    }
+
+    /// Get receive stream ID of the packet.
+    pub fn recv_stream_id(&self) -> u32 {
+        self.recv_stream_id
+    }
+
+    /// Get sequence number of the packet.
+    pub fn seq_nro(&self) -> u32 {
+        self.seq_nro
+    }
+}
+
 /// Streaming protocol packet.
 pub struct Packet<'a> {
     /// Send stream ID.
@@ -253,6 +307,32 @@ impl<'a> Packet<'a> {
     /// Attempt to parse `input` into [`Packet`].
     pub fn parse(input: &'a [u8]) -> Option<Self> {
         Some(Self::parse_frame(input).ok()?.1)
+    }
+
+    /// Inner implementation of [`Packet::peek()`].
+    fn peek_inner(input: &'a [u8]) -> IResult<&'a [u8], PeekInfo> {
+        let (rest, send_stream_id) = be_u32(input)?;
+        let (rest, recv_stream_id) = be_u32(rest)?;
+        let (rest, seq_nro) = be_u32(rest)?;
+        let (rest, _) = take(4usize)(rest)?;
+        let (rest, nack_count) = be_u8(rest)?;
+        let (rest, _nacks) = take(4 * nack_count + 1)(rest)?;
+        let (rest, flags) = be_u16(rest)?;
+
+        Ok((
+            rest,
+            PeekInfo {
+                flags,
+                recv_stream_id,
+                send_stream_id,
+                seq_nro,
+            },
+        ))
+    }
+
+    /// Peek into serialized [`Packet`] and return relevant information.
+    pub fn peek(input: &'a [u8]) -> Option<PeekInfo> {
+        Some(Self::peek_inner(input).ok()?.1)
     }
 }
 
@@ -818,6 +898,24 @@ mod tests {
 
         assert_eq!(packet.ack_through, 10);
         assert_eq!(packet.nacks, vec![1, 3, 5, 7, 9]);
+    }
+
+    #[test]
+    fn peek_packet() {
+        let serialized = PacketBuilder::new(13371338)
+            .with_send_stream_id(13351336)
+            .with_seq_nro(1337)
+            .with_synchronize()
+            .with_reset()
+            .build();
+
+        let info = Packet::peek(&serialized).unwrap();
+
+        assert!(info.synchronize());
+        assert!(info.reset());
+        assert_eq!(info.recv_stream_id, 13371338);
+        assert_eq!(info.send_stream_id, 13351336);
+        assert_eq!(info.seq_nro, 1337);
     }
 
     #[test]
