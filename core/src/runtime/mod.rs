@@ -33,6 +33,8 @@ use core::{
 
 #[cfg(test)]
 pub mod mock;
+#[cfg(test)]
+pub mod noop;
 
 pub trait AsyncRead {
     fn poll_read(
