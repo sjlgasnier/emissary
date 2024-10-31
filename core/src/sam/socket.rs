@@ -19,6 +19,7 @@
 use crate::{
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     sam::parser::{SamCommand, SamVersion},
+    util::AsyncWriteExt,
 };
 
 use bytes::BytesMut;
@@ -103,6 +104,11 @@ impl<R: Runtime> SamSocket<R> {
     /// Send `message` to client.
     pub fn send_message(&mut self, message: Vec<u8>) {
         self.pending_messages.push_back(message);
+    }
+
+    /// Send `message` to client and block until the message has been fully written.
+    pub async fn send_message_blocking(&mut self, message: Vec<u8>) -> crate::Result<()> {
+        self.stream.write_all(&message).await
     }
 }
 

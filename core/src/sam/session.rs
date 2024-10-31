@@ -19,7 +19,7 @@
 use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
     destination::{Destination, DestinationEvent},
-    i2cp::I2cpPayload,
+    i2cp::{I2cpPayload, I2cpPayloadBuilder},
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
@@ -31,7 +31,7 @@ use crate::{
     sam::{
         parser::{SamCommand, SamVersion},
         pending::session::SamSessionContext,
-        protocol::streaming::StreamManager,
+        protocol::streaming::{ListenerKind, StreamManager},
         socket::SamSocket,
     },
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
@@ -358,20 +358,43 @@ impl<R: Runtime> Future for SamSession<R> {
                         "connect to destination",
                     );
                 }
-                Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) => tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id = %self.session_id,
-                    "unhandled `STREAM ACCEPT`",
-                ),
+                Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) =>
+                    if let Err(error) =
+                        self.stream_manager.register_listener(ListenerKind::Ephemeral {
+                            socket,
+                            silent: options
+                                .get("SILENT")
+                                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+                        })
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            session_id = %self.session_id,
+                            "failed to register ephemeral listener",
+                        );
+                    },
                 Poll::Ready(Some(SamSessionCommand::Forward {
                     socket,
                     port,
                     options,
-                })) => tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id = %self.session_id,
-                    "unhandled `STREAM FORWARD`",
-                ),
+                })) =>
+                    if let Err(error) =
+                        self.stream_manager.register_listener(ListenerKind::Persistent {
+                            socket,
+                            port,
+                            silent: options
+                                .get("SILENT")
+                                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+                        })
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            session_id = %self.session_id,
+                            "failed to register persistent listener",
+                        );
+                    },
                 Poll::Ready(Some(SamSessionCommand::Dummy)) => unreachable!(),
             }
         }
@@ -390,6 +413,36 @@ impl<R: Runtime> Future for SamSession<R> {
                     return Poll::Ready(Arc::clone(&self.session_id));
                 }
                 Poll::Ready(Some(event)) => self.on_tunnel_pool_event(event),
+            }
+        }
+
+        loop {
+            match self.stream_manager.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
+                Poll::Ready(Some((destination_id, message))) => {
+                    // TODO: src and dst ports
+                    let Some(message) = I2cpPayloadBuilder::<R>::new(&message)
+                        .with_protocol(Protocol::Streaming)
+                        .build()
+                    else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            "failed to create i2cp payload",
+                        );
+                        continue;
+                    };
+
+                    if let Err(error) = self.destination.encrypt_message(&destination_id, message) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            ?error,
+                            "failed to encrypt message",
+                        );
+                    };
+                }
             }
         }
 

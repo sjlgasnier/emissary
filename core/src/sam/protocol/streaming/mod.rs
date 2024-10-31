@@ -25,6 +25,7 @@ use crate::{
         protocol::streaming::{
             listener::StreamListener,
             packet::{Packet, PacketBuilder, PeekInfo},
+            stream::StreamContext,
         },
         socket::SamSocket,
     },
@@ -32,11 +33,18 @@ use crate::{
 };
 
 use bytes::{BufMut, BytesMut};
+use futures::StreamExt;
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::{fmt, marker::PhantomData, time::Duration};
+use core::{
+    fmt,
+    marker::PhantomData,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 mod config;
 mod listener;
@@ -78,10 +86,10 @@ pub struct StreamManager<R: Runtime> {
     listener: StreamListener<R>,
 
     /// RX channel for receiving [`Packet`]s from active streams.
-    outbound_rx: Receiver<Vec<u8>>,
+    outbound_rx: Receiver<(DestinationId, Vec<u8>)>,
 
     /// TX channel given to active streams they use for sending messages to the network.
-    outbound_tx: Sender<Vec<u8>>,
+    outbound_tx: Sender<(DestinationId, Vec<u8>)>,
 
     /// Signing key.
     signing_key: SigningPrivateKey,
@@ -184,13 +192,19 @@ impl<R: Runtime> StreamManager<R> {
             "inbound stream accepted",
         );
 
-        // TODO: send `SYN` reply
-        // TODO: implement packet builder
+        // initialize new stream
+        //
+        // TODO: explain in more detail
+        let (tx, rx) = channel(STREAM_CHANNEL_SIZE);
 
-        // TODO: if there is an ephemeral listener, pop and create `Stream` future
-        // TODO: if there is a persistent listener, connect to the listener
-        // TODO: if there are no listeners, create timer for expiring a the connection
-        // TODO: if listener is persisten, how to do handle initialization cleanly?
+        self.listener.register_stream(StreamContext {
+            cmd_rx: rx,
+            event_tx: self.outbound_tx.clone(),
+            local: self.destination_id.clone(),
+            recv_stream_id,
+            remote: destination.id(),
+        });
+        self.active.insert(recv_stream_id, tx);
 
         Ok(())
     }
@@ -201,7 +215,7 @@ impl<R: Runtime> StreamManager<R> {
     /// because it's in conflict with an active listener kind, puts the listener on hold because
     /// there are no active streams or starts an active stream for a pending inbound stream.
     pub fn register_listener(&mut self, kind: ListenerKind<R>) -> Result<(), StreamingError> {
-        Ok(())
+        self.listener.register_listener(kind)
     }
 
     /// Handle `payload` received from `src_port` to `dst_port`.
@@ -213,6 +227,32 @@ impl<R: Runtime> StreamManager<R> {
     ) -> Result<(), StreamingError> {
         let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
+        tracing::error!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            send_stream_id = ?packet.send_stream_id(),
+            recv_stream_id = ?packet.recv_stream_id(),
+            seq_nro = ?packet.seq_nro(),
+            "handle inbound message",
+        );
+
+        // forward received packet to an active handler if it exists
+        if let Some(tx) = self.active.get(&packet.recv_stream_id()) {
+            if let Err(error) = tx.try_send(payload) {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    send_stream_id = ?packet.send_stream_id(),
+                    recv_stream_id = ?packet.recv_stream_id(),
+                    seq_nro = ?packet.seq_nro(),
+                    ?error,
+                    "failed to send packet to stream, dropping",
+                );
+            }
+
+            return Ok(());
+        }
+
         // handle new stream
         //
         // both deserialized packet and the original payload are returned
@@ -222,6 +262,39 @@ impl<R: Runtime> StreamManager<R> {
         }
 
         Ok(())
+    }
+}
+
+impl<R: Runtime> futures::Stream for StreamManager<R> {
+    type Item = (DestinationId, Vec<u8>);
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.outbound_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((destination_id, packet))) =>
+                    return Poll::Ready(Some((destination_id, packet))),
+            }
+        }
+
+        loop {
+            match self.listener.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(stream_id)) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        ?stream_id,
+                        "stream closed"
+                    );
+                    self.active.remove(&stream_id);
+                }
+            }
+        }
+
+        Poll::Pending
     }
 }
 
