@@ -22,7 +22,10 @@ use crate::{
     primitives::DestinationId,
     runtime::{JoinSet, Runtime},
     sam::{
-        protocol::streaming::stream::{Stream, StreamContext},
+        protocol::streaming::{
+            config::StreamConfig,
+            stream::{Stream, StreamContext},
+        },
         socket::SamSocket,
     },
 };
@@ -196,6 +199,7 @@ impl<R: Runtime> StreamListener<R> {
                     socket.into_inner(),
                     initial_message,
                     context,
+                    StreamConfig::default(),
                 ));
 
                 assert!(sockets.is_empty());

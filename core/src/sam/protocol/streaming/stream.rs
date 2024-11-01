@@ -19,7 +19,10 @@
 use crate::{
     primitives::DestinationId,
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
-    sam::protocol::streaming::packet::{Packet, PacketBuilder},
+    sam::protocol::streaming::{
+        config::StreamConfig,
+        packet::{Packet, PacketBuilder},
+    },
 };
 
 use rand_core::RngCore;
@@ -60,6 +63,9 @@ pub struct StreamContext {
 pub struct Stream<R: Runtime> {
     /// RX channel for receiving [`Packet`]s from the network.
     cmd_rx: Receiver<Vec<u8>>,
+
+    /// Stream configuration.
+    config: StreamConfig,
 
     /// TX channel for sending [`Packet`]s to the network.
     event_tx: Sender<(DestinationId, Vec<u8>)>,
@@ -106,6 +112,7 @@ impl<R: Runtime> Stream<R> {
         stream: R::TcpStream,
         initial_message: Option<Vec<u8>>,
         context: StreamContext,
+        config: StreamConfig,
     ) -> Self {
         let StreamContext {
             local,
@@ -126,6 +133,7 @@ impl<R: Runtime> Stream<R> {
 
         Self {
             cmd_rx,
+            config,
             event_tx,
             local,
             recv_stream_id,
