@@ -129,7 +129,7 @@ impl<R: Runtime> Stream<R> {
             .with_synchronize()
             .build();
 
-        event_tx.try_send((remote.clone(), packet.freeze().to_vec())).unwrap();
+        event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
 
         Self {
             cmd_rx,
@@ -178,7 +178,27 @@ impl<R: Runtime> Future for Stream<R> {
                             payload,
                         } = Packet::parse(&message).unwrap();
 
-                        // TODO: ack message
+                        // send ack
+                        let ack = PacketBuilder::new(send_stream_id)
+                            .with_send_stream_id(recv_stream_id)
+                            .with_ack_through(seq_nro)
+                            .with_seq_nro(0)
+                            .build();
+
+                        if let Err(error) =
+                            this.event_tx.try_send((this.remote.clone(), ack.to_vec()))
+                        {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "failed to send ack",
+                            );
+                        }
+
+                        if payload.is_empty() {
+                            this.write_state = WriteState::GetMessage;
+                            continue;
+                        }
 
                         this.write_state = WriteState::WriteMessage {
                             offset: 0usize,
