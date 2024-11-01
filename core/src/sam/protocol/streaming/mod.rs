@@ -227,7 +227,7 @@ impl<R: Runtime> StreamManager<R> {
     ) -> Result<(), StreamingError> {
         let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
-        tracing::error!(
+        tracing::trace!(
             target: LOG_TARGET,
             local = %self.destination_id,
             send_stream_id = ?packet.send_stream_id(),

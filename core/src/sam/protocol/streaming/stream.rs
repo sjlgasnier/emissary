@@ -38,6 +38,9 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::streaming::stream";
 
+/// Read buffer size.
+const READ_BUFFER_SIZE: usize = 8192;
+
 /// Context needed to initialize [`Stream`].
 pub struct StreamContext {
     /// RX channel for receiving [`Packet`]s from the network.
@@ -73,6 +76,15 @@ pub struct Stream<R: Runtime> {
     /// ID of the local destination.
     local: DestinationId,
 
+    /// Next sequence number.
+    next_seq_nro: u32,
+
+    /// Read buffer.
+    read_buffer: Vec<u8>,
+
+    /// Read state.
+    read_state: ReadState,
+
     /// Receive stream ID (selected by remote peer).
     recv_stream_id: u32,
 
@@ -89,6 +101,7 @@ pub struct Stream<R: Runtime> {
     write_state: WriteState,
 }
 
+/// Write state.
 enum WriteState {
     /// Get next message from channel.
     GetMessage,
@@ -103,6 +116,30 @@ enum WriteState {
     },
 
     /// [`WriteState`] has been poisoned.
+    Poisoned,
+}
+
+/// Read state.
+enum ReadState {
+    /// Read message from client.
+    ReadMessage,
+
+    /// Sending message
+    SendMessage {
+        /// Offset into read buffer.
+        offset: usize,
+    },
+
+    /// Awaiting ACK to be received for the sent message.
+    AwaitingAck {
+        /// Sequence number of the message.
+        seq_nro: u32,
+
+        /// Serialized packet.
+        packet: Vec<u8>,
+    },
+
+    /// [`ReadState`] has been poisoned.
     Poisoned,
 }
 
@@ -136,6 +173,9 @@ impl<R: Runtime> Stream<R> {
             config,
             event_tx,
             local,
+            next_seq_nro: 1u32,
+            read_buffer: vec![0u8; READ_BUFFER_SIZE],
+            read_state: ReadState::ReadMessage,
             recv_stream_id,
             remote,
             send_stream_id,
@@ -177,6 +217,23 @@ impl<R: Runtime> Future for Stream<R> {
                             flags,
                             payload,
                         } = Packet::parse(&message).unwrap();
+
+                        tracing::error!(target: LOG_TARGET, "ack through = {ack_through}");
+
+                        match this.read_state {
+                            ReadState::AwaitingAck { seq_nro, .. } => {
+                                tracing::error!(
+                                    target: LOG_TARGET,
+                                    "waiting ack for {seq_nro}, got ack for {ack_through}"
+                                );
+
+                                if seq_nro <= ack_through {
+                                    tracing::info!(target: LOG_TARGET, "ack received");
+                                    this.read_state = ReadState::ReadMessage;
+                                }
+                            }
+                            _ => {}
+                        }
 
                         // send ack
                         let ack = PacketBuilder::new(send_stream_id)
@@ -236,7 +293,93 @@ impl<R: Runtime> Future for Stream<R> {
                 WriteState::Poisoned => {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        local = %this.local,
+                        remote = %this.remote,
                         "write state is poisoned",
+                    );
+                    debug_assert!(false);
+                    return Poll::Ready(this.recv_stream_id);
+                }
+            }
+        }
+
+        loop {
+            match mem::replace(&mut this.read_state, ReadState::Poisoned) {
+                ReadState::ReadMessage =>
+                    match stream.as_mut().poll_read(cx, &mut this.read_buffer) {
+                        Poll::Pending => {
+                            this.read_state = ReadState::ReadMessage;
+                            break;
+                        }
+                        Poll::Ready(Err(error)) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                local = %this.local,
+                                remote = %this.remote,
+                                "socket error",
+                            );
+                            return Poll::Ready(this.recv_stream_id);
+                        }
+                        Poll::Ready((Ok(nread))) => {
+                            if nread == 0 {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    local = %this.local,
+                                    remote = %this.remote,
+                                    "read zero bytes from socket",
+                                );
+                                return Poll::Ready(this.recv_stream_id);
+                            }
+
+                            this.read_state = ReadState::SendMessage { offset: nread };
+                        }
+                    },
+                ReadState::SendMessage { offset } => {
+                    let seq_nro = {
+                        let seq_nro = this.next_seq_nro;
+                        this.next_seq_nro += 1;
+
+                        seq_nro
+                    };
+
+                    tracing::info!(target: LOG_TARGET, "send next packet, seq nro = {seq_nro}");
+
+                    let packet = PacketBuilder::new(this.send_stream_id)
+                        .with_send_stream_id(this.recv_stream_id)
+                        .with_seq_nro(seq_nro)
+                        .with_payload(&this.read_buffer[..offset])
+                        .build();
+
+                    // TODO: retries
+                    if let Err(error) =
+                        this.event_tx.try_send((this.remote.clone(), packet.to_vec()))
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %this.local,
+                            remote = %this.remote,
+                            ?error,
+                            "failed to send packet",
+                        );
+                    }
+
+                    this.read_state = ReadState::AwaitingAck {
+                        seq_nro,
+                        packet: packet.to_vec(),
+                    };
+                    break;
+                }
+                ReadState::AwaitingAck { seq_nro, packet } => {
+                    this.read_state = ReadState::AwaitingAck { seq_nro, packet };
+                    break;
+                }
+                ReadState::Poisoned => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %this.local,
+                        remote = %this.remote,
+                        "read state is poisoned",
                     );
                     debug_assert!(false);
                     return Poll::Ready(this.recv_stream_id);

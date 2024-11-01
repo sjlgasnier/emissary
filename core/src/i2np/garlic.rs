@@ -447,7 +447,7 @@ impl<'a> GarlicMessage<'a> {
         let (rest, size) = be_u16(input)?;
         let (rest, timestamp) = be_u32(rest)?;
 
-        debug_assert!(size == 4, "invalid size for datetime block");
+        debug_assert!(size == 4, "invalid size for datetime block {size:?}");
 
         Ok((rest, GarlicMessageBlock::DateTime { timestamp }))
     }
