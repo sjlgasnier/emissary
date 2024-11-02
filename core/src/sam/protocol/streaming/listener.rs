@@ -18,9 +18,9 @@
 
 use crate::{
     crypto::base64_encode,
-    error::StreamingError,
+    error::{ConnectionError, Error, StreamingError},
     primitives::DestinationId,
-    runtime::{JoinSet, Runtime},
+    runtime::{JoinSet, Runtime, TcpStream},
     sam::{
         protocol::streaming::{
             config::StreamConfig,
@@ -30,12 +30,15 @@ use crate::{
     },
 };
 
-use futures::StreamExt;
+use futures::{future::BoxFuture, StreamExt};
 use nom::AsBytes;
 
 use alloc::collections::VecDeque;
 use core::{
-    fmt, mem,
+    fmt,
+    future::Future,
+    mem,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll, Waker},
 };
@@ -80,6 +83,34 @@ impl<R: Runtime> fmt::Debug for ListenerKind<R> {
     }
 }
 
+/// Listener kind while it's being initialized.
+enum PendingListenerKind {
+    /// Ephemeral listener (`STREAM ACCEPT`).
+    Ephemeral,
+
+    /// Persistent listener (`STREAM FORWARD`).
+    Persistent {
+        /// Port where the TCP listener is listening on.
+        port: u16,
+
+        /// Have the streams been configured to be silent.
+        silent: bool,
+    },
+}
+
+impl fmt::Debug for PendingListenerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ephemeral => f.debug_struct("PendingListenerKind::Ephemeral").finish(),
+            Self::Persistent { port, silent } => f
+                .debug_struct("PendingListenerKind::Persistent")
+                .field("port", &port)
+                .field("silent", &silent)
+                .finish(),
+        }
+    }
+}
+
 /// Listener state.
 ///
 /// [`StreamListener`] can alter between uninitialized, ephemeral and persisten states, depending on
@@ -93,6 +124,20 @@ enum ListenerState<R: Runtime> {
     Uninitialized {
         /// Pending connections.
         pending: VecDeque<()>,
+    },
+
+    /// Listener state is being initialized.
+    ///
+    /// Essentially this means that the connected client is being notified that the accept/forward
+    /// request has been accepted and the socket is busy writing the message to client. Once the
+    /// write has finished, [`StreamListener`] initializes itself to either
+    /// [`ListenerState::Ephemeral`] (`STREAM ACCEPT`) or [`ListenerState::Persistent`] (`STREAM
+    /// FORWARD`).
+    Initializing {
+        /// Listener kind.
+        ///
+        /// Which state shall [`StreamListener`] take after it has been initialized.
+        kind: PendingListenerKind,
     },
 
     /// Listener is configured to be ephemeral.
@@ -126,12 +171,14 @@ impl<R: Runtime> fmt::Debug for ListenerState<R> {
                 .debug_struct("ListenerState::Uninitialized")
                 .field("num_pending", &pending.len())
                 .finish(),
+            Self::Initializing { kind } =>
+                f.debug_struct("ListenerState::Initialzing").field("kind", &kind).finish(),
             Self::Ephemeral { sockets } => f
                 .debug_struct("ListenerState::Ephemeral")
                 .field("num_listeners", &sockets.len())
                 .finish(),
             Self::Persistent { port, .. } => f
-                .debug_struct("ListenerState::Ephemeral")
+                .debug_struct("ListenerState::Persistent")
                 .field("port", &port)
                 .finish_non_exhaustive(),
             Self::Poisoned => f.debug_struct("ListenerState::Poisoned").finish(),
@@ -207,7 +254,49 @@ impl<R: Runtime> StreamListener<R> {
                     pending: VecDeque::new(),
                 };
             }
-            state => panic!("support not implemented for {state:?}"),
+            ListenerState::Persistent {
+                socket,
+                port,
+                silent,
+            } => {
+                // if the socket wasn't configured to be silent, send the remote's destination
+                // to client before the socket is convered into a regural tcp stream
+                let initial_message = (!silent)
+                    .then(|| format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes());
+
+                // start new future for the stream in the background
+                //
+                // if `SILENT` was set to false, the first message `Stream` sends to the connected
+                // client is the destination id of the remote peer after which it transfers to send
+                // anything that was received from the remote peer via `StreamManager`
+                self.streams.push(async move {
+                    let Some(mut stream) = R::TcpStream::connect(SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                        port,
+                    ))
+                    .await
+                    else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to open tcp stream to forwarded listener",
+                        );
+                        return context.recv_stream_id;
+                    };
+
+                    Stream::<R>::new(stream, initial_message, context, StreamConfig::default())
+                        .await
+                });
+
+                self.state = ListenerState::Persistent {
+                    socket,
+                    port,
+                    silent,
+                };
+            }
+            state => {
+                tracing::error!(target: LOG_TARGET, ?state, "state not supported");
+                panic!("support not implemented for {state:?}");
+            }
         }
 
         Ok(())
@@ -264,6 +353,45 @@ impl<R: Runtime> StreamListener<R> {
                 );
                 return Err(StreamingError::ListenerMismatch);
             }
+            (
+                ListenerState::Initializing {
+                    kind: PendingListenerKind::Ephemeral,
+                },
+                ListenerKind::Persistent { .. },
+            ) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    "cannot register persistent listener when ephemeral is being initialized",
+                );
+                return Err(StreamingError::ListenerMismatch);
+            }
+            (
+                ListenerState::Initializing {
+                    kind: PendingListenerKind::Persistent { port, silent },
+                },
+                ListenerKind::Ephemeral { .. },
+            ) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    "cannot register ephemeral listener when persistent is being initialized",
+                );
+                return Err(StreamingError::ListenerMismatch);
+            }
+            (
+                ListenerState::Initializing {
+                    kind: PendingListenerKind::Persistent { port, silent },
+                },
+                ListenerKind::Persistent { .. },
+            ) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    "cannot register duplicate persistent listener",
+                );
+                return Err(StreamingError::ListenerMismatch);
+            }
             _ => {}
         }
 
@@ -279,6 +407,10 @@ impl<R: Runtime> StreamListener<R> {
                         sockets: VecDeque::from_iter([(socket, silent)]),
                     },
                 false => {
+                    self.state = ListenerState::Initializing {
+                        kind: PendingListenerKind::Ephemeral,
+                    };
+
                     self.pending_sockets.push(async move {
                         socket
                             .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
@@ -286,11 +418,35 @@ impl<R: Runtime> StreamListener<R> {
                             .map(|()| socket)
                     });
                     self.waker.take().map(|waker| waker.wake_by_ref());
-                    self.state = ListenerState::Uninitialized {
-                        pending: VecDeque::new(),
-                    };
                 }
             },
+            (
+                ListenerState::Uninitialized { pending },
+                ListenerKind::Persistent {
+                    mut socket,
+                    port,
+                    silent,
+                },
+            ) if pending.is_empty() => {
+                self.state = ListenerState::Initializing {
+                    kind: PendingListenerKind::Persistent { port, silent },
+                };
+
+                // from specification:
+                //
+                // "Whether SILENT is true or false, the SAM bridge always answers with a STREAM
+                // STATUS message. Note that this is a different behavior from STREAM ACCEPT and
+                // STREAM CONNECT when SILENT=true"
+                //
+                // https://geti2p.net/en/docs/api/samv3
+                self.pending_sockets.push(async move {
+                    socket
+                        .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
+                        .await
+                        .map(|()| socket)
+                });
+                self.waker.take().map(|waker| waker.wake_by_ref());
+            }
             state => todo!("not implemented: {state:?}"),
         }
 
@@ -325,6 +481,20 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
                             sockets.push_back((socket, false));
                             self.state = ListenerState::Ephemeral { sockets };
                         }
+                        ListenerState::Initializing { kind } => match kind {
+                            PendingListenerKind::Ephemeral => {
+                                self.state = ListenerState::Ephemeral {
+                                    sockets: VecDeque::from_iter([(socket, false)]),
+                                };
+                            }
+                            PendingListenerKind::Persistent { port, silent } => {
+                                self.state = ListenerState::Persistent {
+                                    socket,
+                                    port,
+                                    silent,
+                                };
+                            }
+                        },
                         ListenerState::Persistent {
                             socket,
                             port,

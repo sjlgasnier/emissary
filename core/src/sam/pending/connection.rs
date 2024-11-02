@@ -355,6 +355,26 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                             options,
                         }));
                     }
+                    Poll::Ready(Some(SamCommand::Forward {
+                        session_id,
+                        port,
+                        options,
+                    })) => {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            %session_id,
+                            ?port,
+                            "forward inbound connections"
+                        );
+
+                        return Poll::Ready(Ok(ConnectionKind::Forward {
+                            session_id: Arc::from(session_id),
+                            socket,
+                            port,
+                            version,
+                            options,
+                        }));
+                    }
                     Poll::Ready(Some(command)) => {
                         tracing::debug!(
                             target: LOG_TARGET,

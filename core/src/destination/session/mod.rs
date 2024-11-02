@@ -176,6 +176,7 @@ impl<R: Runtime> SessionManager<R> {
                     out.freeze().to_vec()
                 })
             }
+            // no active session for `destination_id`, check if pending session exists
             None => match self.pending.get_mut(destination_id) {
                 Some(session) => {
                     let message = GarlicMessageBuilder::new()
@@ -206,6 +207,7 @@ impl<R: Runtime> SessionManager<R> {
                         PendingSessionEvent::CreateSession { message, context } => todo!(),
                     }
                 }
+                // no pending nor active session for `destination_id`, create new outbound session
                 None => {
                     // public key of the destination should exist since the caller (`Destination`)
                     // should've queried the lease set of the remote destination when sending the
