@@ -17,19 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::SigningPrivateKey,
+    crypto::{base64_encode, SigningPrivateKey},
     error::StreamingError,
-    primitives::{Destination as Dest, DestinationId},
-    runtime::Runtime,
-    sam::{
-        protocol::streaming::{
-            listener::StreamListener,
-            packet::{Packet, PacketBuilder, PeekInfo},
-            stream::StreamContext,
-        },
-        socket::SamSocket,
+    primitives::DestinationId,
+    runtime::{JoinSet, Runtime},
+    sam::protocol::streaming::{
+        config::StreamConfig,
+        listener::{SocketKind, StreamListener},
+        packet::Packet,
+        stream::{Stream, StreamContext},
     },
-    Error,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -37,10 +34,8 @@ use futures::StreamExt;
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::vec::Vec;
 use core::{
-    fmt,
-    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -93,6 +88,9 @@ pub struct StreamManager<R: Runtime> {
 
     /// Signing key.
     signing_key: SigningPrivateKey,
+
+    /// Active streams.
+    streams: R::JoinSet<u32>,
 }
 
 impl<R: Runtime> StreamManager<R> {
@@ -107,6 +105,7 @@ impl<R: Runtime> StreamManager<R> {
             outbound_rx,
             outbound_tx,
             signing_key,
+            streams: R::join_set(),
         }
     }
 
@@ -192,19 +191,75 @@ impl<R: Runtime> StreamManager<R> {
             "inbound stream accepted",
         );
 
-        // initialize new stream
+        // attempt to acquire a socket from `StreamListener`
         //
-        // TODO: explain in more detail
-        let (tx, rx) = channel(STREAM_CHANNEL_SIZE);
+        // currently pending connections are not supported so a listener must exist
+        let Some(socket) = self.listener.pop_socket() else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "pending connections are not supported",
+            );
+            debug_assert!(false);
+            return Ok(());
+        };
 
-        self.listener.register_stream(StreamContext {
+        // create context for the stream
+        //
+        // since this is an inbound stream, the stream will be indexed in `active` by the
+        // remote-chosen receive stream id and the local stream will generate itself a random id
+        // when it starts and uses that for sending
+        let (tx, rx) = channel(STREAM_CHANNEL_SIZE);
+        let context = StreamContext {
             cmd_rx: rx,
             event_tx: self.outbound_tx.clone(),
             local: self.destination_id.clone(),
             recv_stream_id,
             remote: destination.id(),
-        });
+        };
+
+        // if the socket wasn't configured to be silent, send the remote's destination
+        // to client before the socket is convered into a regural tcp stream
+        let initial_message = match &socket {
+            SocketKind::Direct { silent, .. } => !silent,
+            SocketKind::Forwarded { silent, .. } => !silent,
+        }
+        .then(|| format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes());
+
+        // store the tx channel of the stream in `StreamManager`'s context
+        //
+        // `StreamManager` sends all inbound messages with `recv_stream_id` to this stream and all
+        // outbound messages from the stream to remote peer are send through `event_tx`
         self.active.insert(recv_stream_id, tx);
+
+        // start new future for the stream in the background
+        //
+        // if `SILENT` was set to false, the first message `Stream` sends to the connected
+        // client is the destination id of the remote peer after which it transfers to send
+        // anything that was received from the remote peer via `StreamManager`
+        //
+        // if the listener was created with `STREAM FORWARD`, a new tcp connection must be opened to
+        // the forwarded listener before the stream can be started and if the listener is not
+        // active, the stream is closed immediately
+        match socket {
+            SocketKind::Direct { socket, .. } => self.streams.push(Stream::<R>::new(
+                socket,
+                initial_message,
+                context,
+                StreamConfig::default(),
+            )),
+            SocketKind::Forwarded { future, .. } => self.streams.push(async move {
+                let Ok(stream) = future.await else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "failed to open tcp stream to forwarded listener",
+                    );
+                    return context.recv_stream_id;
+                };
+
+                Stream::<R>::new(stream, initial_message, context, StreamConfig::default()).await
+            }),
+        }
 
         Ok(())
     }
@@ -233,7 +288,9 @@ impl<R: Runtime> StreamManager<R> {
             send_stream_id = ?packet.send_stream_id(),
             recv_stream_id = ?packet.recv_stream_id(),
             seq_nro = ?packet.seq_nro(),
-            "handle inbound message",
+            ?src_port,
+            ?dst_port,
+            "inbound message",
         );
 
         // forward received packet to an active handler if it exists
@@ -279,7 +336,7 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
         }
 
         loop {
-            match self.listener.poll_next_unpin(cx) {
+            match self.streams.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(stream_id)) => {
@@ -301,11 +358,13 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{
-        mock::{MockRuntime, MockTcpStream},
-        TcpStream,
+    use crate::{
+        runtime::{
+            mock::{MockRuntime, MockTcpStream},
+            TcpStream,
+        },
+        sam::socket::SamSocket,
     };
-    use bytes::{BufMut, BytesMut};
     use tokio::net::TcpListener;
 
     #[tokio::test]

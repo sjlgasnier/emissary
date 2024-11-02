@@ -17,28 +17,18 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::base64_encode,
     error::{ConnectionError, Error, StreamingError},
     primitives::DestinationId,
     runtime::{JoinSet, Runtime, TcpStream},
-    sam::{
-        protocol::streaming::{
-            config::StreamConfig,
-            stream::{Stream, StreamContext},
-        },
-        socket::SamSocket,
-    },
+    sam::socket::SamSocket,
     util::AsyncWriteExt,
 };
 
 use futures::{future::BoxFuture, StreamExt};
-use nom::AsBytes;
 
 use alloc::collections::VecDeque;
 use core::{
-    fmt,
-    future::Future,
-    mem,
+    fmt, mem,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll, Waker},
@@ -82,6 +72,29 @@ impl<R: Runtime> fmt::Debug for ListenerKind<R> {
                 .finish_non_exhaustive(),
         }
     }
+}
+
+/// Socket kind for a listener.
+pub enum SocketKind<R: Runtime> {
+    /// Direct connection opened with `STREAM ACCEPT`.
+    Direct {
+        /// Underlying TCP stream of the SAMv3 socket.
+        socket: R::TcpStream,
+
+        /// Has the stream configured to be silent.
+        silent: bool,
+    },
+
+    /// Forwarded connection open with `STREAM FORWARD`.
+    ///
+    /// Returns a future which attempts to open a TCP stream to the listener.
+    Forwarded {
+        /// Future which opens a new connection to the TCP listener.
+        future: BoxFuture<'static, crate::Result<R::TcpStream>>,
+
+        /// Has the stream configured to be silent.
+        silent: bool,
+    },
 }
 
 /// Listener kind while it's being initialized.
@@ -198,9 +211,6 @@ pub struct StreamListener<R: Runtime> {
     /// Listener state.
     state: ListenerState<R>,
 
-    /// Active streams.
-    streams: R::JoinSet<u32>,
-
     /// Waker, if any.
     waker: Option<Waker>,
 }
@@ -214,99 +224,54 @@ impl<R: Runtime> StreamListener<R> {
             state: ListenerState::Uninitialized {
                 pending: VecDeque::new(),
             },
-            streams: R::join_set(),
             waker: None,
         }
     }
 
-    /// Register inbound `stream`.
-    pub fn register_stream(&mut self, context: StreamContext) -> Result<(), StreamingError> {
-        tracing::debug!(
-            target: LOG_TARGET,
-            local = %self.destination_id,
-            remote = %context.remote,
-            "register stream",
-        );
-
-        match mem::replace(&mut self.state, ListenerState::Poisoned) {
-            ListenerState::Ephemeral { mut sockets } => {
-                // socket must exist since the ephemeral state was active
+    /// Attempt to acquire a socket for an active listener.
+    pub fn pop_socket(&mut self) -> Option<SocketKind<R>> {
+        match &mut self.state {
+            ListenerState::Ephemeral { ref mut sockets } => {
+                // socket must exist since state is `Ephemeral` and not `Uninitialized`
                 let (socket, silent) = sockets.pop_front().expect("to exist");
 
-                // if the socket wasn't configured to be silent, send the remote's destination
-                // to client before the socket is convered into a regural tcp stream
-                let initial_message = (!silent)
-                    .then(|| format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes());
-
-                // start new future for the stream in the background
-                //
-                // if `SILENT` was set to false, the first message `Stream` sends to the connected
-                // client is the destination id of the remote peer after which it transfers to send
-                // anything that was received from the remote peer via `StreamManager`
-                self.streams.push(Stream::<R>::new(
-                    socket.into_inner(),
-                    initial_message,
-                    context,
-                    StreamConfig::default(),
-                ));
-
-                match sockets.is_empty() {
-                    true => {
-                        self.state = ListenerState::Uninitialized {
-                            pending: VecDeque::new(),
-                        };
-                    }
-                    false => {
-                        self.state = ListenerState::Ephemeral { sockets };
-                    }
-                }
-            }
-            ListenerState::Persistent {
-                socket,
-                port,
-                silent,
-            } => {
-                // if the socket wasn't configured to be silent, send the remote's destination
-                // to client before the socket is convered into a regural tcp stream
-                let initial_message = (!silent)
-                    .then(|| format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes());
-
-                // start new future for the stream in the background
-                //
-                // if `SILENT` was set to false, the first message `Stream` sends to the connected
-                // client is the destination id of the remote peer after which it transfers to send
-                // anything that was received from the remote peer via `StreamManager`
-                self.streams.push(async move {
-                    let Some(mut stream) = R::TcpStream::connect(SocketAddr::new(
-                        IpAddr::V4(Ipv4Addr::LOCALHOST),
-                        port,
-                    ))
-                    .await
-                    else {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            "failed to open tcp stream to forwarded listener",
-                        );
-                        return context.recv_stream_id;
+                if sockets.is_empty() {
+                    self.state = ListenerState::Uninitialized {
+                        pending: VecDeque::new(),
                     };
+                }
 
-                    Stream::<R>::new(stream, initial_message, context, StreamConfig::default())
-                        .await
-                });
-
-                self.state = ListenerState::Persistent {
-                    socket,
-                    port,
+                Some(SocketKind::Direct {
+                    socket: socket.into_inner(),
                     silent,
-                };
+                })
+            }
+            ListenerState::Persistent { port, silent, .. } => {
+                let port = *port;
+                let silent = *silent;
+
+                Some(SocketKind::Forwarded {
+                    silent,
+                    future: Box::pin(async move {
+                        R::TcpStream::connect(SocketAddr::new(
+                            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                            port,
+                        ))
+                        .await
+                        .ok_or(Error::Connection(ConnectionError::SocketClosed))
+                    }),
+                })
             }
             state => {
-                tracing::error!(target: LOG_TARGET, ?state, "state not supported");
-                panic!("support not implemented for {state:?}");
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    ?state,
+                    "no stream available",
+                );
+                None
             }
         }
-
-        Ok(())
     }
 
     /// Validate that `kind` is an approriate listener kind with the current state.
@@ -336,7 +301,7 @@ impl<R: Runtime> StreamListener<R> {
             (state, kind @ (ListenerKind::Ephemeral { .. } | ListenerKind::Persistent { .. })) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    state = ?self.state,
+                    ?state,
                     ?kind,
                     "invalid (state, kind) combination for listener",
                 );
@@ -510,7 +475,7 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
                 ),
                 Poll::Ready(Some(Ok(socket))) =>
                     match mem::replace(&mut self.state, ListenerState::Poisoned) {
-                        ListenerState::Uninitialized { pending } => {
+                        ListenerState::Uninitialized { .. } => {
                             // connection wasn't configured to be silent because
                             // a status message was sent to the client
                             self.state = ListenerState::Ephemeral {
@@ -549,14 +514,6 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
             }
         }
 
-        loop {
-            match self.streams.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(stream_id)) => return Poll::Ready(Some(stream_id)),
-            }
-        }
-
         self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
@@ -570,8 +527,7 @@ mod tests {
         noop::{NoopRuntime, NoopTcpStream},
     };
     use std::time::Duration;
-    use thingbuf::mpsc::channel;
-    use tokio::{io::AsyncReadExt, net::TcpListener};
+    use tokio::net::TcpListener;
 
     #[test]
     fn register_persistent_when_ephemeral_is_active() {
@@ -723,7 +679,7 @@ mod tests {
     async fn pending_socket_initialized() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -773,8 +729,8 @@ mod tests {
     async fn register_silent_and_non_silent_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -830,8 +786,8 @@ mod tests {
     async fn register_stream_while_listener_is_pending() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -866,16 +822,7 @@ mod tests {
             _ => panic!("invalid state"),
         }
 
-        let (cmd_tx, cmd_rx) = channel(1);
-        let (event_tx, event_rx) = channel(1);
-        let _ = listener.register_stream(StreamContext {
-            cmd_rx,
-            event_tx,
-            local: DestinationId::random(),
-            recv_stream_id: 1337u32,
-            remote: DestinationId::random(),
-        });
-
+        assert!(listener.pop_socket().is_some());
         match &listener.state {
             ListenerState::Uninitialized { .. } => {}
             _ => panic!("invalid state"),
@@ -902,8 +849,8 @@ mod tests {
     async fn two_active_listeners() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -935,31 +882,13 @@ mod tests {
             _ => panic!("invalid state"),
         }
 
-        let (cmd_tx, cmd_rx) = channel(1);
-        let (event_tx, event_rx) = channel(1);
-        let _ = listener.register_stream(StreamContext {
-            cmd_rx,
-            event_tx,
-            local: DestinationId::random(),
-            recv_stream_id: 1337u32,
-            remote: DestinationId::random(),
-        });
-
+        assert!(listener.pop_socket().is_some());
         match &listener.state {
             ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
             _ => panic!("invalid state"),
         }
 
-        let (cmd_tx, cmd_rx) = channel(1);
-        let (event_tx, event_rx) = channel(1);
-        let _ = listener.register_stream(StreamContext {
-            cmd_rx,
-            event_tx,
-            local: DestinationId::random(),
-            recv_stream_id: 1337u32,
-            remote: DestinationId::random(),
-        });
-
+        assert!(listener.pop_socket().is_some());
         match &listener.state {
             ListenerState::Uninitialized { .. } => {}
             _ => panic!("invalid state"),
@@ -970,7 +899,7 @@ mod tests {
     async fn persistent_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -1017,15 +946,7 @@ mod tests {
 
         // multiple streams can be registered
         for _ in 0..5 {
-            let (cmd_tx, cmd_rx) = channel(1);
-            let (event_tx, event_rx) = channel(1);
-            let _ = listener.register_stream(StreamContext {
-                cmd_rx,
-                event_tx,
-                local: DestinationId::random(),
-                recv_stream_id: 1337u32,
-                remote: DestinationId::random(),
-            });
+            assert!(listener.pop_socket().is_some());
 
             match &listener.state {
                 ListenerState::Persistent {
