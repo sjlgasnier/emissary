@@ -28,6 +28,7 @@ use crate::{
         },
         socket::SamSocket,
     },
+    util::AsyncWriteExt,
 };
 
 use futures::{future::BoxFuture, StreamExt};
@@ -249,10 +250,16 @@ impl<R: Runtime> StreamListener<R> {
                     StreamConfig::default(),
                 ));
 
-                assert!(sockets.is_empty());
-                self.state = ListenerState::Uninitialized {
-                    pending: VecDeque::new(),
-                };
+                match sockets.is_empty() {
+                    true => {
+                        self.state = ListenerState::Uninitialized {
+                            pending: VecDeque::new(),
+                        };
+                    }
+                    false => {
+                        self.state = ListenerState::Ephemeral { sockets };
+                    }
+                }
             }
             ListenerState::Persistent {
                 socket,
@@ -271,7 +278,7 @@ impl<R: Runtime> StreamListener<R> {
                 // anything that was received from the remote peer via `StreamManager`
                 self.streams.push(async move {
                     let Some(mut stream) = R::TcpStream::connect(SocketAddr::new(
-                        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
                         port,
                     ))
                     .await
@@ -302,6 +309,57 @@ impl<R: Runtime> StreamListener<R> {
         Ok(())
     }
 
+    /// Validate that `kind` is an approriate listener kind with the current state.
+    ///
+    /// `STREAM ACCEPT` and `STREAM FORWARD` are mutually exclusive and the second socket for the
+    /// incompatible kind is rejected. Multiple `STREAM FORWARD`s are also not supported.
+    ///
+    /// On success the function returns `kind` so the caller can process it normally and on error
+    /// the function returns `None` and sends a rejection message to the client.
+    fn validate_listener(&mut self, kind: ListenerKind<R>) -> Option<ListenerKind<R>> {
+        match (&self.state, kind) {
+            // state can be either uninitialized or initializing/initialized to be ephemeral
+            (
+                ListenerState::Ephemeral { .. }
+                | ListenerState::Uninitialized { .. }
+                | ListenerState::Initializing {
+                    kind: PendingListenerKind::Ephemeral,
+                },
+                kind @ ListenerKind::Ephemeral { .. },
+            ) => return Some(kind),
+
+            // only an unitialized listener can accept `STREAM FORWARD`
+            (ListenerState::Uninitialized { .. }, kind @ ListenerKind::Persistent { .. }) =>
+                return Some(kind),
+
+            // all other states are invalid and the accept requested is rejected
+            (state, kind @ (ListenerKind::Ephemeral { .. } | ListenerKind::Persistent { .. })) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    state = ?self.state,
+                    ?kind,
+                    "invalid (state, kind) combination for listener",
+                );
+
+                match kind {
+                    ListenerKind::Ephemeral { mut socket, .. }
+                    | ListenerKind::Persistent { mut socket, .. } => {
+                        R::spawn(async move {
+                            let _ = socket
+                                .send_message_blocking(
+                                    "STREAM STATUS RESULT=I2P_ERROR\n".as_bytes().to_vec(),
+                                )
+                                .await;
+                            let _ = socket.into_inner().close().await;
+                        });
+                    }
+                }
+
+                None
+            }
+        }
+    }
+
     /// Register new listener `kind`.
     ///
     /// If `kind` is [`ListenerKind::Ephemeral`], push the listener into a set of pending listeners
@@ -328,76 +386,17 @@ impl<R: Runtime> StreamListener<R> {
         );
 
         // ensure `kind` is valid with listener's current state
-        match (&self.state, &kind) {
-            (ListenerState::Ephemeral { .. }, ListenerKind::Persistent { .. }) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "cannot register persistent listener when ephemeral is active",
-                );
-                return Err(StreamingError::ListenerMismatch);
-            }
-            (ListenerState::Persistent { .. }, ListenerKind::Ephemeral { .. }) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "cannot register ephemeral listener when persistent is active",
-                );
-                return Err(StreamingError::ListenerMismatch);
-            }
-            (ListenerState::Persistent { .. }, ListenerKind::Persistent { .. }) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "cannot register duplicate persistent listener",
-                );
-                return Err(StreamingError::ListenerMismatch);
-            }
-            (
-                ListenerState::Initializing {
-                    kind: PendingListenerKind::Ephemeral,
-                },
-                ListenerKind::Persistent { .. },
-            ) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "cannot register persistent listener when ephemeral is being initialized",
-                );
-                return Err(StreamingError::ListenerMismatch);
-            }
-            (
-                ListenerState::Initializing {
-                    kind: PendingListenerKind::Persistent { port, silent },
-                },
-                ListenerKind::Ephemeral { .. },
-            ) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "cannot register ephemeral listener when persistent is being initialized",
-                );
-                return Err(StreamingError::ListenerMismatch);
-            }
-            (
-                ListenerState::Initializing {
-                    kind: PendingListenerKind::Persistent { port, silent },
-                },
-                ListenerKind::Persistent { .. },
-            ) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "cannot register duplicate persistent listener",
-                );
-                return Err(StreamingError::ListenerMismatch);
-            }
-            _ => {}
-        }
+        let kind = self.validate_listener(kind).ok_or(StreamingError::ListenerMismatch)?;
 
-        // TODO: if listener is accepted, client must be notified
-        // TODO: this needs a lot of documentation
-        match (&self.state, kind) {
+        // initialize socket if it needs to be and update listener state
+        //
+        // if `SILENT` was set to false (default), send acceptance notification in a new future
+        // and update listener state
+        //
+        // if the state is uninitialize and a message must be sent to user, the listener is put into
+        // `Initializing` state which indicates that at least one socket is being initialized for
+        // accepting a new connection
+        match (&mut self.state, kind) {
             (
                 ListenerState::Uninitialized { pending },
                 ListenerKind::Ephemeral { mut socket, silent },
@@ -411,6 +410,47 @@ impl<R: Runtime> StreamListener<R> {
                         kind: PendingListenerKind::Ephemeral,
                     };
 
+                    self.pending_sockets.push(async move {
+                        socket
+                            .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
+                            .await
+                            .map(|()| socket)
+                    });
+                    self.waker.take().map(|waker| waker.wake_by_ref());
+                }
+            },
+            (
+                ListenerState::Initializing {
+                    kind: PendingListenerKind::Ephemeral,
+                },
+                ListenerKind::Ephemeral { mut socket, silent },
+            ) => match silent {
+                true =>
+                    self.state = ListenerState::Ephemeral {
+                        sockets: VecDeque::from_iter([(socket, silent)]),
+                    },
+                false => {
+                    self.state = ListenerState::Initializing {
+                        kind: PendingListenerKind::Ephemeral,
+                    };
+
+                    self.pending_sockets.push(async move {
+                        socket
+                            .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
+                            .await
+                            .map(|()| socket)
+                    });
+                    self.waker.take().map(|waker| waker.wake_by_ref());
+                }
+            },
+            (
+                ListenerState::Ephemeral { ref mut sockets },
+                ListenerKind::Ephemeral { mut socket, silent },
+            ) => match silent {
+                true => {
+                    sockets.push_back((socket, silent));
+                }
+                false => {
                     self.pending_sockets.push(async move {
                         socket
                             .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
@@ -495,16 +535,12 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
                                 };
                             }
                         },
-                        ListenerState::Persistent {
-                            socket,
-                            port,
-                            silent,
-                        } => todo!("fix race condition"),
-                        ListenerState::Poisoned => {
+                        state => {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 local = %self.destination_id,
-                                "listener state is poisoned",
+                                ?state,
+                                "invalid listener state for ready socket",
                             );
                             debug_assert!(false);
                             return Poll::Ready(None);
@@ -529,9 +565,15 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::noop::{NoopRuntime, NoopTcpStream};
+    use crate::runtime::{
+        mock::{MockRuntime, MockTcpStream},
+        noop::{NoopRuntime, NoopTcpStream},
+    };
+    use std::time::Duration;
+    use thingbuf::mpsc::channel;
+    use tokio::{io::AsyncReadExt, net::TcpListener};
 
-    // #[test]
+    #[test]
     fn register_persistent_when_ephemeral_is_active() {
         let mut listener = StreamListener::<NoopRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -556,7 +598,7 @@ mod tests {
         );
     }
 
-    // #[test]
+    #[test]
     fn register_ephemeral_when_persistent_is_active() {
         let mut listener = StreamListener::<NoopRuntime>::new(DestinationId::random());
         match &listener.state {
@@ -581,9 +623,418 @@ mod tests {
         );
     }
 
-    // #[test]
-    fn register_multiple_ephemeral_listeners() {}
+    #[test]
+    fn register_multiple_ephemeral_listeners() {
+        let mut listener = StreamListener::<NoopRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
 
-    // #[test]
-    fn register_multiple_persistent_listeners() {}
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(NoopTcpStream::new()),
+                silent: false,
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Initializing {
+                kind: PendingListenerKind::Ephemeral,
+            } => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(NoopTcpStream::new()),
+                silent: false
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Initializing {
+                kind: PendingListenerKind::Ephemeral,
+            } => {}
+            _ => panic!("invalid state"),
+        }
+    }
+
+    #[test]
+    fn register_multiple_silent_ephemeral_listeners() {
+        let mut listener = StreamListener::<NoopRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(NoopTcpStream::new()),
+                silent: true,
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(NoopTcpStream::new()),
+                silent: true
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 2 => {}
+            _ => panic!("invalid state"),
+        }
+    }
+
+    #[test]
+    fn register_multiple_persistent_listeners() {
+        let mut listener = StreamListener::<NoopRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Persistent {
+                socket: SamSocket::new(NoopTcpStream::new()),
+                port: 1337,
+                silent: false
+            })
+            .is_ok());
+
+        assert_eq!(
+            listener.register_listener(ListenerKind::Persistent {
+                socket: SamSocket::new(NoopTcpStream::new()),
+                port: 1338,
+                silent: false
+            }),
+            Err(StreamingError::ListenerMismatch)
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_socket_initialized() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Persistent {
+                socket: SamSocket::new(stream2.unwrap()),
+                port: 1337,
+                silent: false
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Initializing {
+                kind:
+                    PendingListenerKind::Persistent {
+                        port: 1337,
+                        silent: false,
+                    },
+            } => {}
+            _ => panic!("invalid state"),
+        }
+
+        while !listener.pending_sockets.is_empty() {
+            futures::future::poll_fn(|cx| match listener.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Ready(()),
+                Poll::Ready(_) => panic!("invalid event"),
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        match &listener.state {
+            ListenerState::Persistent {
+                port: 1337,
+                silent: false,
+                ..
+            } => {}
+            _ => panic!("invalid state"),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_silent_and_non_silent_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(eph1.unwrap()),
+                silent: false
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Initializing {
+                kind: PendingListenerKind::Ephemeral,
+            } => {}
+            _ => panic!("invalid state"),
+        }
+
+        // register another ephemeral listener but this time it's silent
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(eph2.unwrap()),
+                silent: true,
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
+            _ => panic!("invalid state"),
+        }
+
+        // poll the other pending socket until it's ready
+        while !listener.pending_sockets.is_empty() {
+            futures::future::poll_fn(|cx| match listener.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Ready(()),
+                Poll::Ready(_) => panic!("invalid event"),
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // verify there are two listeners
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 2 => {}
+            _ => panic!("invalid state"),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_stream_while_listener_is_pending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(eph1.unwrap()),
+                silent: false
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Initializing {
+                kind: PendingListenerKind::Ephemeral,
+            } => {}
+            _ => panic!("invalid state"),
+        }
+
+        // register another ephemeral listener but this time it's silent
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(eph2.unwrap()),
+                silent: true,
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
+            _ => panic!("invalid state"),
+        }
+
+        let (cmd_tx, cmd_rx) = channel(1);
+        let (event_tx, event_rx) = channel(1);
+        let _ = listener.register_stream(StreamContext {
+            cmd_rx,
+            event_tx,
+            local: DestinationId::random(),
+            recv_stream_id: 1337u32,
+            remote: DestinationId::random(),
+        });
+
+        match &listener.state {
+            ListenerState::Uninitialized { .. } => {}
+            _ => panic!("invalid state"),
+        }
+
+        // poll the other pending socket until it's ready
+        while !listener.pending_sockets.is_empty() {
+            futures::future::poll_fn(|cx| match listener.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Ready(()),
+                Poll::Ready(_) => panic!("invalid event"),
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // verify there are two listeners
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
+            _ => panic!("invalid state"),
+        }
+    }
+
+    #[tokio::test]
+    async fn two_active_listeners() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, eph1) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (stream2, eph2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(eph1.unwrap()),
+                silent: true
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Ephemeral {
+                socket: SamSocket::new(eph2.unwrap()),
+                silent: true,
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 2 => {}
+            _ => panic!("invalid state"),
+        }
+
+        let (cmd_tx, cmd_rx) = channel(1);
+        let (event_tx, event_rx) = channel(1);
+        let _ = listener.register_stream(StreamContext {
+            cmd_rx,
+            event_tx,
+            local: DestinationId::random(),
+            recv_stream_id: 1337u32,
+            remote: DestinationId::random(),
+        });
+
+        match &listener.state {
+            ListenerState::Ephemeral { sockets } if sockets.len() == 1 => {}
+            _ => panic!("invalid state"),
+        }
+
+        let (cmd_tx, cmd_rx) = channel(1);
+        let (event_tx, event_rx) = channel(1);
+        let _ = listener.register_stream(StreamContext {
+            cmd_rx,
+            event_tx,
+            local: DestinationId::random(),
+            recv_stream_id: 1337u32,
+            remote: DestinationId::random(),
+        });
+
+        match &listener.state {
+            ListenerState::Uninitialized { .. } => {}
+            _ => panic!("invalid state"),
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let mut listener = StreamListener::<MockRuntime>::new(DestinationId::random());
+        match &listener.state {
+            ListenerState::Uninitialized { pending } if pending.is_empty() => {}
+            _ => panic!("invalid state"),
+        }
+
+        assert!(listener
+            .register_listener(ListenerKind::Persistent {
+                socket: SamSocket::new(stream2.unwrap()),
+                port: 1337,
+                silent: false
+            })
+            .is_ok());
+
+        match &listener.state {
+            ListenerState::Initializing {
+                kind:
+                    PendingListenerKind::Persistent {
+                        port: 1337,
+                        silent: false,
+                    },
+            } => {}
+            _ => panic!("invalid state"),
+        }
+
+        while !listener.pending_sockets.is_empty() {
+            futures::future::poll_fn(|cx| match listener.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Ready(()),
+                Poll::Ready(_) => panic!("invalid event"),
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        match &listener.state {
+            ListenerState::Persistent {
+                port: 1337,
+                silent: false,
+                ..
+            } => {}
+            _ => panic!("invalid state"),
+        }
+
+        // multiple streams can be registered
+        for _ in 0..5 {
+            let (cmd_tx, cmd_rx) = channel(1);
+            let (event_tx, event_rx) = channel(1);
+            let _ = listener.register_stream(StreamContext {
+                cmd_rx,
+                event_tx,
+                local: DestinationId::random(),
+                recv_stream_id: 1337u32,
+                remote: DestinationId::random(),
+            });
+
+            match &listener.state {
+                ListenerState::Persistent {
+                    port: 1337,
+                    silent: false,
+                    ..
+                } => {}
+                _ => panic!("invalid state"),
+            }
+        }
+    }
 }
