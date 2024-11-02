@@ -292,7 +292,7 @@ impl<R: Runtime> SamSession<R> {
                             match protocol {
                                 Protocol::Streaming => {
                                     if let Err(error) =
-                                        self.stream_manager.on_message(src_port, dst_port, payload)
+                                        self.stream_manager.on_packet(src_port, dst_port, payload)
                                     {
                                         tracing::warn!(
                                             target: LOG_TARGET,

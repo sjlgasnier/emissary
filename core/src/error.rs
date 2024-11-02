@@ -120,6 +120,12 @@ pub enum StreamingError {
     /// Persistent listener registered when one or more ephemeral listeners
     /// are active or vice versa.
     ListenerMismatch,
+
+    /// Stream closed.
+    Closed,
+
+    /// Receive window is full.
+    ReceiveWindowFull,
 }
 
 impl fmt::Display for StreamingError {
@@ -135,6 +141,8 @@ impl fmt::Display for StreamingError {
             Self::InvalidSignature => write!(f, "invalid signature"),
             Self::Malformed => write!(f, "malformed packet"),
             Self::ListenerMismatch => write!(f, "listener kind mismatch"),
+            Self::Closed => write!(f, "stream closed"),
+            Self::ReceiveWindowFull => write!(f, "receive window is full"),
         }
     }
 }

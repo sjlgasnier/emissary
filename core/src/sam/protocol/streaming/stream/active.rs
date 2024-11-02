@@ -25,9 +25,11 @@ use crate::{
     },
 };
 
+use chacha20poly1305::aead::Buffer;
 use rand_core::RngCore;
 use thingbuf::mpsc::{Receiver, Sender};
 
+use alloc::collections::VecDeque;
 use core::{
     future::Future,
     mem,
@@ -40,6 +42,26 @@ const LOG_TARGET: &str = "emissary::sam::streaming::stream";
 
 /// Read buffer size.
 const READ_BUFFER_SIZE: usize = 8192;
+
+/// Stream state.
+pub enum StreamState {
+    /// Stream is uninitialized and there has been no activity on it before.
+    Uninitialized,
+
+    /// Stream was pending before a listener was ready to accept it and there may have been data
+    /// exchange in stream before the listener was ready. [`Stream`] must initialize its state
+    /// using with the provided data.
+    Initialized {
+        /// Selected send stream ID.
+        send_stream_id: u32,
+
+        /// Remote peer's current sequence number.
+        seq_nro: u32,
+
+        /// Received packets, if any.
+        packets: VecDeque<Vec<u8>>,
+    },
+}
 
 /// Context needed to initialize [`Stream`].
 pub struct StreamContext {
@@ -150,6 +172,7 @@ impl<R: Runtime> Stream<R> {
         initial_message: Option<Vec<u8>>,
         context: StreamContext,
         config: StreamConfig,
+        state: StreamState,
     ) -> Self {
         let StreamContext {
             local,
@@ -159,14 +182,43 @@ impl<R: Runtime> Stream<R> {
             recv_stream_id,
         } = context;
 
-        let send_stream_id = R::rng().next_u32();
-        let packet = PacketBuilder::new(send_stream_id)
-            .with_send_stream_id(recv_stream_id)
-            .with_seq_nro(0)
-            .with_synchronize()
-            .build();
+        let (send_stream_id, initial_message) = match state {
+            StreamState::Uninitialized => {
+                let send_stream_id = R::rng().next_u32();
+                let packet = PacketBuilder::new(send_stream_id)
+                    .with_send_stream_id(recv_stream_id)
+                    .with_seq_nro(0)
+                    .with_synchronize()
+                    .build();
 
-        event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
+                event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
+
+                (send_stream_id, initial_message)
+            }
+            StreamState::Initialized {
+                send_stream_id,
+                seq_nro,
+                packets,
+            } => {
+                let combined = packets.into_iter().fold(Vec::new(), |mut message, packet| {
+                    message.extend_from_slice(&packet);
+                    message
+                });
+
+                (
+                    send_stream_id,
+                    match (initial_message, combined.is_empty()) {
+                        (None, true) => None,
+                        (None, false) => Some(combined),
+                        (Some(message), true) => Some(message),
+                        (Some(mut message), false) => {
+                            message.extend_from_slice(&combined);
+                            Some(message)
+                        }
+                    },
+                )
+            }
+        };
 
         Self {
             cmd_rx,
