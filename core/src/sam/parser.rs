@@ -167,6 +167,9 @@ pub enum SamCommand {
         name: String,
     },
 
+    /// Generate destination.
+    GenerateDestination,
+
     /// Dummy event
     Dummy,
 }
@@ -188,6 +191,7 @@ impl fmt::Display for SamCommand {
             Self::Accept { session_id, .. } => write!(f, "SamCommand::StreamAccept({session_id})"),
             Self::Forward { session_id, .. } => write!(f, "SamCommand::Forward({session_id})"),
             Self::NamingLookup { name } => write!(f, "SamCommand::NamingLookup({name})"),
+            Self::GenerateDestination => write!(f, "SamCommand::GenerateDestination"),
             Self::Dummy => unreachable!(),
         }
     }
@@ -342,6 +346,25 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
             ("NAMING", Some("LOOKUP")) => Ok(SamCommand::NamingLookup {
                 name: value.key_value_pairs.get("NAME").ok_or(())?.to_string(),
             }),
+            ("DEST", Some("GENERATE")) => match value.key_value_pairs.get("SIGNATURE_TYPE") {
+                Some(signature_type) if *signature_type == "7" =>
+                    Ok(SamCommand::GenerateDestination),
+                Some(signature_type) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?signature_type,
+                        "unsupported signature type",
+                    );
+                    Err(())
+                }
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "signature type not specified"
+                    );
+                    Err(())
+                }
+            },
             (command, subcommand) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -362,7 +385,13 @@ impl SamCommand {
     // Non-public method returning `IResult` for cleaner error handling.
     fn parse_inner(input: &str) -> IResult<&str, Self> {
         let (rest, (command, _, subcommand, _, key_value_pairs)) = tuple((
-            alt((tag("HELLO"), tag("SESSION"), tag("STREAM"), tag("NAMING"))),
+            alt((
+                tag("HELLO"),
+                tag("SESSION"),
+                tag("STREAM"),
+                tag("NAMING"),
+                tag("DEST"),
+            )),
             opt(char(' ')),
             opt(alt((
                 tag("VERSION"),
@@ -371,6 +400,7 @@ impl SamCommand {
                 tag("ACCEPT"),
                 tag("FORWARD"),
                 tag("LOOKUP"),
+                tag("GENERATE"),
             ))),
             opt(char(' ')),
             opt(parse_key_value_pairs),
@@ -584,7 +614,33 @@ mod tests {
             response => panic!("invalid response: {response:?}"),
         }
 
+        // subcommand missing
+        assert!(SamCommand::parse("NAMING").is_none());
+
+        // invalid subcommand
+        assert!(SamCommand::parse("NAMING GENERATE").is_none());
+
         // name missing
         assert!(SamCommand::parse("NAMING LOOKUP").is_none());
+    }
+
+    #[test]
+    fn parse_dest_generate() {
+        match SamCommand::parse("DEST GENERATE SIGNATURE_TYPE=7") {
+            Some(SamCommand::GenerateDestination) => {}
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // invalid signature type
+        assert!(SamCommand::parse("DEST GENERATE SIGNATURE_TYPE=1337").is_none());
+
+        // signature type missing
+        assert!(SamCommand::parse("DEST GENERATE").is_none());
+
+        // subcommand missing
+        assert!(SamCommand::parse("DEST").is_none());
+
+        // invalid subcommand
+        assert!(SamCommand::parse("DEST LOOKUP").is_none());
     }
 }

@@ -17,7 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
     error::{ConnectionError, Error},
+    primitives::Destination,
     runtime::Runtime,
     sam::{
         parser::{SamCommand, SamVersion, SessionKind},
@@ -25,6 +27,7 @@ use crate::{
     },
 };
 
+use bytes::{BufMut, BytesMut};
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::HashMap;
 
@@ -364,7 +367,7 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                             target: LOG_TARGET,
                             %session_id,
                             ?port,
-                            "forward inbound connections"
+                            "forward inbound connections",
                         );
 
                         return Poll::Ready(Ok(ConnectionKind::Forward {
@@ -379,11 +382,50 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                         tracing::debug!(
                             target: LOG_TARGET,
                             ?version,
-                            "client connected"
+                            ?name,
+                            "destination lookup",
                         );
 
                         socket.send_message(
                             format!("NAMING REPLY RESULT=KEY_NOT_FOUND NAME={name}\n")
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        self.state = PendingConnectionState::Handshaked { version, socket };
+                    }
+                    Poll::Ready(Some(SamCommand::GenerateDestination)) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?version,
+                            "generate destination",
+                        );
+
+                        // generate keys and destination
+                        let (private_key, signing_key, destination) = {
+                            let mut rng = R::rng();
+
+                            let signing_key = SigningPrivateKey::random(&mut rng);
+                            let private_key = StaticPrivateKey::new(rng);
+                            let destination = Destination::new(signing_key.public());
+
+                            (private_key, signing_key, destination)
+                        };
+
+                        // generate `PRIV` and `PUB` parameters
+                        let (privkey, destination) = {
+                            let mut out =
+                                BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
+                            let destination = destination.serialize();
+
+                            out.put_slice(&destination);
+                            out.put_slice(private_key.as_ref());
+                            out.put_slice(signing_key.as_ref());
+
+                            (base64_encode(out), base64_encode(&destination))
+                        };
+
+                        socket.send_message(
+                            format!("DEST REPLY PUB={destination} PRIV={privkey}\n")
                                 .as_bytes()
                                 .to_vec(),
                         );
