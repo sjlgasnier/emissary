@@ -22,7 +22,7 @@ use crate::{
     primitives::Destination,
     runtime::Runtime,
     sam::{
-        parser::{SamCommand, SamVersion, SessionKind},
+        parser::{DestinationKind, SamCommand, SamVersion, SessionKind},
         socket::SamSocket,
     },
 };
@@ -62,6 +62,9 @@ pub enum ConnectionKind<R: Runtime> {
 
         /// SAMv3 socket associated with the session.
         socket: SamSocket<R>,
+
+        /// Destination kind.
+        destination: DestinationKind,
 
         /// Negotiated version.
         version: SamVersion,
@@ -305,17 +308,20 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                     Poll::Ready(Some(SamCommand::CreateSession {
                         session_id,
                         session_kind,
+                        destination,
                         options,
                     })) => {
                         tracing::info!(
                             target: LOG_TARGET,
                             %session_id,
                             ?session_kind,
+                            ?destination,
                             "create session"
                         );
 
                         return Poll::Ready(Ok(ConnectionKind::Session {
                             session_id: Arc::from(session_id),
+                            destination,
                             socket,
                             version,
                             session_kind,

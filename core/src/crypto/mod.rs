@@ -333,7 +333,7 @@ impl AsRef<[u8]> for SigningPrivateKey {
 }
 
 /// Signing public key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigningPublicKey {
     /// EdDSA.
     Ed25519(ed25519_dalek::VerifyingKey),

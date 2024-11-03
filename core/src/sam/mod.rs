@@ -214,6 +214,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         socket,
                         version,
                         session_id,
+                        destination,
                         session_kind,
                         options,
                     } => {
@@ -272,6 +273,7 @@ impl<R: Runtime> Future for SamServer<R> {
                             tx,
                             PendingSamSession::new(
                                 socket,
+                                destination,
                                 Arc::clone(&session_id),
                                 options,
                                 version,

@@ -29,7 +29,7 @@ use crate::{
     protocol::Protocol,
     runtime::Runtime,
     sam::{
-        parser::{SamCommand, SamVersion},
+        parser::{DestinationKind, SamCommand, SamVersion},
         pending::session::SamSessionContext,
         protocol::streaming::{ListenerKind, StreamManager},
         socket::SamSocket,
@@ -149,6 +149,7 @@ impl<R: Runtime> SamSession<R> {
         let SamSessionContext {
             inbound,
             options,
+            destination,
             outbound,
             receiver,
             session_id,
@@ -159,18 +160,24 @@ impl<R: Runtime> SamSession<R> {
         } = context;
 
         let (destination, destination_id, privkey, signing_key) = {
-            // create encryption and signing keys as this is a transient session
-            let (encryption_key, signing_key) = {
-                let mut rng = R::rng();
+            let (encryption_key, signing_key, destination_id, destination) = match destination {
+                DestinationKind::Transient => {
+                    let mut rng = R::rng();
 
-                let signing_key = SigningPrivateKey::random(&mut rng);
-                let encryption_key = StaticPrivateKey::new(rng);
+                    let signing_key = SigningPrivateKey::random(&mut rng);
+                    let encryption_key = StaticPrivateKey::new(rng);
 
-                (encryption_key, signing_key)
+                    let destination = Dest::new(signing_key.public());
+                    let destination_id = destination.id();
+
+                    (encryption_key, signing_key, destination_id, destination)
+                }
+                DestinationKind::Persistent {
+                    destination,
+                    private_key,
+                    signing_key,
+                } => (private_key, signing_key, destination.id(), destination),
             };
-
-            let destination = Dest::new(signing_key.public());
-            let destination_id = destination.id();
 
             // from specification:
             //

@@ -16,10 +16,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::{
+    crypto::{base64_decode, SigningPrivateKey, StaticPrivateKey},
+    primitives::Destination,
+};
+
 use hashbrown::HashMap;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, is_not, tag, take_while1},
+    bytes::complete::{escaped, is_not, tag, take, take_while1},
     character::complete::{alpha1, alphanumeric1, char, multispace0},
     combinator::{map, opt, recognize},
     error::{make_error, ErrorKind},
@@ -104,6 +109,62 @@ impl fmt::Display for SamVersion {
     }
 }
 
+/// Destination kind.
+#[derive(Clone)]
+pub enum DestinationKind {
+    /// Transient session.
+    Transient,
+
+    /// Persistent session.
+    Persistent {
+        /// Destination.
+        destination: Destination,
+
+        /// Private key of the destination.
+        private_key: StaticPrivateKey,
+
+        /// Signing key of the destination.
+        signing_key: SigningPrivateKey,
+    },
+}
+
+impl fmt::Debug for DestinationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transient => f.debug_struct("DestinationKind::Transient").finish(),
+            Self::Persistent {
+                destination,
+                private_key,
+                signing_key,
+            } => f.debug_struct("DestinationKind::Persistent").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl PartialEq for DestinationKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DestinationKind::Transient, DestinationKind::Transient) => true,
+            (
+                DestinationKind::Persistent {
+                    destination: dst1,
+                    private_key: priv1,
+                    signing_key: sign1,
+                },
+                DestinationKind::Persistent {
+                    destination: dst2,
+                    private_key: priv2,
+                    signing_key: sign2,
+                },
+            ) =>
+                dst1 == dst2 && priv1.as_ref() == priv2.as_ref() && sign1.as_ref() == sign2.as_ref(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for DestinationKind {}
+
 /// SAMv3 commands received from the client.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SamCommand {
@@ -123,6 +184,9 @@ pub enum SamCommand {
 
         /// Session kind:
         session_kind: SessionKind,
+
+        /// Destination kind.
+        destination: DestinationKind,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -240,22 +304,37 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                     }
                 };
 
-                match value.key_value_pairs.remove("DESTINATION") {
-                    Some("TRANSIENT") => {}
-                    kind => {
+                let destination = match value.key_value_pairs.remove("DESTINATION") {
+                    Some("TRANSIENT") => DestinationKind::Transient,
+                    Some(destination) => {
+                        let decoded = base64_decode(destination).ok_or(())?;
+                        let (rest, destination) =
+                            Destination::parse_frame(&decoded).map_err(|_| ())?;
+                        let (rest, private_key) =
+                            take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
+                        let (rest, signing_key) =
+                            take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
+
+                        DestinationKind::Persistent {
+                            destination,
+                            private_key: StaticPrivateKey::from(private_key.to_vec()),
+                            signing_key: SigningPrivateKey::new(&signing_key).ok_or(())?,
+                        }
+                    }
+                    None => {
                         tracing::warn!(
                             target: LOG_TARGET,
-                            ?kind,
-                            "only transient destinations supported",
+                            "destination type not specified",
                         );
 
                         return Err(());
                     }
-                }
+                };
 
                 Ok(SamCommand::CreateSession {
                     session_id,
                     session_kind,
+                    destination,
                     options: value
                         .key_value_pairs
                         .into_iter()
@@ -458,6 +537,11 @@ fn parse_quoted_value(input: &str) -> IResult<&str, &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        crypto::base64_encode,
+        runtime::{mock::MockRuntime, Runtime},
+    };
+    use bytes::{BufMut, BytesMut};
 
     #[test]
     fn parse_hello() {
@@ -490,12 +574,14 @@ mod tests {
 
     #[test]
     fn parse_session_create_stream() {
+        // transient
         match SamCommand::parse(
             "SESSION CREATE STYLE=STREAM ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         ) {
             Some(SamCommand::CreateSession {
                 session_id,
                 session_kind: SessionKind::Stream,
+                destination: DestinationKind::Transient,
                 options,
             }) => {
                 assert_eq!(session_id.as_str(), "test");
@@ -507,7 +593,43 @@ mod tests {
             response => panic!("invalid response: {response:?}"),
         }
 
-        // non-transient destination
+        // persistent
+        let privkey = {
+            let mut rng = MockRuntime::rng();
+
+            let signing_key = SigningPrivateKey::random(&mut rng);
+            let encryption_key = StaticPrivateKey::new(rng);
+
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+
+            let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
+            out.put_slice(&destination.serialize());
+            out.put_slice(encryption_key.as_ref());
+            out.put_slice(signing_key.as_ref());
+
+            base64_encode(out)
+        };
+
+        match SamCommand::parse(&format!(
+            "SESSION CREATE STYLE=STREAM ID=test DESTINATION={privkey} i2cp.leaseSetEncType=4,0"
+        )) {
+            Some(SamCommand::CreateSession {
+                session_id,
+                session_kind: SessionKind::Stream,
+                destination: DestinationKind::Persistent { .. },
+                options,
+            }) => {
+                assert_eq!(session_id.as_str(), "test");
+                assert_eq!(
+                    options.get("i2cp.leaseSetEncType"),
+                    Some(&"4,0".to_string())
+                );
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // invalid destination
         assert!(SamCommand::parse(
             "SESSION CREATE STYLE=DATAGRAM ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
         )

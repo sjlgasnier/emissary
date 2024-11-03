@@ -22,7 +22,7 @@ use crate::{
     primitives::{Lease, TunnelId},
     runtime::Runtime,
     sam::{
-        parser::{SamCommand, SamVersion},
+        parser::{DestinationKind, SamCommand, SamVersion},
         session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
@@ -51,6 +51,9 @@ pub struct SamSessionContext<R: Runtime> {
 
     /// Session options.
     pub options: HashMap<String, String>,
+
+    /// Destination kind.
+    pub destination: DestinationKind,
 
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
@@ -87,6 +90,9 @@ enum PendingSessionState<R: Runtime> {
         /// Session options.
         options: HashMap<String, String>,
 
+        /// Destination kind.
+        destination: DestinationKind,
+
         /// Negotiated version.
         version: SamVersion,
 
@@ -112,6 +118,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// Session options.
         options: HashMap<String, String>,
+
+        /// Destination kind.
+        destination: DestinationKind,
 
         /// Negotiated version.
         version: SamVersion,
@@ -150,6 +159,7 @@ impl<R: Runtime> PendingSamSession<R> {
     /// Create new [`PendingSamSession`].
     pub fn new(
         socket: SamSocket<R>,
+        destination: DestinationKind,
         session_id: Arc<str>,
         options: HashMap<String, String>,
         version: SamVersion,
@@ -164,6 +174,7 @@ impl<R: Runtime> PendingSamSession<R> {
                 options,
                 version,
                 receiver,
+                destination,
                 tunnel_pool_future,
                 netdb_handle,
             },
@@ -181,6 +192,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     socket,
                     session_id,
                     options,
+                    destination,
                     version,
                     receiver,
                     netdb_handle,
@@ -197,6 +209,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             socket,
                             session_id,
                             options,
+                            destination,
                             version,
                             handle,
                             receiver,
@@ -210,6 +223,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             socket,
                             session_id,
                             options,
+                            destination,
                             version,
                             receiver,
                             netdb_handle,
@@ -222,6 +236,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     socket,
                     session_id,
                     options,
+                    destination,
                     version,
                     receiver,
                     netdb_handle,
@@ -234,6 +249,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             socket,
                             session_id,
                             options,
+                            destination,
                             version,
                             netdb_handle,
                             receiver,
@@ -260,6 +276,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 socket,
                                 session_id,
                                 options,
+                                destination,
                                 version,
                                 netdb_handle,
                                 handle,
@@ -281,6 +298,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         return Poll::Ready(Ok(SamSessionContext {
                             inbound,
                             options,
+                            destination,
                             outbound,
                             version,
                             session_id,
@@ -306,6 +324,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 socket,
                                 session_id,
                                 options,
+                                destination,
                                 version,
                                 netdb_handle,
                                 handle,
@@ -327,6 +346,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         return Poll::Ready(Ok(SamSessionContext {
                             inbound,
                             options,
+                            destination,
                             outbound,
                             version,
                             session_id,
@@ -349,6 +369,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             socket,
                             session_id,
                             options,
+                            destination,
                             version,
                             netdb_handle,
                             handle,
@@ -370,6 +391,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             socket,
                             session_id,
                             options,
+                            destination,
                             version,
                             netdb_handle,
                             handle,
@@ -390,6 +412,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             socket,
                             session_id,
                             options,
+                            destination,
                             version,
                             netdb_handle,
                             handle,
