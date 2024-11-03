@@ -26,6 +26,9 @@ use crate::{
 use alloc::collections::VecDeque;
 use rand_core::RngCore;
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::sam::streaming::pending";
+
 /// Initial window size
 const INITIAL_WINDOW_SIZE: usize = 6usize;
 
@@ -127,6 +130,15 @@ impl<R: Runtime> PendingStream<R> {
             flags,
             payload,
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            remote = %self.destination_id,
+            ?send_stream_id,
+            ?recv_stream_id,
+            payload_len = ?payload.len(),
+            "inbound message",
+        );
 
         // destroy stream if remote wants to close it
         if flags.reset() || flags.close() {

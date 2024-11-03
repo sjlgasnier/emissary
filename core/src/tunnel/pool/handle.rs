@@ -29,6 +29,7 @@ use thingbuf::mpsc;
 
 use alloc::vec::Vec;
 use core::{
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -75,6 +76,21 @@ pub enum TunnelPoolEvent {
 
     /// Dummy event.
     Dummy,
+}
+
+impl fmt::Display for TunnelPoolEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TunnelPoolShutDown => write!(f, "TunnelPoolEvent::TunnelPoolShutDown"),
+            Self::InboundTunnelBuilt { .. } => write!(f, "TunnelPoolEvent::InboundTunnelBuilt"),
+            Self::OutboundTunnelBuilt { .. } => write!(f, "TunnelPoolEvent::OutboundTunnelBuilt"),
+            Self::InboundTunnelExpired { .. } => write!(f, "TunnelPoolEvent::InboundTunnelExpired"),
+            Self::OutboundTunnelExpired { .. } =>
+                write!(f, "TunnelPoolEvent::OutboundTunnelExpired"),
+            Self::Message { .. } => write!(f, "TunnelPoolEvent::Message"),
+            Self::Dummy => write!(f, "TunnelPoolEvent::Dummy"),
+        }
+    }
 }
 
 impl Default for TunnelPoolEvent {

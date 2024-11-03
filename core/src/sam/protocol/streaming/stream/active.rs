@@ -205,6 +205,16 @@ impl<R: Runtime> Stream<R> {
                     message
                 });
 
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %local,
+                    %remote,
+                    ?send_stream_id,
+                    ?recv_stream_id,
+                    pending_payload_len = ?combined.len(),
+                    "initialize state from pending connection",
+                );
+
                 (
                     send_stream_id,
                     match (initial_message, combined.is_empty()) {

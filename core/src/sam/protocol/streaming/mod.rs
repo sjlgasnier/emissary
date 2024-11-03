@@ -326,6 +326,13 @@ impl<R: Runtime> StreamManager<R> {
     /// there are any pending streams and if so, start event loops for the streams. If there are no
     /// pending streams, the event is ignored.
     fn on_listener_ready(&mut self) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            num_pending = ?self.pending.len(),
+            "listener ready",
+        );
+
         // loop through all pending streams until either:
         //  a) there are no more pending streams
         //  b) there are no more available listeners

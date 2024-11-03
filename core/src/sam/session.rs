@@ -262,7 +262,7 @@ impl<R: Runtime> SamSession<R> {
         tracing::trace!(
             target: LOG_TARGET,
             session_id = ?self.session_id,
-            ?event,
+            %event,
             "tunnel pool event",
         );
 
