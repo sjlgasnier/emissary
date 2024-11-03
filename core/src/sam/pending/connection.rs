@@ -375,6 +375,20 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                             options,
                         }));
                     }
+                    Poll::Ready(Some(SamCommand::NamingLookup { name })) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?version,
+                            "client connected"
+                        );
+
+                        socket.send_message(
+                            format!("NAMING REPLY RESULT=KEY_NOT_FOUND NAME={name}\n")
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        self.state = PendingConnectionState::Handshaked { version, socket };
+                    }
                     Poll::Ready(Some(command)) => {
                         tracing::debug!(
                             target: LOG_TARGET,

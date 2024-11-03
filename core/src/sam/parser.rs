@@ -161,6 +161,12 @@ pub enum SamCommand {
         options: HashMap<String, String>,
     },
 
+    /// `NAMING LOOKUP` message.
+    NamingLookup {
+        /// Hostname to lookup.
+        name: String,
+    },
+
     /// Dummy event
     Dummy,
 }
@@ -181,6 +187,7 @@ impl fmt::Display for SamCommand {
                 write!(f, "SamCommand::StreamConnect({session_id})"),
             Self::Accept { session_id, .. } => write!(f, "SamCommand::StreamAccept({session_id})"),
             Self::Forward { session_id, .. } => write!(f, "SamCommand::Forward({session_id})"),
+            Self::NamingLookup { name } => write!(f, "SamCommand::NamingLookup({name})"),
             Self::Dummy => unreachable!(),
         }
     }
@@ -332,6 +339,9 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         .collect(),
                 })
             }
+            ("NAMING", Some("LOOKUP")) => Ok(SamCommand::NamingLookup {
+                name: value.key_value_pairs.get("NAME").ok_or(())?.to_string(),
+            }),
             (command, subcommand) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -352,7 +362,7 @@ impl SamCommand {
     // Non-public method returning `IResult` for cleaner error handling.
     fn parse_inner(input: &str) -> IResult<&str, Self> {
         let (rest, (command, _, subcommand, _, key_value_pairs)) = tuple((
-            alt((tag("HELLO"), tag("SESSION"), tag("STREAM"))),
+            alt((tag("HELLO"), tag("SESSION"), tag("STREAM"), tag("NAMING"))),
             opt(char(' ')),
             opt(alt((
                 tag("VERSION"),
@@ -360,6 +370,7 @@ impl SamCommand {
                 tag("CONNECT"),
                 tag("ACCEPT"),
                 tag("FORWARD"),
+                tag("LOOKUP"),
             ))),
             opt(char(' ')),
             opt(parse_key_value_pairs),
@@ -562,5 +573,18 @@ mod tests {
 
         // port missing
         assert!(SamCommand::parse("STREAM FORWARD ID=MM9z52ZwnTTPwfeD SILENT=false").is_none());
+    }
+
+    #[test]
+    fn parse_naming_lookup() {
+        match SamCommand::parse("NAMING LOOKUP NAME=host.i2p") {
+            Some(SamCommand::NamingLookup { name }) => {
+                assert_eq!(name.as_str(), "host.i2p");
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // name missing
+        assert!(SamCommand::parse("NAMING LOOKUP").is_none());
     }
 }
