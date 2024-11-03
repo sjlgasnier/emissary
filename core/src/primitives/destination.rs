@@ -83,7 +83,7 @@ impl DestinationId {
 
     /// Copy [`DestinationId`] into a byte vector.
     pub fn to_vec(&self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes())
+        base64_decode(&self.0.as_bytes()).expect("to succeed")
     }
 }
 
@@ -100,7 +100,7 @@ impl<T: AsRef<[u8]>> From<T> for DestinationId {
 }
 
 /// Destination.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     /// Destination's verifying key.
     verifying_key: Option<SigningPublicKey>,

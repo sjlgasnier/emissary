@@ -245,8 +245,31 @@ impl<R: Runtime> SessionManager<R> {
                 })?;
 
                 (
-                    StaticPublicKey::from_bytes(base64_decode(static_key.as_bytes())).unwrap(),
-                    base64_decode(iv.as_bytes()),
+                    StaticPublicKey::from_bytes(base64_decode(static_key.as_bytes()).ok_or_else(
+                        || {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                "failed to base64-decode ntcp2 static key"
+                            );
+
+                            Error::InvalidData
+                        },
+                    )?)
+                    .ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to create public key from ntcp2 record",
+                        );
+                        Error::InvalidData
+                    })?,
+                    base64_decode(iv.as_bytes()).ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to base64-decode ntcp2 iv"
+                        );
+
+                        Error::InvalidData
+                    })?,
                     socket_address,
                 )
             };

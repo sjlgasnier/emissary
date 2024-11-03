@@ -60,10 +60,8 @@ pub fn base64_encode<T: AsRef<[u8]>>(data: T) -> String {
 }
 
 /// Base64 decode `data`
-//
-// TODO: no unwraps
-pub fn base64_decode<T: AsRef<[u8]>>(data: T) -> Vec<u8> {
-    I2P_BASE64.decode(data.as_ref()).unwrap()
+pub fn base64_decode<T: AsRef<[u8]>>(data: T) -> Option<Vec<u8>> {
+    I2P_BASE64.decode(data.as_ref()).ok()
 }
 
 /// Base32 decode `data`.
