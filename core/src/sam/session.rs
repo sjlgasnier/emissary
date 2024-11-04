@@ -71,12 +71,12 @@ impl<R: Runtime> thingbuf::Recycle<SamSessionCommand<R>> for SamSessionCommandRe
 /// SAMv3 session commands.
 pub enum SamSessionCommand<R: Runtime> {
     /// Open virtual stream to `destination` over this connection.
-    Stream {
+    Connect {
         /// SAMv3 socket associated with the outbound stream.
         socket: SamSocket<R>,
 
         /// Destination.
-        destination: String,
+        destination: Dest,
 
         /// Options.
         options: HashMap<String, String>,
@@ -328,6 +328,23 @@ impl<R: Runtime> SamSession<R> {
             TunnelPoolEvent::TunnelPoolShutDown | TunnelPoolEvent::Dummy => unreachable!(),
         }
     }
+
+    /// Handle `STREAM CONNECT`.
+    ///
+    /// TODO: more documentation
+    fn on_stream_connect(
+        &mut self,
+        socket: SamSocket<R>,
+        destination: Dest,
+        options: HashMap<String, String>,
+    ) {
+        tracing::info!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            destination_id = %destination.id(),
+            "connect to destination",
+        );
+    }
 }
 
 impl<R: Runtime> Future for SamSession<R> {
@@ -353,18 +370,11 @@ impl<R: Runtime> Future for SamSession<R> {
             match self.receiver.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(SamSessionCommand::Stream {
+                Poll::Ready(Some(SamSessionCommand::Connect {
                     socket,
                     destination,
                     options,
-                })) => {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        session_id = %self.session_id,
-                        %destination,
-                        "connect to destination",
-                    );
-                }
+                })) => self.on_stream_connect(socket, destination, options),
                 Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) =>
                     if let Err(error) =
                         self.stream_manager.register_listener(ListenerKind::Ephemeral {

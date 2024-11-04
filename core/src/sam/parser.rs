@@ -198,7 +198,7 @@ pub enum SamCommand {
         session_id: String,
 
         /// Destination.
-        destination: String,
+        destination: Destination,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -360,9 +360,12 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                     ()
                 })?;
 
+                let decoded = base64_decode(destination).ok_or(())?;
+                let destination = Destination::parse(&decoded).ok_or(())?;
+
                 Ok(SamCommand::Connect {
                     session_id: session_id.to_string(),
-                    destination: destination.to_string(),
+                    destination,
                     options: value
                         .key_value_pairs
                         .into_iter()
@@ -660,16 +663,20 @@ mod tests {
 
     #[test]
     fn parse_stream_connect() {
-        match SamCommand::parse(
-            "STREAM CONNECT ID=MM9z52ZwnTTPwfeD DESTINATION=host.i2p SILENT=false",
-        ) {
+        let destination = {
+            let mut signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+            base64_encode(Destination::new(signing_key.public()).serialize())
+        };
+
+        match SamCommand::parse(&format!(
+            "STREAM CONNECT ID=MM9z52ZwnTTPwfeD DESTINATION={destination} SILENT=false"
+        )) {
             Some(SamCommand::Connect {
                 session_id,
                 destination,
                 options,
             }) => {
                 assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
-                assert_eq!(destination.as_str(), "host.i2p");
                 assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
             }
             response => panic!("invalid response: {response:?}"),

@@ -292,7 +292,7 @@ impl<R: Runtime> Future for SamServer<R> {
                     } => {
                         if let Err(error) = self.active_sessions.send_command(
                             &session_id,
-                            SamSessionCommand::Stream {
+                            SamSessionCommand::Connect {
                                 socket,
                                 destination,
                                 options,

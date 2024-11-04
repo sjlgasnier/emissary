@@ -88,7 +88,7 @@ pub enum ConnectionKind<R: Runtime> {
         version: SamVersion,
 
         /// Destination.
-        destination: String,
+        destination: Destination,
 
         /// Options.
         options: HashMap<String, String>,
