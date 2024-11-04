@@ -76,6 +76,9 @@ pub enum QueryError {
 
     /// Malformed reply.
     Malformed,
+
+    /// Retry limimt reached.
+    RetryFailure,
 }
 
 impl fmt::Display for QueryError {
@@ -85,6 +88,7 @@ impl fmt::Display for QueryError {
             Self::Timeout => write!(f, "query timed out"),
             Self::ValueNotFound => write!(f, "value not found"),
             Self::Malformed => write!(f, "malformed reply"),
+            Self::RetryFailure => write!(f, "operation retried too many times"),
         }
     }
 }

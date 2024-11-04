@@ -25,9 +25,9 @@ use crate::{
         MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
-    primitives::{Destination as Dest, LeaseSet2, LeaseSet2Header},
+    primitives::{Destination as Dest, DestinationId, LeaseSet2, LeaseSet2Header},
     protocol::Protocol,
-    runtime::Runtime,
+    runtime::{JoinSet, Runtime},
     sam::{
         parser::{DestinationKind, SamCommand, SamVersion},
         pending::session::SamSessionContext,
@@ -267,10 +267,10 @@ impl<R: Runtime> SamSession<R> {
         );
 
         match event {
-            TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease } => {}
-            TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {}
-            TunnelPoolEvent::InboundTunnelExpired { tunnel_id } => {}
-            TunnelPoolEvent::OutboundTunnelExpired { tunnel_id } => {}
+            TunnelPoolEvent::InboundTunnelBuilt { .. } => {}
+            TunnelPoolEvent::OutboundTunnelBuilt { .. } => {}
+            TunnelPoolEvent::InboundTunnelExpired { .. } => {}
+            TunnelPoolEvent::OutboundTunnelExpired { .. } => {}
             TunnelPoolEvent::Message { message } => match self.destination.decrypt_message(message)
             {
                 Err(error) => tracing::debug!(
@@ -491,6 +491,15 @@ impl<R: Runtime> Future for SamSession<R> {
                             "failed to send message to tunnel",
                         );
                     }
+                }
+                Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id })) => {
+                    todo!();
+                }
+                Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
+                    destination_id,
+                    error,
+                })) => {
+                    todo!();
                 }
             }
         }
