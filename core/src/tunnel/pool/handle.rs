@@ -171,6 +171,30 @@ impl TunnelPoolHandle {
     pub fn shutdown(&mut self) {
         self.shutdown_tx.take().map(|tx| tx.send(()));
     }
+
+    #[cfg(test)]
+    /// Create new [`TunnelPoolHandle`] for testing.
+    pub fn create() -> (
+        Self,
+        mpsc::Receiver<TunnelMessage>,
+        mpsc::Sender<TunnelPoolEvent>,
+        oneshot::Receiver<()>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (message_tx, message_rx) = mpsc::channel(64);
+
+        (
+            Self {
+                event_rx,
+                message_tx,
+                shutdown_tx: Some(shutdown_tx),
+            },
+            message_rx,
+            event_tx,
+            shutdown_rx,
+        )
+    }
 }
 
 impl Stream for TunnelPoolHandle {

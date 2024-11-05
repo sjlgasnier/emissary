@@ -20,27 +20,20 @@ use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
     destination::{Destination, DestinationEvent},
     i2cp::{I2cpPayload, I2cpPayloadBuilder},
-    i2np::{
-        database::store::{DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
-        MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
-    },
-    netdb::NetDbHandle,
-    primitives::{Destination as Dest, DestinationId, LeaseSet2, LeaseSet2Header},
+    primitives::{Destination as Dest, LeaseSet2, LeaseSet2Header},
     protocol::Protocol,
-    runtime::{JoinSet, Runtime},
+    runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamCommand, SamVersion},
+        parser::{DestinationKind, SamVersion},
         pending::session::SamSessionContext,
         protocol::streaming::{ListenerKind, StreamManager},
         socket::SamSocket,
     },
-    tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use hashbrown::HashMap;
-use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
 use alloc::sync::Arc;
@@ -135,9 +128,6 @@ pub struct SamSession<R: Runtime> {
 
     /// I2P virtual stream manager.
     stream_manager: StreamManager<R>,
-
-    /// Tunnel pool handle.
-    tunnel_pool_handle: TunnelPoolHandle,
 
     /// Negotiated SAMv3 version.
     version: SamVersion,
@@ -234,6 +224,7 @@ impl<R: Runtime> SamSession<R> {
                     encryption_key,
                     local_leaseset,
                     netdb_handle,
+                    tunnel_pool_handle,
                 ),
                 destination_id,
                 privkey,
@@ -252,80 +243,7 @@ impl<R: Runtime> SamSession<R> {
             session_id,
             socket,
             stream_manager: StreamManager::new(destination_id, signing_key),
-            tunnel_pool_handle,
             version,
-        }
-    }
-
-    /// Handle `event` received from the session's tunnel pool.
-    fn on_tunnel_pool_event(&mut self, event: TunnelPoolEvent) {
-        tracing::trace!(
-            target: LOG_TARGET,
-            session_id = ?self.session_id,
-            %event,
-            "tunnel pool event",
-        );
-
-        match event {
-            TunnelPoolEvent::InboundTunnelBuilt { .. } => {}
-            TunnelPoolEvent::OutboundTunnelBuilt { .. } => {}
-            TunnelPoolEvent::InboundTunnelExpired { .. } => {}
-            TunnelPoolEvent::OutboundTunnelExpired { .. } => {}
-            TunnelPoolEvent::Message { message } => match self.destination.decrypt_message(message)
-            {
-                Err(error) => tracing::debug!(
-                    target: LOG_TARGET,
-                    session_id = ?self.session_id,
-                    ?error,
-                    "failed to decrypt garlic message",
-                ),
-                Ok(messages) =>
-                    messages.for_each(|message| match I2cpPayload::decompress::<R>(message) {
-                        Some(I2cpPayload {
-                            dst_port,
-                            payload,
-                            protocol,
-                            src_port,
-                        }) => {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                session_id = ?self.session_id,
-                                ?src_port,
-                                ?dst_port,
-                                ?protocol,
-                                "handle protocol payload",
-                            );
-
-                            match protocol {
-                                Protocol::Streaming => {
-                                    if let Err(error) =
-                                        self.stream_manager.on_packet(src_port, dst_port, payload)
-                                    {
-                                        tracing::warn!(
-                                            target: LOG_TARGET,
-                                            ?src_port,
-                                            ?dst_port,
-                                            session_id = ?self.session_id,
-                                            ?error,
-                                            "failed to handle streaming protocol packet",
-                                        );
-                                    }
-                                }
-                                protocol => tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?protocol,
-                                    "unsupported protocol",
-                                ),
-                            }
-                        }
-                        None => tracing::warn!(
-                            target: LOG_TARGET,
-                            session_id = ?self.session_id,
-                            "failed to decompress i2cp payload",
-                        ),
-                    }),
-            },
-            TunnelPoolEvent::TunnelPoolShutDown | TunnelPoolEvent::Dummy => unreachable!(),
         }
     }
 
@@ -417,23 +335,6 @@ impl<R: Runtime> Future for SamSession<R> {
         }
 
         loop {
-            match self.tunnel_pool_handle.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) => {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        session_id = ?self.session_id,
-                        "tunnel pool shut down, shutting down session",
-                    );
-
-                    return Poll::Ready(Arc::clone(&self.session_id));
-                }
-                Poll::Ready(Some(event)) => self.on_tunnel_pool_event(event),
-            }
-        }
-
-        loop {
             match self.stream_manager.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
@@ -451,7 +352,7 @@ impl<R: Runtime> Future for SamSession<R> {
                         continue;
                     };
 
-                    if let Err(error) = self.destination.encrypt_message(&destination_id, message) {
+                    if let Err(error) = self.destination.send_message(&destination_id, message) {
                         tracing::warn!(
                             target: LOG_TARGET,
                             session_id = ?self.session_id,
@@ -467,31 +368,52 @@ impl<R: Runtime> Future for SamSession<R> {
             match self.destination.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(DestinationEvent::SendMessage {
-                    router_id,
-                    tunnel_id,
-                    message,
-                })) => {
-                    // wrap the garlic message inside a standard i2np message and send it over
-                    // the one of the pool's outbound tunnels to remote destination
-                    let message = MessageBuilder::standard()
-                        .with_message_type(MessageType::Garlic)
-                        .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                        .with_message_id(R::rng().next_u32())
-                        .with_payload(&message)
-                        .build();
+                Poll::Ready(Some(DestinationEvent::Messages { messages })) => messages
+                    .into_iter()
+                    .for_each(|message| match I2cpPayload::decompress::<R>(message) {
+                        Some(I2cpPayload {
+                            dst_port,
+                            payload,
+                            protocol,
+                            src_port,
+                        }) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                session_id = ?self.session_id,
+                                ?src_port,
+                                ?dst_port,
+                                ?protocol,
+                                "handle protocol payload",
+                            );
 
-                    if let Err(error) =
-                        self.tunnel_pool_handle.send_to_tunnel(router_id, tunnel_id, message)
-                    {
-                        tracing::warn!(
+                            match protocol {
+                                Protocol::Streaming => {
+                                    if let Err(error) =
+                                        self.stream_manager.on_packet(src_port, dst_port, payload)
+                                    {
+                                        tracing::warn!(
+                                            target: LOG_TARGET,
+                                            session_id = ?self.session_id,
+                                            ?src_port,
+                                            ?dst_port,
+                                            ?error,
+                                            "failed to handle streaming protocol packet",
+                                        );
+                                    }
+                                }
+                                protocol => tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?protocol,
+                                    "unsupported protocol",
+                                ),
+                            }
+                        }
+                        None => tracing::warn!(
                             target: LOG_TARGET,
-                            session_id = %self.session_id,
-                            ?error,
-                            "failed to send message to tunnel",
-                        );
-                    }
-                }
+                            session_id = ?self.session_id,
+                            "failed to decompress i2cp payload",
+                        ),
+                    }),
                 Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id })) => {
                     todo!();
                 }
@@ -500,6 +422,15 @@ impl<R: Runtime> Future for SamSession<R> {
                     error,
                 })) => {
                     todo!();
+                }
+                Poll::Ready(Some(DestinationEvent::TunnelPoolShutDown)) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        "tunnel pool shut down, shutting down session",
+                    );
+
+                    return Poll::Ready(Arc::clone(&self.session_id));
                 }
             }
         }
