@@ -43,15 +43,15 @@ const LOG_TARGET: &str = "emissary::sam::streaming::stream";
 /// Read buffer size.
 const READ_BUFFER_SIZE: usize = 8192;
 
-/// Stream state.
-pub enum StreamState {
+/// Stream kind.
+pub enum StreamKind {
     /// Stream is uninitialized and there has been no activity on it before.
-    Uninitialized,
+    Inbound,
 
     /// Stream was pending before a listener was ready to accept it and there may have been data
     /// exchange in stream before the listener was ready. [`Stream`] must initialize its state
     /// using with the provided data.
-    Initialized {
+    InboundPending {
         /// Selected send stream ID.
         send_stream_id: u32,
 
@@ -60,6 +60,12 @@ pub enum StreamState {
 
         /// Received packets, if any.
         packets: VecDeque<Vec<u8>>,
+    },
+
+    /// Outbound stream.
+    Outbound {
+        /// Selected send stream ID.
+        send_stream_id: u32,
     },
 }
 
@@ -172,7 +178,7 @@ impl<R: Runtime> Stream<R> {
         initial_message: Option<Vec<u8>>,
         context: StreamContext,
         config: StreamConfig,
-        state: StreamState,
+        state: StreamKind,
     ) -> Self {
         let StreamContext {
             local,
@@ -183,7 +189,7 @@ impl<R: Runtime> Stream<R> {
         } = context;
 
         let (send_stream_id, initial_message) = match state {
-            StreamState::Uninitialized => {
+            StreamKind::Inbound => {
                 let send_stream_id = R::rng().next_u32();
                 let packet = PacketBuilder::new(send_stream_id)
                     .with_send_stream_id(recv_stream_id)
@@ -195,7 +201,7 @@ impl<R: Runtime> Stream<R> {
 
                 (send_stream_id, initial_message)
             }
-            StreamState::Initialized {
+            StreamKind::InboundPending {
                 send_stream_id,
                 seq_nro,
                 packets,
@@ -228,6 +234,10 @@ impl<R: Runtime> Stream<R> {
                     },
                 )
             }
+            StreamKind::Outbound { send_stream_id } => (
+                send_stream_id,
+                initial_message.is_some().then(|| b"STREAM STATUS RESULT=OK\n".to_vec()),
+            ),
         };
 
         Self {

@@ -19,22 +19,26 @@
 use crate::{
     crypto::{base64_encode, SigningPrivateKey},
     error::StreamingError,
-    primitives::DestinationId,
+    primitives::{Destination, DestinationId},
     runtime::{Instant, JoinSet, Runtime},
-    sam::protocol::streaming::{
-        config::StreamConfig,
-        listener::{SocketKind, StreamListener, StreamListenerEvent},
-        packet::Packet,
-        stream::{
-            active::{Stream, StreamContext, StreamState},
-            pending::{PendingStream, PendingStreamResult},
+    sam::{
+        protocol::streaming::{
+            config::StreamConfig,
+            listener::{SocketKind, StreamListener, StreamListenerEvent},
+            packet::{Packet, PacketBuilder},
+            stream::{
+                active::{Stream, StreamContext, StreamKind},
+                pending::{PendingStream, PendingStreamResult},
+            },
         },
+        socket::SamSocket,
     },
 };
 
 use bytes::{BufMut, BytesMut};
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use rand_core::RngCore;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{collections::VecDeque, vec::Vec};
@@ -70,12 +74,63 @@ const PENDING_STREAM_PRUNE_THRESHOLD: Duration = Duration::from_secs(30);
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
 
+/// Direction of stream.
+pub enum Direction {
+    /// Inbound stream.
+    Inbound,
+
+    /// Outbound stream.
+    Outbound,
+}
+
+/// Events emitted by [`StreamManager`].
+pub enum StreamManagerEvent {
+    /// Stream opened.
+    StreamOpened {
+        /// ID of remote destination.
+        destination_id: DestinationId,
+
+        /// Direction of the stream.
+        direction: Direction,
+    },
+
+    /// Stream closed.
+    StreamClosed {
+        /// ID of remote destination.
+        destination_id: DestinationId,
+    },
+
+    /// Send packet.
+    SendPacket {
+        /// ID of remote destination.
+        destination_id: DestinationId,
+
+        /// Packet.
+        packet: Vec<u8>,
+    },
+}
+
+/// Pending outbound stream.
+struct PendingOutboundStream<R: Runtime> {
+    /// ID of the remote destination.
+    destination_id: DestinationId,
+
+    /// Has the stream configured to be silent.
+    silent: bool,
+
+    /// SAMv3 client socket that was used to send `STREAM CONNECT` command.
+    socket: SamSocket<R>,
+}
+
 /// I2P virtual stream manager.
 pub struct StreamManager<R: Runtime> {
     /// TX channels for sending [`Packet`]'s to active streams.
     ///
     /// Indexed with receive stream ID.
     active: HashMap<u32, Sender<Vec<u8>>>,
+
+    /// Destination of the session the stream manager is bound to.
+    destination: Destination,
 
     /// ID of the `Destination` the stream manager is bound to.
     destination_id: DestinationId,
@@ -89,10 +144,13 @@ pub struct StreamManager<R: Runtime> {
     /// TX channel given to active streams they use for sending messages to the network.
     outbound_tx: Sender<(DestinationId, Vec<u8>)>,
 
-    /// Pending streams.
+    /// Pending inbound streams.
     ///
     /// Indexed by the remote-selected receive stream ID.
-    pending: HashMap<u32, PendingStream<R>>,
+    pending_inbound: HashMap<u32, PendingStream<R>>,
+
+    /// Pending outbound streams.
+    pending_outbound: HashMap<u32, PendingOutboundStream<R>>,
 
     /// Timer for pruning stale pending streams.
     prune_timer: BoxFuture<'static, ()>,
@@ -106,16 +164,19 @@ pub struct StreamManager<R: Runtime> {
 
 impl<R: Runtime> StreamManager<R> {
     /// Create new [`StreamManager`].
-    pub fn new(destination_id: DestinationId, signing_key: SigningPrivateKey) -> Self {
+    pub fn new(destination: Destination, signing_key: SigningPrivateKey) -> Self {
         let (outbound_tx, outbound_rx) = channel(STREAM_MANAGER_CHANNEL_SIZE);
+        let destination_id = destination.id();
 
         Self {
             active: HashMap::new(),
+            destination,
             destination_id: destination_id.clone(),
             listener: StreamListener::new(destination_id),
             outbound_rx,
             outbound_tx,
-            pending: HashMap::new(),
+            pending_inbound: HashMap::new(),
+            pending_outbound: HashMap::new(),
             prune_timer: Box::pin(R::delay(PENDING_STREAM_PRUNE_THRESHOLD)),
             signing_key,
             streams: R::join_set(),
@@ -124,12 +185,15 @@ impl<R: Runtime> StreamManager<R> {
 
     /// Handle message with `SYN`.
     ///
-    /// Ensure that signature and destination are in the message and verify their validity.
-    /// Additionally ensure that the NACK field contains local destination's ID.
+    /// If this a response to an outbound stream sent by us, convert the pending stream to an active
+    /// stream by allocating it a new channel and spawning it in a background task.
     ///
-    /// If validity checks pass, send the message to a listener if it exists. If there are no active
-    /// listeners, mark the stream as pending and start a timer for waiting for a new listener to be
-    /// registered. If no listener is registered within the time window, the stream is closed.
+    /// If this a new inbound stream ensure that signature and destination are in the message and
+    /// verify their validity. Additionally ensure that the NACK field contains local destination's
+    /// ID. If validity checks pass, send the message to a listener if it exists. If there are no
+    /// active listeners, mark the stream as pending and start a timer for waiting for a new
+    /// listener to be registered. If no listener is registered within the time window, the stream
+    /// is closed.
     fn on_synchronize(&mut self, packet: Vec<u8>) -> Result<(), StreamingError> {
         let Packet {
             send_stream_id,
@@ -142,12 +206,41 @@ impl<R: Runtime> StreamManager<R> {
             payload,
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
+        // if this is a syn-ack for an outbound stream, initialize state
+        // for a new stream future and spawn it in the background
+        if let Some(PendingOutboundStream {
+            destination_id,
+            silent,
+            socket,
+        }) = self.pending_outbound.remove(&send_stream_id)
+        {
+            tracing::trace!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                ?recv_stream_id,
+                ?send_stream_id,
+                "outbound stream accepted",
+            );
+
+            self.spawn_stream(
+                SocketKind::Accept {
+                    socket: socket.into_inner(),
+                    silent,
+                },
+                recv_stream_id,
+                destination_id,
+                StreamKind::Outbound { send_stream_id },
+            );
+
+            return Ok(());
+        }
+
         let signature = flags.signature().ok_or(StreamingError::SignatureMissing)?;
         let destination =
             flags.from_included().as_ref().ok_or(StreamingError::DestinationMissing)?;
 
         // verify that the nacks field contains local destination id for replay protection
-        {
+        if nacks.len() == 8 {
             let destination_id = nacks
                 .into_iter()
                 .fold(BytesMut::with_capacity(32), |mut acc, x| {
@@ -212,7 +305,7 @@ impl<R: Runtime> StreamManager<R> {
                 socket,
                 recv_stream_id,
                 destination.id(),
-                StreamState::Uninitialized,
+                StreamKind::Inbound,
             ),
             None => {
                 tracing::info!(
@@ -226,7 +319,7 @@ impl<R: Runtime> StreamManager<R> {
                 let (pending, packet) = PendingStream::new(destination.id(), recv_stream_id);
                 let _ = self.outbound_tx.try_send((destination.id(), packet));
 
-                self.pending.insert(recv_stream_id, pending);
+                self.pending_inbound.insert(recv_stream_id, pending);
             }
         }
 
@@ -245,7 +338,7 @@ impl<R: Runtime> StreamManager<R> {
         socket: SocketKind<R>,
         recv_stream_id: u32,
         destination_id: DestinationId,
-        state: StreamState,
+        stream_kind: StreamKind,
     ) {
         // create context for the stream
         //
@@ -264,10 +357,12 @@ impl<R: Runtime> StreamManager<R> {
         // if the socket wasn't configured to be silent, send the remote's destination
         // to client before the socket is convered into a regural tcp stream
         let initial_message = match &socket {
-            SocketKind::Direct { silent, .. } => !silent,
-            SocketKind::Forwarded { silent, .. } => !silent,
-        }
-        .then(|| format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes());
+            SocketKind::Accept { silent, .. } | SocketKind::Forwarded { silent, .. } if !silent =>
+                Some(format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes()),
+            SocketKind::Connect { silent, .. } if !silent =>
+                Some(b"STREAM STATUS RESULT=OK".to_vec()),
+            _ => None,
+        };
 
         // store the tx channel of the stream in `StreamManager`'s context
         //
@@ -285,13 +380,14 @@ impl<R: Runtime> StreamManager<R> {
         // the forwarded listener before the stream can be started and if the listener is not
         // active, the stream is closed immediately
         match socket {
-            SocketKind::Direct { socket, .. } => self.streams.push(Stream::<R>::new(
-                socket,
-                initial_message,
-                context,
-                StreamConfig::default(),
-                state,
-            )),
+            SocketKind::Accept { socket, .. } | SocketKind::Connect { socket, .. } =>
+                self.streams.push(Stream::<R>::new(
+                    socket,
+                    initial_message,
+                    context,
+                    StreamConfig::default(),
+                    stream_kind,
+                )),
             SocketKind::Forwarded { future, .. } => self.streams.push(async move {
                 let Some(stream) = future.await else {
                     tracing::warn!(
@@ -306,7 +402,7 @@ impl<R: Runtime> StreamManager<R> {
                     initial_message,
                     context,
                     StreamConfig::default(),
-                    state,
+                    stream_kind,
                 )
                 .await
             }),
@@ -329,7 +425,7 @@ impl<R: Runtime> StreamManager<R> {
         tracing::debug!(
             target: LOG_TARGET,
             local = %self.destination_id,
-            num_pending = ?self.pending.len(),
+            num_pending = ?self.pending_inbound.len(),
             "listener ready",
         );
 
@@ -337,7 +433,7 @@ impl<R: Runtime> StreamManager<R> {
         //  a) there are no more pending streams
         //  b) there are no more available listeners
         loop {
-            let Some(stream_id) = self.pending.keys().next().copied() else {
+            let Some(stream_id) = self.pending_inbound.keys().next().copied() else {
                 return;
             };
 
@@ -352,14 +448,14 @@ impl<R: Runtime> StreamManager<R> {
                 packets,
                 seq_nro,
                 ..
-            } = self.pending.remove(&stream_id).expect("to exist");
+            } = self.pending_inbound.remove(&stream_id).expect("to exist");
 
             // spawn new task for the stream in the background
             self.spawn_stream(
                 socket,
                 stream_id,
                 destination_id,
-                StreamState::Initialized {
+                StreamKind::InboundPending {
                     send_stream_id,
                     seq_nro,
                     packets,
@@ -409,8 +505,6 @@ impl<R: Runtime> StreamManager<R> {
             send_stream_id = ?packet.send_stream_id(),
             recv_stream_id = ?packet.recv_stream_id(),
             seq_nro = ?packet.seq_nro(),
-            ?src_port,
-            ?dst_port,
             "inbound message",
         );
 
@@ -431,7 +525,7 @@ impl<R: Runtime> StreamManager<R> {
             return Ok(());
         }
 
-        if let Some(stream) = self.pending.get_mut(&packet.recv_stream_id()) {
+        if let Some(stream) = self.pending_inbound.get_mut(&packet.recv_stream_id()) {
             match stream.on_packet(payload) {
                 PendingStreamResult::DoNothing => {}
                 PendingStreamResult::Send { packet } => {
@@ -446,7 +540,7 @@ impl<R: Runtime> StreamManager<R> {
                     );
 
                     let _ = self.outbound_tx.try_send((stream.destination_id.clone(), pkt));
-                    let _ = self.pending.remove(&packet.recv_stream_id());
+                    let _ = self.pending_inbound.remove(&packet.recv_stream_id());
                 }
                 PendingStreamResult::Destroy => {
                     tracing::debug!(
@@ -456,7 +550,7 @@ impl<R: Runtime> StreamManager<R> {
                         "destroy pending stream",
                     );
 
-                    let _ = self.pending.remove(&packet.recv_stream_id());
+                    let _ = self.pending_inbound.remove(&packet.recv_stream_id());
                 }
             }
 
@@ -473,10 +567,70 @@ impl<R: Runtime> StreamManager<R> {
 
         Ok(())
     }
+
+    /// Create outbound stream to remote peer identfied by `destination_id`.
+    ///
+    /// Construct initial `SYN` packet and create pending outbound stream.
+    ///
+    /// Returns the initial packet and the selected receive stream ID which the caller
+    /// can use to remove the pending stream if the session is rejected at a lower layer.
+    pub fn create_stream(
+        &mut self,
+        destination_id: DestinationId,
+        socket: SamSocket<R>,
+        silent: bool,
+    ) -> (BytesMut, u32) {
+        // generate free receive stream id
+        let recv_stream_id = {
+            let mut rng = R::rng();
+
+            loop {
+                let stream_id = rng.next_u32();
+
+                if !self.active.contains_key(&stream_id)
+                    && !self.pending_outbound.contains_key(&stream_id)
+                {
+                    break stream_id;
+                }
+            }
+        };
+
+        let packet = PacketBuilder::new(recv_stream_id)
+            .with_send_stream_id(0u32)
+            .with_replay_protection(&destination_id)
+            .with_synchronize()
+            .with_signature()
+            .with_from_included(self.destination.clone())
+            .build_and_sign(&self.signing_key);
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            remote = %destination_id,
+            ?recv_stream_id,
+            "open stream",
+        );
+
+        self.pending_outbound.insert(
+            recv_stream_id,
+            PendingOutboundStream {
+                destination_id,
+                silent,
+                socket,
+            },
+        );
+
+        (packet, recv_stream_id)
+    }
+
+    /// Remove pending outbound stream associated with `recv_stream_id`.
+    pub fn remove_stream(&mut self, recv_stream_id: u32) {
+        self.pending_outbound.remove(&recv_stream_id);
+    }
 }
 
 impl<R: Runtime> futures::Stream for StreamManager<R> {
-    type Item = (DestinationId, Vec<u8>);
+    type Item = StreamManagerEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -484,7 +638,10 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some((destination_id, packet))) =>
-                    return Poll::Ready(Some((destination_id, packet))),
+                    return Poll::Ready(Some(StreamManagerEvent::SendPacket {
+                        destination_id,
+                        packet,
+                    })),
             }
         }
 
@@ -513,7 +670,7 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
         }
 
         if let Poll::Ready(()) = self.prune_timer.poll_unpin(cx) {
-            self.pending
+            self.pending_inbound
                 .iter()
                 .filter_map(|(stream_id, pending_stream)| {
                     (pending_stream.established.elapsed() > PENDING_STREAM_PRUNE_THRESHOLD)
@@ -527,7 +684,7 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         ?stream_id,
                         "pruning stale pending stream",
                     );
-                    self.pending.remove(&stream_id);
+                    self.pending_inbound.remove(&stream_id);
                 });
 
             // create new timer and register it into the executor
@@ -558,6 +715,27 @@ mod tests {
         net::TcpListener,
     };
 
+    struct SocketFactory {
+        listener: TcpListener,
+    }
+
+    impl SocketFactory {
+        pub async fn new() -> Self {
+            Self {
+                listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+            }
+        }
+
+        pub async fn socket(&self) -> (SamSocket<MockRuntime>, tokio::net::TcpStream) {
+            let address = self.listener.local_addr().unwrap();
+            let (stream1, stream2) =
+                tokio::join!(self.listener.accept(), MockTcpStream::connect(address));
+            let (mut stream, _) = stream1.unwrap();
+
+            (SamSocket::new(stream2.unwrap()), stream)
+        }
+    }
+
     #[tokio::test]
     async fn register_ephemeral_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -567,9 +745,9 @@ mod tests {
         let (mut stream, _) = stream1.unwrap();
         let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
-        let destination_id = DestinationId::random();
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id, signing_key);
+        let destination = Destination::new(signing_key.public());
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -581,9 +759,10 @@ mod tests {
 
     #[tokio::test]
     async fn stale_pending_streams_are_pruned() {
-        let destination_id = DestinationId::random();
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id.clone(), signing_key);
+        let destination = Destination::new(signing_key.public());
+        let destination_id = destination.id();
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let mut packets = (0..3)
             .into_iter()
@@ -604,7 +783,7 @@ mod tests {
 
         // register syn packet and verify the stream is pending
         assert!(manager.on_packet(0u16, 0u16, packets.pop_front().unwrap()).is_ok());
-        assert_eq!(manager.pending.len(), 1);
+        assert_eq!(manager.pending_inbound.len(), 1);
 
         // reset timer
         manager.prune_timer = Box::pin(tokio::time::sleep(PENDING_STREAM_PRUNE_THRESHOLD));
@@ -615,7 +794,7 @@ mod tests {
         // register two other pending streams
         assert!(manager.on_packet(0u16, 0u16, packets.pop_front().unwrap()).is_ok());
         assert!(manager.on_packet(0u16, 0u16, packets.pop_front().unwrap()).is_ok());
-        assert_eq!(manager.pending.len(), 3);
+        assert_eq!(manager.pending_inbound.len(), 3);
 
         // poll manager until the first stream is pruned
         //
@@ -627,7 +806,7 @@ mod tests {
             })
             .await;
 
-            if manager.pending.len() != 3 {
+            if manager.pending_inbound.len() != 3 {
                 break;
             }
 
@@ -635,9 +814,9 @@ mod tests {
         }
 
         // verify that first pending stream is pruned and that the other two are still left
-        assert!(!manager.pending.contains_key(&0));
-        assert!(manager.pending.contains_key(&1));
-        assert!(manager.pending.contains_key(&2));
+        assert!(!manager.pending_inbound.contains_key(&0));
+        assert!(manager.pending_inbound.contains_key(&1));
+        assert!(manager.pending_inbound.contains_key(&2));
 
         // reset timer
         manager.prune_timer = Box::pin(tokio::time::sleep(Duration::from_secs(20)));
@@ -650,7 +829,7 @@ mod tests {
             })
             .await;
 
-            if manager.pending.is_empty() {
+            if manager.pending_inbound.is_empty() {
                 break;
             }
 
@@ -660,9 +839,10 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_silent_listener() {
-        let destination_id = DestinationId::random();
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id.clone(), signing_key);
+        let destination = Destination::new(signing_key.public());
+        let destination_id = destination.id();
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
@@ -678,7 +858,7 @@ mod tests {
             .to_vec();
 
         assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
-        assert_eq!(manager.pending.len(), 1);
+        assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -693,29 +873,40 @@ mod tests {
                 silent: true
             })
             .is_ok());
-        assert!(manager.pending.is_empty());
+        assert!(manager.pending_inbound.is_empty());
 
         // poll manager until ack packet is received
-        let (remote, message) = manager.next().await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), manager.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            StreamManagerEvent::SendPacket {
+                destination_id: remote,
+                packet,
+            } => {
+                let Packet {
+                    send_stream_id,
+                    recv_stream_id,
+                    flags,
+                    ..
+                } = Packet::parse(&packet).unwrap();
 
-        let Packet {
-            send_stream_id,
-            recv_stream_id,
-            flags,
-            ..
-        } = Packet::parse(&message).unwrap();
-
-        assert_eq!(remote, remote_destination_id);
-        assert_eq!(send_stream_id, 1337u32);
-        assert_ne!(recv_stream_id, 0u32);
-        assert!(flags.synchronize());
+                assert_eq!(remote, remote_destination_id);
+                assert_eq!(send_stream_id, 1337u32);
+                assert_ne!(recv_stream_id, 0u32);
+                assert!(flags.synchronize());
+            }
+            _ => panic!("invalid event"),
+        }
     }
 
     #[tokio::test]
     async fn pending_stream_initialized_with_non_silent_listener() {
-        let destination_id = DestinationId::random();
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id.clone(), signing_key);
+        let destination = Destination::new(signing_key.public());
+        let destination_id = destination.id();
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
@@ -731,7 +922,7 @@ mod tests {
             .to_vec();
 
         assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
-        assert_eq!(manager.pending.len(), 1);
+        assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -746,29 +937,40 @@ mod tests {
                 silent: false
             })
             .is_ok());
-        assert!(!manager.pending.is_empty());
+        assert!(!manager.pending_inbound.is_empty());
 
         // poll manager until ack packet is received
-        let (remote, message) = manager.next().await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), manager.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            StreamManagerEvent::SendPacket {
+                destination_id: remote,
+                packet,
+            } => {
+                let Packet {
+                    send_stream_id,
+                    recv_stream_id,
+                    flags,
+                    ..
+                } = Packet::parse(&packet).unwrap();
 
-        let Packet {
-            send_stream_id,
-            recv_stream_id,
-            flags,
-            ..
-        } = Packet::parse(&message).unwrap();
-
-        assert_eq!(remote, remote_destination_id);
-        assert_eq!(send_stream_id, 1337u32);
-        assert_ne!(recv_stream_id, 0u32);
-        assert!(flags.synchronize());
+                assert_eq!(remote, remote_destination_id);
+                assert_eq!(send_stream_id, 1337u32);
+                assert_ne!(recv_stream_id, 0u32);
+                assert!(flags.synchronize());
+            }
+            _ => panic!("invalid event"),
+        }
     }
 
     #[tokio::test]
     async fn pending_stream_initialized_with_persistent_listener() {
-        let destination_id = DestinationId::random();
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id.clone(), signing_key);
+        let destination = Destination::new(signing_key.public());
+        let destination_id = destination.id();
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
@@ -784,7 +986,7 @@ mod tests {
             .to_vec();
 
         assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
-        assert_eq!(manager.pending.len(), 1);
+        assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -801,22 +1003,32 @@ mod tests {
                 silent: false
             })
             .is_ok());
-        assert!(!manager.pending.is_empty());
+        assert!(!manager.pending_inbound.is_empty());
 
         // poll manager until ack packet is received
-        let (remote, message) = manager.next().await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), manager.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            StreamManagerEvent::SendPacket {
+                destination_id: remote,
+                packet,
+            } => {
+                let Packet {
+                    send_stream_id,
+                    recv_stream_id,
+                    flags,
+                    ..
+                } = Packet::parse(&packet).unwrap();
 
-        let Packet {
-            send_stream_id,
-            recv_stream_id,
-            flags,
-            ..
-        } = Packet::parse(&message).unwrap();
-
-        assert_eq!(remote, remote_destination_id);
-        assert_eq!(send_stream_id, 1337u32);
-        assert_ne!(recv_stream_id, 0u32);
-        assert!(flags.synchronize());
+                assert_eq!(remote, remote_destination_id);
+                assert_eq!(send_stream_id, 1337u32);
+                assert_ne!(recv_stream_id, 0u32);
+                assert!(flags.synchronize());
+            }
+            _ => panic!("invalid event"),
+        }
 
         let mut reader = BufReader::new(stream);
         let mut response = String::new();
@@ -827,9 +1039,10 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_with_buffered_data_initialized() {
-        let destination_id = DestinationId::random();
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id.clone(), signing_key);
+        let destination = Destination::new(signing_key.public());
+        let destination_id = destination.id();
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
@@ -845,22 +1058,34 @@ mod tests {
             .to_vec();
 
         assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
-        assert_eq!(manager.pending.len(), 1);
+        assert_eq!(manager.pending_inbound.len(), 1);
 
         // poll manager until ack packet is received
-        let (remote, message) = manager.next().await.unwrap();
+        let recv_stream_id = match tokio::time::timeout(Duration::from_secs(5), manager.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            StreamManagerEvent::SendPacket {
+                destination_id: remote,
+                packet,
+            } => {
+                let Packet {
+                    send_stream_id,
+                    recv_stream_id,
+                    flags,
+                    ..
+                } = Packet::parse(&packet).unwrap();
 
-        let Packet {
-            send_stream_id,
-            recv_stream_id,
-            flags,
-            ..
-        } = Packet::parse(&message).unwrap();
+                assert_eq!(remote, remote_destination_id);
+                assert_eq!(send_stream_id, 1337u32);
+                assert_ne!(recv_stream_id, 0u32);
+                assert!(flags.synchronize());
 
-        assert_eq!(remote, remote_destination_id);
-        assert_eq!(send_stream_id, 1337u32);
-        assert_ne!(recv_stream_id, 0u32);
-        assert!(flags.synchronize());
+                recv_stream_id
+            }
+            _ => panic!("invalid event"),
+        };
 
         // send three data packets and verify that they're all ack'ed
         {
@@ -882,25 +1107,35 @@ mod tests {
                 assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
 
                 // poll manager until ack packet is received
-                let (remote, message) = manager.next().await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), manager.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    StreamManagerEvent::SendPacket {
+                        destination_id: remote,
+                        packet,
+                    } => {
+                        let Packet {
+                            send_stream_id,
+                            recv_stream_id,
+                            flags,
+                            ack_through,
+                            ..
+                        } = Packet::parse(&packet).unwrap();
 
-                let Packet {
-                    send_stream_id,
-                    recv_stream_id,
-                    flags,
-                    ack_through,
-                    ..
-                } = Packet::parse(&message).unwrap();
-
-                assert_eq!(remote, remote_destination_id);
-                assert_eq!(send_stream_id, 1337u32);
-                assert_ne!(recv_stream_id, 0u32);
-                assert_eq!(ack_through, i as u32 + 1u32);
+                        assert_eq!(remote, remote_destination_id);
+                        assert_eq!(send_stream_id, 1337u32);
+                        assert_ne!(recv_stream_id, 0u32);
+                        assert_eq!(ack_through, i as u32 + 1u32);
+                    }
+                    _ => panic!("invalid event"),
+                }
             }
         }
 
         // verify that the stream is still pending
-        assert_eq!(manager.pending.len(), 1);
+        assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -915,7 +1150,7 @@ mod tests {
                 silent: true
             })
             .is_ok());
-        assert!(manager.pending.is_empty());
+        assert!(manager.pending_inbound.is_empty());
 
         // poll manager in the background in order to drive the stream future forward
         tokio::spawn(async move { while let Some(_) = manager.next().await {} });
@@ -928,42 +1163,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_stream_accepted() {
+        crate::util::init_logger();
+
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager1 = {
+            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // register listener for `manager1`
+        let (socket, _) = socket_factory.socket().await;
+        assert!(manager1
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true
+            })
+            .is_ok());
+
+        // create new oubound stream to `manager1`
+        let (socket, mut client_stream) = socket_factory.socket().await;
+        let (packet, stream_id) =
+            manager2.create_stream(manager1.destination_id.clone(), socket, false);
+
+        assert!(manager1.on_packet(0u16, 0u16, packet.to_vec()).is_ok());
+
+        let (destination_id, packet) =
+            match tokio::time::timeout(Duration::from_secs(5), manager1.next())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                StreamManagerEvent::SendPacket {
+                    destination_id,
+                    packet,
+                } => (destination_id, packet),
+                _ => panic!("invalid event"),
+            };
+
+        assert_eq!(destination_id, manager2.destination_id);
+        assert!(manager2.on_packet(0u16, 0u16, packet).is_ok());
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = manager1.next() => {}
+                    _ = manager2.next() => {}
+                }
+            }
+        });
+
+        let mut reader = tokio::io::BufReader::new(client_stream);
+        let mut response = String::new();
+        reader.read_line(&mut response).await.unwrap();
+
+        assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
+    }
+
+    #[tokio::test]
     async fn inbound_stream() {
-        let destination_id = DestinationId::from([
-            200, 35, 63, 139, 109, 209, 249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81,
-            133, 124, 14, 246, 56, 138, 8, 201, 219, 160, 118, 181, 191, 27,
-        ]);
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id, signing_key);
+        let signing_key = SigningPrivateKey::new(&[
+            116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
+            221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
+        ])
+        .unwrap();
+        let destination = Destination::new(signing_key.public());
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let payload = vec![
-            0, 0, 0, 0, 148, 23, 180, 82, 0, 0, 0, 0, 0, 0, 0, 0, 8, 200, 35, 63, 139, 109, 209,
-            249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81, 133, 124, 14, 246, 56, 138, 8,
-            201, 219, 160, 118, 181, 191, 27, 9, 4, 169, 1, 201, 38, 195, 17, 125, 194, 201, 147,
-            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
-            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
-            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
-            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
-            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
-            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
-            244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4,
-            113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44,
-            250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89,
-            81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195,
-            17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54,
-            252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147,
-            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
-            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
-            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
-            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
-            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
-            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
-            244, 107, 183, 252, 44, 250, 248, 138, 76, 180, 60, 50, 18, 127, 20, 227, 77, 70, 183,
-            45, 98, 87, 86, 53, 211, 46, 229, 46, 211, 83, 237, 74, 202, 66, 177, 167, 84, 212,
-            142, 59, 123, 5, 0, 4, 0, 7, 0, 0, 7, 20, 34, 64, 253, 113, 136, 137, 7, 144, 142, 165,
-            147, 51, 145, 79, 234, 74, 126, 166, 86, 159, 203, 103, 202, 205, 154, 245, 129, 74,
-            180, 253, 6, 52, 63, 37, 90, 147, 60, 180, 195, 134, 209, 104, 48, 24, 178, 46, 155,
-            216, 187, 51, 17, 73, 220, 156, 1, 23, 130, 84, 245, 197, 171, 40, 76, 5,
+            0, 0, 0, 0, 7, 170, 162, 225, 0, 0, 0, 0, 0, 0, 0, 0, 8, 92, 237, 166, 51, 230, 31, 2,
+            219, 176, 105, 43, 109, 206, 122, 239, 241, 221, 135, 206, 60, 147, 145, 41, 155, 120,
+            133, 180, 145, 4, 26, 107, 40, 9, 4, 169, 1, 201, 127, 213, 228, 57, 98, 56, 202, 186,
+            4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107,
+            167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46,
+            112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93,
+            127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224,
+            232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56,
+            202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97,
+            227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192,
+            50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101,
+            93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46,
+            224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57,
+            98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217,
+            232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78,
+            254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167,
+            187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112,
+            10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127,
+            213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232,
+            108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202,
+            186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227,
+            107, 167, 187, 30, 101, 93, 25, 140, 66, 230, 135, 216, 58, 4, 196, 109, 50, 64, 50,
+            20, 213, 102, 99, 242, 187, 7, 216, 187, 137, 158, 228, 199, 195, 182, 38, 53, 40, 227,
+            5, 0, 4, 0, 7, 0, 0, 7, 20, 182, 215, 224, 75, 178, 60, 111, 31, 179, 197, 227, 223,
+            204, 20, 139, 51, 220, 96, 129, 16, 67, 235, 112, 185, 5, 108, 37, 55, 24, 251, 233,
+            175, 88, 10, 18, 128, 227, 33, 34, 87, 15, 141, 210, 183, 58, 42, 184, 148, 221, 156,
+            78, 128, 175, 18, 79, 142, 32, 0, 13, 28, 247, 4, 222, 7,
         ];
 
         assert!(manager.on_packet(13, 37, payload).is_ok());
@@ -971,41 +1274,42 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let destination_id = DestinationId::from([
-            200, 35, 63, 139, 109, 209, 249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81,
-            133, 124, 14, 246, 56, 138, 8, 201, 219, 160, 118, 181, 191, 27,
-        ]);
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id, signing_key);
+        let signing_key = SigningPrivateKey::new(&[
+            116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
+            221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
+        ])
+        .unwrap();
+        let destination = Destination::new(signing_key.public());
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let payload = vec![
-            0, 0, 0, 0, 148, 23, 180, 82, 0, 0, 0, 0, 0, 0, 0, 0, 8, 200, 35, 63, 139, 109, 209,
-            249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81, 133, 124, 14, 246, 56, 138, 8,
-            201, 219, 160, 118, 181, 191, 27, 9, 4, 169, 1, 201, 38, 195, 17, 125, 194, 201, 147,
-            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
-            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
-            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
-            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
-            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
-            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
-            244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4,
-            113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44,
-            250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89,
-            81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195,
-            17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54,
-            252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147,
-            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
-            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
-            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
-            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
-            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
-            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
-            244, 107, 183, 252, 44, 250, 248, 138, 76, 180, 60, 50, 18, 127, 20, 227, 77, 70, 183,
-            45, 98, 87, 86, 53, 211, 46, 229, 46, 211, 83, 237, 74, 202, 66, 177, 167, 84, 212,
-            142, 59, 123, 5, 0, 4, 0, 7, 0, 0, 7, 20, 34, 64, 253, 113, 136, 137, 7, 144, 142, 165,
-            147, 51, 145, 79, 234, 74, 126, 166, 86, 159, 203, 103, 202, 205, 154, 245, 129, 74,
-            180, 253, 6, 52, 63, 37, 90, 147, 60, 180, 195, 134, 209, 104, 48, 24, 178, 46, 155,
-            216, 187, 51, 17, 73, 220, 156, 1, 23, 130, 84, 245, 197, 171, 40, 76, 6,
+            0, 0, 0, 0, 7, 170, 162, 225, 0, 0, 0, 0, 0, 0, 0, 0, 8, 92, 237, 166, 51, 230, 31, 2,
+            219, 176, 105, 43, 109, 206, 122, 239, 241, 221, 135, 206, 60, 147, 145, 41, 155, 120,
+            133, 180, 145, 4, 26, 107, 40, 9, 4, 169, 1, 201, 127, 213, 228, 57, 98, 56, 202, 186,
+            4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107,
+            167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46,
+            112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93,
+            127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224,
+            232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56,
+            202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97,
+            227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192,
+            50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101,
+            93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46,
+            224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57,
+            98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217,
+            232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78,
+            254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167,
+            187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112,
+            10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127,
+            213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232,
+            108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202,
+            186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227,
+            107, 167, 187, 30, 101, 93, 25, 140, 66, 230, 135, 216, 58, 4, 196, 109, 50, 64, 50,
+            20, 213, 102, 99, 242, 187, 7, 216, 187, 137, 158, 228, 199, 195, 182, 38, 53, 40, 227,
+            5, 0, 4, 0, 7, 0, 0, 7, 20, 182, 215, 224, 75, 178, 60, 111, 31, 179, 197, 227, 223,
+            204, 20, 139, 51, 220, 96, 129, 16, 67, 235, 112, 185, 5, 108, 37, 55, 24, 251, 233,
+            175, 88, 10, 18, 128, 227, 33, 34, 87, 15, 141, 210, 183, 58, 42, 184, 148, 221, 156,
+            78, 128, 175, 18, 79, 142, 32, 0, 13, 28, 247, 4, 223, 7,
         ];
 
         assert_eq!(
@@ -1016,41 +1320,42 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_destination_id() {
-        let destination_id = DestinationId::from([
-            200, 200, 200, 139, 109, 209, 249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81,
-            133, 124, 14, 246, 56, 138, 8, 201, 219, 160, 118, 181, 191, 27,
-        ]);
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let mut manager = StreamManager::<MockRuntime>::new(destination_id, signing_key);
+        let signing_key = SigningPrivateKey::new(&[
+            116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
+            221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
+        ])
+        .unwrap();
+        let destination = Destination::new(signing_key.public());
+        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let payload = vec![
-            0, 0, 0, 0, 148, 23, 180, 82, 0, 0, 0, 0, 0, 0, 0, 0, 8, 200, 35, 63, 139, 109, 209,
-            249, 106, 242, 177, 156, 87, 29, 241, 241, 117, 75, 81, 133, 124, 14, 246, 56, 138, 8,
-            201, 219, 160, 118, 181, 191, 27, 9, 4, 169, 1, 201, 38, 195, 17, 125, 194, 201, 147,
-            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
-            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
-            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
-            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
-            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
-            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
-            244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4,
-            113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44,
-            250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89,
-            81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195,
-            17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54,
-            252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147,
-            121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183,
-            252, 44, 250, 248, 138, 76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209,
-            227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138,
-            76, 38, 195, 17, 125, 194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54,
-            140, 254, 54, 252, 60, 244, 107, 183, 252, 44, 250, 248, 138, 76, 38, 195, 17, 125,
-            194, 201, 147, 121, 4, 113, 230, 209, 227, 66, 89, 81, 115, 54, 140, 254, 54, 252, 60,
-            244, 107, 183, 252, 44, 250, 248, 138, 76, 180, 60, 50, 18, 127, 20, 227, 77, 70, 183,
-            45, 98, 87, 86, 53, 211, 46, 229, 46, 211, 83, 237, 74, 202, 66, 177, 167, 84, 212,
-            142, 59, 123, 5, 0, 4, 0, 7, 0, 0, 7, 20, 34, 64, 253, 113, 136, 137, 7, 144, 142, 165,
-            147, 51, 145, 79, 234, 74, 126, 166, 86, 159, 203, 103, 202, 205, 154, 245, 129, 74,
-            180, 253, 6, 52, 63, 37, 90, 147, 60, 180, 195, 134, 209, 104, 48, 24, 178, 46, 155,
-            216, 187, 51, 17, 73, 220, 156, 1, 23, 130, 84, 245, 197, 171, 40, 76, 5,
+            0, 0, 0, 0, 7, 170, 162, 225, 0, 0, 0, 0, 0, 0, 0, 0, 8, 92, 237, 165, 51, 230, 31, 2,
+            219, 176, 105, 43, 109, 206, 122, 239, 241, 221, 135, 206, 60, 147, 145, 41, 155, 120,
+            133, 180, 145, 4, 26, 107, 40, 9, 4, 169, 1, 201, 127, 213, 228, 57, 98, 56, 202, 186,
+            4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107,
+            167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46,
+            112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93,
+            127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224,
+            232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56,
+            202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97,
+            227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192,
+            50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101,
+            93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46,
+            224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57,
+            98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217,
+            232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78,
+            254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167,
+            187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112,
+            10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127,
+            213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232,
+            108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202,
+            186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227,
+            107, 167, 187, 30, 101, 93, 25, 140, 66, 230, 135, 216, 58, 4, 196, 109, 50, 64, 50,
+            20, 213, 102, 99, 242, 187, 7, 216, 187, 137, 158, 228, 199, 195, 182, 38, 53, 40, 227,
+            5, 0, 4, 0, 7, 0, 0, 7, 20, 182, 215, 224, 75, 178, 60, 111, 31, 179, 197, 227, 223,
+            204, 20, 139, 51, 220, 96, 129, 16, 67, 235, 112, 185, 5, 108, 37, 55, 24, 251, 233,
+            175, 88, 10, 18, 128, 227, 33, 34, 87, 15, 141, 210, 183, 58, 42, 184, 148, 221, 156,
+            78, 128, 175, 18, 79, 142, 32, 0, 13, 28, 247, 4, 222, 7,
         ];
 
         assert_eq!(

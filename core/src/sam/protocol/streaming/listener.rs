@@ -83,10 +83,19 @@ impl<R: Runtime> fmt::Debug for ListenerKind<R> {
     }
 }
 
-/// Socket kind for a listener.
+/// Socket kind for a SAMV3 socket.
 pub enum SocketKind<R: Runtime> {
+    /// Direct connection opened with `STREAM CONNECT`.
+    Connect {
+        /// Underlying TCP stream of the SAMv3 socket.
+        socket: R::TcpStream,
+
+        /// Has the stream configured to be silent.
+        silent: bool,
+    },
+
     /// Direct connection opened with `STREAM ACCEPT`.
-    Direct {
+    Accept {
         /// Underlying TCP stream of the SAMv3 socket.
         socket: R::TcpStream,
 
@@ -247,7 +256,7 @@ impl<R: Runtime> StreamListener<R> {
                     self.state = ListenerState::Uninitialized;
                 }
 
-                Some(SocketKind::Direct {
+                Some(SocketKind::Accept {
                     socket: socket.into_inner(),
                     silent,
                 })
