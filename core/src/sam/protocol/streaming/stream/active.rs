@@ -46,7 +46,10 @@ const READ_BUFFER_SIZE: usize = 8192;
 /// Stream kind.
 pub enum StreamKind {
     /// Stream is uninitialized and there has been no activity on it before.
-    Inbound,
+    Inbound {
+        /// Payload of the `SYN` packet, may be empty.
+        payload: Vec<u8>,
+    },
 
     /// Stream was pending before a listener was ready to accept it and there may have been data
     /// exchange in stream before the listener was ready. [`Stream`] must initialize its state
@@ -189,7 +192,7 @@ impl<R: Runtime> Stream<R> {
         } = context;
 
         let (send_stream_id, initial_message) = match state {
-            StreamKind::Inbound => {
+            StreamKind::Inbound { payload } => {
                 let send_stream_id = R::rng().next_u32();
                 let packet = PacketBuilder::new(send_stream_id)
                     .with_send_stream_id(recv_stream_id)
@@ -199,7 +202,18 @@ impl<R: Runtime> Stream<R> {
 
                 event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
 
-                (send_stream_id, initial_message)
+                (
+                    send_stream_id,
+                    match (initial_message, payload.is_empty()) {
+                        (Some(mut initial), false) => {
+                            initial.extend_from_slice(&payload);
+                            Some(initial)
+                        }
+                        (Some(initial), true) => Some(initial),
+                        (None, false) => Some(payload),
+                        (None, true) => None,
+                    },
+                )
             }
             StreamKind::InboundPending {
                 send_stream_id,

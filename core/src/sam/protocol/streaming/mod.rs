@@ -305,7 +305,9 @@ impl<R: Runtime> StreamManager<R> {
                 socket,
                 recv_stream_id,
                 destination.id(),
-                StreamKind::Inbound,
+                StreamKind::Inbound {
+                    payload: payload.to_vec(),
+                },
             ),
             None => {
                 tracing::info!(
@@ -316,7 +318,8 @@ impl<R: Runtime> StreamManager<R> {
                 );
 
                 // create new pending stream and send syn-ack for it
-                let (pending, packet) = PendingStream::new(destination.id(), recv_stream_id);
+                let (pending, packet) =
+                    PendingStream::new(destination.id(), recv_stream_id, payload.to_vec());
                 let _ = self.outbound_tx.try_send((destination.id(), packet));
 
                 self.pending_inbound.insert(recv_stream_id, pending);
@@ -1164,8 +1167,6 @@ mod tests {
 
     #[tokio::test]
     async fn outbound_stream_accepted() {
-        crate::util::init_logger();
-
         let socket_factory = SocketFactory::new().await;
 
         let mut manager1 = {
@@ -1227,6 +1228,216 @@ mod tests {
         reader.read_line(&mut response).await.unwrap();
 
         assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
+    }
+
+    #[tokio::test]
+    async fn data_in_syn_packet_silent_ephemeral() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager = {
+            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // register listener for `manager1`
+        let (socket, mut client_socket) = socket_factory.socket().await;
+        assert!(manager
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true
+            })
+            .is_ok());
+
+        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let destination = Destination::new(signing_key.public());
+        let packet = PacketBuilder::new(1337u32)
+            .with_synchronize()
+            .with_send_stream_id(0u32)
+            .with_replay_protection(&manager.destination.id())
+            .with_from_included(destination)
+            .with_signature()
+            .with_payload(b"hello, world")
+            .build_and_sign(&signing_key)
+            .to_vec();
+
+        // handle syn packet and spawn manager in the background
+        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+
+        tokio::spawn(async move { while let Some(_) = manager.next().await {} });
+
+        // read the payload that was contained within the syn packet
+        let mut buffer = [0u8; 12];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client_socket.read_exact(&mut buffer),
+        )
+        .await
+        .expect("no timeout")
+        .expect("to succeed");
+        assert_eq!(&buffer, b"hello, world");
+    }
+
+    #[tokio::test]
+    async fn data_in_syn_packet_non_silent_ephemeral() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager = {
+            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // register listener for `manager1`
+        let (socket, mut client_socket) = socket_factory.socket().await;
+        assert!(manager
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: false
+            })
+            .is_ok());
+
+        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let destination = Destination::new(signing_key.public());
+        let destination_id = base64_encode(destination.id().to_vec());
+        let packet = PacketBuilder::new(1337u32)
+            .with_synchronize()
+            .with_send_stream_id(0u32)
+            .with_replay_protection(&manager.destination.id())
+            .with_from_included(destination)
+            .with_signature()
+            .with_payload(b"hello, world\n")
+            .build_and_sign(&signing_key)
+            .to_vec();
+
+        // handle syn packet and spawn manager in the background
+        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+
+        tokio::spawn(async move { while let Some(_) = manager.next().await {} });
+
+        let mut reader = BufReader::new(client_socket);
+        let mut response = String::new();
+
+        // read stream status
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, "STREAM STATUS RESULT=OK\n");
+
+        // read remote's destination id
+        response.clear();
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, format!("{destination_id}\n"));
+
+        // read payload from syn packet
+        response.clear();
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, "hello, world\n");
+    }
+
+    #[tokio::test]
+    async fn data_in_syn_packet_non_silent_pending_ephemeral() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager = {
+            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let destination = Destination::new(signing_key.public());
+        let destination_id = base64_encode(destination.id().to_vec());
+        let packet = PacketBuilder::new(1337u32)
+            .with_synchronize()
+            .with_send_stream_id(0u32)
+            .with_replay_protection(&manager.destination.id())
+            .with_from_included(destination)
+            .with_signature()
+            .with_payload(b"hello, world\n")
+            .build_and_sign(&signing_key)
+            .to_vec();
+
+        // handle syn packet and spawn manager in the background
+        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(!manager.pending_inbound.is_empty());
+
+        // register listener for `manager1`
+        let (socket, mut client_socket) = socket_factory.socket().await;
+        assert!(manager
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: false
+            })
+            .is_ok());
+
+        tokio::spawn(async move { while let Some(_) = manager.next().await {} });
+
+        let mut reader = BufReader::new(client_socket);
+        let mut response = String::new();
+
+        // read stream status
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, "STREAM STATUS RESULT=OK\n");
+
+        // read remote's destination id
+        response.clear();
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, format!("{destination_id}\n"));
+
+        // read payload from syn packet
+        response.clear();
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, "hello, world\n");
+    }
+
+    #[tokio::test]
+    async fn data_in_syn_packet_silent_pending_ephemeral() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager = {
+            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let destination = Destination::new(signing_key.public());
+        let destination_id = base64_encode(destination.id().to_vec());
+        let packet = PacketBuilder::new(1337u32)
+            .with_synchronize()
+            .with_send_stream_id(0u32)
+            .with_replay_protection(&manager.destination.id())
+            .with_from_included(destination)
+            .with_signature()
+            .with_payload(b"hello, world\n")
+            .build_and_sign(&signing_key)
+            .to_vec();
+
+        // handle syn packet and spawn manager in the background
+        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(!manager.pending_inbound.is_empty());
+
+        // register listener for `manager1`
+        let (socket, mut client_socket) = socket_factory.socket().await;
+        assert!(manager
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true
+            })
+            .is_ok());
+
+        tokio::spawn(async move { while let Some(_) = manager.next().await {} });
+
+        let mut reader = BufReader::new(client_socket);
+        let mut response = String::new();
+
+        // read payload from syn packet
+        response.clear();
+        reader.read_line(&mut response).await.unwrap();
+        assert_eq!(response, "hello, world\n");
     }
 
     #[tokio::test]
