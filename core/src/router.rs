@@ -23,10 +23,11 @@ use crate::{
     primitives::{RouterInfo, TransportKind},
     router_storage::RouterStorage,
     runtime::{MetricType, Runtime},
+    sam::SamServer,
     subsystem::SubsystemKind,
     transports::TransportManager,
     tunnel::{TunnelManager, TunnelManagerHandle},
-    Config, I2cpConfig,
+    Config, I2cpConfig, SamConfig,
 };
 
 use futures::{FutureExt, Stream, StreamExt};
@@ -72,6 +73,7 @@ impl<R: Runtime> Router<R> {
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
         let ntcp2_config = config.ntcp2_config.clone();
         let i2cp_config = config.i2cp_config.clone();
+        let sam_config = config.samv3_config.clone();
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -147,9 +149,23 @@ impl<R: Runtime> Router<R> {
         // initialize i2cp server if it was enabled
         if let Some(I2cpConfig { port }) = i2cp_config {
             let i2cp_server =
-                I2cpServer::<R>::new(port, netdb_handle, tunnel_manager_handle.clone()).await?;
+                I2cpServer::<R>::new(port, netdb_handle.clone(), tunnel_manager_handle.clone())
+                    .await?;
 
             R::spawn(i2cp_server);
+        }
+
+        if let Some(SamConfig { tcp_port, udp_port }) = sam_config {
+            let sam_server = SamServer::<R>::new(
+                tcp_port,
+                udp_port,
+                netdb_handle.clone(),
+                tunnel_manager_handle.clone(),
+                metrics_handle,
+            )
+            .await?;
+
+            R::spawn(sam_server)
         }
 
         // initialize and start ntcp2

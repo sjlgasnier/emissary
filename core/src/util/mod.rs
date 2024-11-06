@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    error::ConnectionError,
     runtime::{AsyncRead, AsyncWrite},
     Error,
 };
@@ -62,7 +63,7 @@ impl<'a, T: AsyncRead + Unpin> Future for ReadExact<'a, T> {
                 this.buffer = rest;
             }
             if n == 0 {
-                return Poll::Ready(Err(Error::IoError(String::from("eof"))));
+                return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed)));
             }
         }
         Poll::Ready(Ok(()))
@@ -110,7 +111,7 @@ impl<T: AsyncWrite + Unpin> Future for WriteAll<'_, T> {
                 this.buffer = rest;
             }
             if n == 0 {
-                return Poll::Ready(Err(Error::IoError(String::from("eof"))));
+                return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed)));
             }
         }
 

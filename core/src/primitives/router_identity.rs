@@ -62,7 +62,7 @@ impl<T: AsRef<[u8]>> From<T> for RouterId {
 
 impl Into<Vec<u8>> for RouterId {
     fn into(self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes())
+        base64_decode(&self.0.as_bytes()).expect("to succeed")
     }
 }
 

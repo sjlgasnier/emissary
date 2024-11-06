@@ -29,10 +29,10 @@ use nom::{
     number::complete::be_u8,
     Err, IResult,
 };
+use rand_core::RngCore;
 
 use alloc::{vec, vec::Vec};
 use core::str::FromStr;
-use rand_core::RngCore;
 
 use super::router_address::TransportKind;
 

@@ -22,6 +22,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
+    error::ConnectionError,
     i2np::MessageType,
     primitives::{RouterId, RouterInfo},
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
@@ -242,9 +243,9 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         }
                         Poll::Ready((Ok(nread))) => {
                             if nread == 0 {
-                                return Poll::Ready(Err(Error::IoError(String::from(
-                                    "socket closed",
-                                ))));
+                                return Poll::Ready(Err(Error::Connection(
+                                    ConnectionError::SocketClosed,
+                                )));
                             }
 
                             if offset + nread != 2 {
@@ -270,9 +271,9 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready((Ok(nread))) => {
                             if nread == 0 {
-                                return Poll::Ready(Err(Error::IoError(String::from(
-                                    "socket closed",
-                                ))));
+                                return Poll::Ready(Err(Error::Connection(
+                                    ConnectionError::SocketClosed,
+                                )));
                             }
 
                             // next frame hasn't been read completely
@@ -375,7 +376,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     }
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                     Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
-                        return Poll::Ready(Err(Error::IoError(String::from("socket closed")))),
+                        return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
                     Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
                         true => {
                             this.write_state = WriteState::SendMessage {
@@ -392,27 +393,29 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         }
                     },
                 },
-                WriteState::SendMessage { offset, message } =>
-                    match stream.as_mut().poll_write(cx, &message[offset..]) {
-                        Poll::Pending => {
-                            this.write_state = WriteState::SendMessage { offset, message };
-                            break;
+                WriteState::SendMessage { offset, message } => match stream
+                    .as_mut()
+                    .poll_write(cx, &message[offset..])
+                {
+                    Poll::Pending => {
+                        this.write_state = WriteState::SendMessage { offset, message };
+                        break;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                        return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+                    Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
+                        true => {
+                            this.write_state = WriteState::GetMessage;
                         }
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
-                            return Poll::Ready(Err(Error::IoError(String::from("socket closed")))),
-                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
-                            true => {
-                                this.write_state = WriteState::GetMessage;
-                            }
-                            false => {
-                                this.write_state = WriteState::SendMessage {
-                                    offset: offset + nwritten,
-                                    message,
-                                };
-                            }
-                        },
+                        false => {
+                            this.write_state = WriteState::SendMessage {
+                                offset: offset + nwritten,
+                                message,
+                            };
+                        }
                     },
+                },
                 WriteState::Poisoned => {
                     tracing::warn!(
                         target: LOG_TARGET,

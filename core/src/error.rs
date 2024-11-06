@@ -24,6 +24,29 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// Connection error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConnectionError {
+    /// Socket closed.
+    SocketClosed,
+
+    /// Failed to bind to socket.
+    BindFailure,
+
+    /// Keep-alive timeout.
+    KeepAliveTimeout,
+}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SocketClosed => write!(f, "socket closed"),
+            Self::BindFailure => write!(f, "failed to bind to socket"),
+            Self::KeepAliveTimeout => write!(f, "keep-alive timeout"),
+        }
+    }
+}
+
 /// I2CP error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum I2cpError {
@@ -53,6 +76,9 @@ pub enum QueryError {
 
     /// Malformed reply.
     Malformed,
+
+    /// Retry limimt reached.
+    RetryFailure,
 }
 
 impl fmt::Display for QueryError {
@@ -62,6 +88,7 @@ impl fmt::Display for QueryError {
             Self::Timeout => write!(f, "query timed out"),
             Self::ValueNotFound => write!(f, "value not found"),
             Self::Malformed => write!(f, "malformed reply"),
+            Self::RetryFailure => write!(f, "operation retried too many times"),
         }
     }
 }
@@ -71,6 +98,38 @@ impl fmt::Display for QueryError {
 pub enum StreamingError {
     /// Mismatch between send and receive stream IDs.
     StreamIdMismatch(u32, u32),
+
+    /// Signature missing from `SYN` packet.
+    SignatureMissing,
+
+    /// Destination mssing from `SYN` packet.
+    DestinationMissing,
+
+    /// Verifying key missing from included destination.
+    VerifyingKeyMissing,
+
+    /// Replay protection check failed.
+    ///
+    /// NACk field didn't contain destination's ID.
+    ReplayProtectionCheckFailed,
+
+    /// Invalid signature.
+    InvalidSignature,
+
+    /// Malformed packet.
+    Malformed,
+
+    /// Listener kind mismatch.
+    ///
+    /// Persistent listener registered when one or more ephemeral listeners
+    /// are active or vice versa.
+    ListenerMismatch,
+
+    /// Stream closed.
+    Closed,
+
+    /// Receive window is full.
+    ReceiveWindowFull,
 }
 
 impl fmt::Display for StreamingError {
@@ -78,6 +137,16 @@ impl fmt::Display for StreamingError {
         match self {
             Self::StreamIdMismatch(send, recv) =>
                 write!(f, "stream mismatch: {send} (send) vs {recv} (recv)"),
+            Self::SignatureMissing => write!(f, "signature missing"),
+            Self::DestinationMissing => write!(f, "destination missing"),
+            Self::VerifyingKeyMissing => write!(f, "verifying key mssing"),
+            Self::ReplayProtectionCheckFailed =>
+                write!(f, "nack field didn't contain correct destination id"),
+            Self::InvalidSignature => write!(f, "invalid signature"),
+            Self::Malformed => write!(f, "malformed packet"),
+            Self::ListenerMismatch => write!(f, "listener kind mismatch"),
+            Self::Closed => write!(f, "stream closed"),
+            Self::ReceiveWindowFull => write!(f, "receive window is full"),
         }
     }
 }
@@ -222,8 +291,6 @@ impl fmt::Display for RoutingError {
 pub enum Error {
     Ed25519(ed25519_dalek::ed25519::Error),
     Chacha20Poly1305(chacha20poly1305::Error),
-    IoError(String),
-    Socket,
     InvalidData,
     InvalidState,
     NonceOverflow,
@@ -237,6 +304,8 @@ pub enum Error {
     Streaming(StreamingError),
     Query(QueryError),
     I2cp(I2cpError),
+    Connection(ConnectionError),
+    Custom(String),
 }
 
 impl fmt::Display for Error {
@@ -244,11 +313,9 @@ impl fmt::Display for Error {
         match self {
             Self::Ed25519(error) => write!(f, "ed25519 error: {error:?}"),
             Self::Chacha20Poly1305(error) => write!(f, "chacha20poly1305 error: {error:?}"),
-            Self::Socket => write!(f, "socket failure"),
             Self::InvalidData => write!(f, "invalid data"),
             Self::InvalidState => write!(f, "invalid state"),
             Self::NonceOverflow => write!(f, "nonce overflow"),
-            Self::IoError(error) => write!(f, "i/o error: {error:?}"),
             Self::NotSupported => write!(f, "protocol or operation not supported"),
             Self::EssentialTaskClosed => write!(f, "essential task closed"),
             Self::RouterDoesntExist => write!(f, "router doesn't exist"),
@@ -259,6 +326,8 @@ impl fmt::Display for Error {
             Self::Streaming(error) => write!(f, "streaming protocol error: {error}"),
             Self::Query(error) => write!(f, "query error: {error}"),
             Self::I2cp(error) => write!(f, "i2cp error: {error}"),
+            Self::Connection(error) => write!(f, "connection error: {error}"),
+            Self::Custom(error) => write!(f, "{error}"),
         }
     }
 }

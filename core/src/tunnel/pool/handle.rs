@@ -29,6 +29,7 @@ use thingbuf::mpsc;
 
 use alloc::vec::Vec;
 use core::{
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -75,6 +76,21 @@ pub enum TunnelPoolEvent {
 
     /// Dummy event.
     Dummy,
+}
+
+impl fmt::Display for TunnelPoolEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TunnelPoolShutDown => write!(f, "TunnelPoolEvent::TunnelPoolShutDown"),
+            Self::InboundTunnelBuilt { .. } => write!(f, "TunnelPoolEvent::InboundTunnelBuilt"),
+            Self::OutboundTunnelBuilt { .. } => write!(f, "TunnelPoolEvent::OutboundTunnelBuilt"),
+            Self::InboundTunnelExpired { .. } => write!(f, "TunnelPoolEvent::InboundTunnelExpired"),
+            Self::OutboundTunnelExpired { .. } =>
+                write!(f, "TunnelPoolEvent::OutboundTunnelExpired"),
+            Self::Message { .. } => write!(f, "TunnelPoolEvent::Message"),
+            Self::Dummy => write!(f, "TunnelPoolEvent::Dummy"),
+        }
+    }
 }
 
 impl Default for TunnelPoolEvent {
@@ -154,6 +170,30 @@ impl TunnelPoolHandle {
     /// [`TunnelPoolEvent::TunnelPoolShutDown`] is emitted before `TunnelPool` is shut down.
     pub fn shutdown(&mut self) {
         self.shutdown_tx.take().map(|tx| tx.send(()));
+    }
+
+    #[cfg(test)]
+    /// Create new [`TunnelPoolHandle`] for testing.
+    pub fn create() -> (
+        Self,
+        mpsc::Receiver<TunnelMessage>,
+        mpsc::Sender<TunnelPoolEvent>,
+        oneshot::Receiver<()>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (message_tx, message_rx) = mpsc::channel(64);
+
+        (
+            Self {
+                event_rx,
+                message_tx,
+                shutdown_tx: Some(shutdown_tx),
+            },
+            message_rx,
+            event_tx,
+            shutdown_rx,
+        )
     }
 }
 

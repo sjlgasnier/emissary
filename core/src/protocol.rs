@@ -16,32 +16,39 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
-#![allow(unused)]
+/// Protocol type.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Protocol {
+    /// Streaming protocol.
+    Streaming,
 
-extern crate alloc;
+    /// Repliable datagrams.
+    Datagram,
 
-pub type Result<T> = core::result::Result<T, Error>;
+    /// Raw datagrams.
+    Anonymous,
+}
 
-pub use config::{Config, I2cpConfig, Ntcp2Config, SamConfig};
-pub use error::Error;
+impl Protocol {
+    /// Attempt to convert `protocol` into [`Protocol`].
+    pub fn from_u8(protocol: u8) -> Option<Self> {
+        match protocol {
+            6u8 => Some(Self::Streaming),
+            17u8 => Some(Self::Datagram),
+            18u8 => Some(Self::Anonymous),
+            _ => {
+                tracing::warn!(?protocol, "unknown i2cp protocol");
+                None
+            }
+        }
+    }
 
-mod config;
-mod crypto;
-mod destination;
-mod error;
-mod i2cp;
-mod netdb;
-mod router_storage;
-mod sam;
-mod subsystem;
-mod transports;
-mod tunnel;
-mod util;
-
-pub mod i2np;
-pub mod primitives;
-pub mod protocol;
-pub mod router;
-pub mod runtime;
+    /// Serialize [`Protocol`].
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Streaming => 6u8,
+            Self::Datagram => 17u8,
+            Self::Anonymous => 18u8,
+        }
+    }
+}

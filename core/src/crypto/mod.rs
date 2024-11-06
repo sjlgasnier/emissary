@@ -60,10 +60,8 @@ pub fn base64_encode<T: AsRef<[u8]>>(data: T) -> String {
 }
 
 /// Base64 decode `data`
-//
-// TODO: no unwraps
-pub fn base64_decode<T: AsRef<[u8]>>(data: T) -> Vec<u8> {
-    I2P_BASE64.decode(data.as_ref()).unwrap()
+pub fn base64_decode<T: AsRef<[u8]>>(data: T) -> Option<Vec<u8>> {
+    I2P_BASE64.decode(data.as_ref()).ok()
 }
 
 /// Base32 decode `data`.
@@ -326,8 +324,16 @@ impl SigningPrivateKey {
     }
 }
 
+impl AsRef<[u8]> for SigningPrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Ed25519(key) => key.as_bytes(),
+        }
+    }
+}
+
 /// Signing public key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigningPublicKey {
     /// EdDSA.
     Ed25519(ed25519_dalek::VerifyingKey),
@@ -360,6 +366,17 @@ impl SigningPublicKey {
 
                 key.verify_strict(&message[..message.len() - 64], &signature)
                     .map_err(From::from)
+            }
+        }
+    }
+
+    pub fn verify_new(&self, message: &[u8], signature: &[u8]) -> crate::Result<()> {
+        match self {
+            Self::Ed25519(key) => {
+                let signature: [u8; 64] = signature.try_into().map_err(|_| Error::InvalidData)?;
+                let signature = ed25519_dalek::Signature::from_bytes(&signature);
+
+                key.verify_strict(&message, &signature).map_err(From::from)
             }
         }
     }

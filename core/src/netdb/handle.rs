@@ -27,7 +27,7 @@ use thingbuf::mpsc;
 
 /// Recycling strategy for [`NetDbAction`].
 #[derive(Default, Clone)]
-pub(super) struct NetDbActionRecycle(());
+pub struct NetDbActionRecycle(());
 
 impl thingbuf::Recycle<NetDbAction> for NetDbActionRecycle {
     fn new_element(&self) -> NetDbAction {
@@ -40,7 +40,7 @@ impl thingbuf::Recycle<NetDbAction> for NetDbActionRecycle {
 }
 
 /// Query kind.
-pub(super) enum NetDbAction {
+pub enum NetDbAction {
     /// `LeaseSet2` query.
     QueryLeaseSet2 {
         /// Key,
@@ -107,6 +107,14 @@ impl NetDbHandle {
             .try_send(NetDbAction::StoreLeaseSet2 { key, leaseset })
             .map(|_| ())
             .map_err(From::from)
+    }
+
+    #[cfg(test)]
+    /// Create new [`NetDbHandle`] for testing.
+    pub fn create() -> (Self, mpsc::Receiver<NetDbAction, NetDbActionRecycle>) {
+        let (tx, rx) = mpsc::with_recycle(64, NetDbActionRecycle::default());
+
+        (Self { tx }, rx)
     }
 }
 

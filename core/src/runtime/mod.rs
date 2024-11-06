@@ -33,6 +33,8 @@ use core::{
 
 #[cfg(test)]
 pub mod mock;
+#[cfg(test)]
+pub mod noop;
 
 pub trait AsyncRead {
     fn poll_read(
@@ -52,7 +54,7 @@ pub trait AsyncWrite {
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>>;
 }
 
-pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sized + 'static {
+pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + Sized + 'static {
     /// Establish connection to remote peer at `address`.
     fn connect(address: SocketAddr) -> impl Future<Output = Option<Self>> + Send;
 }

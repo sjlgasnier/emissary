@@ -16,9 +16,12 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::runtime::{
-    AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricsHandle,
-    Runtime, TcpListener, TcpStream,
+use crate::{
+    error::{ConnectionError, Error},
+    runtime::{
+        AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet,
+        MetricsHandle, Runtime, TcpListener, TcpStream,
+    },
 };
 
 use flate2::{
@@ -26,10 +29,12 @@ use flate2::{
     Compression,
 };
 use futures::{future::BoxFuture, Stream};
+use futures_io::{AsyncRead as _, AsyncWrite as _};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use rand_core::{CryptoRng, RngCore};
-use tokio::task;
+use tokio::{net, task};
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
     borrow::Borrow,
@@ -38,45 +43,72 @@ use std::{
     io::Write,
     marker::PhantomData,
     net::SocketAddr,
-    pin::Pin,
+    pin::{pin, Pin},
     sync::Arc,
     task::{Context, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
 
-pub struct MockTcpStream {}
+pub struct MockTcpStream(Compat<net::TcpStream>);
 
 impl AsyncRead for MockTcpStream {
-    fn poll_read<'a>(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'a>,
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<crate::Result<usize>> {
-        Poll::Pending
+        let pinned = pin!(&mut self.0);
+
+        match futures::ready!(pinned.poll_read(cx, buf)) {
+            Ok(nread) => Poll::Ready(Ok(nread)),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+        }
     }
 }
 
-impl crate::runtime::AsyncWrite for MockTcpStream {
+impl AsyncWrite for MockTcpStream {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<crate::Result<usize>> {
-        Poll::Pending
+        let pinned = pin!(&mut self.0);
+
+        match futures::ready!(pinned.poll_write(cx, buf)) {
+            Ok(nwritten) => Poll::Ready(Ok(nwritten)),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+        }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
-        Poll::Pending
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
+        let pinned = pin!(&mut self.0);
+
+        match futures::ready!(pinned.poll_flush(cx)) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+        }
     }
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
-        Poll::Pending
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
+        let pinned = pin!(&mut self.0);
+
+        match futures::ready!(pinned.poll_close(cx)) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+        }
     }
 }
 
 impl crate::runtime::TcpStream for MockTcpStream {
     fn connect(address: SocketAddr) -> impl Future<Output = Option<Self>> + Send {
-        pending()
+        async move {
+            net::TcpStream::connect(address).await.ok().map(|stream| {
+                let stream = TokioAsyncReadCompatExt::compat(stream).into_inner();
+                let stream = TokioAsyncWriteCompatExt::compat_write(stream);
+
+                MockTcpStream(stream)
+            })
+        }
     }
 }
 
