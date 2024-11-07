@@ -127,7 +127,7 @@ pub struct StreamManager<R: Runtime> {
     /// TX channels for sending [`Packet`]'s to active streams.
     ///
     /// Indexed with receive stream ID.
-    active: HashMap<u32, Sender<Vec<u8>>>,
+    active: HashMap<u32, (DestinationId, Sender<Vec<u8>>)>,
 
     /// Destination of the session the stream manager is bound to.
     destination: Destination,
@@ -148,6 +148,9 @@ pub struct StreamManager<R: Runtime> {
     ///
     /// Indexed by the remote-selected receive stream ID.
     pending_inbound: HashMap<u32, PendingStream<R>>,
+
+    /// Pending events.
+    pending_events: VecDeque<StreamManagerEvent>,
 
     /// Pending outbound streams.
     pending_outbound: HashMap<u32, PendingOutboundStream<R>>,
@@ -176,6 +179,7 @@ impl<R: Runtime> StreamManager<R> {
             outbound_rx,
             outbound_tx,
             pending_inbound: HashMap::new(),
+            pending_events: VecDeque::new(),
             pending_outbound: HashMap::new(),
             prune_timer: Box::pin(R::delay(PENDING_STREAM_PRUNE_THRESHOLD)),
             signing_key,
@@ -228,7 +232,7 @@ impl<R: Runtime> StreamManager<R> {
                     silent,
                 },
                 recv_stream_id,
-                destination_id,
+                destination_id.clone(),
                 StreamKind::Outbound { send_stream_id },
             );
 
@@ -354,7 +358,7 @@ impl<R: Runtime> StreamManager<R> {
             event_tx: self.outbound_tx.clone(),
             local: self.destination_id.clone(),
             recv_stream_id,
-            remote: destination_id,
+            remote: destination_id.clone(),
         };
 
         // if the socket wasn't configured to be silent, send the remote's destination
@@ -371,7 +375,23 @@ impl<R: Runtime> StreamManager<R> {
         //
         // `StreamManager` sends all inbound messages with `recv_stream_id` to this stream and all
         // outbound messages from the stream to remote peer are send through `event_tx`
-        self.active.insert(recv_stream_id, tx);
+        self.active.insert(recv_stream_id, (destination_id.clone(), tx));
+
+        // if socket kind is `Connect` this is an outbound stream
+        //
+        // accept/forward indicates an inbound stream
+        match &socket {
+            SocketKind::Connect { .. } =>
+                self.pending_events.push_back(StreamManagerEvent::StreamOpened {
+                    destination_id,
+                    direction: Direction::Outbound,
+                }),
+            SocketKind::Accept { .. } | SocketKind::Forwarded { .. } =>
+                self.pending_events.push_back(StreamManagerEvent::StreamOpened {
+                    destination_id,
+                    direction: Direction::Inbound,
+                }),
+        }
 
         // start new future for the stream in the background
         //
@@ -512,7 +532,7 @@ impl<R: Runtime> StreamManager<R> {
         );
 
         // forward received packet to an active handler if it exists
-        if let Some(tx) = self.active.get(&packet.recv_stream_id()) {
+        if let Some((_, tx)) = self.active.get(&packet.recv_stream_id()) {
             if let Err(error) = tx.try_send(payload) {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -636,6 +656,10 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
     type Item = StreamManagerEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Poll::Ready(Some(event));
+        }
+
         loop {
             match self.outbound_rx.poll_recv(cx) {
                 Poll::Pending => break,
@@ -659,7 +683,19 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         ?stream_id,
                         "stream closed"
                     );
-                    self.active.remove(&stream_id);
+
+                    let Some((destination_id, _)) = self.active.remove(&stream_id) else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            ?stream_id,
+                            "active stream doesn't exist",
+                        );
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    return Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id }));
                 }
             }
         }
@@ -877,6 +913,11 @@ mod tests {
             })
             .is_ok());
         assert!(manager.pending_inbound.is_empty());
+
+        assert!(std::matches!(
+            manager.next().await,
+            Some(StreamManagerEvent::StreamOpened { .. })
+        ));
 
         // poll manager until ack packet is received
         match tokio::time::timeout(Duration::from_secs(5), manager.next())
@@ -1198,6 +1239,11 @@ mod tests {
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
         assert!(manager1.on_packet(0u16, 0u16, packet.to_vec()).is_ok());
+
+        assert!(std::matches!(
+            manager1.next().await,
+            Some(StreamManagerEvent::StreamOpened { .. })
+        ));
 
         let (destination_id, packet) =
             match tokio::time::timeout(Duration::from_secs(5), manager1.next())
