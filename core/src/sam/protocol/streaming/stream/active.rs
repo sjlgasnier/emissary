@@ -30,7 +30,7 @@ use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 use thingbuf::mpsc::{Receiver, Sender};
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use core::{
     future::Future,
     marker::PhantomData,
@@ -147,10 +147,18 @@ pub struct InboundContext<R: Runtime> {
     ack_timer: Option<BoxFuture<'static, ()>>,
 
     /// Sequence number of the highest, last ACKed packet.
+    //
+    // TODO; what is this used for?
     last_acked: u32,
 
+    /// Missing packets.
+    missing: BTreeSet<u32>,
+
     /// Pending packets.
-    pending: VecDeque<Vec<u8>>,
+    pending: BTreeMap<u32, Vec<u8>>,
+
+    /// Ready packets.
+    ready: VecDeque<Vec<u8>>,
 
     /// Measured RTT.
     rtt: Duration,
@@ -167,24 +175,90 @@ impl<R: Runtime> InboundContext<R> {
     fn new(seq_nro: u32) -> Self {
         Self {
             ack_timer: None,
-            pending: VecDeque::new(),
+            last_acked: seq_nro,
+            missing: BTreeSet::new(),
+            pending: BTreeMap::new(),
+            ready: VecDeque::new(),
             rtt: INITIAL_ACK_DELAY,
             seq_nro,
-            last_acked: seq_nro,
             _runtime: Default::default(),
         }
     }
 
+    // TODO: so ugly
     fn handle_packet(&mut self, seq_nro: u32, payload: Vec<u8>) {
+        // packet received in order
         if seq_nro == self.seq_nro + 1 {
-            self.pending.push_back(payload);
+            self.missing.remove(&seq_nro);
+            if self.missing.is_empty() {
+                self.ready.push_back(payload);
+            } else {
+                self.pending.insert(seq_nro, payload);
+            }
+            self.seq_nro = seq_nro;
+
+            if self.ack_timer.is_none() {
+                self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
+            }
+
+            return;
+        }
+
+        if seq_nro > self.seq_nro + 1 {
+            tracing::trace!(
+                target: LOG_TARGET,
+                ?seq_nro,
+                expected = ?self.seq_nro + 1,
+                "received out-of-order packet",
+            );
+
+            (self.seq_nro + 1..seq_nro).for_each(|seq_nro| {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    ?seq_nro,
+                    "marking packet as missing",
+                );
+
+                if !self.pending.contains_key(&seq_nro) {
+                    self.missing.insert(seq_nro);
+                }
+            });
+
+            self.pending.insert(seq_nro, payload);
+            self.missing.remove(&seq_nro);
             self.seq_nro = seq_nro;
 
             if self.ack_timer.is_none() {
                 self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
             }
         } else {
-            panic!("out-of-order packets not supported");
+            if self.missing.first() == Some(&seq_nro) {
+                self.ready.push_back(payload);
+                self.missing.remove(&seq_nro);
+
+                let mut next_seq = seq_nro + 1;
+
+                loop {
+                    match self.pending.remove(&next_seq) {
+                        Some(payload) => {
+                            self.ready.push_back(payload);
+                            next_seq += 1;
+                        }
+                        None => break,
+                    }
+                }
+
+                if self.ack_timer.is_none() {
+                    self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
+                }
+            } else {
+                self.missing.remove(&seq_nro);
+                self.pending.insert(seq_nro, payload);
+
+                if self.ack_timer.is_none() {
+                    self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
+                }
+            }
         }
     }
 
@@ -193,7 +267,7 @@ impl<R: Runtime> InboundContext<R> {
     }
 
     fn pop_message(&mut self) -> Option<Vec<u8>> {
-        self.pending.pop_front()
+        self.ready.pop_front()
     }
 }
 
@@ -399,10 +473,17 @@ impl<R: Runtime> Future for Stream<R> {
         loop {
             match mem::replace(&mut this.write_state, WriteState::Poisoned) {
                 WriteState::GetMessage => match this.cmd_rx.poll_recv(cx) {
-                    Poll::Pending => {
-                        this.write_state = WriteState::GetMessage;
-                        break;
-                    }
+                    Poll::Pending => match this.inbound_context.pop_message() {
+                        None => {
+                            this.write_state = WriteState::GetMessage;
+                            break;
+                        }
+                        Some(message) =>
+                            this.write_state = WriteState::WriteMessage {
+                                offset: 0usize,
+                                message,
+                            },
+                    },
                     Poll::Ready(None) => return Poll::Ready(this.recv_stream_id),
                     Poll::Ready(Some(message)) => match this.on_packet(message) {
                         Err(error) => {
@@ -552,10 +633,12 @@ impl<R: Runtime> Future for Stream<R> {
 
         if this.inbound_context.poll_unpin(cx).is_ready() {
             let ack_through = this.inbound_context.seq_nro;
+            let nacks = this.inbound_context.missing.iter().copied().collect::<Vec<_>>();
 
             let packet = PacketBuilder::new(this.send_stream_id)
                 .with_send_stream_id(this.recv_stream_id)
                 .with_ack_through(ack_through)
+                .with_nacks(nacks)
                 .with_seq_nro(PLAIN_ACK)
                 .build();
 
@@ -586,8 +669,13 @@ mod tests {
         mock::{MockRuntime, MockTcpStream},
         Runtime, TcpStream,
     };
+    use rand::{
+        distributions::{Alphanumeric, DistString},
+        seq::SliceRandom,
+        thread_rng, Rng,
+    };
     use thingbuf::mpsc::channel;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     struct StreamBuilder {
         cmd_tx: Sender<Vec<u8>>,
@@ -730,5 +818,302 @@ mod tests {
         reader.read_line(&mut response).await.unwrap();
         assert_eq!("test message\n", response.as_str());
         response.clear();
+    }
+
+    #[tokio::test]
+    async fn out_of_order() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        tokio::spawn(stream);
+
+        // ignore syn packet
+        let _ = event_rx.recv().await.unwrap();
+
+        let mut messages = VecDeque::from_iter([
+            (4u32, b"message\n".to_vec()),
+            (6u32, b"world\n".to_vec()),
+            (2u32, b"world\n".to_vec()),
+            (1u32, b"hello\n".to_vec()),
+            (3u32, b"testing\n".to_vec()),
+            (5u32, b"goodbye\n".to_vec()),
+        ]);
+
+        let mut reader = BufReader::new(client);
+        let mut response = String::new();
+
+        // send first packet and verify that there are nacks for packets 1, 2 and 3
+        {
+            let (seq_nro, message) = messages.pop_front().unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(seq_nro)
+                        .with_payload(&message)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("event")
+                .expect("to succeed");
+
+            let Packet {
+                seq_nro,
+                ack_through,
+                nacks,
+                payload,
+                ..
+            } = Packet::parse(&packet).unwrap();
+
+            assert_eq!(ack_through, 4u32);
+            assert_eq!(seq_nro, 0u32);
+            assert_eq!(nacks, vec![1, 2, 3]);
+            assert!(payload.is_empty());
+
+            // verify the client is sent nothing
+            assert!(tokio::time::timeout(
+                Duration::from_millis(200),
+                reader.read_line(&mut response)
+            )
+            .await
+            .is_err());
+        }
+
+        // send second packet and verify that there is an additional nack for 5
+        {
+            let (seq_nro, message) = messages.pop_front().unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(seq_nro)
+                        .with_payload(&message)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("event")
+                .expect("to succeed");
+
+            let Packet {
+                seq_nro,
+                ack_through,
+                nacks,
+                payload,
+                ..
+            } = Packet::parse(&packet).unwrap();
+
+            assert_eq!(ack_through, 6u32);
+            assert_eq!(seq_nro, 0u32);
+            assert_eq!(nacks, vec![1, 2, 3, 5]);
+            assert!(payload.is_empty());
+
+            // verify the client is sent nothing
+            assert!(tokio::time::timeout(
+                Duration::from_millis(200),
+                reader.read_line(&mut response)
+            )
+            .await
+            .is_err());
+        }
+
+        // send two more packets and verify that there is a nack left for packets 5 and 3
+        // and that the client is send data for the first two packets
+        {
+            for _ in 0..2 {
+                let (seq_nro, message) = messages.pop_front().unwrap();
+
+                cmd_tx
+                    .send(
+                        PacketBuilder::new(1338u32)
+                            .with_send_stream_id(1337u32)
+                            .with_seq_nro(seq_nro)
+                            .with_payload(&message)
+                            .build()
+                            .to_vec(),
+                    )
+                    .await;
+            }
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("event")
+                .expect("to succeed");
+
+            let Packet {
+                seq_nro,
+                ack_through,
+                nacks,
+                payload,
+                ..
+            } = Packet::parse(&packet).unwrap();
+
+            assert_eq!(ack_through, 6u32);
+            assert_eq!(seq_nro, 0u32);
+            assert_eq!(nacks, vec![3, 5]);
+            assert!(payload.is_empty());
+
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.as_str(), "hello\n");
+
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.as_str(), "world\n");
+        }
+
+        // send the 3rd packet and verify there's still nack for packet 5
+        // and that messages for packets 3 and 4 are returned to client
+        {
+            let (seq_nro, message) = messages.pop_front().unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(seq_nro)
+                        .with_payload(&message)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("event")
+                .expect("to succeed");
+
+            let Packet {
+                seq_nro,
+                ack_through,
+                nacks,
+                payload,
+                ..
+            } = Packet::parse(&packet).unwrap();
+
+            assert_eq!(ack_through, 6u32);
+            assert_eq!(seq_nro, 0u32);
+            assert_eq!(nacks, vec![5]);
+            assert!(payload.is_empty());
+
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.as_str(), "testing\n");
+
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.as_str(), "message\n");
+        }
+
+        // send 5th packet and verify that there are no more nacks
+        // and that the payloads for packets 5 and 6 are returned
+        {
+            let (seq_nro, message) = messages.pop_front().unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(seq_nro)
+                        .with_payload(&message)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("event")
+                .expect("to succeed");
+
+            let Packet {
+                seq_nro,
+                ack_through,
+                nacks,
+                payload,
+                ..
+            } = Packet::parse(&packet).unwrap();
+
+            assert_eq!(ack_through, 6u32);
+            assert_eq!(seq_nro, 0u32);
+            assert_eq!(nacks, vec![]);
+            assert!(payload.is_empty());
+
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.as_str(), "goodbye\n");
+
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.as_str(), "world\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn out_of_order_random() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        tokio::spawn(stream);
+
+        // ignore syn packet
+        let _ = event_rx.recv().await.unwrap();
+
+        let test_string = Alphanumeric.sample_string(&mut thread_rng(), 256);
+
+        let mut packets = test_string
+            .clone()
+            .into_bytes()
+            .chunks(4)
+            .enumerate()
+            .map(|(seq_nro, message)| {
+                PacketBuilder::new(1338u32)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(seq_nro as u32 + 1)
+                    .with_payload(&message)
+                    .build()
+                    .to_vec()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(packets.len(), 64);
+        packets.shuffle(&mut thread_rng());
+
+        // send packet to stream with random sleeps
+        for packet in packets {
+            cmd_tx.try_send(packet).unwrap();
+
+            tokio::time::sleep(Duration::from_millis(thread_rng().gen_range(5..100))).await;
+        }
+
+        // ignore acks received from the stream
+        tokio::spawn(async move { while let Some(_) = event_rx.recv().await {} });
+
+        // read back response which is exactly 256 bytes long
+        let mut response = [0u8; 256];
+        client.read_exact(&mut response).await.unwrap();
+
+        assert_eq!(std::str::from_utf8(&response).unwrap(), test_string);
     }
 }
