@@ -35,7 +35,7 @@ use core::{
 };
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::sam::streaming::listener";
+const LOG_TARGET: &str = "emissary::streaming::listener";
 
 /// Events emitted by [`StreamListener`].
 pub enum StreamListenerEvent {

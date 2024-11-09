@@ -27,7 +27,7 @@ use alloc::collections::VecDeque;
 use rand_core::RngCore;
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::sam::streaming::pending";
+const LOG_TARGET: &str = "emissary::streaming::pending";
 
 /// Initial window size
 const INITIAL_WINDOW_SIZE: usize = 6usize;

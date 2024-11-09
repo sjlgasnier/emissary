@@ -56,7 +56,7 @@ mod stream;
 pub use listener::ListenerKind;
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::sam::streaming";
+const LOG_TARGET: &str = "emissary::streaming";
 
 /// [`StreamManager`]'s message channel size.
 ///

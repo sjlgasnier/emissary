@@ -41,7 +41,7 @@ use core::{
 };
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::sam::streaming::stream";
+const LOG_TARGET: &str = "emissary::streaming::active";
 
 /// Read buffer size.
 const READ_BUFFER_SIZE: usize = 8192;
@@ -166,6 +166,9 @@ pub struct InboundContext<R: Runtime> {
     /// Highest received sequence number from remote destination.
     seq_nro: u32,
 
+    /// Close requested, either by client or remote peer.
+    close_requested: bool,
+
     /// Marker for `Runtime`.
     _runtime: PhantomData<R>,
 }
@@ -180,6 +183,7 @@ impl<R: Runtime> InboundContext<R> {
             pending: BTreeMap::new(),
             ready: VecDeque::new(),
             rtt: INITIAL_ACK_DELAY,
+            close_requested: false,
             seq_nro,
             _runtime: Default::default(),
         }
@@ -268,6 +272,14 @@ impl<R: Runtime> InboundContext<R> {
 
     fn pop_message(&mut self) -> Option<Vec<u8>> {
         self.ready.pop_front()
+    }
+
+    fn close(&mut self) {
+        self.close_requested = true;
+    }
+
+    fn can_close(&self) -> bool {
+        self.close_requested && self.missing.is_empty()
     }
 }
 
@@ -457,12 +469,24 @@ impl<R: Runtime> Stream<R> {
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,
-                recv_stream_id = ?self.recv_stream_id,
-                send_stream_id = ?self.send_stream_id,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
                 "stream reset",
             );
 
             return Err(StreamingError::Closed);
+        }
+
+        if flags.close() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
+                "remote sent `CLOSE`",
+            );
+            self.inbound_context.close();
         }
 
         if !flags.no_ack() {
@@ -650,12 +674,19 @@ impl<R: Runtime> Future for Stream<R> {
             let ack_through = this.inbound_context.seq_nro;
             let nacks = this.inbound_context.missing.iter().copied().collect::<Vec<_>>();
 
-            let packet = PacketBuilder::new(this.send_stream_id)
+            let mut builder = PacketBuilder::new(this.send_stream_id)
                 .with_send_stream_id(this.recv_stream_id)
                 .with_ack_through(ack_through)
                 .with_nacks(nacks)
-                .with_seq_nro(PLAIN_ACK)
-                .build();
+                .with_seq_nro(PLAIN_ACK);
+
+            let packet = if this.inbound_context.can_close() {
+                builder.with_close()
+            } else {
+                builder
+            }
+            .build()
+            .to_vec();
 
             match this.event_tx.try_send((this.remote.clone(), packet.to_vec())) {
                 Err(error) => {
@@ -666,10 +697,16 @@ impl<R: Runtime> Future for Stream<R> {
                         ?error,
                         "failed to send packet",
                     );
+                    todo!();
+                    // TODO: reset timer
                 }
                 Ok(()) => {
                     this.inbound_context.last_acked = ack_through;
                 }
+            }
+
+            if this.inbound_context.can_close() {
+                return Poll::Ready(this.recv_stream_id);
             }
         }
 
@@ -744,7 +781,7 @@ mod tests {
             },
         ) = StreamBuilder::build_stream().await;
 
-        tokio::spawn(stream);
+        let handle = tokio::spawn(stream);
 
         let messages = vec![
             b"hello\n".to_vec(),
@@ -833,6 +870,10 @@ mod tests {
         reader.read_line(&mut response).await.unwrap();
         assert_eq!("test message\n", response.as_str());
         response.clear();
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect_err("stream closed");
     }
 
     #[tokio::test]
@@ -846,7 +887,7 @@ mod tests {
             },
         ) = StreamBuilder::build_stream().await;
 
-        tokio::spawn(stream);
+        let handle = tokio::spawn(stream);
 
         // ignore syn packet
         let _ = event_rx.recv().await.unwrap();
@@ -1077,6 +1118,10 @@ mod tests {
             reader.read_line(&mut response).await.unwrap();
             assert_eq!(response.as_str(), "world\n");
         }
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect_err("stream closed");
     }
 
     #[tokio::test]
@@ -1090,7 +1135,7 @@ mod tests {
             },
         ) = StreamBuilder::build_stream().await;
 
-        tokio::spawn(stream);
+        let handle = tokio::spawn(stream);
 
         // ignore syn packet
         let _ = event_rx.recv().await.unwrap();
@@ -1130,12 +1175,13 @@ mod tests {
         client.read_exact(&mut response).await.unwrap();
 
         assert_eq!(std::str::from_utf8(&response).unwrap(), test_string);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect_err("stream closed");
     }
 
     #[tokio::test]
     async fn stream_reset() {
-        crate::util::init_logger();
-
         let (
             stream,
             StreamBuilder {
@@ -1178,6 +1224,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), handle).await.expect("no timeout");
     }
+
     #[tokio::test]
     async fn duplicate_packets() {
         let (
@@ -1240,5 +1287,74 @@ mod tests {
             assert_eq!("test1test2\n", response);
             response.clear();
         }
+    }
+
+    #[tokio::test]
+    async fn out_of_order_last_packet_closes_connection() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        let handle = tokio::spawn(stream);
+
+        // ignore syn packet
+        let _ = event_rx.recv().await.unwrap();
+
+        let test_string = Alphanumeric.sample_string(&mut thread_rng(), 128);
+
+        let mut packets = test_string
+            .clone()
+            .into_bytes()
+            .chunks(4)
+            .enumerate()
+            .map(|(seq_nro, message)| {
+                let mut builder = PacketBuilder::new(1338u32)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(seq_nro as u32 + 1)
+                    .with_payload(&message);
+
+                if seq_nro == 31 {
+                    builder.with_close()
+                } else {
+                    builder
+                }
+                .build()
+                .to_vec()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(packets.len(), 32);
+        packets.shuffle(&mut thread_rng());
+
+        // send packet to stream with random sleeps
+        for packet in packets {
+            cmd_tx.try_send(packet).unwrap();
+
+            tokio::time::sleep(Duration::from_millis(thread_rng().gen_range(5..100))).await;
+        }
+
+        // read back response which is exactly 256 bytes long
+        let mut response = [0u8; 128];
+        client.read_exact(&mut response).await.unwrap();
+
+        assert_eq!(std::str::from_utf8(&response).unwrap(), test_string);
+
+        tokio::time::timeout(Duration::from_secs(5), handle).await.expect("no timeout");
+
+        // ignore syn
+        let (_, mut prev) = event_rx.recv().await.unwrap();
+
+        // verify the last packet sent by the stream has the `CLOSE` flag set
+        while let Ok((_, packet)) = event_rx.try_recv() {
+            prev = packet;
+        }
+
+        let packet = Packet::parse(&prev).unwrap();
+        assert!(packet.flags.close());
     }
 }
