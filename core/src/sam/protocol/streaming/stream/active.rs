@@ -452,6 +452,19 @@ impl<R: Runtime> Stream<R> {
             ..
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
+        if flags.reset() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                recv_stream_id = ?self.recv_stream_id,
+                send_stream_id = ?self.send_stream_id,
+                "stream reset",
+            );
+
+            return Err(StreamingError::Closed);
+        }
+
         if !flags.no_ack() {
             self.handle_acks(ack_through, &nacks);
         }
@@ -486,6 +499,7 @@ impl<R: Runtime> Future for Stream<R> {
                     },
                     Poll::Ready(None) => return Poll::Ready(this.recv_stream_id),
                     Poll::Ready(Some(message)) => match this.on_packet(message) {
+                        Err(StreamingError::Closed) => return Poll::Ready(this.recv_stream_id),
                         Err(error) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -631,6 +645,7 @@ impl<R: Runtime> Future for Stream<R> {
             }
         }
 
+        // send plain ack
         if this.inbound_context.poll_unpin(cx).is_ready() {
             let ack_through = this.inbound_context.seq_nro;
             let nacks = this.inbound_context.missing.iter().copied().collect::<Vec<_>>();
@@ -1115,5 +1130,115 @@ mod tests {
         client.read_exact(&mut response).await.unwrap();
 
         assert_eq!(std::str::from_utf8(&response).unwrap(), test_string);
+    }
+
+    #[tokio::test]
+    async fn stream_reset() {
+        crate::util::init_logger();
+
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        let handle = tokio::spawn(stream);
+
+        // send two normal packets
+        for (seq_nro, message) in vec![(1u32, b"msg1\n".to_vec()), (2u32, b"msg2\n".to_vec())] {
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(seq_nro)
+                        .with_payload(&message)
+                        .build()
+                        .to_vec(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // send packet with high seq number (missing packets) with `RESET`
+        // and verify that the stream is closed event though there's missing data
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(10u32)
+                    .with_reset()
+                    .build()
+                    .to_vec(),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), handle).await.expect("no timeout");
+    }
+    #[tokio::test]
+    async fn duplicate_packets() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        tokio::spawn(stream);
+
+        let messages = vec![
+            (1u32, b"hello1".to_vec()),
+            (2u32, b"world1\n".to_vec()),
+            (1u32, b"hello1\n".to_vec()),
+            (4u32, b"world2\n".to_vec()),
+            (3u32, b"goodbye2".to_vec()),
+            (4u32, b"world3\n".to_vec()),
+            (6u32, b"test2\n".to_vec()),
+            (5u32, b"test1".to_vec()),
+        ];
+
+        for (i, message) in messages.iter() {
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(*i)
+                        .with_payload(message)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+
+        let mut reader = BufReader::new(client);
+        let mut response = String::new();
+
+        // 1st and 2nd messages are received normally
+        {
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!("hello1world1\n", response);
+            response.clear();
+        }
+
+        // 4th is send before 3rd but 3rd is ready normally
+        {
+            // concatenated 3rd and 4th message
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!("goodbye2world2\n", response);
+            response.clear();
+        }
+
+        // 5th and 6th are received out of order and the duplicate 4th is ignored
+        {
+            // concatenated 5th and 6th message
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!("test1test2\n", response);
+            response.clear();
+        }
     }
 }
