@@ -52,6 +52,15 @@ const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
 /// Sequence number for a plain ACK message.
 const PLAIN_ACK: u32 = 0u32;
 
+/// MTU size.
+const MTU: usize = 1812;
+
+/// Maximum window size in packets.
+const MAX_WINDOW_SIZE: usize = 128;
+
+/// How far ahead of the current highest received sequence number is a packet accepted.
+const MAX_WINDOW_LOOKAHEAD: usize = 4 * 128;
+
 /// Stream kind.
 pub enum StreamKind {
     /// Stream is uninitialized and there has been no activity on it before.
@@ -190,7 +199,7 @@ impl<R: Runtime> InboundContext<R> {
     }
 
     // TODO: so ugly
-    fn handle_packet(&mut self, seq_nro: u32, payload: Vec<u8>) {
+    fn handle_packet(&mut self, seq_nro: u32, payload: Vec<u8>) -> Result<(), StreamingError> {
         // packet received in order
         if seq_nro == self.seq_nro + 1 {
             self.missing.remove(&seq_nro);
@@ -205,10 +214,21 @@ impl<R: Runtime> InboundContext<R> {
                 self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
             }
 
-            return;
+            return Ok(());
         }
 
         if seq_nro > self.seq_nro + 1 {
+            if (seq_nro - self.seq_nro - 1) as usize > MAX_WINDOW_LOOKAHEAD {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?seq_nro,
+                    next_seq_nro = ?(self.seq_nro + 1),
+                    "packet is too far in the future",
+                );
+
+                return Err(StreamingError::SequenceNumberTooHigh);
+            }
+
             tracing::trace!(
                 target: LOG_TARGET,
                 ?seq_nro,
@@ -264,6 +284,8 @@ impl<R: Runtime> InboundContext<R> {
                 }
             }
         }
+
+        Ok(())
     }
 
     fn set_rtt(&mut self, rtt: usize) {
@@ -494,7 +516,7 @@ impl<R: Runtime> Stream<R> {
         }
 
         if !payload.is_empty() {
-            self.inbound_context.handle_packet(seq_nro, payload.to_vec());
+            self.inbound_context.handle_packet(seq_nro, payload.to_vec())?;
         }
 
         Ok(())
@@ -523,7 +545,8 @@ impl<R: Runtime> Future for Stream<R> {
                     },
                     Poll::Ready(None) => return Poll::Ready(this.recv_stream_id),
                     Poll::Ready(Some(message)) => match this.on_packet(message) {
-                        Err(StreamingError::Closed) => return Poll::Ready(this.recv_stream_id),
+                        Err(StreamingError::Closed | StreamingError::SequenceNumberTooHigh) =>
+                            return Poll::Ready(this.recv_stream_id),
                         Err(error) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -1356,5 +1379,55 @@ mod tests {
 
         let packet = Packet::parse(&prev).unwrap();
         assert!(packet.flags.close());
+    }
+
+    #[tokio::test]
+    async fn sequence_number_too_high() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        let handle = tokio::spawn(stream);
+
+        let messages = vec![
+            b"hello\n".to_vec(),
+            b"world\n".to_vec(),
+            b"goodbye\n".to_vec(),
+            b"world\n".to_vec(),
+        ];
+
+        for (i, message) in messages.iter().enumerate() {
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(i as u32 + 1)
+                        .with_payload(message)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+
+        // send packet with way too high sequence number
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(1024)
+                    .with_payload(b"hello, world")
+                    .build()
+                    .to_vec(),
+            )
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("stream to exist");
     }
 }
