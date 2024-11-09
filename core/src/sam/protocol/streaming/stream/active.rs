@@ -53,13 +53,22 @@ const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
 const PLAIN_ACK: u32 = 0u32;
 
 /// MTU size.
-const MTU: usize = 1812;
+const MTU: usize = 1812usize;
+
+/// Initial window size.
+const INITIAL_WINDOW_SIZE: usize = 1usize;
 
 /// Maximum window size in packets.
-const MAX_WINDOW_SIZE: usize = 128;
+const MAX_WINDOW_SIZE: usize = 128usize;
 
 /// How far ahead of the current highest received sequence number is a packet accepted.
-const MAX_WINDOW_LOOKAHEAD: usize = 4 * 128;
+const MAX_WINDOW_LOOKAHEAD: usize = 4 * MAX_WINDOW_SIZE;
+
+/// Delay request which indicates choking.
+const CHOKING_REQUEST: u16 = 60_001u16;
+
+/// Maximum number of NACKs sent.
+const MAX_NACKS: usize = 255usize;
 
 /// Stream kind.
 pub enum StreamKind {
@@ -695,13 +704,20 @@ impl<R: Runtime> Future for Stream<R> {
         // send plain ack
         if this.inbound_context.poll_unpin(cx).is_ready() {
             let ack_through = this.inbound_context.seq_nro;
-            let nacks = this.inbound_context.missing.iter().copied().collect::<Vec<_>>();
+            let nacks =
+                this.inbound_context.missing.iter().copied().take(MAX_NACKS).collect::<Vec<_>>();
 
             let mut builder = PacketBuilder::new(this.send_stream_id)
                 .with_send_stream_id(this.recv_stream_id)
                 .with_ack_through(ack_through)
                 .with_nacks(nacks)
                 .with_seq_nro(PLAIN_ACK);
+
+            builder = if this.inbound_context.missing.len() >= MAX_NACKS {
+                builder.with_delay_requested(CHOKING_REQUEST)
+            } else {
+                builder
+            };
 
             let packet = if this.inbound_context.can_close() {
                 builder.with_close()
@@ -1429,5 +1445,51 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
             .expect("stream to exist");
+    }
+
+    #[tokio::test]
+    async fn choke() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        tokio::spawn(stream);
+
+        // send every other packet so that the nack window grows
+        for i in 0..1024 {
+            if i % 2 == 0 {
+                cmd_tx
+                    .send(
+                        PacketBuilder::new(1338u32)
+                            .with_send_stream_id(1337u32)
+                            .with_seq_nro(i as u32 + 1)
+                            .with_payload(b"test")
+                            .build()
+                            .to_vec(),
+                    )
+                    .await;
+            }
+        }
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        // verify the last packet sent by the stream has the `CLOSE` flag set
+        loop {
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+            let packet = Packet::parse(&packet).unwrap();
+
+            if packet.flags.delay_requested() == Some(CHOKING_REQUEST) {
+                break;
+            }
+        }
     }
 }
