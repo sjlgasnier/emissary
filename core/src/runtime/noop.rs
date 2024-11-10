@@ -153,7 +153,7 @@ impl<T: Send + 'static> Stream for NoopJoinSet<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct NoopInstant(Instant);
 
 impl NoopInstant {

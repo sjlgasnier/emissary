@@ -225,7 +225,7 @@ impl<T: Send + 'static> Stream for MockJoinSet<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct MockInstant(Instant);
 
 impl MockInstant {

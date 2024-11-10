@@ -39,6 +39,9 @@ const MIN_HEADER_SIZE: usize = 22usize;
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
 
+/// MTU size.
+const MTU: usize = 1812usize;
+
 /// Flags of the streaming packet.
 pub struct Flags<'a> {
     /// Included destination, if received.

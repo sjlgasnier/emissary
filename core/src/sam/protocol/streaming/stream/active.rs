@@ -19,7 +19,7 @@
 use crate::{
     error::StreamingError,
     primitives::DestinationId,
-    runtime::{AsyncRead, AsyncWrite, Runtime},
+    runtime::{AsyncRead, AsyncWrite, Instant, Runtime},
     sam::protocol::streaming::{
         config::StreamConfig,
         packet::{Packet, PacketBuilder},
@@ -52,9 +52,6 @@ const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
 /// Sequence number for a plain ACK message.
 const PLAIN_ACK: u32 = 0u32;
 
-/// MTU size.
-const MTU: usize = 1812usize;
-
 /// Initial window size.
 const INITIAL_WINDOW_SIZE: usize = 1usize;
 
@@ -69,6 +66,12 @@ const CHOKING_REQUEST: u16 = 60_001u16;
 
 /// Maximum number of NACKs sent.
 const MAX_NACKS: usize = 255usize;
+
+/// Initial RTO.
+const INITIAL_RTO: Duration = Duration::from_millis(9000);
+
+/// Initial RTT.
+const INITIAL_RTT: Duration = Duration::from_millis(8000);
 
 /// Stream kind.
 pub enum StreamKind {
@@ -117,6 +120,18 @@ pub struct StreamContext {
     pub remote: DestinationId,
 }
 
+/// Pending outbound packet.
+pub struct PendingPacket<R: Runtime> {
+    /// When was the packet sent.
+    sent: R::Instant,
+
+    /// Sequence number of the packet.
+    seq_nro: u32,
+
+    /// Serialized packet.
+    packet: Vec<u8>,
+}
+
 /// Write state.
 enum WriteState {
     /// Get next message from channel.
@@ -144,15 +159,6 @@ enum SocketState {
     SendMessage {
         /// Offset into read buffer.
         offset: usize,
-    },
-
-    /// Awaiting ACK to be received for the sent message.
-    AwaitingAck {
-        /// Sequence number of the message.
-        seq_nro: u32,
-
-        /// Serialized packet.
-        packet: Vec<u8>,
     },
 
     /// [`SocketState`] has been poisoned.
@@ -352,6 +358,12 @@ pub struct Stream<R: Runtime> {
     /// Next sequence number.
     next_seq_nro: u32,
 
+    /// Pending (unACKed) outbound packets.
+    unacked: BTreeMap<u32, PendingPacket<R>>,
+
+    /// Pending (unsent) outbound packets.
+    pending: BTreeMap<u32, PendingPacket<R>>,
+
     /// Read buffer.
     read_buffer: Vec<u8>,
 
@@ -364,11 +376,23 @@ pub struct Stream<R: Runtime> {
     /// ID of the remote destination.
     remote: DestinationId,
 
+    /// RTO.
+    rto: Duration,
+
+    /// RTT.
+    rtt: Duration,
+
+    /// RTO timer.
+    rto_timer: Option<BoxFuture<'static, ()>>,
+
     /// Send stream ID (selected by us).
     send_stream_id: u32,
 
     /// Underlying TCP stream used to communicate with the client.
     stream: R::TcpStream,
+
+    /// Window size.
+    window_size: usize,
 
     /// Write state.
     write_state: WriteState,
@@ -464,12 +488,18 @@ impl<R: Runtime> Stream<R> {
             inbound_context: InboundContext::new(highest_ack),
             local,
             next_seq_nro: 1u32,
+            unacked: BTreeMap::new(),
+            pending: BTreeMap::new(),
             read_buffer: vec![0u8; READ_BUFFER_SIZE],
             read_state: SocketState::ReadMessage,
+            rto: INITIAL_RTO,
+            rtt: INITIAL_RTT,
+            rto_timer: None,
             recv_stream_id,
             remote,
             send_stream_id,
             stream,
+            window_size: INITIAL_WINDOW_SIZE,
             write_state: match initial_message {
                 None => WriteState::GetMessage,
                 Some(message) => WriteState::WriteMessage {
@@ -481,7 +511,49 @@ impl<R: Runtime> Stream<R> {
     }
 
     /// Handle acknowledgements.
-    fn handle_acks(&mut self, ack_through: u32, nacks: &[u32]) {}
+    //
+    // NOTE: `nacks` are ignored for now
+    fn handle_acks(&mut self, ack_through: u32, nacks: &[u32]) {
+        assert!(nacks.is_empty());
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            ?ack_through,
+            ?nacks,
+            "handle acks",
+        );
+
+        if ack_through > self.next_seq_nro {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                ?ack_through,
+                next_seq_nro = ?self.next_seq_nro,
+                "unexpected ack",
+            );
+            return;
+        }
+
+        let acked = self
+            .unacked
+            .iter()
+            .filter_map(|(seq_nro, _)| (seq_nro <= &ack_through).then_some(*seq_nro))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|seq_nro| (seq_nro, self.unacked.remove(&seq_nro).expect("to exist")))
+            .collect::<Vec<_>>();
+
+        for (seq_nro, packet) in acked {
+            // TODO: needs work
+            tracing::info!(target: LOG_TARGET, "rtt = {}", packet.sent.elapsed().as_millis());
+            self.rtt = packet.sent.elapsed();
+            self.rto = self.rtt * 2;
+            self.window_size += 1;
+        }
+    }
 
     /// Handle `packet` received from the network.
     fn on_packet(&mut self, packet: Vec<u8>) -> Result<(), StreamingError> {
@@ -529,6 +601,99 @@ impl<R: Runtime> Stream<R> {
         }
 
         Ok(())
+    }
+
+    fn packetize(&mut self, offset: usize) {
+        let sent = R::now();
+
+        let packets = self.read_buffer[..offset]
+            .chunks(256)
+            .map(|chunk| {
+                let seq_nro = {
+                    let seq_nro = self.next_seq_nro;
+                    self.next_seq_nro += 1;
+                    seq_nro
+                };
+                let ack_through = self.inbound_context.seq_nro;
+                let nacks = self
+                    .inbound_context
+                    .missing
+                    .iter()
+                    .copied()
+                    .take(MAX_NACKS)
+                    .collect::<Vec<_>>();
+
+                let mut builder = PacketBuilder::new(self.send_stream_id)
+                    .with_send_stream_id(self.recv_stream_id)
+                    .with_ack_through(ack_through)
+                    .with_nacks(nacks)
+                    .with_seq_nro(seq_nro)
+                    .with_payload(chunk);
+
+                let packet = if self.inbound_context.missing.len() >= MAX_NACKS {
+                    builder.with_delay_requested(CHOKING_REQUEST)
+                } else {
+                    builder
+                }
+                .build()
+                .to_vec();
+
+                (
+                    seq_nro,
+                    PendingPacket::<R> {
+                        sent,
+                        seq_nro,
+                        packet,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            num_packets = ?packets.len(),
+            windows_size = %self.window_size,
+            "send packets",
+        );
+
+        let (unacked, pending): (Vec<_>, Vec<_>) = packets
+            .into_iter()
+            .map(|(seq_nro, packet)| {
+                if self.unacked.len() >= self.window_size {
+                    return (None, Some((seq_nro, packet)));
+                }
+
+                if let Err(error) =
+                    self.event_tx.try_send((self.remote.clone(), packet.packet.clone()))
+                {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %self.local,
+                        remote = %self.remote,
+                        ?error,
+                        "failed to send packet",
+                    );
+                    return (None, Some((seq_nro, packet)));
+                }
+
+                (Some((seq_nro, packet)), None)
+            })
+            .unzip();
+
+        self.unacked.extend(unacked.into_iter().flatten());
+        self.pending.extend(pending.into_iter().flatten());
+
+        if self.rto_timer.is_none() {
+            self.rto_timer = Some(Box::pin(R::delay(self.rto)));
+        }
+    }
+
+    /// Resend any unACKed packets.
+    fn resend(&mut self) {
+        // TODO: resend unacked packets
+        // TODO: reduce window size
     }
 }
 
@@ -616,6 +781,7 @@ impl<R: Runtime> Future for Stream<R> {
             }
         }
 
+        // TODO: should not reaad more data if there's too many unacked packets
         loop {
             match mem::replace(&mut this.read_state, SocketState::Poisoned) {
                 SocketState::ReadMessage =>
@@ -649,44 +815,8 @@ impl<R: Runtime> Future for Stream<R> {
                         }
                     },
                 SocketState::SendMessage { offset } => {
-                    let seq_nro = {
-                        let seq_nro = this.next_seq_nro;
-                        this.next_seq_nro += 1;
-
-                        seq_nro
-                    };
-
-                    tracing::info!(target: LOG_TARGET, "send next packet, seq nro = {seq_nro}");
-
-                    let packet = PacketBuilder::new(this.send_stream_id)
-                        .with_send_stream_id(this.recv_stream_id)
-                        .with_seq_nro(seq_nro)
-                        .with_payload(&this.read_buffer[..offset])
-                        .build();
-
-                    // TODO: retries
-                    // TODO: cancel ack timer here if ok
-                    if let Err(error) =
-                        this.event_tx.try_send((this.remote.clone(), packet.to_vec()))
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            local = %this.local,
-                            remote = %this.remote,
-                            ?error,
-                            "failed to send packet",
-                        );
-                    }
-
-                    this.read_state = SocketState::AwaitingAck {
-                        seq_nro,
-                        packet: packet.to_vec(),
-                    };
-                    break;
-                }
-                SocketState::AwaitingAck { seq_nro, packet } => {
-                    this.read_state = SocketState::AwaitingAck { seq_nro, packet };
-                    break;
+                    this.packetize(offset);
+                    this.read_state = SocketState::ReadMessage;
                 }
                 SocketState::Poisoned => {
                     tracing::warn!(
@@ -698,6 +828,13 @@ impl<R: Runtime> Future for Stream<R> {
                     debug_assert!(false);
                     return Poll::Ready(this.recv_stream_id);
                 }
+            }
+        }
+
+        // resend packets
+        if let Some(timer) = &mut this.rto_timer {
+            if timer.poll_unpin(cx).is_ready() {
+                this.resend();
             }
         }
 
@@ -766,7 +903,7 @@ mod tests {
         thread_rng, Rng,
     };
     use thingbuf::mpsc::channel;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     struct StreamBuilder {
         cmd_tx: Sender<Vec<u8>>,
@@ -1491,5 +1628,72 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn outbound_packets() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(stream.rtt, INITIAL_RTT);
+        assert_eq!(stream.rto, INITIAL_RTO);
+
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        client.write_all(b"hello, world\n").await.unwrap();
+        client.write_all(b"testing 123\n").await.unwrap();
+        client.write_all(b"goodbye, world\n").await.unwrap();
+
+        // poll stream and send outbound packets
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let packet = Packet::parse(&packet).unwrap();
+        assert_eq!(
+            packet.payload,
+            b"hello, world\ntesting 123\ngoodbye, world\n"
+        );
+
+        // verify there's one pending packet and that the rto timer is active
+        assert_eq!(stream.unacked.len(), 1);
+        assert_eq!(stream.next_seq_nro, 2);
+        assert!(stream.pending.is_empty());
+        assert!(stream.rto_timer.is_some());
+
+        // send ack for the packet
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .build()
+                    .to_vec(),
+            )
+            .await;
+
+        // poll stream and handle ack
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        assert_eq!(stream.window_size, 2);
+        assert_ne!(stream.rtt, INITIAL_RTT);
+        assert_ne!(stream.rto, INITIAL_RTO);
     }
 }
