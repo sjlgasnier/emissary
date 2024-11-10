@@ -71,6 +71,12 @@ const STREAM_CHANNEL_SIZE: usize = 512;
 /// How long are streams kept in the pending state before they are pruned and rejected.
 const PENDING_STREAM_PRUNE_THRESHOLD: Duration = Duration::from_secs(30);
 
+/// How long should a pending outbound stream wait before sending another `SYN`.
+const SYN_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum `SYN` retries before the remote destination is considered unreachable.
+const MAX_SYN_RETRIES: usize = 3usize;
+
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
 
@@ -100,6 +106,12 @@ pub enum StreamManagerEvent {
         destination_id: DestinationId,
     },
 
+    /// Outbound stream rejected.
+    StreamRejected {
+        /// ID of remote destination.
+        destination_id: DestinationId,
+    },
+
     /// Send packet.
     SendPacket {
         /// ID of remote destination.
@@ -120,6 +132,12 @@ struct PendingOutboundStream<R: Runtime> {
 
     /// SAMv3 client socket that was used to send `STREAM CONNECT` command.
     socket: SamSocket<R>,
+
+    /// Serialised `SYN` packet.
+    packet: Vec<u8>,
+
+    /// Number of `SYN`s sent thus far.
+    num_sent: usize,
 }
 
 /// I2P virtual stream manager.
@@ -141,16 +159,19 @@ pub struct StreamManager<R: Runtime> {
     /// RX channel for receiving [`Packet`]s from active streams.
     outbound_rx: Receiver<(DestinationId, Vec<u8>)>,
 
+    /// Timers for outbound streams.
+    outbound_timers: R::JoinSet<u32>,
+
     /// TX channel given to active streams they use for sending messages to the network.
     outbound_tx: Sender<(DestinationId, Vec<u8>)>,
+
+    /// Pending events.
+    pending_events: VecDeque<StreamManagerEvent>,
 
     /// Pending inbound streams.
     ///
     /// Indexed by the remote-selected receive stream ID.
     pending_inbound: HashMap<u32, PendingStream<R>>,
-
-    /// Pending events.
-    pending_events: VecDeque<StreamManagerEvent>,
 
     /// Pending outbound streams.
     pending_outbound: HashMap<u32, PendingOutboundStream<R>>,
@@ -177,9 +198,10 @@ impl<R: Runtime> StreamManager<R> {
             destination_id: destination_id.clone(),
             listener: StreamListener::new(destination_id),
             outbound_rx,
+            outbound_timers: R::join_set(),
             outbound_tx,
-            pending_inbound: HashMap::new(),
             pending_events: VecDeque::new(),
+            pending_inbound: HashMap::new(),
             pending_outbound: HashMap::new(),
             prune_timer: Box::pin(R::delay(PENDING_STREAM_PRUNE_THRESHOLD)),
             signing_key,
@@ -216,6 +238,7 @@ impl<R: Runtime> StreamManager<R> {
             destination_id,
             silent,
             socket,
+            ..
         }) = self.pending_outbound.remove(&send_stream_id)
         {
             tracing::trace!(
@@ -634,14 +657,24 @@ impl<R: Runtime> StreamManager<R> {
             "open stream",
         );
 
+        // create pending stream and start timer for retrying `SYN` if the remote doesn't respond to
+        // the first packet
+        //
+        // `SYN` is retried 3 times before the remote destination is considered unreachable
         self.pending_outbound.insert(
             recv_stream_id,
             PendingOutboundStream {
                 destination_id,
                 silent,
                 socket,
+                num_sent: 1usize,
+                packet: packet.clone().to_vec(),
             },
         );
+        self.outbound_timers.push(async move {
+            R::delay(SYN_RETRY_TIMEOUT).await;
+            recv_stream_id
+        });
 
         (packet, recv_stream_id)
     }
@@ -705,6 +738,82 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(StreamListenerEvent::ListenerReady)) => self.on_listener_ready(),
+            }
+        }
+
+        loop {
+            match self.outbound_timers.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(stream_id)) => {
+                    let Some(PendingOutboundStream {
+                        destination_id,
+                        packet,
+                        ref mut num_sent,
+                        ..
+                    }) = self.pending_outbound.get_mut(&stream_id)
+                    else {
+                        continue;
+                    };
+
+                    // pending stream still exists, check if the packet should be resent
+                    // or if the stream should be destroyed
+                    if *num_sent < MAX_SYN_RETRIES {
+                        let destination_id = destination_id.clone();
+                        let packet = packet.clone();
+                        *num_sent += 1;
+
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            ?stream_id,
+                            "resend `SYN`",
+                        );
+
+                        // create new timer for the new syn packet
+                        //
+                        // the future is guaranteed to be polled as we return from this branch
+                        self.outbound_timers.push(async move {
+                            R::delay(SYN_RETRY_TIMEOUT).await;
+                            stream_id
+                        });
+
+                        return Poll::Ready(Some(StreamManagerEvent::SendPacket {
+                            destination_id,
+                            packet,
+                        }));
+                    } else {
+                        // stream must exist since it was just fetched from `pending_outbound`
+                        let PendingOutboundStream {
+                            destination_id,
+                            silent,
+                            mut socket,
+                            packet,
+                            num_sent,
+                        } = self.pending_outbound.remove(&stream_id).expect("to exist");
+
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            ?stream_id,
+                            "remote didn't reply after 3 tries, closing stream",
+                        );
+
+                        // send rejection to client and return event to `SamSession`
+                        // indicating that the connection failed
+                        R::spawn(async move {
+                            socket
+                                .send_message_blocking(
+                                    b"STREAM STATUS RESULT=CANT_REACH_PEER\n".to_vec(),
+                                )
+                                .await;
+                        });
+
+                        return Poll::Ready(Some(StreamManagerEvent::StreamRejected {
+                            destination_id,
+                        }));
+                    }
+                }
             }
         }
 
@@ -1274,6 +1383,60 @@ mod tests {
         reader.read_line(&mut response).await.unwrap();
 
         assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
+    }
+
+    #[tokio::test]
+    async fn outbound_stream_rejected() {
+        let socket_factory = SocketFactory::new().await;
+
+        let remote = DestinationId::random();
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // create new oubound stream to `manager1`
+        let (socket, mut client_stream) = socket_factory.socket().await;
+        let _ = manager2.create_stream(remote.clone(), socket, false);
+
+        // verify the syn packet is sent twice more
+        for _ in 0..2 {
+            match tokio::time::timeout(Duration::from_secs(15), manager2.next())
+                .await
+                .expect("no timeout")
+                .expect("to succeed")
+            {
+                StreamManagerEvent::SendPacket {
+                    destination_id,
+                    packet,
+                } if destination_id == remote => {
+                    assert!(Packet::parse(&packet).unwrap().flags.synchronize());
+                }
+                _ => panic!("invalid event"),
+            }
+        }
+
+        // verify that stream rejection is emitted
+        match tokio::time::timeout(Duration::from_secs(15), manager2.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            StreamManagerEvent::StreamRejected { destination_id } if destination_id == remote => {}
+            _ => panic!("invalid event"),
+        }
+
+        let mut reader = BufReader::new(client_stream);
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(15), reader.read_line(&mut response))
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        assert_eq!(response, "STREAM STATUS RESULT=CANT_REACH_PEER\n");
     }
 
     #[tokio::test]

@@ -601,6 +601,9 @@ impl<R: Runtime> Future for SamSession<R> {
                         self.pending_outbound.remove(&destination_id);
                     }
                 },
+                Poll::Ready(Some(StreamManagerEvent::StreamRejected { destination_id })) => {
+                    self.pending_outbound.remove(&destination_id);
+                }
                 Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id })) => {}
             }
         }
