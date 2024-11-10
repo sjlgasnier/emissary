@@ -692,8 +692,34 @@ impl<R: Runtime> Stream<R> {
 
     /// Resend any unACKed packets.
     fn resend(&mut self) {
-        // TODO: resend unacked packets
-        // TODO: reduce window size
+        if self.unacked.is_empty() {
+            self.rto_timer = None;
+            return;
+        }
+
+        for packet in self.unacked.values_mut() {
+            if packet.sent.elapsed() < self.rto {
+                break;
+            }
+            packet.sent = R::now();
+
+            if let Err(error) = self.event_tx.try_send((self.remote.clone(), packet.packet.clone()))
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    ?error,
+                    "failed to send packet",
+                );
+            }
+        }
+
+        self.rto_timer = Some(Box::pin(R::delay(self.rto)));
+
+        if self.window_size > 1 {
+            self.window_size -= 1;
+        }
     }
 }
 
@@ -832,9 +858,10 @@ impl<R: Runtime> Future for Stream<R> {
         }
 
         // resend packets
-        if let Some(timer) = &mut this.rto_timer {
-            if timer.poll_unpin(cx).is_ready() {
-                this.resend();
+        while let Some(timer) = &mut this.rto_timer {
+            match timer.poll_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(_) => this.resend(),
             }
         }
 
@@ -1695,5 +1722,180 @@ mod tests {
         assert_eq!(stream.window_size, 2);
         assert_ne!(stream.rtt, INITIAL_RTT);
         assert_ne!(stream.rto, INITIAL_RTO);
+    }
+
+    #[tokio::test]
+    async fn rto_works() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(stream.rtt, INITIAL_RTT);
+        assert_eq!(stream.rto, INITIAL_RTO);
+
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        client.write_all(b"hello, world\n").await.unwrap();
+        client.write_all(b"testing 123\n").await.unwrap();
+        client.write_all(b"goodbye, world\n").await.unwrap();
+
+        // poll stream and send outbound packets
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let packet = Packet::parse(&first_packet).unwrap();
+        assert_eq!(
+            packet.payload,
+            b"hello, world\ntesting 123\ngoodbye, world\n"
+        );
+
+        // verify there's one pending packet and that the rto timer is active
+        assert_eq!(stream.unacked.len(), 1);
+        assert_eq!(stream.next_seq_nro, 2);
+        assert!(stream.pending.is_empty());
+        assert!(stream.rto_timer.is_some());
+
+        let future = async {
+            loop {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    event = event_rx.recv() => break event,
+                }
+            }
+        };
+
+        let (_, second_packet) = tokio::time::timeout(Duration::from_secs(15), future)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        assert_eq!(first_packet, second_packet);
+
+        // verify state is unchanged
+        assert_eq!(stream.unacked.len(), 1);
+        assert_eq!(stream.next_seq_nro, 2);
+        assert_eq!(stream.window_size, 1);
+        assert!(stream.pending.is_empty());
+        assert!(stream.rto_timer.is_some());
+    }
+
+    #[tokio::test]
+    async fn resend_decrease_window_size() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(stream.rtt, INITIAL_RTT);
+        assert_eq!(stream.rto, INITIAL_RTO);
+
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        client.write_all(b"hello, world\n").await.unwrap();
+        client.write_all(b"testing 123\n").await.unwrap();
+        client.write_all(b"goodbye, world\n").await.unwrap();
+
+        // poll stream and send outbound packets
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let packet = Packet::parse(&first_packet).unwrap();
+        assert_eq!(
+            packet.payload,
+            b"hello, world\ntesting 123\ngoodbye, world\n"
+        );
+
+        // send ack for the packet
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .build()
+                    .to_vec(),
+            )
+            .await;
+
+        // poll stream and handle ack
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        assert_eq!(stream.window_size, 2);
+        assert_ne!(stream.rtt, INITIAL_RTT);
+        assert_ne!(stream.rto, INITIAL_RTO);
+
+        client.write_all(b"dropped packet\n").await.unwrap();
+
+        // poll stream and send outbound packets
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let packet = Packet::parse(&first_packet).unwrap();
+        assert_eq!(packet.payload, b"dropped packet\n");
+
+        // verify there's one pending packet and that the rto timer is active
+        assert_eq!(stream.unacked.len(), 1);
+        assert_eq!(stream.next_seq_nro, 3);
+        assert_eq!(stream.window_size, 2);
+        assert!(stream.pending.is_empty());
+        assert!(stream.rto_timer.is_some());
+
+        let future = async {
+            loop {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    event = event_rx.recv() => break event,
+                }
+            }
+        };
+
+        let (_, second_packet) = tokio::time::timeout(Duration::from_secs(15), future)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        assert_eq!(first_packet, second_packet);
+
+        // verify state is unchanged
+        assert_eq!(stream.unacked.len(), 1);
+        assert_eq!(stream.next_seq_nro, 3);
+        assert_eq!(stream.window_size, 1);
+        assert!(stream.pending.is_empty());
+        assert!(stream.rto_timer.is_some());
     }
 }
