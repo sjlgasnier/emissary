@@ -515,8 +515,6 @@ impl<R: Runtime> Stream<R> {
     //
     // NOTE: `nacks` are ignored for now
     fn handle_acks(&mut self, ack_through: u32, nacks: &[u32]) {
-        assert!(nacks.is_empty());
-
         tracing::trace!(
             target: LOG_TARGET,
             local = %self.local,
@@ -541,7 +539,10 @@ impl<R: Runtime> Stream<R> {
         let acked = self
             .unacked
             .iter()
-            .filter_map(|(seq_nro, _)| (seq_nro <= &ack_through).then_some(*seq_nro))
+            .filter_map(|(seq_nro, _)| {
+                (seq_nro <= &ack_through && nacks.iter().find(|nack| nack == &seq_nro).is_none())
+                    .then_some(*seq_nro)
+            })
             .collect::<Vec<_>>()
             .into_iter()
             .map(|seq_nro| (seq_nro, self.unacked.remove(&seq_nro).expect("to exist")))
@@ -2052,5 +2053,214 @@ mod tests {
 
         let third = Packet::parse(&third_packet).unwrap();
         assert_eq!(third.payload, vec![4u8; 256]);
+    }
+
+    #[tokio::test]
+    async fn nacks_work() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(stream.rtt, INITIAL_RTT);
+        assert_eq!(stream.rto, INITIAL_RTO);
+
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        // send five packets
+        client
+            .write_all(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&vec![1u8; 256]);
+                data.extend_from_slice(&vec![2u8; 256]);
+                data.extend_from_slice(&vec![3u8; 256]);
+                data.extend_from_slice(&vec![4u8; 256]);
+                data.extend_from_slice(&vec![5u8; 256]);
+
+                data
+            })
+            .await
+            .unwrap();
+
+        // poll stream and send outbound packets
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        // ack first packet
+        {
+            let first_packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("no timeout")
+                .expect("to succeed")
+                .1;
+
+            let packet = Packet::parse(&first_packet).unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+
+        // ack the next two packets
+        {
+            let mut future = async {
+                let mut packets = Vec::new();
+                while packets.len() != 2 {
+                    tokio::select! {
+                        _ = &mut stream => {}
+                        event = event_rx.recv() => {
+                            packets.push(event.unwrap());
+                        }
+                    }
+                }
+
+                packets
+            };
+
+            let packets =
+                tokio::time::timeout(Duration::from_secs(2), future).await.expect("no timeout");
+            let packet = Packet::parse(&packets[1].1).unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+
+        // read and ack the last two packets and verify window size
+        {
+            let mut future = async {
+                let mut packets = Vec::new();
+                while packets.len() != 2 {
+                    tokio::select! {
+                        _ = &mut stream => {}
+                        event = event_rx.recv() => {
+                            packets.push(event.unwrap());
+                        }
+                    }
+                }
+
+                packets
+            };
+
+            let packets =
+                tokio::time::timeout(Duration::from_secs(2), future).await.expect("no timeout");
+            let packet = Packet::parse(&packets[1].1).unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+            assert_eq!(stream.window_size, 6);
+            assert!(stream.unacked.is_empty());
+            assert!(stream.pending.is_empty());
+        }
+
+        // send 6 packets and NACK 2 of them
+        client
+            .write_all(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&vec![6u8; 256]);
+                data.extend_from_slice(&vec![7u8; 256]);
+                data.extend_from_slice(&vec![8u8; 256]);
+                data.extend_from_slice(&vec![9u8; 256]);
+                data.extend_from_slice(&vec![0xau8; 256]);
+                data.extend_from_slice(&vec![0xbu8; 256]);
+
+                data
+            })
+            .await
+            .unwrap();
+
+        let mut future = async {
+            let mut packets = Vec::new();
+            while packets.len() != 6 {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    event = event_rx.recv() => {
+                        packets.push(event.unwrap());
+                    }
+                }
+            }
+
+            packets
+        };
+
+        let packets =
+            tokio::time::timeout(Duration::from_secs(2), future).await.expect("no timeout");
+        let packet = Packet::parse(&packets[5].1).unwrap();
+
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_nacks(vec![packet.seq_nro - 1, packet.seq_nro - 3])
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .build()
+                    .to_vec(),
+            )
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        assert_eq!(stream.window_size, 10);
+        assert_eq!(stream.unacked.len(), 2);
+        assert!(stream.pending.is_empty());
+
+        let mut future = async {
+            let mut packets = Vec::new();
+            while packets.len() != 2 {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    event = event_rx.recv() => {
+                        packets.push(event.unwrap());
+                    }
+                }
+            }
+
+            packets
+        };
+
+        let packets =
+            tokio::time::timeout(Duration::from_secs(12), future).await.expect("no timeout");
+        let first_missing = Packet::parse(&packets[0].1).unwrap();
+        let second_missing = Packet::parse(&packets[1].1).unwrap();
+
+        assert_eq!(first_missing.payload, vec![8u8; 256]);
+        assert_eq!(second_missing.payload, vec![0xau8; 256]);
+        assert_eq!(stream.window_size, 9);
     }
 }
