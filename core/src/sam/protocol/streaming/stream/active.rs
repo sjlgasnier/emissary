@@ -32,6 +32,7 @@ use thingbuf::mpsc::{Receiver, Sender};
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use core::{
+    cmp,
     future::Future,
     marker::PhantomData,
     mem,
@@ -658,32 +659,20 @@ impl<R: Runtime> Stream<R> {
             "send packets",
         );
 
-        let (unacked, pending): (Vec<_>, Vec<_>) = packets
-            .into_iter()
-            .map(|(seq_nro, packet)| {
-                if self.unacked.len() >= self.window_size {
-                    return (None, Some((seq_nro, packet)));
+        packets.into_iter().for_each(|(seq_nro, packet)| {
+            if self.unacked.len() >= self.window_size {
+                self.pending.insert(seq_nro, packet);
+            } else {
+                match self.event_tx.try_send((self.remote.clone(), packet.packet.clone())) {
+                    Err(_) => {
+                        self.pending.insert(seq_nro, packet);
+                    }
+                    Ok(()) => {
+                        self.unacked.insert(seq_nro, packet);
+                    }
                 }
-
-                if let Err(error) =
-                    self.event_tx.try_send((self.remote.clone(), packet.packet.clone()))
-                {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        local = %self.local,
-                        remote = %self.remote,
-                        ?error,
-                        "failed to send packet",
-                    );
-                    return (None, Some((seq_nro, packet)));
-                }
-
-                (Some((seq_nro, packet)), None)
-            })
-            .unzip();
-
-        self.unacked.extend(unacked.into_iter().flatten());
-        self.pending.extend(pending.into_iter().flatten());
+            }
+        });
 
         if self.rto_timer.is_none() {
             self.rto_timer = Some(Box::pin(R::delay(self.rto)));
@@ -807,11 +796,53 @@ impl<R: Runtime> Future for Stream<R> {
             }
         }
 
-        // TODO: should not reaad more data if there's too many unacked packets
         loop {
-            match mem::replace(&mut this.read_state, SocketState::Poisoned) {
-                SocketState::ReadMessage =>
-                    match Pin::new(&mut this.stream).as_mut().poll_read(cx, &mut this.read_buffer) {
+            match this.read_state {
+                // if there are pending messages from previous reads, the socket shouldn't be read
+                SocketState::ReadMessage => match this.pending.is_empty() {
+                    false => {
+                        let outstanding = this.unacked.len();
+                        let available = this.window_size - outstanding;
+
+                        // cannot send more data for now
+                        if available == 0 {
+                            break;
+                        }
+
+                        let now = R::now();
+                        let num_packets = cmp::min(this.pending.len(), available);
+                        let packets =
+                            this.pending.keys().take(num_packets).copied().collect::<Vec<_>>();
+
+                        let num_sent = packets.into_iter().fold(0usize, |count, seq_nro| {
+                            // packet must exist since its key existed in `pending`
+                            let mut packet = this.pending.remove(&seq_nro).expect("to exist");
+
+                            match this
+                                .event_tx
+                                .try_send((this.remote.clone(), packet.packet.clone()))
+                            {
+                                Err(_) => {
+                                    this.pending.insert(seq_nro, packet);
+                                    count
+                                }
+                                Ok(()) => {
+                                    packet.sent = now;
+                                    this.unacked.insert(seq_nro, packet);
+
+                                    count + 1
+                                }
+                            }
+                        });
+
+                        if num_sent > 0 && this.rto_timer.is_none() {
+                            this.rto_timer = Some(Box::pin(R::delay(this.rto)));
+                        }
+                    }
+                    true => match Pin::new(&mut this.stream)
+                        .as_mut()
+                        .poll_read(cx, &mut this.read_buffer)
+                    {
                         Poll::Pending => {
                             this.read_state = SocketState::ReadMessage;
                             break;
@@ -840,10 +871,12 @@ impl<R: Runtime> Future for Stream<R> {
                             this.read_state = SocketState::SendMessage { offset: nread };
                         }
                     },
+                },
                 SocketState::SendMessage { offset } => {
                     this.packetize(offset);
                     this.read_state = SocketState::ReadMessage;
                 }
+                // TODO: can be removed?
                 SocketState::Poisoned => {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -1659,8 +1692,6 @@ mod tests {
 
     #[tokio::test]
     async fn outbound_packets() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
@@ -1726,8 +1757,6 @@ mod tests {
 
     #[tokio::test]
     async fn rto_works() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
@@ -1797,8 +1826,6 @@ mod tests {
 
     #[tokio::test]
     async fn resend_decrease_window_size() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
@@ -1897,5 +1924,133 @@ mod tests {
         assert_eq!(stream.window_size, 1);
         assert!(stream.pending.is_empty());
         assert!(stream.rto_timer.is_some());
+    }
+
+    #[tokio::test]
+    async fn data_split_into_multiple_packets() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(stream.rtt, INITIAL_RTT);
+        assert_eq!(stream.rto, INITIAL_RTO);
+
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        client
+            .write_all(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&vec![1u8; 256]);
+                data.extend_from_slice(&vec![2u8; 256]);
+                data.extend_from_slice(&vec![3u8; 256]);
+
+                data
+            })
+            .await
+            .unwrap();
+
+        // poll stream and send outbound packets
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let packet = Packet::parse(&first_packet).unwrap();
+        assert_eq!(packet.payload, vec![1u8; 256]);
+        assert_eq!(stream.window_size, 1);
+        assert_eq!(stream.unacked.len(), INITIAL_WINDOW_SIZE);
+        assert_eq!(stream.pending.len(), 2);
+
+        // send ack for the packet
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .build()
+                    .to_vec(),
+            )
+            .await;
+
+        // poll stream and handle ack
+        tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+
+        assert_eq!(stream.window_size, 2);
+        assert_ne!(stream.rtt, INITIAL_RTT);
+        assert_ne!(stream.rto, INITIAL_RTO);
+
+        // send more data
+        client.write_all(&vec![4u8; 256]).await.unwrap();
+
+        // verify the other two packets are sent now that window size is 2
+        let mut future = async {
+            let mut packets = Vec::new();
+            while packets.len() != 2 {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    event = event_rx.recv() => {
+                        packets.push(event.unwrap());
+                    }
+                }
+            }
+
+            packets
+        };
+
+        let packets =
+            tokio::time::timeout(Duration::from_secs(2), future).await.expect("no timeout");
+
+        let first = Packet::parse(&packets[0].1).unwrap();
+        assert_eq!(first.payload, vec![2u8; 256]);
+
+        let second = Packet::parse(&packets[1].1).unwrap();
+        assert_eq!(second.payload, vec![3u8; 256]);
+
+        assert!(stream.pending.is_empty());
+        assert_eq!(stream.unacked.len(), 2);
+
+        // send ack for both packets
+        cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_ack_through(second.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .build()
+                    .to_vec(),
+            )
+            .await;
+
+        let future = async {
+            loop {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    event = event_rx.recv() => break event,
+                }
+            }
+        };
+
+        let (_, third_packet) = tokio::time::timeout(Duration::from_secs(15), future)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let third = Packet::parse(&third_packet).unwrap();
+        assert_eq!(third.payload, vec![4u8; 256]);
     }
 }
