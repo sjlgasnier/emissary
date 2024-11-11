@@ -36,6 +36,7 @@ use core::{
     future::Future,
     marker::PhantomData,
     mem,
+    ops::Deref,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -73,6 +74,105 @@ const INITIAL_RTO: Duration = Duration::from_millis(9000);
 
 /// Initial RTT.
 const INITIAL_RTT: Duration = Duration::from_millis(8000);
+
+/// RTT dampening factor (alpha).
+const RTT_DAMPENING_FACTOR: f64 = 0.125f64;
+
+/// RTTDEV dampening factor (beta).
+const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
+
+/// Measured RTT.
+#[derive(Debug, Copy, Clone)]
+enum Rtt {
+    /// Stream has just started so there are no RTT values.
+    Unsampled(Duration),
+
+    /// RTT values have been measured.
+    Sampled(Duration),
+}
+
+impl Rtt {
+    /// Create new [`Rtt`].
+    fn new() -> Self {
+        Self::Unsampled(INITIAL_RTT)
+    }
+
+    /// Calculate new [`Rtt`] from `sample` and previous RTT.
+    fn calculate_rtt(&mut self, sample: Duration) {
+        match self {
+            Self::Unsampled(_) => *self = Self::Sampled(sample),
+            Self::Sampled(rtt) => {
+                // calculate smoothed rtt
+                let rtt = (1f64 - RTT_DAMPENING_FACTOR) * rtt.as_millis() as f64
+                    + RTT_DAMPENING_FACTOR * sample.as_millis() as f64;
+
+                *self = Self::Sampled(Duration::from_millis(rtt as u64));
+            }
+        }
+    }
+}
+
+impl Deref for Rtt {
+    type Target = Duration;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Unsampled(rtt) => rtt,
+            Self::Sampled(rtt) => rtt,
+        }
+    }
+}
+
+/// Measured RTO.
+#[derive(Debug, Copy, Clone)]
+enum Rto {
+    /// Stream has just started so there are no RTO values.
+    Unsampled(Duration),
+
+    /// RTO values have been measured.
+    Sampled((Duration, Duration)),
+}
+
+impl Rto {
+    /// Create new [`Rto`].
+    fn new() -> Self {
+        Self::Unsampled(INITIAL_RTO)
+    }
+
+    fn calculate_rto(&mut self, rtt: &Rtt, sample: Duration) {
+        match self {
+            Self::Unsampled(_) => *self = Self::Sampled(((**rtt) * 2, (**rtt) / 2)),
+            Self::Sampled((rto, rtt_var)) => {
+                // calculate smoothed rto
+                // let rtt_var = (1−β)×RTTVAR+β×∣SRTT−RTT∣
+                let srtt = (**rtt).as_millis() as i64;
+                let abs = {
+                    let sample = sample.as_millis() as i64;
+                    RTTDEV_DAMPENING_FACTOR * i64::abs(srtt - sample) as f64
+                };
+                let rtt_var = rtt_var.as_millis() as f64;
+                let rtt_var = (1f64 - RTTDEV_DAMPENING_FACTOR) * rtt_var + abs;
+                let rto = srtt as f64 + 4f64 * rtt_var;
+
+                *self = Self::Sampled((
+                    Duration::from_millis(rto as u64),
+                    Duration::from_millis(rtt_var as u64),
+                ))
+            }
+        }
+    }
+}
+
+impl Deref for Rto {
+    type Target = Duration;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Unsampled(rto) => rto,
+            Self::Sampled((rto, _)) => rto,
+        }
+    }
+}
 
 /// Stream kind.
 pub enum StreamKind {
@@ -378,10 +478,10 @@ pub struct Stream<R: Runtime> {
     remote: DestinationId,
 
     /// RTO.
-    rto: Duration,
+    rto: Rto,
 
     /// RTT.
-    rtt: Duration,
+    rtt: Rtt,
 
     /// RTO timer.
     rto_timer: Option<BoxFuture<'static, ()>>,
@@ -493,8 +593,8 @@ impl<R: Runtime> Stream<R> {
             pending: BTreeMap::new(),
             read_buffer: vec![0u8; READ_BUFFER_SIZE],
             read_state: SocketState::ReadMessage,
-            rto: INITIAL_RTO,
-            rtt: INITIAL_RTT,
+            rto: Rto::new(),
+            rtt: Rtt::new(),
             rto_timer: None,
             recv_stream_id,
             remote,
@@ -512,8 +612,6 @@ impl<R: Runtime> Stream<R> {
     }
 
     /// Handle acknowledgements.
-    //
-    // NOTE: `nacks` are ignored for now
     fn handle_acks(&mut self, ack_through: u32, nacks: &[u32]) {
         tracing::trace!(
             target: LOG_TARGET,
@@ -521,6 +619,11 @@ impl<R: Runtime> Stream<R> {
             remote = %self.remote,
             ?ack_through,
             ?nacks,
+            unacked = ?self.unacked.len(),
+            pending = ?self.pending.len(),
+            seq = ?(self.next_seq_nro - 1),
+            rtt = ?*self.rtt,
+            rto = ?*self.rto,
             "handle acks",
         );
 
@@ -549,10 +652,8 @@ impl<R: Runtime> Stream<R> {
             .collect::<Vec<_>>();
 
         for (seq_nro, packet) in acked {
-            // TODO: needs work
-            tracing::info!(target: LOG_TARGET, "rtt = {}", packet.sent.elapsed().as_millis());
-            self.rtt = packet.sent.elapsed();
-            self.rto = self.rtt * 2;
+            self.rtt.calculate_rtt(packet.sent.elapsed());
+            self.rto.calculate_rto(&self.rtt, packet.sent.elapsed());
             self.window_size += 1;
         }
     }
@@ -676,7 +777,7 @@ impl<R: Runtime> Stream<R> {
         });
 
         if self.rto_timer.is_none() {
-            self.rto_timer = Some(Box::pin(R::delay(self.rto)));
+            self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
         }
     }
 
@@ -688,10 +789,18 @@ impl<R: Runtime> Stream<R> {
         }
 
         for packet in self.unacked.values_mut() {
-            if packet.sent.elapsed() < self.rto {
+            if packet.sent.elapsed() < *self.rto {
                 break;
             }
             packet.sent = R::now();
+
+            tracing::trace!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                seq_nro = ?packet.seq_nro,
+                "resend packet"
+            );
 
             if let Err(error) = self.event_tx.try_send((self.remote.clone(), packet.packet.clone()))
             {
@@ -705,7 +814,7 @@ impl<R: Runtime> Stream<R> {
             }
         }
 
-        self.rto_timer = Some(Box::pin(R::delay(self.rto)));
+        self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
 
         if self.window_size > 1 {
             self.window_size -= 1;
@@ -803,12 +912,20 @@ impl<R: Runtime> Future for Stream<R> {
                 SocketState::ReadMessage => match this.pending.is_empty() {
                     false => {
                         let outstanding = this.unacked.len();
-                        let available = this.window_size - outstanding;
+                        let available = this.window_size.saturating_sub(outstanding);
 
                         // cannot send more data for now
                         if available == 0 {
                             break;
                         }
+
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            window_size = this.window_size,
+                            num_unacked = ?this.unacked.len(),
+                            num_pending = ?this.pending.len(),
+                            "send pending packets",
+                        );
 
                         let now = R::now();
                         let num_packets = cmp::min(this.pending.len(), available);
@@ -837,7 +954,7 @@ impl<R: Runtime> Future for Stream<R> {
                         });
 
                         if num_sent > 0 && this.rto_timer.is_none() {
-                            this.rto_timer = Some(Box::pin(R::delay(this.rto)));
+                            this.rto_timer = Some(Box::pin(R::delay(*this.rto)));
                         }
                     }
                     true => match Pin::new(&mut this.stream)
@@ -1704,8 +1821,8 @@ mod tests {
 
         // verify initial state
         assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
-        assert_eq!(stream.rtt, INITIAL_RTT);
-        assert_eq!(stream.rto, INITIAL_RTO);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
 
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
@@ -1752,8 +1869,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
         assert_eq!(stream.window_size, 2);
-        assert_ne!(stream.rtt, INITIAL_RTT);
-        assert_ne!(stream.rto, INITIAL_RTO);
+        assert_ne!(*stream.rtt, INITIAL_RTT);
+        assert_ne!(*stream.rto, INITIAL_RTO);
     }
 
     #[tokio::test]
@@ -1769,8 +1886,8 @@ mod tests {
 
         // verify initial state
         assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
-        assert_eq!(stream.rtt, INITIAL_RTT);
-        assert_eq!(stream.rto, INITIAL_RTO);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
 
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
@@ -1838,8 +1955,8 @@ mod tests {
 
         // verify initial state
         assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
-        assert_eq!(stream.rtt, INITIAL_RTT);
-        assert_eq!(stream.rto, INITIAL_RTO);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
 
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
@@ -1880,8 +1997,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
         assert_eq!(stream.window_size, 2);
-        assert_ne!(stream.rtt, INITIAL_RTT);
-        assert_ne!(stream.rto, INITIAL_RTO);
+        assert_ne!(*stream.rtt, INITIAL_RTT);
+        assert_ne!(*stream.rto, INITIAL_RTO);
 
         client.write_all(b"dropped packet\n").await.unwrap();
 
@@ -1929,8 +2046,6 @@ mod tests {
 
     #[tokio::test]
     async fn data_split_into_multiple_packets() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
@@ -1942,8 +2057,8 @@ mod tests {
 
         // verify initial state
         assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
-        assert_eq!(stream.rtt, INITIAL_RTT);
-        assert_eq!(stream.rto, INITIAL_RTO);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
 
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
@@ -1992,8 +2107,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
         assert_eq!(stream.window_size, 2);
-        assert_ne!(stream.rtt, INITIAL_RTT);
-        assert_ne!(stream.rto, INITIAL_RTO);
+        assert_ne!(*stream.rtt, INITIAL_RTT);
+        assert_ne!(*stream.rto, INITIAL_RTO);
 
         // send more data
         client.write_all(&vec![4u8; 256]).await.unwrap();
@@ -2057,8 +2172,6 @@ mod tests {
 
     #[tokio::test]
     async fn nacks_work() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
@@ -2070,8 +2183,8 @@ mod tests {
 
         // verify initial state
         assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
-        assert_eq!(stream.rtt, INITIAL_RTT);
-        assert_eq!(stream.rto, INITIAL_RTO);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
 
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
@@ -2262,5 +2375,59 @@ mod tests {
         assert_eq!(first_missing.payload, vec![8u8; 256]);
         assert_eq!(second_missing.payload, vec![0xau8; 256]);
         assert_eq!(stream.window_size, 9);
+    }
+
+    #[tokio::test]
+    async fn rtt_rto_calculated_correctly() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stream => {},
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => return stream,
+                }
+            }
+        });
+
+        // ignore syn
+        let (_, _) = event_rx.recv().await.unwrap();
+
+        // send 11 packets, each with 100ms delay
+        for i in 1..=11 {
+            client.write_all(&vec![i as u8; 256]).await.unwrap();
+
+            let (_, packet) = event_rx.recv().await.unwrap();
+            let packet = Packet::parse(&packet).unwrap();
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+
+        let stream = handle.await.unwrap();
+        assert!((*stream.rtt).as_millis() >= 100 && (*stream.rtt).as_millis() <= 105);
+        assert!(
+            (*stream.rto).as_millis() > (*stream.rtt).as_millis()
+                && (*stream.rto).as_millis() <= 130
+        );
     }
 }
