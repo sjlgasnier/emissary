@@ -81,6 +81,9 @@ const RTT_DAMPENING_FACTOR: f64 = 0.125f64;
 /// RTTDEV dampening factor (beta).
 const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
 
+/// Threshold for stopping exponential growth of the window size.
+const EXP_GROWTH_STOP_THRESHOLD: usize = 64;
+
 /// Measured RTT.
 #[derive(Debug, Copy, Clone)]
 enum Rtt {
@@ -654,7 +657,12 @@ impl<R: Runtime> Stream<R> {
         for (seq_nro, packet) in acked {
             self.rtt.calculate_rtt(packet.sent.elapsed());
             self.rto.calculate_rto(&self.rtt, packet.sent.elapsed());
-            self.window_size += 1;
+
+            if self.window_size < EXP_GROWTH_STOP_THRESHOLD {
+                self.window_size *= 2;
+            } else if self.window_size < MAX_WINDOW_SIZE {
+                self.window_size += 1;
+            }
         }
     }
 
@@ -2379,8 +2387,6 @@ mod tests {
 
     #[tokio::test]
     async fn rtt_rto_calculated_correctly() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
@@ -2429,5 +2435,178 @@ mod tests {
             (*stream.rto).as_millis() > (*stream.rtt).as_millis()
                 && (*stream.rto).as_millis() <= 130
         );
+    }
+
+    #[tokio::test]
+    async fn window_size_clamping() {
+        crate::util::init_logger();
+
+        let (
+            mut stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                mut event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // ignore syn
+        let (_, _) = event_rx.recv().await.unwrap();
+
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+
+        // verify window is first grown to 2 and then decreased back to 1
+        {
+            client.write_all(&vec![1 as u8; 256]).await.unwrap();
+
+            let future = async {
+                loop {
+                    tokio::select! {
+                        _ = &mut stream => {}
+                        event = event_rx.recv() => break event,
+                    }
+                }
+            };
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(15), future)
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+
+            let packet = Packet::parse(&packet).unwrap();
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            // verify that window size is doubled
+            tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+            assert_eq!(stream.window_size, 2);
+
+            // send another packet but this time allow rto to expire
+            client.write_all(&vec![1 as u8; 256]).await.unwrap();
+
+            let future = async {
+                loop {
+                    tokio::select! {
+                        _ = &mut stream => {}
+                        event = event_rx.recv() => break event,
+                    }
+                }
+            };
+
+            // read packet and ignore it
+            let (_, ignored) = tokio::time::timeout(Duration::from_secs(15), future)
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+
+            let future = async {
+                loop {
+                    tokio::select! {
+                        _ = &mut stream => {}
+                        event = event_rx.recv() => break event,
+                    }
+                }
+            };
+
+            // read it again and verify it's the same as `ignored`
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(15), future)
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+            assert_eq!(ignored, packet);
+
+            // verify that window size is decreased back to 1
+            assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+
+            let packet = Packet::parse(&packet).unwrap();
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+        }
+
+        // verify exponential window growth works
+        for i in 0..5 {
+            client.write_all(&vec![i as u8; 256]).await.unwrap();
+
+            let future = async {
+                loop {
+                    tokio::select! {
+                        _ = &mut stream => {}
+                        event = event_rx.recv() => break event,
+                    }
+                }
+            };
+
+            let (_, packet) = tokio::time::timeout(Duration::from_secs(15), future)
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+
+            let packet = Packet::parse(&packet).unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+
+            tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
+        }
+        assert_eq!(stream.window_size, EXP_GROWTH_STOP_THRESHOLD);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stream => {}
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => return stream,
+                }
+            }
+        });
+
+        // send 100 more packets and verify the window size is capped at 128
+        for i in 0..100 {
+            client.write_all(&vec![i as u8; 256]).await.unwrap();
+
+            let (_, packet) = event_rx.recv().await.unwrap();
+            let packet = Packet::parse(&packet).unwrap();
+
+            cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+        let stream = handle.await.unwrap();
+        assert_eq!(stream.window_size, MAX_WINDOW_SIZE);
     }
 }
