@@ -30,7 +30,12 @@ use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 use thingbuf::mpsc::{Receiver, Sender};
 
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    vec,
+    vec::Vec,
+};
 use core::{
     cmp,
     future::Future,
@@ -145,7 +150,7 @@ impl Rto {
     fn calculate_rto(&mut self, rtt: &Rtt, sample: Duration) {
         match self {
             Self::Unsampled(_) => *self = Self::Sampled(((**rtt) * 2, (**rtt) / 2, 1)),
-            Self::Sampled((rto, rtt_var, _)) => {
+            Self::Sampled((_, rtt_var, _)) => {
                 // calculate smoothed rto
                 // let rtt_var = (1−β)×RTTVAR+β×∣SRTT−RTT∣
                 let srtt = (**rtt).as_millis() as i64;
@@ -278,20 +283,12 @@ enum SocketState {
         /// Offset into read buffer.
         offset: usize,
     },
-
-    /// [`SocketState`] has been poisoned.
-    Poisoned,
 }
 
 /// Inbound context.
 pub struct InboundContext<R: Runtime> {
     /// ACK timer.
     ack_timer: Option<BoxFuture<'static, ()>>,
-
-    /// Sequence number of the highest, last ACKed packet.
-    //
-    // TODO; what is this used for?
-    last_acked: u32,
 
     /// Missing packets.
     missing: BTreeSet<u32>,
@@ -320,7 +317,6 @@ impl<R: Runtime> InboundContext<R> {
     fn new(seq_nro: u32) -> Self {
         Self {
             ack_timer: None,
-            last_acked: seq_nro,
             missing: BTreeSet::new(),
             pending: BTreeMap::new(),
             ready: VecDeque::new(),
@@ -421,10 +417,6 @@ impl<R: Runtime> InboundContext<R> {
         Ok(())
     }
 
-    fn set_rtt(&mut self, rtt: usize) {
-        todo!();
-    }
-
     fn pop_message(&mut self) -> Option<Vec<u8>> {
         self.ready.pop_front()
     }
@@ -460,9 +452,6 @@ impl<R: Runtime> Future for InboundContext<R> {
 pub struct Stream<R: Runtime> {
     /// RX channel for receiving [`Packet`]s from the network.
     cmd_rx: Receiver<Vec<u8>>,
-
-    /// Stream configuration.
-    config: StreamConfig,
 
     /// TX channel for sending [`Packet`]s to the network.
     event_tx: Sender<(DestinationId, Vec<u8>)>,
@@ -522,7 +511,7 @@ impl<R: Runtime> Stream<R> {
         stream: R::TcpStream,
         initial_message: Option<Vec<u8>>,
         context: StreamContext,
-        config: StreamConfig,
+        _: StreamConfig,
         state: StreamKind,
     ) -> Self {
         let StreamContext {
@@ -601,7 +590,6 @@ impl<R: Runtime> Stream<R> {
 
         Self {
             cmd_rx,
-            config,
             event_tx,
             inbound_context: InboundContext::new(highest_ack),
             local,
@@ -668,7 +656,7 @@ impl<R: Runtime> Stream<R> {
             .map(|seq_nro| (seq_nro, self.unacked.remove(&seq_nro).expect("to exist")))
             .collect::<Vec<_>>();
 
-        for (seq_nro, packet) in acked {
+        for (_, packet) in acked {
             self.rtt.calculate_rtt(packet.sent.elapsed());
             self.rto.calculate_rto(&self.rtt, packet.sent.elapsed());
 
@@ -686,7 +674,6 @@ impl<R: Runtime> Stream<R> {
             seq_nro,
             ack_through,
             nacks,
-            resend_delay,
             flags,
             payload,
             ..
@@ -748,7 +735,7 @@ impl<R: Runtime> Stream<R> {
                     .take(MAX_NACKS)
                     .collect::<Vec<_>>();
 
-                let mut builder = PacketBuilder::new(self.send_stream_id)
+                let builder = PacketBuilder::new(self.send_stream_id)
                     .with_send_stream_id(self.recv_stream_id)
                     .with_ack_through(ack_through)
                     .with_nacks(nacks)
@@ -1020,17 +1007,6 @@ impl<R: Runtime> Future for Stream<R> {
                     this.packetize(offset);
                     this.read_state = SocketState::ReadMessage;
                 }
-                // TODO: can be removed?
-                SocketState::Poisoned => {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        local = %this.local,
-                        remote = %this.remote,
-                        "read state is poisoned",
-                    );
-                    debug_assert!(false);
-                    return Poll::Ready(this.recv_stream_id);
-                }
             }
         }
 
@@ -1068,21 +1044,14 @@ impl<R: Runtime> Future for Stream<R> {
             .build()
             .to_vec();
 
-            match this.event_tx.try_send((this.remote.clone(), packet.to_vec())) {
-                Err(error) => {
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        local = %this.local,
-                        remote = %this.remote,
-                        ?error,
-                        "failed to send packet",
-                    );
-                    todo!();
-                    // TODO: reset timer
-                }
-                Ok(()) => {
-                    this.inbound_context.last_acked = ack_through;
-                }
+            if let Err(error) = this.event_tx.try_send((this.remote.clone(), packet.to_vec())) {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %this.local,
+                    remote = %this.remote,
+                    ?error,
+                    "failed to send packet",
+                );
             }
 
             if this.inbound_context.can_close() {
@@ -1099,7 +1068,7 @@ mod tests {
     use super::*;
     use crate::runtime::{
         mock::{MockRuntime, MockTcpStream},
-        Runtime, TcpStream,
+        TcpStream,
     };
     use rand::{
         distributions::{Alphanumeric, DistString},
@@ -1157,7 +1126,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1180,7 +1149,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         let mut reader = BufReader::new(client);
@@ -1226,7 +1196,8 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
@@ -1263,7 +1234,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1297,7 +1268,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
@@ -1339,7 +1311,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
@@ -1383,7 +1356,8 @@ mod tests {
                             .build()
                             .to_vec(),
                     )
-                    .await;
+                    .await
+                    .unwrap();
             }
 
             let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
@@ -1427,7 +1401,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
@@ -1470,7 +1445,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
@@ -1511,7 +1487,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1562,14 +1538,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_reset() {
-        let (
-            stream,
-            StreamBuilder {
-                cmd_tx,
-                stream: mut client,
-                mut event_rx,
-            },
-        ) = StreamBuilder::build_stream().await;
+        let (stream, StreamBuilder { cmd_tx, .. }) = StreamBuilder::build_stream().await;
 
         let handle = tokio::spawn(stream);
 
@@ -1602,7 +1571,10 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::timeout(Duration::from_secs(5), handle).await.expect("no timeout");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no timeout")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1612,7 +1584,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: client,
-                mut event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1639,7 +1611,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         let mut reader = BufReader::new(client);
@@ -1676,7 +1649,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1693,7 +1666,7 @@ mod tests {
             .chunks(4)
             .enumerate()
             .map(|(seq_nro, message)| {
-                let mut builder = PacketBuilder::new(1338u32)
+                let builder = PacketBuilder::new(1338u32)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(seq_nro as u32 + 1)
                     .with_payload(&message);
@@ -1724,7 +1697,10 @@ mod tests {
 
         assert_eq!(std::str::from_utf8(&response).unwrap(), test_string);
 
-        tokio::time::timeout(Duration::from_secs(5), handle).await.expect("no timeout");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no timeout")
+            .unwrap();
 
         // ignore syn
         let (_, mut prev) = event_rx.recv().await.unwrap();
@@ -1740,14 +1716,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_number_too_high() {
-        let (
-            stream,
-            StreamBuilder {
-                cmd_tx,
-                stream: client,
-                mut event_rx,
-            },
-        ) = StreamBuilder::build_stream().await;
+        let (stream, StreamBuilder { cmd_tx, .. }) = StreamBuilder::build_stream().await;
 
         let handle = tokio::spawn(stream);
 
@@ -1768,7 +1737,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         // send packet with way too high sequence number
@@ -1781,11 +1751,13 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
-            .expect("stream to exist");
+            .expect("stream to exist")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1794,8 +1766,8 @@ mod tests {
             stream,
             StreamBuilder {
                 cmd_tx,
-                stream: client,
-                mut event_rx,
+                event_rx,
+                stream: _stream,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1813,7 +1785,8 @@ mod tests {
                             .build()
                             .to_vec(),
                     )
-                    .await;
+                    .await
+                    .unwrap();
             }
         }
 
@@ -1841,7 +1814,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1889,7 +1862,8 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         // poll stream and handle ack
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
@@ -1904,9 +1878,9 @@ mod tests {
         let (
             mut stream,
             StreamBuilder {
-                cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
+                cmd_tx: _cmd_tx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1975,7 +1949,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2017,7 +1991,8 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         // poll stream and handle ack
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
@@ -2077,7 +2052,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2127,7 +2102,8 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         // poll stream and handle ack
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
@@ -2140,7 +2116,7 @@ mod tests {
         client.write_all(&vec![4u8; 256]).await.unwrap();
 
         // verify the other two packets are sent now that window size is 2
-        let mut future = async {
+        let future = async {
             let mut packets = Vec::new();
             while packets.len() != 2 {
                 tokio::select! {
@@ -2176,7 +2152,8 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         let future = async {
             loop {
@@ -2203,7 +2180,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2254,12 +2231,13 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         // ack the next two packets
         {
-            let mut future = async {
+            let future = async {
                 let mut packets = Vec::new();
                 while packets.len() != 2 {
                     tokio::select! {
@@ -2286,12 +2264,13 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         // read and ack the last two packets and verify window size
         {
-            let mut future = async {
+            let future = async {
                 let mut packets = Vec::new();
                 while packets.len() != 2 {
                     tokio::select! {
@@ -2318,11 +2297,12 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-            assert_eq!(stream.window_size, 6);
+            assert_eq!(stream.window_size, 32);
             assert!(stream.unacked.is_empty());
             assert!(stream.pending.is_empty());
         }
@@ -2343,7 +2323,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut future = async {
+        let future = async {
             let mut packets = Vec::new();
             while packets.len() != 6 {
                 tokio::select! {
@@ -2371,15 +2351,16 @@ mod tests {
                     .build()
                     .to_vec(),
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-        assert_eq!(stream.window_size, 10);
+        assert_eq!(stream.window_size, 67);
         assert_eq!(stream.unacked.len(), 2);
         assert!(stream.pending.is_empty());
 
-        let mut future = async {
+        let future = async {
             let mut packets = Vec::new();
             while packets.len() != 2 {
                 tokio::select! {
@@ -2400,7 +2381,7 @@ mod tests {
 
         assert_eq!(first_missing.payload, vec![8u8; 256]);
         assert_eq!(second_missing.payload, vec![0xau8; 256]);
-        assert_eq!(stream.window_size, 9);
+        assert_eq!(stream.window_size, 66);
     }
 
     #[tokio::test]
@@ -2410,7 +2391,7 @@ mod tests {
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2444,7 +2425,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         let stream = handle.await.unwrap();
@@ -2457,14 +2439,12 @@ mod tests {
 
     #[tokio::test]
     async fn window_size_clamping() {
-        crate::util::init_logger();
-
         let (
             mut stream,
             StreamBuilder {
                 cmd_tx,
                 stream: mut client,
-                mut event_rx,
+                event_rx,
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2504,7 +2484,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             // verify that window size is doubled
             tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
@@ -2557,7 +2538,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
         }
@@ -2591,7 +2573,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
 
             tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
         }
@@ -2622,7 +2605,8 @@ mod tests {
                         .build()
                         .to_vec(),
                 )
-                .await;
+                .await
+                .unwrap();
         }
         let stream = handle.await.unwrap();
         assert_eq!(stream.window_size, MAX_WINDOW_SIZE);
@@ -2633,7 +2617,7 @@ mod tests {
         let mut rto = Rto::new();
         let mut rtt = Rtt::new();
 
-        for i in 0..10 {
+        for _ in 0..10 {
             let sample = Duration::from_millis(100 + 1);
 
             rtt.calculate_rtt(sample);
@@ -2656,5 +2640,75 @@ mod tests {
         assert_eq!(rto.as_millis(), 119);
 
         assert_eq!(rto.exponential_backoff(), Duration::from_millis(238));
+    }
+
+    async fn client_closes_socket_with_pending_data() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
+
+        let handle = tokio::spawn(async move {
+            let _ = stream.await;
+        });
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        // send five packets
+        client
+            .write_all(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&vec![1u8; 256]);
+                data.extend_from_slice(&vec![2u8; 256]);
+                data.extend_from_slice(&vec![3u8; 256]);
+                data.extend_from_slice(&vec![4u8; 256]);
+                data.extend_from_slice(&vec![5u8; 256]);
+
+                data
+            })
+            .await
+            .unwrap();
+
+        drop(client);
+
+        for i in 1..=5 {
+            let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("no timeout")
+                .expect("to succeed")
+                .1;
+
+            let packet = Packet::parse(&packet).unwrap();
+
+            assert_eq!(packet.payload, vec![i as u8; 256]);
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let _ = cmd_tx
+                .send(
+                    PacketBuilder::new(1338u32)
+                        .with_ack_through(packet.seq_nro)
+                        .with_send_stream_id(1337u32)
+                        .with_seq_nro(PLAIN_ACK)
+                        .build()
+                        .to_vec(),
+                )
+                .await;
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
     }
 }
