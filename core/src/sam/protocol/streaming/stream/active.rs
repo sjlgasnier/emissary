@@ -133,7 +133,7 @@ enum Rto {
     Unsampled(Duration),
 
     /// RTO values have been measured.
-    Sampled((Duration, Duration)),
+    Sampled((Duration, Duration, usize)),
 }
 
 impl Rto {
@@ -144,8 +144,8 @@ impl Rto {
 
     fn calculate_rto(&mut self, rtt: &Rtt, sample: Duration) {
         match self {
-            Self::Unsampled(_) => *self = Self::Sampled(((**rtt) * 2, (**rtt) / 2)),
-            Self::Sampled((rto, rtt_var)) => {
+            Self::Unsampled(_) => *self = Self::Sampled(((**rtt) * 2, (**rtt) / 2, 1)),
+            Self::Sampled((rto, rtt_var, _)) => {
                 // calculate smoothed rto
                 // let rtt_var = (1−β)×RTTVAR+β×∣SRTT−RTT∣
                 let srtt = (**rtt).as_millis() as i64;
@@ -160,7 +160,21 @@ impl Rto {
                 *self = Self::Sampled((
                     Duration::from_millis(rto as u64),
                     Duration::from_millis(rtt_var as u64),
+                    2usize,
                 ))
+            }
+        }
+    }
+
+    /// Get exponential back-off if packet loss has occurred.
+    fn exponential_backoff(&mut self) -> Duration {
+        match self {
+            Self::Unsampled(rto) => *rto,
+            Self::Sampled((rto, rtt_var, backoff)) => {
+                let timeout = *rto * (*backoff as u32);
+
+                *self = Self::Sampled((*rto, *rtt_var, *backoff + 1));
+                timeout
             }
         }
     }
@@ -172,7 +186,7 @@ impl Deref for Rto {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Unsampled(rto) => rto,
-            Self::Sampled((rto, _)) => rto,
+            Self::Sampled((rto, _, _)) => rto,
         }
     }
 }
@@ -796,9 +810,9 @@ impl<R: Runtime> Stream<R> {
             return;
         }
 
-        for packet in self.unacked.values_mut() {
+        let num_resent = self.unacked.values_mut().fold(0usize, |count, packet| {
             if packet.sent.elapsed() < *self.rto {
-                break;
+                return count;
             }
             packet.sent = R::now();
 
@@ -820,12 +834,16 @@ impl<R: Runtime> Stream<R> {
                     "failed to send packet",
                 );
             }
-        }
 
-        self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
+            count + 1
+        });
 
-        if self.window_size > 1 {
-            self.window_size -= 1;
+        if num_resent > 0 {
+            self.rto_timer = Some(Box::pin(R::delay(self.rto.exponential_backoff())));
+
+            if self.window_size > 1 {
+                self.window_size -= 1;
+            }
         }
     }
 }
@@ -2608,5 +2626,35 @@ mod tests {
         }
         let stream = handle.await.unwrap();
         assert_eq!(stream.window_size, MAX_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn exponential_backoff_rto() {
+        let mut rto = Rto::new();
+        let mut rtt = Rtt::new();
+
+        for i in 0..10 {
+            let sample = Duration::from_millis(100 + 1);
+
+            rtt.calculate_rtt(sample);
+            rto.calculate_rto(&rtt, sample);
+        }
+
+        assert_eq!(rtt.as_millis(), 101);
+        assert_eq!(rto.as_millis(), 113);
+
+        assert_eq!(rto.exponential_backoff(), Duration::from_millis(226));
+        assert_eq!(rto.exponential_backoff(), Duration::from_millis(339));
+        assert_eq!(rto.exponential_backoff(), Duration::from_millis(452));
+
+        let sample = Duration::from_millis(110);
+
+        rtt.calculate_rtt(sample);
+        rto.calculate_rto(&rtt, sample);
+
+        assert_eq!(rtt.as_millis(), 102);
+        assert_eq!(rto.as_millis(), 119);
+
+        assert_eq!(rto.exponential_backoff(), Duration::from_millis(238));
     }
 }
