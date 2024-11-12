@@ -37,7 +37,7 @@ use futures::StreamExt;
 use hashbrown::HashMap;
 use thingbuf::mpsc::Receiver;
 
-use alloc::sync::Arc;
+use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,

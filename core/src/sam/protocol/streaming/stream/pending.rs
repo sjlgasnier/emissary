@@ -23,8 +23,9 @@ use crate::{
     sam::protocol::streaming::packet::{Packet, PacketBuilder},
 };
 
-use alloc::collections::VecDeque;
 use rand_core::RngCore;
+
+use alloc::{collections::VecDeque, vec::Vec};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::streaming::pending";

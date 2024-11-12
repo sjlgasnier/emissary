@@ -26,7 +26,7 @@ use crate::{
 
 use futures::{future::BoxFuture, StreamExt};
 
-use alloc::collections::VecDeque;
+use alloc::{boxed::Box, collections::VecDeque};
 use core::{
     fmt, mem,
     net::{IpAddr, Ipv4Addr, SocketAddr},
