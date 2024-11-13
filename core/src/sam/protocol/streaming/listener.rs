@@ -26,7 +26,7 @@ use crate::{
 
 use futures::{future::BoxFuture, StreamExt};
 
-use alloc::collections::VecDeque;
+use alloc::{boxed::Box, collections::VecDeque};
 use core::{
     fmt, mem,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -35,7 +35,7 @@ use core::{
 };
 
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::sam::streaming::listener";
+const LOG_TARGET: &str = "emissary::streaming::listener";
 
 /// Events emitted by [`StreamListener`].
 pub enum StreamListenerEvent {

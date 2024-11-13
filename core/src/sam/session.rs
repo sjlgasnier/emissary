@@ -37,7 +37,7 @@ use futures::StreamExt;
 use hashbrown::HashMap;
 use thingbuf::mpsc::Receiver;
 
-use alloc::sync::Arc;
+use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
@@ -601,6 +601,9 @@ impl<R: Runtime> Future for SamSession<R> {
                         self.pending_outbound.remove(&destination_id);
                     }
                 },
+                Poll::Ready(Some(StreamManagerEvent::StreamRejected { destination_id })) => {
+                    self.pending_outbound.remove(&destination_id);
+                }
                 Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id })) => {}
             }
         }

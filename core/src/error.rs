@@ -130,6 +130,9 @@ pub enum StreamingError {
 
     /// Receive window is full.
     ReceiveWindowFull,
+
+    /// Sequence number for the packet is unexpected high.
+    SequenceNumberTooHigh,
 }
 
 impl fmt::Display for StreamingError {
@@ -147,6 +150,8 @@ impl fmt::Display for StreamingError {
             Self::ListenerMismatch => write!(f, "listener kind mismatch"),
             Self::Closed => write!(f, "stream closed"),
             Self::ReceiveWindowFull => write!(f, "receive window is full"),
+            Self::SequenceNumberTooHigh =>
+                write!(f, "sequnce number for the packet is unexpectedly high"),
         }
     }
 }

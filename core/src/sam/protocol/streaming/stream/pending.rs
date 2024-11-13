@@ -23,11 +23,12 @@ use crate::{
     sam::protocol::streaming::packet::{Packet, PacketBuilder},
 };
 
-use alloc::collections::VecDeque;
 use rand_core::RngCore;
 
+use alloc::{collections::VecDeque, vec::Vec};
+
 /// Logging target for the file.
-const LOG_TARGET: &str = "emissary::sam::streaming::pending";
+const LOG_TARGET: &str = "emissary::streaming::pending";
 
 /// Initial window size
 const INITIAL_WINDOW_SIZE: usize = 6usize;
@@ -86,7 +87,13 @@ pub struct PendingStream<R: Runtime> {
 
 impl<R: Runtime> PendingStream<R> {
     /// Create new [`PendingStream`].
-    pub fn new(destination_id: DestinationId, recv_stream_id: u32) -> (Self, Vec<u8>) {
+    ///
+    /// `syn_payload` is the payload contained within the `SYN` message and may be empty.
+    pub fn new(
+        destination_id: DestinationId,
+        recv_stream_id: u32,
+        syn_payload: Vec<u8>,
+    ) -> (Self, Vec<u8>) {
         let send_stream_id = R::rng().next_u32();
         let packet = PacketBuilder::new(send_stream_id)
             .with_send_stream_id(recv_stream_id)
@@ -99,7 +106,10 @@ impl<R: Runtime> PendingStream<R> {
             Self {
                 destination_id,
                 established: R::now(),
-                packets: VecDeque::new(),
+                packets: match syn_payload.is_empty() {
+                    true => VecDeque::new(),
+                    false => VecDeque::from_iter([syn_payload]),
+                },
                 recv_stream_id,
                 send_stream_id: R::rng().next_u32(),
                 seq_nro: 0u32,
@@ -196,7 +206,8 @@ mod tests {
 
     #[test]
     fn ignore_duplicate_ack() {
-        let (mut stream, _) = PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32);
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![]);
 
         let packet = PacketBuilder::new(stream.send_stream_id)
             .with_send_stream_id(stream.recv_stream_id)
@@ -212,7 +223,8 @@ mod tests {
 
     #[test]
     fn destroy_stream_on_close() {
-        let (mut stream, _) = PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32);
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![]);
 
         let packet = PacketBuilder::new(stream.send_stream_id)
             .with_send_stream_id(stream.recv_stream_id)
@@ -229,7 +241,8 @@ mod tests {
 
     #[test]
     fn destroy_stream_on_reset() {
-        let (mut stream, _) = PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32);
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![]);
 
         let packet = PacketBuilder::new(stream.send_stream_id)
             .with_send_stream_id(stream.recv_stream_id)
@@ -246,7 +259,8 @@ mod tests {
 
     #[test]
     fn buffer_data_correctly() {
-        let (mut stream, _) = PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32);
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![]);
 
         for i in 1..=3 {
             let packet = PacketBuilder::new(stream.send_stream_id)
@@ -285,7 +299,8 @@ mod tests {
 
     #[test]
     fn ignore_invalid_packets() {
-        let (mut stream, _) = PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32);
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![]);
 
         match stream.on_packet(vec![1, 2, 3, 4]) {
             PendingStreamResult::DoNothing => {}
@@ -295,7 +310,8 @@ mod tests {
 
     #[test]
     fn receive_window_full() {
-        let (mut stream, _) = PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32);
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![]);
 
         for i in 1..=INITIAL_WINDOW_SIZE {
             let packet = PacketBuilder::new(stream.send_stream_id)
@@ -331,6 +347,19 @@ mod tests {
                 assert!(Packet::parse(&packet).unwrap().flags.reset());
             }
             _ => panic!("invalid result"),
+        }
+    }
+
+    #[test]
+    fn syn_payload_not_empty() {
+        let (mut stream, _) =
+            PendingStream::<NoopRuntime>::new(DestinationId::random(), 1337u32, vec![1, 2, 3, 4]);
+
+        match stream.packets.pop_front() {
+            Some(payload) => {
+                assert_eq!(payload, vec![1, 2, 3, 4]);
+            }
+            _ => panic!("expected payload"),
         }
     }
 }

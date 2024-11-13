@@ -40,7 +40,7 @@ use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use thingbuf::mpsc::{with_recycle, Sender};
 
-use alloc::{string::String, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
