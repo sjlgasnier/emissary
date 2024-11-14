@@ -97,7 +97,7 @@ const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
 /// Tunnel pool configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TunnelPoolConfig {
     /// Tunnel pool name.
     ///

@@ -186,16 +186,16 @@ impl<R: Runtime> SamSession<R> {
     /// Create new [`SamSession`].
     pub fn new(context: SamSessionContext<R>) -> Self {
         let SamSessionContext {
-            inbound,
-            options,
             destination,
+            inbound,
+            mut socket,
+            netdb_handle,
+            options,
             outbound,
             receiver,
             session_id,
-            mut socket,
             tunnel_pool_handle,
             version,
-            netdb_handle,
         } = context;
 
         let (session_destination, destination, privkey, signing_key) = {
