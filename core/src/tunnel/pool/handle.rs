@@ -206,6 +206,33 @@ impl TunnelPoolHandle {
             shutdown_rx,
         )
     }
+
+    #[cfg(test)]
+    /// Create new [`TunnelPoolHandle`] from `config`
+    pub fn from_config(
+        config: TunnelPoolConfig,
+    ) -> (
+        Self,
+        mpsc::Receiver<TunnelMessage>,
+        mpsc::Sender<TunnelPoolEvent>,
+        oneshot::Receiver<()>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (message_tx, message_rx) = mpsc::channel(64);
+
+        (
+            Self {
+                config,
+                event_rx,
+                message_tx,
+                shutdown_tx: Some(shutdown_tx),
+            },
+            message_rx,
+            event_tx,
+            shutdown_rx,
+        )
+    }
 }
 
 impl Stream for TunnelPoolHandle {

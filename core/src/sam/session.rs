@@ -150,8 +150,16 @@ impl<R: Runtime> fmt::Debug for PendingStreamState<R> {
 
 /// Active SAMv3 session.
 pub struct SamSession<R: Runtime> {
+    /// [`Dest`] of the session.
+    ///
+    /// Used to create new lease sets.
+    dest: Dest,
+
     /// [`Destination`] of the session.
     destination: Destination<R>,
+
+    /// Encryption key.
+    encryption_key: StaticPrivateKey,
 
     /// Session options.
     options: HashMap<String, String>,
@@ -171,6 +179,9 @@ pub struct SamSession<R: Runtime> {
 
     /// Session ID.
     session_id: Arc<str>,
+
+    /// Signing key.
+    signing_key: SigningPrivateKey,
 
     /// Socket for reading session-related commands from the client.
     socket: SamSocket<R>,
@@ -198,7 +209,7 @@ impl<R: Runtime> SamSession<R> {
             version,
         } = context;
 
-        let (session_destination, destination, privkey, signing_key) = {
+        let (session_destination, dest, privkey, encryption_key, signing_key) = {
             let (encryption_key, signing_key, destination_id, destination) = match destination {
                 DestinationKind::Transient => {
                     let mut rng = R::rng();
@@ -270,13 +281,14 @@ impl<R: Runtime> SamSession<R> {
             (
                 Destination::new(
                     destination_id.clone(),
-                    encryption_key,
+                    encryption_key.clone(),
                     local_leaseset,
                     netdb_handle,
                     tunnel_pool_handle,
                 ),
                 destination,
                 privkey,
+                encryption_key,
                 signing_key,
             )
         };
@@ -286,13 +298,16 @@ impl<R: Runtime> SamSession<R> {
         );
 
         Self {
+            dest: dest.clone(),
             destination: session_destination,
+            encryption_key,
             options,
             pending_outbound: HashMap::new(),
             receiver,
             session_id,
+            signing_key: signing_key.clone(),
             socket,
-            stream_manager: StreamManager::new(destination, signing_key),
+            stream_manager: StreamManager::new(dest, signing_key),
             version,
         }
     }
@@ -628,6 +643,31 @@ impl<R: Runtime> Future for SamSession<R> {
                     );
 
                     return Poll::Ready(Arc::clone(&self.session_id));
+                }
+                Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases })) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        num_leases = ?leases.len(),
+                        "create new lease set",
+                    );
+
+                    let lease_set = Bytes::from(
+                        LeaseSet2 {
+                            header: LeaseSet2Header {
+                                destination: self.dest.clone(),
+                                published: R::time_since_epoch().as_secs() as u32,
+                                expires: (R::time_since_epoch() + Duration::from_secs(10 * 60))
+                                    .as_secs() as u32,
+                            },
+                            public_keys: vec![self.encryption_key.public()],
+                            leases,
+                        }
+                        .serialize(&self.signing_key),
+                    );
+                    let destination_id = Bytes::from(self.dest.id().to_vec());
+
+                    self.destination.publish_lease_set(destination_id, lease_set);
                 }
             }
         }

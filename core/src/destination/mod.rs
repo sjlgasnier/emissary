@@ -19,26 +19,27 @@
 use crate::{
     crypto::StaticPrivateKey,
     destination::session::SessionManager,
-    error::{Error, QueryError},
+    error::{ChannelError, Error, QueryError},
     i2np::{
         database::store::{DatabaseStore, DatabaseStorePayload},
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
-    primitives::{DestinationId, LeaseSet2},
-    runtime::{JoinSet, Runtime},
+    primitives::{DestinationId, Lease, LeaseSet2},
+    runtime::{Instant, JoinSet, Runtime},
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
 use alloc::vec::Vec;
 use core::{
+    mem,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -50,6 +51,15 @@ const LOG_TARGET: &str = "emissary::destination";
 /// Retry timeout for lease set query.
 const QUERY_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Local lease set expiration timeout.
+const LEASE_SET_EXPIRATION: Duration = Duration::from_secs(9 * 60);
+
+/// Local lease set expiration timeout.
+const LEASE_SET_MAX_AGE: Duration = Duration::from_secs(2 * 60);
+
+/// How soon is the lease set publish retried after it failed.
+const LEASE_SET_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Number of retries before lease set query is aborted.
 ///
 /// This is the number retries made when trying to contact [`NetDb`] for a lease set query
@@ -57,6 +67,7 @@ const QUERY_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const NUM_QUERY_RETRIES: usize = 3usize;
 
 /// Events emitted by [`Destination`].
+#[derive(Debug)]
 pub enum DestinationEvent {
     /// One or more messages received.
     Messages {
@@ -81,6 +92,12 @@ pub enum DestinationEvent {
 
     /// Tunnel pool shut down.
     TunnelPoolShutDown,
+
+    /// Create new lease set from leases.
+    CreateLeaseSet {
+        /// Leases.
+        leases: Vec<Lease>,
+    },
 }
 
 /// Lease set status of remote destination.
@@ -111,8 +128,15 @@ pub struct Destination<R: Runtime> {
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
     lease_set: Bytes,
 
+    /// Timer which expires when a new lease set needs to be published
+    /// or an old lease set publish should be reattempted.
+    lease_set_publish_timer: LeaseSetPublishTimer,
+
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
+
+    /// Inbound tunnels waiting to be published to `NetDb`.
+    pending_inbound: Vec<(Lease, R::Instant)>,
 
     /// Pending lease set queries:
     pending_queries: HashSet<DestinationId>,
@@ -128,6 +152,9 @@ pub struct Destination<R: Runtime> {
 
     /// Handle to destination's [`TunnelPool`].
     tunnel_pool_handle: TunnelPoolHandle,
+
+    /// Waker.
+    waker: Option<Waker>,
 }
 
 impl<R: Runtime> Destination<R> {
@@ -143,6 +170,7 @@ impl<R: Runtime> Destination<R> {
         tunnel_pool_handle: TunnelPoolHandle,
     ) -> Self {
         Self {
+            pending_inbound: Vec::new(),
             destination_id: destination_id.clone(),
             lease_set: lease_set.clone(),
             netdb_handle,
@@ -151,6 +179,8 @@ impl<R: Runtime> Destination<R> {
             remote_destinations: HashMap::new(),
             session_manager: SessionManager::new(destination_id, private_key, lease_set),
             tunnel_pool_handle,
+            lease_set_publish_timer: LeaseSetPublishTimer::new::<R>(),
+            waker: None,
         }
     }
 
@@ -360,6 +390,34 @@ impl<R: Runtime> Destination<R> {
             })
             .collect::<Vec<_>>())
     }
+
+    /// Attempt to publish new lease set to `NetDb`.
+    pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
+        match self.netdb_handle.store_leaseset(key.clone(), lease_set.clone()) {
+            Ok(()) => {
+                self.lease_set = lease_set;
+                self.lease_set_publish_timer.reset::<R>();
+            }
+            Err(ChannelError::Full) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    "channel to netdb is clogged, try publishing lease set later",
+                );
+                self.lease_set_publish_timer.retry::<R>(key, lease_set);
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
+            }
+            Err(error) => tracing::error!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                ?error,
+                "failed to publish lease set",
+            ),
+        }
+    }
 }
 
 impl<R: Runtime> Stream for Destination<R> {
@@ -372,7 +430,36 @@ impl<R: Runtime> Stream for Destination<R> {
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) =>
                     return Poll::Ready(Some(DestinationEvent::TunnelPoolShutDown)),
-                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { .. })) => {}
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        ?tunnel_id,
+                        "inbound tunnel built",
+                    );
+                    self.pending_inbound.push((lease, R::now()));
+
+                    // return event before the publish timer expires if there are enough leases
+                    if self
+                        .pending_inbound
+                        .iter()
+                        .filter(|(_, created)| created.elapsed() < LEASE_SET_MAX_AGE)
+                        .count()
+                        == self.tunnel_pool_handle.config().num_inbound
+                    {
+                        // reset timer so it doesn't fire when the client is creating the lease set
+                        self.lease_set_publish_timer.deactivate();
+
+                        let leases = mem::replace(&mut self.pending_inbound, Vec::new())
+                            .into_iter()
+                            .filter_map(|(lease, created)| {
+                                (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
+                            })
+                            .collect::<Vec<_>>();
+
+                        return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
+                    }
+                }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { .. })) => {}
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { .. })) => {}
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { .. })) => {}
@@ -420,6 +507,129 @@ impl<R: Runtime> Stream for Destination<R> {
             }
         }
 
+        match self.lease_set_publish_timer.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew)) => {
+                let leases = mem::replace(&mut self.pending_inbound, Vec::new())
+                    .into_iter()
+                    .filter_map(|(lease, created)| {
+                        (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
+                    })
+                    .collect::<Vec<_>>();
+
+                return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
+            }
+            Poll::Ready(Some(LeaseSetPublishTimerEvent::Republish { key, lease_set })) => {
+                self.publish_lease_set(key, lease_set);
+            }
+        }
+
+        self.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// Events emitted by [`LeaseSetPublishTimer`].
+enum LeaseSetPublishTimerEvent {
+    /// Create new lease set.
+    CreateNew,
+
+    /// Attempt to republish old lease set.
+    Republish {
+        /// Key.
+        key: Bytes,
+        /// Lease set.
+        lease_set: Bytes,
+    },
+}
+
+/// Lease set publish timer.
+enum LeaseSetPublishTimer {
+    /// TImer is inactive.
+    Inactive,
+
+    /// Create new lease set.
+    CreateNew {
+        /// Timer.
+        timer: BoxFuture<'static, ()>,
+    },
+
+    /// Attempt to retry publishing an old lease set.
+    Republish {
+        // Timer.
+        timer: BoxFuture<'static, ()>,
+
+        /// Key.
+        key: Bytes,
+
+        /// Lease set.
+        lease_set: Bytes,
+    },
+}
+
+impl LeaseSetPublishTimer {
+    /// Create new [`LeaseSetPublishTimer`].
+    fn new<R: Runtime>() -> Self {
+        Self::CreateNew {
+            timer: Box::pin(R::delay(LEASE_SET_EXPIRATION)),
+        }
+    }
+
+    /// Reset timer.
+    fn reset<R: Runtime>(&mut self) {
+        *self = Self::CreateNew {
+            timer: Box::pin(R::delay(LEASE_SET_EXPIRATION)),
+        };
+    }
+
+    /// Set timer in republish mode.
+    fn retry<R: Runtime>(&mut self, key: Bytes, lease_set: Bytes) {
+        *self = Self::Republish {
+            timer: Box::pin(R::delay(LEASE_SET_REPUBLISH_TIMEOUT)),
+            key,
+            lease_set,
+        };
+    }
+
+    /// Set timer as inactive.
+    fn deactivate(&mut self) {
+        *self = Self::Inactive;
+    }
+}
+
+impl Stream for LeaseSetPublishTimer {
+    type Item = LeaseSetPublishTimerEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = Pin::into_inner(self);
+
+        match &mut this {
+            LeaseSetPublishTimer::Inactive => {}
+            LeaseSetPublishTimer::CreateNew { ref mut timer } => {
+                if timer.poll_unpin(cx).is_ready() {
+                    *this = LeaseSetPublishTimer::Inactive;
+                    return Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew));
+                }
+            }
+            LeaseSetPublishTimer::Republish {
+                timer,
+                key,
+                lease_set,
+            } =>
+                if timer.poll_unpin(cx).is_ready() {
+                    let key = key.clone();
+                    let lease_set = lease_set.clone();
+
+                    *this = LeaseSetPublishTimer::Inactive;
+
+                    return Poll::Ready(Some(LeaseSetPublishTimerEvent::Republish {
+                        key,
+                        lease_set,
+                    }));
+                },
+        }
+
         Poll::Pending
     }
 }
@@ -427,7 +637,11 @@ impl<R: Runtime> Stream for Destination<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{mock::MockRuntime, Runtime};
+    use crate::{
+        primitives::{RouterId, TunnelId},
+        runtime::{mock::MockRuntime, Runtime},
+        tunnel::TunnelPoolConfig,
+    };
 
     #[tokio::test]
     async fn query_lease_set_found() {
@@ -559,5 +773,176 @@ mod tests {
         );
 
         destination.send_message(&DestinationId::random(), vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn create_lease_set_immediately() {
+        let (netdb_handle, _rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::create();
+        let mut destination = Destination::<MockRuntime>::new(
+            DestinationId::random(),
+            StaticPrivateKey::new(MockRuntime::rng()),
+            Bytes::new(),
+            netdb_handle.clone(),
+            tp_handle,
+        );
+
+        // new inbound tunnel built
+        tp_tx
+            .send(TunnelPoolEvent::InboundTunnelBuilt {
+                tunnel_id: TunnelId::random(),
+                lease: Lease {
+                    router_id: RouterId::random(),
+                    tunnel_id: TunnelId::random(),
+                    expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
+                },
+            })
+            .await
+            .unwrap();
+
+        // verify event is emitted even though the timer is still active
+        assert!(std::matches!(
+            destination.lease_set_publish_timer,
+            LeaseSetPublishTimer::CreateNew { .. }
+        ));
+        futures::future::poll_fn(|cx| {
+            match destination.lease_set_publish_timer.poll_next_unpin(cx) {
+                Poll::Pending => Poll::Ready(()),
+                _ => panic!("timer is ready"),
+            }
+        })
+        .await;
+
+        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            DestinationEvent::CreateLeaseSet { leases } => {}
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_lease_set_after_timeout() {
+        let (netdb_handle, _rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+            num_inbound: 3usize,
+            ..Default::default()
+        });
+        let mut destination = Destination::<MockRuntime>::new(
+            DestinationId::random(),
+            StaticPrivateKey::new(MockRuntime::rng()),
+            Bytes::new(),
+            netdb_handle.clone(),
+            tp_handle,
+        );
+
+        // set lease set timer to a more sensible value
+        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
+            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
+        };
+
+        // issue events for two new inbound tunnels
+        for _ in 0..2 {
+            tp_tx
+                .send(TunnelPoolEvent::InboundTunnelBuilt {
+                    tunnel_id: TunnelId::random(),
+                    lease: Lease {
+                        router_id: RouterId::random(),
+                        tunnel_id: TunnelId::random(),
+                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        // verify that inbound tunnel is not built because 3 inbound tunnels are needed
+        assert!(destination.next().now_or_never().is_none());
+
+        // verify that that an event is emitted after the timer expires
+        match tokio::time::timeout(Duration::from_secs(15), destination.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            DestinationEvent::CreateLeaseSet { leases } => {}
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_set_publish_retried() {
+        crate::util::init_logger();
+
+        let (netdb_handle, mut rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+            num_inbound: 3usize,
+            ..Default::default()
+        });
+        let mut destination = Destination::<MockRuntime>::new(
+            DestinationId::random(),
+            StaticPrivateKey::new(MockRuntime::rng()),
+            Bytes::new(),
+            netdb_handle.clone(),
+            tp_handle,
+        );
+
+        // spam the netdb channel full of data
+        while let Ok(_) = netdb_handle.store_leaseset(Bytes::new(), Bytes::new()) {}
+
+        // set lease set timer to a more sensible value
+        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
+            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
+        };
+
+        // issue events for two new inbound tunnels
+        for _ in 0..2 {
+            tp_tx
+                .send(TunnelPoolEvent::InboundTunnelBuilt {
+                    tunnel_id: TunnelId::random(),
+                    lease: Lease {
+                        router_id: RouterId::random(),
+                        tunnel_id: TunnelId::random(),
+                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        // verify that inbound tunnel is not built because 3 inbound tunnels are needed
+        assert!(destination.next().now_or_never().is_none());
+
+        // verify that that an event is emitted after the timer expires
+        match tokio::time::timeout(Duration::from_secs(15), destination.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            DestinationEvent::CreateLeaseSet { leases } => {}
+            _ => panic!("invalid event"),
+        }
+
+        destination.publish_lease_set(Bytes::from(vec![1, 2, 3]), Bytes::from(vec![4, 5, 6]));
+        assert!(std::matches!(
+            destination.lease_set_publish_timer,
+            LeaseSetPublishTimer::Republish { .. }
+        ));
+
+        // drain events from netdb queue, giving space for the lease set publication
+        while let Ok(_) = rx.try_recv() {}
+
+        // poll destination for 5 seconds, allowing it to republish the destination
+        tokio::time::timeout(Duration::from_secs(5), destination.next())
+            .await
+            .unwrap_err();
+
+        // poll lease set store
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
     }
 }
