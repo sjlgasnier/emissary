@@ -311,6 +311,7 @@ pub enum Error {
     I2cp(I2cpError),
     Connection(ConnectionError),
     Custom(String),
+    Missing,
 }
 
 impl fmt::Display for Error {
@@ -333,6 +334,7 @@ impl fmt::Display for Error {
             Self::I2cp(error) => write!(f, "i2cp error: {error}"),
             Self::Connection(error) => write!(f, "connection error: {error}"),
             Self::Custom(error) => write!(f, "{error}"),
+            Self::Missing => write!(f, "value missing"),
         }
     }
 }

@@ -2548,8 +2548,148 @@ mod tests {
     }
 
     #[test]
-    fn new_session_retried() {}
+    fn new_session_retried() {
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (
+            outbound_leaseset,
+            outbound_destination_id,
+            outbound_destination,
+            outbound_signing_key,
+        ) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let destination = leaseset.header.destination.clone();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+                destination,
+                signing_key,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key.clone(),
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // send and handle NS message
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![1u8; 4]).unwrap();
+        decrypt_and_verify!(&mut inbound_session, message, vec![1u8; 4]);
+
+        // send NSR but drop it
+        let _ = inbound_session.encrypt(&outbound_destination_id, vec![2u8; 4]).unwrap();
+
+        // send another NS because the NSR was lost
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![1u8; 4]).unwrap();
+        decrypt_and_verify!(&mut inbound_session, message, vec![1u8; 4]);
+
+        // send NSR as reply to the new NS
+        let message = inbound_session.encrypt(&outbound_destination_id, vec![2u8; 4]).unwrap();
+        decrypt_and_verify!(&mut outbound_session, message, vec![2u8; 4]);
+
+        // send ES message to bob, finalizing the session
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![3u8; 4]).unwrap();
+        decrypt_and_verify!(&mut inbound_session, message, vec![3u8; 4]);
+
+        // send ES message to alice
+        let message = inbound_session.encrypt(&outbound_destination_id, vec![5u8; 4]).unwrap();
+        decrypt_and_verify!(&mut outbound_session, message, vec![5u8; 4]);
+    }
 
     #[test]
-    fn new_session_reply_retried() {}
+    fn new_session_reply_retried() {
+        crate::util::init_logger();
+
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (
+            outbound_leaseset,
+            outbound_destination_id,
+            outbound_destination,
+            outbound_signing_key,
+        ) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let destination = leaseset.header.destination.clone();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+                destination,
+                signing_key,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key.clone(),
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // send and handle NS message
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![1u8; 4]).unwrap();
+        decrypt_and_verify!(&mut inbound_session, message, vec![1u8; 4]);
+
+        // send and handle NSR message
+        let message = inbound_session.encrypt(&outbound_destination_id, vec![2u8; 4]).unwrap();
+        decrypt_and_verify!(&mut outbound_session, message, vec![2u8; 4]);
+
+        // send ES message which is never received by bob
+        //
+        // this converts the outbound session to active
+        let _message = outbound_session.encrypt(&inbound_destination_id, vec![3u8; 4]).unwrap();
+
+        // send another NSR because bob assumes it was dropped
+        let message = inbound_session.encrypt(&outbound_destination_id, vec![3u8; 4]).unwrap();
+        decrypt_and_verify!(&mut outbound_session, message, vec![3u8; 4]);
+
+        // send ES message to bob, finalizing the session
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![4u8; 4]).unwrap();
+        decrypt_and_verify!(&mut inbound_session, message, vec![4u8; 4]);
+
+        // send ES message to alice
+        let message = inbound_session.encrypt(&outbound_destination_id, vec![5u8; 4]).unwrap();
+        decrypt_and_verify!(&mut outbound_session, message, vec![5u8; 4]);
+    }
 }

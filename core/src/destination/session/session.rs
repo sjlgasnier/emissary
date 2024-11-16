@@ -56,7 +56,7 @@ use core::{fmt, marker::PhantomData, mem};
 const GARLIC_MESSAGE_OVERHEAD: usize = 24usize;
 
 /// Event emitted by [`PendingSession`].
-pub enum PendingSessionEvent {
+pub enum PendingSessionEvent<R: Runtime> {
     /// Send message to remote destination.
     SendMessage {
         /// Serialized message.
@@ -81,7 +81,7 @@ pub enum PendingSessionEvent {
         message: Vec<u8>,
 
         /// Session context.
-        context: SessionContext,
+        context: SessionContext<R>,
 
         /// Tag set ID.
         tag_set_id: u16,
@@ -108,7 +108,7 @@ enum PendingSessionState<R: Runtime> {
     /// Outbound session established to remote destination.
     OutboundActive {
         /// Outbound session.
-        outbound: Vec<OutboundSession<R>>,
+        outbound: HashMap<usize, OutboundSession<R>>,
 
         /// Active sessions.
         //
@@ -121,8 +121,11 @@ enum PendingSessionState<R: Runtime> {
         /// Garlic tags, global mapping for all active and pending sessions.
         garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
 
-        /// Garlic tag -> session key mapping for `NewSessionReply` message(s).
-        tag_set_entries: HashMap<u64, (usize, TagSetEntry)>,
+        /// Garlic tag -> (session, session key) mapping for NSR message(s).
+        nsr_tag_set_entries: HashMap<u64, (usize, TagSetEntry)>,
+
+        /// Garlic tag -> session key mapping for ES messages.
+        tag_set_entries: HashMap<u64, TagSetEntry>,
     },
 
     /// State has been poisoned.
@@ -188,7 +191,7 @@ impl<R: Runtime> PendingSession<R> {
         key_context: KeyContext<R>,
     ) -> Self {
         // generate and store tag set entries for `NewSessionReply`
-        let tag_set_entries = {
+        let nsr_tag_set_entries = {
             let mut inner = garlic_tags.write();
 
             outbound
@@ -205,11 +208,12 @@ impl<R: Runtime> PendingSession<R> {
             local,
             remote,
             state: PendingSessionState::OutboundActive {
-                outbound: vec![outbound],
+                outbound: HashMap::from_iter([(0usize, outbound)]),
                 outbound_active: vec![],
                 remote_public_key,
                 garlic_tags,
-                tag_set_entries,
+                nsr_tag_set_entries,
+                tag_set_entries: HashMap::new(),
             },
         }
     }
@@ -221,7 +225,7 @@ impl<R: Runtime> PendingSession<R> {
         &mut self,
         lease_set: Bytes,
         message: Vec<u8>,
-    ) -> crate::Result<PendingSessionEvent> {
+    ) -> crate::Result<PendingSessionEvent<R>> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive {
                 mut inbound,
@@ -281,9 +285,11 @@ impl<R: Runtime> PendingSession<R> {
                 garlic_tags,
                 mut outbound,
                 mut outbound_active,
-                mut tag_set_entries,
+                mut nsr_tag_set_entries,
                 remote_public_key,
+                tag_set_entries,
             } => {
+                // TODO: ugly
                 if outbound_active.is_empty() {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -305,26 +311,23 @@ impl<R: Runtime> PendingSession<R> {
 
                         session.generate_new_session_reply_tags().for_each(|tag_set| {
                             inner.insert(tag_set.tag, self.remote.clone());
-                            tag_set_entries.insert(tag_set.tag, (outbound.len(), tag_set));
+                            nsr_tag_set_entries.insert(tag_set.tag, (outbound.len(), tag_set));
                         });
                     }
-                    outbound.push(session);
+                    outbound.insert(outbound.len(), session);
 
                     self.state = PendingSessionState::OutboundActive {
                         outbound,
                         outbound_active,
                         garlic_tags,
-                        tag_set_entries,
+                        nsr_tag_set_entries,
                         remote_public_key,
+                        tag_set_entries,
                     };
 
                     Ok(PendingSessionEvent::SendMessage { message })
                 } else {
                     let (mut send_tag_set, recv_tag_set) = outbound_active.pop().expect("to exist");
-                    // TODO: take active sesssion
-                    // TODO: discard rest
-                    // TODO: send message
-
                     let TagSetEntry {
                         key,
                         tag,
@@ -346,7 +349,7 @@ impl<R: Runtime> PendingSession<R> {
                         local = %self.local,
                         remote = %self.remote,
                         garlic_tag = ?tag,
-                        "outbound garlic message",
+                        "send first ES message",
                     );
 
                     let message = {
@@ -381,10 +384,11 @@ impl<R: Runtime> PendingSession<R> {
                             recv_tag_set,
                             remote: self.remote.clone(),
                             send_tag_set,
-                            tag_set_entries: tag_set_entries
-                                .into_iter()
-                                .map(|(key, (_, value))| (key, value))
-                                .collect(),
+                            tag_set_entries,
+                            nsr_context: NsrContext::Active {
+                                tag_set_entries: nsr_tag_set_entries,
+                                sessions: outbound,
+                            },
                         },
                         tag_set_id,
                         tag_index,
@@ -413,7 +417,7 @@ impl<R: Runtime> PendingSession<R> {
         &mut self,
         garlic_tag: u64,
         message: Vec<u8>,
-    ) -> crate::Result<PendingSessionEvent> {
+    ) -> crate::Result<PendingSessionEvent<R>> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive {
                 mut inbound,
@@ -424,7 +428,7 @@ impl<R: Runtime> PendingSession<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
-                    "send NSR",
+                    "ES received",
                 );
 
                 let tag_set_entry = tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
@@ -444,7 +448,7 @@ impl<R: Runtime> PendingSession<R> {
 
                 // TODO: fix this
                 let (message, send_tag_set, recv_tag_set) =
-                    inbound[0].handle_existing_session(tag_set_entry, message)?;
+                    inbound[0].handle_existing_session(garlic_tag, tag_set_entry, message)?;
 
                 Ok(PendingSessionEvent::CreateSession {
                     message,
@@ -455,16 +459,18 @@ impl<R: Runtime> PendingSession<R> {
                         garlic_tags,
                         local: self.local.clone(),
                         remote: self.remote.clone(),
+                        nsr_context: NsrContext::Inactive,
                     },
                     tag_set_id,
                     tag_index,
                 })
             }
             PendingSessionState::OutboundActive {
+                garlic_tags,
                 mut outbound,
                 mut outbound_active,
+                mut nsr_tag_set_entries,
                 mut tag_set_entries,
-                garlic_tags,
                 remote_public_key,
             } => {
                 tracing::debug!(
@@ -475,7 +481,7 @@ impl<R: Runtime> PendingSession<R> {
                 );
 
                 let (session_idx, tag_set_entry) =
-                    tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+                    nsr_tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,
                             local = %self.local,
@@ -491,7 +497,7 @@ impl<R: Runtime> PendingSession<R> {
                 let tag_index = tag_set_entry.tag_index;
 
                 let (message, send_tag_set, mut recv_tag_set) = outbound
-                    .get_mut(session_idx)
+                    .get_mut(&session_idx)
                     .expect("to exist")
                     .handle_new_session_reply(tag_set_entry, message)?;
 
@@ -502,19 +508,12 @@ impl<R: Runtime> PendingSession<R> {
                 // TODO: refactor & re-explain
                 {
                     let mut inner = garlic_tags.write();
-                    // let mut tag_set_entries = tag_set_entries
-                    //     .into_iter()
-                    //     .filter_map(|(key, (idx, value))| {
-                    //         (idx == session_idx).then_some((key, value))
-                    //     })
-                    //     .collect::<HashMap<_, _>>();
-
                     // `next_entry()` must succeed as `recv_tag_set` is a fresh `TagSet`
                     (0..NUM_TAGS_TO_GENERATE).for_each(|_| {
                         let entry = recv_tag_set.next_entry().expect("to succeed");
 
                         inner.insert(entry.tag, self.remote.clone());
-                        tag_set_entries.insert(entry.tag, (session_idx, entry));
+                        tag_set_entries.insert(entry.tag, entry);
                     });
                 };
 
@@ -526,6 +525,7 @@ impl<R: Runtime> PendingSession<R> {
                     garlic_tags,
                     tag_set_entries,
                     remote_public_key,
+                    nsr_tag_set_entries,
                 };
 
                 Ok(PendingSessionEvent::ReturnMessage {
@@ -570,8 +570,52 @@ impl<R: Runtime> PendingSession<R> {
     }
 }
 
+/// NSR context.
+//
+// TODO: more documentation
+enum NsrContext<R: Runtime> {
+    Inactive,
+    Active {
+        /// Garlic tag -> (session, session key) mapping for NSR message(s).
+        tag_set_entries: HashMap<u64, (usize, TagSetEntry)>,
+
+        /// Active sessions.
+        sessions: HashMap<usize, OutboundSession<R>>,
+    },
+}
+
+impl<R: Runtime> NsrContext<R> {
+    /// Attempt to decrypt `message` using an NSR tag set entry.
+    fn decrypt(&mut self, garlic_tag: u64, message: Vec<u8>) -> crate::Result<(u16, u16, Vec<u8>)> {
+        let NsrContext::Active {
+            tag_set_entries,
+            sessions,
+        } = self
+        else {
+            return Err(Error::Missing);
+        };
+
+        let (session_idx, tag_set_entry) =
+            tag_set_entries.remove(&garlic_tag).ok_or(Error::Missing)?;
+        let session = sessions.get_mut(&session_idx).ok_or(Error::Missing)?;
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            ?garlic_tag,
+            "late NSR message",
+        );
+
+        let tag_set_id = tag_set_entry.tag_set_id;
+        let tag_index = tag_set_entry.tag_index;
+
+        session
+            .handle_new_session_reply(tag_set_entry, message)
+            .map(|(message, _, _)| (tag_set_id, tag_index, message))
+    }
+}
+
 /// Session context, passed into [`Session::new()`].
-pub struct SessionContext {
+pub struct SessionContext<R: Runtime> {
     /// Garlic tags, global mapping for all active and pending sessions.
     garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
 
@@ -589,6 +633,14 @@ pub struct SessionContext {
 
     /// `TagSet` entries for inbound messages.
     tag_set_entries: HashMap<u64, TagSetEntry>,
+
+    /// NSR context.
+    ///
+    /// Always `NsrContext::Inactive` for inbound sessions.
+    ///
+    /// For outbound context, converted to `NsrContext::Inactive` after the tag sets have been
+    /// expired.
+    nsr_context: NsrContext<R>,
 }
 
 /// Active ECIES-X25519-AEAD-Ratchet session.
@@ -598,6 +650,11 @@ pub struct Session<R: Runtime> {
 
     /// ID of the local destination.
     local: DestinationId,
+
+    /// NSR context.
+    ///
+    /// See [`NsrContext`] for more details.
+    nsr_context: NsrContext<R>,
 
     /// Pending `NextKey` block, if any.
     ///
@@ -622,7 +679,7 @@ pub struct Session<R: Runtime> {
 
 impl<R: Runtime> Session<R> {
     /// Create new [`Session`].
-    pub fn new(context: SessionContext) -> Self {
+    pub fn new(context: SessionContext<R>) -> Self {
         let SessionContext {
             garlic_tags,
             local,
@@ -630,17 +687,19 @@ impl<R: Runtime> Session<R> {
             remote,
             send_tag_set,
             tag_set_entries,
+            nsr_context,
         } = context;
 
         Self {
             garlic_tags,
             local,
+            nsr_context,
             pending_next_key: None,
             recv_tag_set,
             remote,
-            _runtime: Default::default(),
             send_tag_set,
             tag_set_entries,
+            _runtime: Default::default(),
         }
     }
 
@@ -660,23 +719,27 @@ impl<R: Runtime> Session<R> {
             "inbound garlic message",
         );
 
-        let TagSetEntry {
+        let Some(TagSetEntry {
             key,
             tag,
             tag_index,
             tag_set_id,
-        } = self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                local = %self.local,
-                remote = %self.remote,
-                ?garlic_tag,
-                "`TagSetEntry` doesn't exist",
-            );
+        }) = self.tag_set_entries.remove(&garlic_tag)
+        else {
+            return self.nsr_context.decrypt(garlic_tag, message).map_err(|error| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    ?garlic_tag,
+                    ?error,
+                    "`TagSetEntry` doesn't exist and failed to handle as NSR",
+                );
 
-            debug_assert!(false);
-            Error::InvalidState
-        })?;
+                debug_assert!(false);
+                Error::InvalidState
+            });
+        };
 
         // generate new tag for the used tag if there are tags left
         {
@@ -787,7 +850,7 @@ impl<R: Runtime> Session<R> {
             local = %self.local,
             remote = %self.remote,
             garlic_tag = ?tag,
-            "outbound garlic message",
+            "send ES",
         );
 
         // check if a dh ratchet should be performed because enought tags have been generated from

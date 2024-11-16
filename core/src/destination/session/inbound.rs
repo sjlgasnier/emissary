@@ -33,6 +33,7 @@ use crate::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
+use hashbrown::HashMap;
 use zeroize::Zeroize;
 
 use alloc::{vec, vec::Vec};
@@ -70,11 +71,11 @@ enum InboundSessionState {
     /// [`InboundSession`] is waiting for `ExistingSession` message to be received before the
     /// session is considered active.
     NewSessionReplySent {
-        /// `TagSet` for encrypting outbound messages.
-        send_tag_set: TagSet,
+        /// Generated tag sets.
+        tag_sets: HashMap<usize, (TagSet, TagSet)>,
 
-        /// `TagSet` for decrypting inbound messages.
-        recv_tag_set: TagSet,
+        /// Garlic tag -> `tag_sets` index mappings.
+        tag_set_mappings: HashMap<u64, usize>,
 
         /// `NewSessionReply` tag set.
         nsr_tag_set: TagSet,
@@ -85,14 +86,14 @@ enum InboundSessionState {
         /// Static public key of remote destination.
         remote_static_public_key: StaticPublicKey,
 
-        /// State from `NewSession`.
+        /// State from NS.
         ///
-        /// Used if multiple `NewSessionReply` messages are sent.
+        /// Used if multiple NSR messages are sent.
         state: Vec<u8>,
 
-        /// Chaining key from `NewSession`.
+        /// Chaining key from NS.
         ///
-        /// Used if multiple `NewSessionReply` messages are sent.
+        /// Used if multiple NSR messages are sent.
         chaining_key: Vec<u8>,
     },
 
@@ -198,7 +199,7 @@ impl<R: Runtime> InboundSession<R> {
                 tracing::trace!(
                     target: LOG_TARGET,
                     ?garlic_tag,
-                    "garlic tag for `NewSessionReply`",
+                    "garlic tag for NSR",
                 );
 
                 // calculate keys from shared secrets derived from ee & es
@@ -281,13 +282,17 @@ impl<R: Runtime> InboundSession<R> {
                 // `next_entry()` must succeed as this is a fresh `TagSet` and
                 // `NUM_TAGS_TO_GENERATE` is smaller than the maximum tag count
                 // in a `Tagset`
-                let tags = (0..NUM_TAGS_TO_GENERATE)
-                    .map(|_| recv_tag_set.next_entry().expect("to succeed"))
-                    .collect::<Vec<_>>();
+                let (tag_set_mappings, tags): (HashMap<_, _>, Vec<_>) = (0..NUM_TAGS_TO_GENERATE)
+                    .map(|_| {
+                        let entry = recv_tag_set.next_entry().expect("to succeed");
+
+                        ((entry.tag, 0usize), entry)
+                    })
+                    .unzip();
 
                 self.state = InboundSessionState::NewSessionReplySent {
-                    send_tag_set,
-                    recv_tag_set,
+                    tag_sets: HashMap::from_iter([(0usize, (send_tag_set, recv_tag_set))]),
+                    tag_set_mappings,
                     nsr_tag_set,
                     remote_ephemeral_public_key,
                     remote_static_public_key,
@@ -298,8 +303,8 @@ impl<R: Runtime> InboundSession<R> {
                 Ok((payload, tags))
             }
             InboundSessionState::NewSessionReplySent {
-                send_tag_set,
-                recv_tag_set,
+                mut tag_sets,
+                mut tag_set_mappings,
                 mut nsr_tag_set,
                 remote_ephemeral_public_key,
                 remote_static_public_key,
@@ -308,7 +313,7 @@ impl<R: Runtime> InboundSession<R> {
             } => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    "send another `NewSessionReply`",
+                    "send another NSR",
                 );
 
                 // generate new elligator2-encodable ephemeral keypair
@@ -329,12 +334,14 @@ impl<R: Runtime> InboundSession<R> {
                     (sk, ephemeral_public_key, representative)
                 };
 
+                // garlic tag generation is expected to succeed as the number of sent NSR messages
+                // should never exceed the total number of tags in the NSR tag set
                 let garlic_tag = nsr_tag_set.next_entry().expect("to succeed").tag;
 
                 tracing::trace!(
                     target: LOG_TARGET,
                     ?garlic_tag,
-                    "garlic tag for `NewSessionReply`",
+                    "garlic tag for NSR",
                 );
 
                 // calculate keys from shared secrets derived from ee & es
@@ -421,9 +428,15 @@ impl<R: Runtime> InboundSession<R> {
                     .map(|_| recv_tag_set.next_entry().expect("to succeed"))
                     .collect::<Vec<_>>();
 
+                // TODO: explain
+                tags.iter().for_each(|entry| {
+                    tag_set_mappings.insert(entry.tag, tag_sets.len());
+                });
+                tag_sets.insert(tag_sets.len(), (send_tag_set, recv_tag_set));
+
                 self.state = InboundSessionState::NewSessionReplySent {
-                    send_tag_set,
-                    recv_tag_set,
+                    tag_sets,
+                    tag_set_mappings,
                     nsr_tag_set,
                     remote_ephemeral_public_key,
                     remote_static_public_key,
@@ -437,7 +450,7 @@ impl<R: Runtime> InboundSession<R> {
                 tracing::warn!(
                     target: LOG_TARGET,
                     ?state,
-                    "invalid state for `NewSessionReply` message",
+                    "invalid state for NSR",
                 );
                 debug_assert!(false);
                 Err(Error::InvalidState)
@@ -452,22 +465,26 @@ impl<R: Runtime> InboundSession<R> {
     /// both send and receive `TagSet`s.
     pub fn handle_existing_session(
         &mut self,
+        garlic_tag: u64,
         tag_set_entry: TagSetEntry,
         mut payload: Vec<u8>,
     ) -> crate::Result<(Vec<u8>, TagSet, TagSet)> {
         let InboundSessionState::NewSessionReplySent {
-            send_tag_set,
-            recv_tag_set,
+            mut tag_sets,
+            tag_set_mappings,
             ..
         } = mem::replace(&mut self.state, InboundSessionState::Poisoned)
         else {
             tracing::warn!(
                 target: LOG_TARGET,
-                "invalid state for `ExistingSession` message",
+                "invalid state for ES",
             );
             debug_assert!(false);
             return Err(Error::InvalidState);
         };
+
+        let tag_set_index = tag_set_mappings.get(&garlic_tag).ok_or(Error::Missing)?;
+        let (send_tag_set, recv_tag_set) = tag_sets.remove(tag_set_index).ok_or(Error::Missing)?;
 
         let mut payload = payload[12..].to_vec();
 
