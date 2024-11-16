@@ -207,14 +207,17 @@ impl KeyContext {
 /// Session tag entry.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TagSetEntry {
-    /// Index.
-    pub index: u16,
-
     /// Session key.
     pub key: Bytes,
 
     /// Session tag.
     pub tag: u64,
+
+    /// Tag Index.
+    pub tag_index: u16,
+
+    /// Tag set ID.
+    pub tag_set_id: u16,
 }
 
 /// Tag set.
@@ -310,7 +313,8 @@ impl TagSet {
         };
 
         Some(TagSetEntry {
-            index: tag_index,
+            tag_index,
+            tag_set_id: self.tag_set_id,
             key: symmetric_key,
             tag: u64::from_le_bytes(
                 TryInto::<[u8; 8]>::try_into(garlic_tag.as_ref()).expect("to succeed"),

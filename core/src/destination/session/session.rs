@@ -63,6 +63,12 @@ pub enum PendingSessionEvent {
 
         /// Session context.
         context: SessionContext,
+
+        /// Tag set ID.
+        tag_set_id: u16,
+
+        /// Tag index.
+        tag_index: u16,
     },
 }
 
@@ -266,6 +272,8 @@ impl<R: Runtime> PendingSession<R> {
                     debug_assert!(false);
                     Error::InvalidState
                 })?;
+                let tag_set_id = tag_set_entry.tag_set_id;
+                let tag_index = tag_set_entry.tag_index;
 
                 let (message, send_tag_set, recv_tag_set) =
                     inbound.handle_existing_session(tag_set_entry, message)?;
@@ -280,6 +288,8 @@ impl<R: Runtime> PendingSession<R> {
                         local: self.local.clone(),
                         remote: self.remote.clone(),
                     },
+                    tag_set_id,
+                    tag_index,
                 })
             }
             PendingSessionState::OutboundActive {
@@ -299,6 +309,8 @@ impl<R: Runtime> PendingSession<R> {
                     debug_assert!(false);
                     Error::InvalidState
                 })?;
+                let tag_set_id = tag_set_entry.tag_set_id;
+                let tag_index = tag_set_entry.tag_index;
 
                 let (message, send_tag_set, mut recv_tag_set) =
                     outbound.handle_new_session_reply(tag_set_entry, message)?;
@@ -328,6 +340,8 @@ impl<R: Runtime> PendingSession<R> {
                         local: self.local.clone(),
                         remote: self.remote.clone(),
                     },
+                    tag_set_id,
+                    tag_index,
                 })
             }
             PendingSessionState::Poisoned => {
@@ -419,7 +433,13 @@ impl<R: Runtime> Session<R> {
     }
 
     /// Decrypt `message` using `garlic_tag` which identifies a `TagSetEntry`.
-    pub fn decrypt(&mut self, garlic_tag: u64, message: Vec<u8>) -> crate::Result<Vec<u8>> {
+    ///
+    /// Retuns the tag set ID and tag index of the decrypted message, along with the message itself.
+    pub fn decrypt(
+        &mut self,
+        garlic_tag: u64,
+        message: Vec<u8>,
+    ) -> crate::Result<(u16, u16, Vec<u8>)> {
         tracing::trace!(
             target: LOG_TARGET,
             local = %self.local,
@@ -428,19 +448,23 @@ impl<R: Runtime> Session<R> {
             "inbound garlic message",
         );
 
-        let TagSetEntry { index, key, tag } =
-            self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.local,
-                    remote = %self.remote,
-                    ?garlic_tag,
-                    "`TagSetEntry` doesn't exist",
-                );
+        let TagSetEntry {
+            key,
+            tag,
+            tag_index,
+            tag_set_id,
+        } = self.tag_set_entries.remove(&garlic_tag).ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                ?garlic_tag,
+                "`TagSetEntry` doesn't exist",
+            );
 
-                debug_assert!(false);
-                Error::InvalidState
-            })?;
+            debug_assert!(false);
+            Error::InvalidState
+        })?;
 
         // generate new tag for the used tag if there are tags left
         {
@@ -459,7 +483,7 @@ impl<R: Runtime> Session<R> {
         }
 
         let mut payload = message[12..].to_vec();
-        let payload = ChaChaPoly::with_nonce(&key, index as u64)
+        let payload = ChaChaPoly::with_nonce(&key, tag_index as u64)
             .decrypt_with_ad(&tag.to_le_bytes(), &mut payload)
             .map(|_| payload)?;
 
@@ -522,12 +546,20 @@ impl<R: Runtime> Session<R> {
             _ => Ok::<_, Error>(()),
         })?;
 
-        Ok(payload)
+        Ok((tag_set_id, tag_index, payload))
     }
 
     /// Encrypt `message`.
-    pub fn encrypt(&mut self, mut message_builder: GarlicMessageBuilder) -> crate::Result<Vec<u8>> {
-        let TagSetEntry { index, key, tag } = self.send_tag_set.next_entry().ok_or_else(|| {
+    pub fn encrypt(
+        &mut self,
+        mut message_builder: GarlicMessageBuilder,
+    ) -> crate::Result<(u16, u16, Vec<u8>)> {
+        let TagSetEntry {
+            key,
+            tag,
+            tag_index,
+            tag_set_id,
+        } = self.send_tag_set.next_entry().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
                 local = %self.local,
@@ -583,12 +615,12 @@ impl<R: Runtime> Session<R> {
         let mut message = message_builder.build();
         let mut out = BytesMut::with_capacity(message.len() + GARLIC_MESSAGE_OVERHEAD);
 
-        ChaChaPoly::with_nonce(&key, index as u64)
+        ChaChaPoly::with_nonce(&key, tag_index as u64)
             .encrypt_with_ad_new(&tag.to_le_bytes(), &mut message)?;
 
         out.put_u64_le(tag);
         out.put_slice(&message);
 
-        Ok(out.freeze().to_vec())
+        Ok((tag_set_id, tag_index, out.freeze().to_vec()))
     }
 }

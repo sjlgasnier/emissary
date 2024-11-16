@@ -306,7 +306,7 @@ impl<R: Runtime> InboundSession<R> {
 
         let mut payload = payload[12..].to_vec();
 
-        ChaChaPoly::with_nonce(&tag_set_entry.key, tag_set_entry.index as u64)
+        ChaChaPoly::with_nonce(&tag_set_entry.key, tag_set_entry.tag_index as u64)
             .decrypt_with_ad(&tag_set_entry.tag.to_le_bytes(), &mut payload)?;
 
         Ok((payload, send_tag_set, recv_tag_set))

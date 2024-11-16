@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::StaticPrivateKey,
-    destination::session::SessionManager,
+    destination::session::{SessionManager, SessionManagerEvent},
     error::{ChannelError, Error, QueryError},
     i2np::{
         database::store::{DatabaseStore, DatabaseStorePayload},
@@ -248,7 +248,7 @@ impl<R: Runtime> Destination<R> {
         LeaseSetStatus::NotFound
     }
 
-    /// Encrypt and send `message` to remote destination.
+    /// Send encrypted `message` to remote `destination`.
     ///
     /// Lease set for the remote destination must exist in [`Destination`], otherwise the call is
     /// rejected. Lease set can be queried with [`Destination::query_lease_set()`] which returns a
@@ -256,7 +256,7 @@ impl<R: Runtime> Destination<R> {
     ///
     /// After the message has been encrypted, it's sent to remote destination via one of the
     /// outbound tunnels of [`Destination`].
-    pub fn send_message(
+    fn send_message_inner(
         &mut self,
         destination_id: &DestinationId,
         message: Vec<u8>,
@@ -270,11 +270,6 @@ impl<R: Runtime> Destination<R> {
             debug_assert!(false);
             return Err(Error::InvalidState);
         };
-
-        // encrypt message
-        //
-        // session manager is expected to have public key of the destination
-        let message = self.session_manager.encrypt(destination_id, message)?;
 
         // wrap the garlic message inside a standard i2np message and send it over
         // the one of the pool's outbound tunnels to remote destination
@@ -300,6 +295,19 @@ impl<R: Runtime> Destination<R> {
         }
 
         Ok(())
+    }
+
+    /// Encrypt and send `message` to remote destination.
+    ///
+    /// Session manager is expected to have public key of the remote destination.
+    pub fn send_message(
+        &mut self,
+        destination_id: &DestinationId,
+        message: Vec<u8>,
+    ) -> crate::Result<()> {
+        let message = self.session_manager.encrypt(destination_id, message)?;
+
+        self.send_message_inner(destination_id, message)
     }
 
     /// Handle garlic messages received into one of the [`Destination`]'s inbound tunnels.
@@ -332,9 +340,10 @@ impl<R: Runtime> Destination<R> {
             .decrypt(message)?
             .filter_map(|clove| match clove.message_type {
                 MessageType::DatabaseStore => {
-                    tracing::warn!(
+                    tracing::debug!(
                         target: LOG_TARGET,
-                        "ignoring database store",
+                        local = %self.destination_id,
+                        "remote lease set received",
                     );
 
                     match DatabaseStore::<R>::parse(&clove.message_body) {
@@ -476,6 +485,25 @@ impl<R: Runtime> Stream for Destination<R> {
                         Ok(_) => {}
                     },
                 Poll::Ready(Some(TunnelPoolEvent::Dummy)) => unreachable!(),
+            }
+        }
+
+        loop {
+            match self.session_manager.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(SessionManagerEvent::SendMessage {
+                    destination_id,
+                    message,
+                })) =>
+                    if let Err(error) = self.send_message_inner(&destination_id, message) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            ?error,
+                            "failed to send message",
+                        );
+                    },
             }
         }
 
