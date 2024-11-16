@@ -19,7 +19,7 @@
 use crate::{
     crypto::{hmac::Hmac, StaticPrivateKey, StaticPublicKey},
     destination::session::{LOG_TARGET, SESSION_DH_RATCHET_THRESHOLD},
-    error::Error,
+    error::SessionError,
     i2np::garlic::{NextKeyBuilder, NextKeyKind},
     runtime::Runtime,
 };
@@ -36,6 +36,11 @@ use core::{fmt, mem};
 ///
 /// [1]: https://geti2p.net/spec/ecies#new-session-tags-and-comparison-to-signal
 const MAX_TAGS: usize = 65535;
+
+/// Maximum key ID.
+///
+/// The session must be terminated after this.
+const MAX_KEY_ID: u16 = 32767;
 
 /// Key state of [`TagSet`].
 ///
@@ -117,7 +122,7 @@ impl fmt::Debug for KeyState {
             Self::AwaitingReverseKey {
                 send_key_id,
                 recv_key_id,
-                private_key,
+                ..
             } => f
                 .debug_struct("KeyState::AwaitingReverseKey")
                 .field("send_key_id", &send_key_id)
@@ -167,7 +172,7 @@ struct KeyContext {
 impl KeyContext {
     /// Create new [`KeyContext`] for a [`TagSet`].
     pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
-        let mut temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
+        let temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
         let next_root_key =
             Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
         let ratchet_key = Hmac::new(&temp_key)
@@ -176,7 +181,7 @@ impl KeyContext {
             .update(&[0x02])
             .finalize();
 
-        let mut temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
+        let temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
         let session_tag_key =
             Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
         let symmetric_key = Hmac::new(&temp_key)
@@ -194,6 +199,8 @@ impl KeyContext {
             .update(&[0x02])
             .finalize();
 
+        temp_key.zeroize();
+
         Self {
             next_root_key: Bytes::from(next_root_key),
             session_key_data: Bytes::from(session_key_data),
@@ -207,14 +214,17 @@ impl KeyContext {
 /// Session tag entry.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TagSetEntry {
-    /// Index.
-    pub index: u16,
-
     /// Session key.
     pub key: Bytes,
 
     /// Session tag.
     pub tag: u64,
+
+    /// Tag Index.
+    pub tag_index: u16,
+
+    /// Tag set ID.
+    pub tag_set_id: u16,
 }
 
 /// Tag set.
@@ -257,11 +267,6 @@ impl TagSet {
         }
     }
 
-    /// Get ID of the [`TagSet`].
-    pub fn tag_set_id(&self) -> u16 {
-        self.tag_set_id
-    }
-
     /// Get next [`TagSetEntry`].
     ///
     /// Returns `None` if all tags have been used.
@@ -290,6 +295,8 @@ impl TagSet {
                 .update(&[0x02])
                 .finalize();
 
+            temp_key.zeroize();
+
             BytesMut::from(&session_tag_key_data[0..8]).freeze()
         };
 
@@ -306,11 +313,14 @@ impl TagSet {
                 .update(&[0x02])
                 .finalize();
 
+            temp_key.zeroize();
+
             BytesMut::from(&symmetric_key[..]).freeze()
         };
 
         Some(TagSetEntry {
-            index: tag_index,
+            tag_index,
+            tag_set_id: self.tag_set_id,
             key: symmetric_key,
             tag: u64::from_le_bytes(
                 TryInto::<[u8; 8]>::try_into(garlic_tag.as_ref()).expect("to succeed"),
@@ -335,9 +345,10 @@ impl TagSet {
         let tag_set_key = {
             let mut shared = private_key.diffie_hellman(&public_key);
             let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-            let mut tagset_key =
+            let tagset_key =
                 Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
 
+            shared.zeroize();
             temp_key.zeroize();
 
             tagset_key
@@ -370,7 +381,9 @@ impl TagSet {
     /// using the [`Tagset`].
     ///
     /// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
-    pub fn try_generate_next_key<R: Runtime>(&mut self) -> crate::Result<Option<NextKeyKind>> {
+    pub fn try_generate_next_key<R: Runtime>(
+        &mut self,
+    ) -> Result<Option<NextKeyKind>, SessionError> {
         // more tags can be generated from the current dh ratchet
         if self.tag_index as usize <= SESSION_DH_RATCHET_THRESHOLD || self.key_state.is_pending() {
             return Ok(None);
@@ -412,6 +425,15 @@ impl TagSet {
                         let private_key = StaticPrivateKey::new(R::rng());
                         let public_key = private_key.public();
 
+                        if send_key_id + 1 > MAX_KEY_ID {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?send_key_id,
+                                "send key id is too large",
+                            );
+                            return Err(SessionError::SessionTerminated);
+                        }
+
                         self.key_state = KeyState::AwaitingReverseKeyConfirmation {
                             send_key_id: send_key_id + 1,
                             recv_key_id,
@@ -426,6 +448,15 @@ impl TagSet {
                         ))
                     }
                     false => {
+                        if recv_key_id + 1 > MAX_KEY_ID {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?send_key_id,
+                                "receive key id is too large",
+                            );
+                            return Err(SessionError::SessionTerminated);
+                        }
+
                         self.key_state = KeyState::AwaitingReverseKey {
                             send_key_id,
                             recv_key_id: recv_key_id + 1,
@@ -447,7 +478,7 @@ impl TagSet {
                     "invalid state for tag set when generating next key",
                 );
                 debug_assert!(false);
-                Err(Error::InvalidState)
+                Err(SessionError::InvalidState)
             }
         }
     }
@@ -456,7 +487,7 @@ impl TagSet {
     pub fn handle_next_key<R: Runtime>(
         &mut self,
         kind: &NextKeyKind,
-    ) -> crate::Result<Option<NextKeyKind>> {
+    ) -> Result<Option<NextKeyKind>, SessionError> {
         match (mem::replace(&mut self.key_state, KeyState::Poisoned), kind) {
             (
                 KeyState::Uninitialized,
@@ -491,8 +522,8 @@ impl TagSet {
                     private_key,
                 },
                 NextKeyKind::ReverseKey {
-                    key_id,
                     public_key: Some(public_key),
+                    ..
                 },
             ) => {
                 self.reinitialize_tag_set(
@@ -516,8 +547,7 @@ impl TagSet {
                     public_key,
                 },
                 NextKeyKind::ReverseKey {
-                    key_id,
-                    public_key: None,
+                    public_key: None, ..
                 },
             ) => {
                 self.reinitialize_tag_set(private_key, public_key, send_key_id, recv_key_id);
@@ -533,7 +563,6 @@ impl TagSet {
             // the `NextKey` is replied only with a confirmation, without a reverse key
             (
                 KeyState::Active {
-                    send_key_id,
                     recv_key_id,
                     private_key,
                     ..
@@ -544,6 +573,17 @@ impl TagSet {
                     reverse_key_requested: false,
                 },
             ) => {
+                if key_id > &MAX_KEY_ID {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        max_key_id = ?MAX_KEY_ID,
+                        ?key_id,
+                        "key id is too large",
+                    );
+                    debug_assert!(false);
+                    return Err(SessionError::SessionTerminated);
+                }
+
                 self.reinitialize_tag_set(
                     private_key,
                     remote_public_key.clone(),
@@ -562,7 +602,6 @@ impl TagSet {
             (
                 KeyState::Active {
                     send_key_id,
-                    recv_key_id,
                     public_key: remote_public_key,
                     ..
                 },
@@ -572,6 +611,17 @@ impl TagSet {
                     reverse_key_requested: true,
                 },
             ) => {
+                if key_id > &MAX_KEY_ID {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        max_key_id = ?MAX_KEY_ID,
+                        ?key_id,
+                        "key id is too large",
+                    );
+                    debug_assert!(false);
+                    return Err(SessionError::SessionTerminated);
+                }
+
                 let private_key = StaticPrivateKey::new(R::rng());
                 let public_key = private_key.public();
 
@@ -594,7 +644,7 @@ impl TagSet {
                     "invalid key state/next key kind combination",
                 );
                 debug_assert!(false);
-                Err(Error::InvalidState)
+                Err(SessionError::InvalidState)
             }
         }
     }

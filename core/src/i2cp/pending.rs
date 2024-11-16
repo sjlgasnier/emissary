@@ -527,9 +527,10 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         );
                         inbound.insert(tunnel_id, lease);
 
-                        // `RequestVariableLeaseSet` shall not be sent until there is
-                        // at least one inbound and outbound tunnel built
-                        if inbound.is_empty() || outbound.is_empty() {
+                        // wait until all tunnels have been built
+                        if inbound.len() != handle.config().num_inbound
+                            || outbound.len() != handle.config().num_outbound
+                        {
                             self.state = PendingSessionState::BuildingTunnels {
                                 session_id,
                                 socket,
@@ -570,9 +571,10 @@ impl<R: Runtime> Future for PendingI2cpSession<R> {
                         );
                         outbound.insert(tunnel_id);
 
-                        // `RequestVariableLeaseSet` shall not be sent until there is
-                        // at least one inbound and outbound tunnel built
-                        if inbound.is_empty() || outbound.is_empty() {
+                        // wait until all tunnels have been built
+                        if inbound.len() != handle.config().num_inbound
+                            || outbound.len() != handle.config().num_outbound
+                        {
                             self.state = PendingSessionState::BuildingTunnels {
                                 session_id,
                                 socket,

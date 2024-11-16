@@ -26,6 +26,37 @@ use core::fmt;
 
 /// Connection error.
 #[derive(Debug, PartialEq, Eq)]
+pub enum SessionError {
+    /// Session terminated forcibly due to protocol error.
+    SessionTerminated,
+
+    /// Unknown garlic tag.
+    UnknownTag,
+
+    /// Message was malformed.
+    Malformed,
+
+    /// Encryption/decryption error.
+    Chacha,
+
+    /// State machine has entered an invalid state.
+    InvalidState,
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionTerminated => write!(f, "session forcibly terminated"),
+            Self::UnknownTag => write!(f, "unknown garlic tag"),
+            Self::Malformed => write!(f, "malformed message"),
+            Self::Chacha => write!(f, "encryption/decryption error"),
+            Self::InvalidState => write!(f, "invalid state"),
+        }
+    }
+}
+
+/// Connection error.
+#[derive(Debug, PartialEq, Eq)]
 pub enum ConnectionError {
     /// Socket closed.
     SocketClosed,
@@ -311,6 +342,8 @@ pub enum Error {
     I2cp(I2cpError),
     Connection(ConnectionError),
     Custom(String),
+    Missing,
+    Session(SessionError),
 }
 
 impl fmt::Display for Error {
@@ -333,6 +366,8 @@ impl fmt::Display for Error {
             Self::I2cp(error) => write!(f, "i2cp error: {error}"),
             Self::Connection(error) => write!(f, "connection error: {error}"),
             Self::Custom(error) => write!(f, "{error}"),
+            Self::Missing => write!(f, "value missing"),
+            Self::Session(error) => write!(f, "session error: {error}"),
         }
     }
 }
@@ -346,6 +381,12 @@ impl From<ed25519_dalek::ed25519::Error> for Error {
 impl From<chacha20poly1305::Error> for Error {
     fn from(value: chacha20poly1305::Error) -> Self {
         Error::Chacha20Poly1305(value)
+    }
+}
+
+impl From<Error> for SessionError {
+    fn from(value: Error) -> Self {
+        SessionError::Chacha
     }
 }
 

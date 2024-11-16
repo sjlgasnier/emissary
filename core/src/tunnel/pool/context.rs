@@ -315,12 +315,12 @@ pub struct TunnelPoolContext {
 
 impl TunnelPoolContext {
     /// Create new [`TunnelPoolContext`].
-    fn new() -> (Self, TunnelPoolContextHandle, TunnelPoolHandle) {
+    fn new(config: TunnelPoolConfig) -> (Self, TunnelPoolContextHandle, TunnelPoolHandle) {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
         let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
 
-        let (tunnel_pool_handle, event_tx, shutdown_tx) = TunnelPoolHandle::new(tx.clone());
+        let (tunnel_pool_handle, event_tx, shutdown_tx) = TunnelPoolHandle::new(config, tx.clone());
 
         (
             Self {
@@ -486,7 +486,8 @@ impl TunnelPoolBuildParameters {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
         let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
-        let (tunnel_pool_handle, event_tx, shutdown_rx) = TunnelPoolHandle::new(tx.clone());
+        let (tunnel_pool_handle, event_tx, shutdown_rx) =
+            TunnelPoolHandle::new(config.clone(), tx.clone());
 
         Self {
             config,

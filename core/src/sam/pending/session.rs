@@ -271,7 +271,9 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         // `SESSION STATUS` shall not be sent until there is
                         // at least one inbound and outbound tunnel built
-                        if inbound.is_empty() || outbound.is_empty() {
+                        if inbound.len() != handle.config().num_inbound
+                            || outbound.len() != handle.config().num_outbound
+                        {
                             self.state = PendingSessionState::BuildingTunnels {
                                 socket,
                                 session_id,
@@ -319,7 +321,9 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         // `SESSION STATUS` shall not be sent until there is
                         // at least one inbound and outbound tunnel built
-                        if inbound.is_empty() || outbound.is_empty() {
+                        if inbound.len() != handle.config().num_inbound
+                            || outbound.len() != handle.config().num_outbound
+                        {
                             self.state = PendingSessionState::BuildingTunnels {
                                 socket,
                                 session_id,

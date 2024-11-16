@@ -103,6 +103,9 @@ impl Default for TunnelPoolEvent {
 ///
 /// Allows `Destination`s to communicate with their `TunnelPool`.
 pub struct TunnelPoolHandle {
+    /// Tunnel pool configuration.
+    config: TunnelPoolConfig,
+
     /// RX channel for receiving events from `TunnelPool`.
     event_rx: mpsc::Receiver<TunnelPoolEvent>,
 
@@ -116,6 +119,7 @@ pub struct TunnelPoolHandle {
 impl TunnelPoolHandle {
     /// Create new [`TunnelPoolHandle`].
     pub(super) fn new(
+        config: TunnelPoolConfig,
         message_tx: mpsc::Sender<TunnelMessage>,
     ) -> (Self, mpsc::Sender<TunnelPoolEvent>, oneshot::Receiver<()>) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -123,6 +127,7 @@ impl TunnelPoolHandle {
 
         (
             Self {
+                config,
                 event_rx,
                 message_tx,
                 shutdown_tx: Some(shutdown_tx),
@@ -172,6 +177,11 @@ impl TunnelPoolHandle {
         self.shutdown_tx.take().map(|tx| tx.send(()));
     }
 
+    /// Get reference to [`TunnelPoolConfig`] of the tunnel pool.
+    pub fn config(&self) -> &TunnelPoolConfig {
+        &self.config
+    }
+
     #[cfg(test)]
     /// Create new [`TunnelPoolHandle`] for testing.
     pub fn create() -> (
@@ -186,6 +196,34 @@ impl TunnelPoolHandle {
 
         (
             Self {
+                config: Default::default(),
+                event_rx,
+                message_tx,
+                shutdown_tx: Some(shutdown_tx),
+            },
+            message_rx,
+            event_tx,
+            shutdown_rx,
+        )
+    }
+
+    #[cfg(test)]
+    /// Create new [`TunnelPoolHandle`] from `config`
+    pub fn from_config(
+        config: TunnelPoolConfig,
+    ) -> (
+        Self,
+        mpsc::Receiver<TunnelMessage>,
+        mpsc::Sender<TunnelPoolEvent>,
+        oneshot::Receiver<()>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (message_tx, message_rx) = mpsc::channel(64);
+
+        (
+            Self {
+                config,
                 event_rx,
                 message_tx,
                 shutdown_tx: Some(shutdown_tx),

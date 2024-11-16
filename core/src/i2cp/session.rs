@@ -20,8 +20,8 @@ use crate::{
     destination::{Destination, DestinationEvent, LeaseSetStatus},
     i2cp::{
         message::{
-            BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload, SessionId,
-            SessionStatus, SessionStatusKind, SetDate,
+            BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload,
+            RequestVariableLeaseSet, SessionId, SessionStatus, SessionStatusKind, SetDate,
         },
         payload::I2cpParameters,
         pending::I2cpSessionContext,
@@ -234,19 +234,10 @@ impl<R: Runtime> I2cpSession<R> {
                     target: LOG_TARGET,
                     ?session_id,
                     num_private_keys = ?private_keys.len(),
-                    "store leaseset to netdb",
+                    "store lease set",
                 );
 
-                if let Err(error) = self.netdb_handle.store_leaseset(key, leaseset) {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        ?session_id,
-                        ?error,
-                        "failed to store leaseset to netdb",
-                    );
-                }
-
-                // TODO: handle correctly
+                self.destination.publish_lease_set(key, leaseset);
             }
             Message::SendMessageExpires {
                 session_id,
@@ -414,6 +405,23 @@ impl<R: Runtime> Future for I2cpSession<R> {
                     );
 
                     return Poll::Ready(());
+                }
+                Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases })) => {
+                    let session_id = self.session_id;
+                    self.socket.send_message(RequestVariableLeaseSet::new(session_id, leases));
+
+                    // wake the task so that the socket is polled and the message is sent to client
+                    cx.waker().wake_by_ref();
+                }
+                Poll::Ready(Some(DestinationEvent::SessionTerminated { destination_id })) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        destination_id = %destination_id,
+                        "session termianted with remote",
+                    );
+
+                    // TODO: implement
                 }
             }
         }

@@ -176,7 +176,7 @@ impl<T: Send + 'static> Stream for TokioJoinSet<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct TokioInstant(Instant);
 
 impl InstantT for TokioInstant {
