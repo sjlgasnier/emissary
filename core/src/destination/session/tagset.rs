@@ -117,7 +117,7 @@ impl fmt::Debug for KeyState {
             Self::AwaitingReverseKey {
                 send_key_id,
                 recv_key_id,
-                private_key,
+                ..
             } => f
                 .debug_struct("KeyState::AwaitingReverseKey")
                 .field("send_key_id", &send_key_id)
@@ -167,7 +167,7 @@ struct KeyContext {
 impl KeyContext {
     /// Create new [`KeyContext`] for a [`TagSet`].
     pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
-        let mut temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
+        let temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
         let next_root_key =
             Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
         let ratchet_key = Hmac::new(&temp_key)
@@ -176,7 +176,7 @@ impl KeyContext {
             .update(&[0x02])
             .finalize();
 
-        let mut temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
+        let temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
         let session_tag_key =
             Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
         let symmetric_key = Hmac::new(&temp_key)
@@ -193,6 +193,8 @@ impl KeyContext {
             .update(&b"STInitialization")
             .update(&[0x02])
             .finalize();
+
+        temp_key.zeroize();
 
         Self {
             next_root_key: Bytes::from(next_root_key),
@@ -260,11 +262,6 @@ impl TagSet {
         }
     }
 
-    /// Get ID of the [`TagSet`].
-    pub fn tag_set_id(&self) -> u16 {
-        self.tag_set_id
-    }
-
     /// Get next [`TagSetEntry`].
     ///
     /// Returns `None` if all tags have been used.
@@ -293,6 +290,8 @@ impl TagSet {
                 .update(&[0x02])
                 .finalize();
 
+            temp_key.zeroize();
+
             BytesMut::from(&session_tag_key_data[0..8]).freeze()
         };
 
@@ -308,6 +307,8 @@ impl TagSet {
                 .update(&b"SymmetricRatchet")
                 .update(&[0x02])
                 .finalize();
+
+            temp_key.zeroize();
 
             BytesMut::from(&symmetric_key[..]).freeze()
         };
@@ -339,9 +340,10 @@ impl TagSet {
         let tag_set_key = {
             let mut shared = private_key.diffie_hellman(&public_key);
             let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
-            let mut tagset_key =
+            let tagset_key =
                 Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
 
+            shared.zeroize();
             temp_key.zeroize();
 
             tagset_key
@@ -495,8 +497,8 @@ impl TagSet {
                     private_key,
                 },
                 NextKeyKind::ReverseKey {
-                    key_id,
                     public_key: Some(public_key),
+                    ..
                 },
             ) => {
                 self.reinitialize_tag_set(
@@ -520,8 +522,7 @@ impl TagSet {
                     public_key,
                 },
                 NextKeyKind::ReverseKey {
-                    key_id,
-                    public_key: None,
+                    public_key: None, ..
                 },
             ) => {
                 self.reinitialize_tag_set(private_key, public_key, send_key_id, recv_key_id);
@@ -537,7 +538,6 @@ impl TagSet {
             // the `NextKey` is replied only with a confirmation, without a reverse key
             (
                 KeyState::Active {
-                    send_key_id,
                     recv_key_id,
                     private_key,
                     ..
@@ -566,7 +566,6 @@ impl TagSet {
             (
                 KeyState::Active {
                     send_key_id,
-                    recv_key_id,
                     public_key: remote_public_key,
                     ..
                 },

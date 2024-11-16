@@ -255,7 +255,7 @@ impl<R: Runtime> SessionManager<R> {
         )
         .build();
 
-        let mut builder = GarlicMessageBuilder::new()
+        let builder = GarlicMessageBuilder::new()
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
@@ -332,7 +332,7 @@ impl<R: Runtime> SessionManager<R> {
                         let database_store = DatabaseStoreBuilder::new(
                             Bytes::from(self.destination_id.to_vec()),
                             DatabaseStoreKind::LeaseSet2 {
-                                leaseset: Bytes::from(self.lease_set.clone()),
+                                leaseset: Bytes::from(lease_set.clone()),
                             },
                         )
                         .build();
@@ -374,10 +374,7 @@ impl<R: Runtime> SessionManager<R> {
                             out.freeze().to_vec()
                         }),
                         PendingSessionEvent::CreateSession {
-                            message,
-                            context,
-                            tag_set_id,
-                            tag_index,
+                            message, context, ..
                         } => {
                             tracing::info!(
                                 target: LOG_TARGET,
@@ -570,9 +567,12 @@ impl<R: Runtime> SessionManager<R> {
                             ),
                         );
                     }
-                    Some(pending_session) => {
-                        pending_session.register_inbound_session(session);
-                    }
+                    Some(_) => tracing::trace!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        remote = %destination_id,
+                        "inbound session already exists",
+                    ),
                 }
 
                 // this is the first message of the session so both tag set id and tag index are 0
@@ -586,7 +586,7 @@ impl<R: Runtime> SessionManager<R> {
                 )?,
                 None => match self.pending.get_mut(&destination_id) {
                     Some(session) => match session.advance_inbound(garlic_tag, message.payload)? {
-                        PendingSessionEvent::SendMessage { message } => todo!(),
+                        PendingSessionEvent::SendMessage { .. } => unreachable!(),
                         PendingSessionEvent::CreateSession {
                             message,
                             context,
@@ -763,16 +763,11 @@ impl<R: Runtime> Stream for SessionManager<R> {
 mod tests {
     use super::*;
     use crate::{
-        i2np::{
-            database::store::{DatabaseStoreBuilder, DatabaseStoreKind},
-            garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder},
-        },
-        primitives::{Lease, LeaseSet2, LeaseSet2Header, MessageId, RouterId, TunnelId},
+        primitives::{Lease, LeaseSet2, LeaseSet2Header, RouterId, TunnelId},
         runtime::mock::MockRuntime,
     };
-    use bytes::{BufMut, BytesMut};
     use core::time::Duration;
-    use rand::{thread_rng, RngCore};
+    use rand::thread_rng;
 
     /// Decrypt `message` using `session` and verify the inbound `Data` message
     /// inside the garlic message matches `diff`
@@ -804,12 +799,8 @@ mod tests {
         let mut session =
             SessionManager::<MockRuntime>::new(destination_id.clone(), private_key, leaseset);
 
-        let remote_private_key = StaticPrivateKey::new(thread_rng());
-        let mut key_context = KeyContext::<MockRuntime>::from_private_key(remote_private_key);
-
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -898,7 +889,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1040,7 +1030,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1082,7 +1071,7 @@ mod tests {
         };
 
         // handle `NewSessionReply` and finalize outbound session
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -1096,7 +1085,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(&message_body[4..], &vec![5, 6, 7, 8]);
-        };
+        }
 
         // finalize inbound session by sending an `ExistingSession` message
         let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -1157,7 +1146,6 @@ mod tests {
 
         // create first outbound `SessionManager`
         let outbound1_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound1_public_key = outbound1_private_key.public();
         let (outbound1_leaseset, outbound1_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound1_destination_id = leaseset.header.destination.id();
@@ -1177,7 +1165,6 @@ mod tests {
 
         // create second outbound `SessionManager`
         let outbound2_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound2_public_key = outbound2_private_key.public();
         let (outbound2_leaseset, outbound2_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound2_destination_id = leaseset.header.destination.id();
@@ -1408,7 +1395,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1590,7 +1576,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1632,7 +1617,7 @@ mod tests {
         };
 
         // handle `NewSessionReply` and finalize outbound session
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -1646,7 +1631,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(message_body[4..], [5, 6, 7, 8]);
-        };
+        }
 
         // finalize inbound session by sending an `ExistingSession` message
         let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -1713,7 +1698,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1755,7 +1739,7 @@ mod tests {
         };
 
         // handle `NewSessionReply` and finalize outbound session
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -1769,7 +1753,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(message_body[4..], [5, 6, 7, 8]);
-        };
+        }
 
         // finalize inbound session by sending an `ExistingSession` message
         let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -1820,7 +1804,7 @@ mod tests {
                     let message =
                         outbound_session.encrypt(&inbound_destination_id, vec![4]).unwrap();
 
-                    let mut message = inbound_session
+                    let _message = inbound_session
                         .decrypt(Message {
                             payload: message,
                             ..Default::default()
@@ -1855,7 +1839,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -1905,7 +1888,7 @@ mod tests {
         };
 
         // handle `NewSessionReply` and finalize outbound session
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -1919,7 +1902,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(message_body[4..], [5, 6, 7, 8]);
-        };
+        }
 
         // send random data over the active session
         let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -2032,7 +2015,7 @@ mod tests {
             .inbound_ack_requests
             .is_empty());
 
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -2046,7 +2029,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(message_body[4..], [5, 5, 5, 5]);
-        };
+        }
 
         // verify that the lease set publish is no longer pending since an ack was received
         assert!(outbound_session
@@ -2087,7 +2070,6 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2137,7 +2119,7 @@ mod tests {
         };
 
         // handle `NewSessionReply` and finalize outbound session
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -2151,7 +2133,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(message_body[4..], [5, 6, 7, 8]);
-        };
+        }
 
         // finalize inbound session by sending an `ExistingSession` message
         let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -2243,7 +2225,7 @@ mod tests {
             .is_some());
 
         // handle `ExistingSession` message
-        let mut messages = inbound_session
+        let messages = inbound_session
             .decrypt(Message {
                 payload: message,
                 ..Default::default()
@@ -2273,7 +2255,7 @@ mod tests {
             .inbound_ack_requests
             .is_empty());
 
-        let message = {
+        {
             let mut message = outbound_session
                 .decrypt(Message {
                     payload: message,
@@ -2287,7 +2269,7 @@ mod tests {
                 panic!("message not found");
             };
             assert_eq!(message_body[4..], [5, 5, 5, 5]);
-        };
+        }
 
         // verify that the lease set publish is no longer pending since an ack was received
         assert!(outbound_session
@@ -2326,12 +2308,11 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
-            outbound_destination,
-            outbound_signing_key,
+            _outbound_destination,
+            _outbound_signing_key,
         ) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let destination = leaseset.header.destination.clone();
@@ -2406,12 +2387,11 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
-            outbound_destination,
-            outbound_signing_key,
+            _outbound_destination,
+            _outbound_signing_key,
         ) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let destination = leaseset.header.destination.clone();
@@ -2484,12 +2464,11 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
-            outbound_destination,
-            outbound_signing_key,
+            _outbound_destination,
+            _outbound_signing_key,
         ) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let destination = leaseset.header.destination.clone();
@@ -2569,12 +2548,11 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
-            outbound_destination,
-            outbound_signing_key,
+            _outbound_destination,
+            _outbound_signing_key,
         ) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let destination = leaseset.header.destination.clone();
@@ -2642,12 +2620,11 @@ mod tests {
 
         // create outbound `SessionManager`
         let outbound_private_key = StaticPrivateKey::new(thread_rng());
-        let outbound_public_key = outbound_private_key.public();
         let (
             outbound_leaseset,
             outbound_destination_id,
-            outbound_destination,
-            outbound_signing_key,
+            _outbound_destination,
+            _outbound_signing_key,
         ) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let destination = leaseset.header.destination.clone();

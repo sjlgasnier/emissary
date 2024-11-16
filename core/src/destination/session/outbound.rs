@@ -23,26 +23,18 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::tagset::{TagSet, TagSetEntry},
-    i2np::{
-        garlic::{NextKeyBuilder, NextKeyKind},
-        Message,
-    },
     primitives::DestinationId,
     runtime::Runtime,
     Error,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
-use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
-use rand_core::RngCore;
-use x25519_dalek::PublicKey;
+use bytes::Bytes;
+use curve25519_elligator2::{MapToPointVariant, Randomized};
 use zeroize::Zeroize;
 
 use alloc::vec::Vec;
 use core::{
-    fmt,
     marker::PhantomData,
-    mem,
     ops::{Range, RangeFrom},
 };
 
@@ -64,83 +56,56 @@ const NSR_POLY1305_MAC_OFFSET: Range<usize> = 44..60;
 /// Payload offset in `NewSessionReply` message.
 const NSR_PAYLOAD_OFFSET: RangeFrom<usize> = 60..;
 
-/// Outbound session state.
-pub enum OutboundSessionState {
-    /// `NewSession` message has been sent to remote and the session is waiting for a reply.
-    OutboundSessionPending {
-        /// Destination ID.
-        destination_id: DestinationId,
-
-        /// State (`h` from the specification).
-        state: Bytes,
-
-        /// Static private key.
-        static_private_key: StaticPrivateKey,
-
-        /// Ephemeral private key.
-        ephemeral_private_key: StaticPrivateKey,
-
-        /// Chaining key.
-        chaining_key: Vec<u8>,
-    },
-
-    /// Session has been negotiated.
-    Active {
-        /// Destination ID.
-        destination_id: DestinationId,
-
-        /// [`TagSet`] for outbound messages.
-        send_tag_set: TagSet,
-
-        /// [`TagSet`] for inbound messages.
-        recv_tag_set: TagSet,
-    },
-
-    /// State has been poisoned.
-    Poisoned,
-}
-
-impl fmt::Debug for OutboundSessionState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OutboundSessionPending { destination_id, .. } => f
-                .debug_struct("OutboundSessionState::OutboundSessionPending")
-                .field("id", &destination_id)
-                .finish_non_exhaustive(),
-            Self::Active { destination_id, .. } => f
-                .debug_struct("OutboundSessionState::Active")
-                .field("id", &destination_id)
-                .finish_non_exhaustive(),
-            Self::Poisoned =>
-                f.debug_struct("OutboundSessionState::Poisoned").finish_non_exhaustive(),
-        }
-    }
-}
-
 /// Outbound session.
 pub struct OutboundSession<R: Runtime> {
-    /// Outbound session state.
-    pub state: OutboundSessionState,
+    /// Destination ID.
+    pub destination_id: DestinationId,
+
+    /// State (`h` from the specification).
+    pub state: Bytes,
+
+    /// Static private key.
+    pub static_private_key: StaticPrivateKey,
+
+    /// Ephemeral private key.
+    pub ephemeral_private_key: StaticPrivateKey,
+
+    /// Chaining key.
+    pub chaining_key: Vec<u8>,
 
     /// Marker for `Runtime`.
     pub _runtime: PhantomData<R>,
 }
 
 impl<R: Runtime> OutboundSession<R> {
+    /// Create new [`OutboundSession`].
+    pub fn new(
+        destination_id: DestinationId,
+        state: Bytes,
+        static_private_key: StaticPrivateKey,
+        ephemeral_private_key: StaticPrivateKey,
+        chaining_key: Vec<u8>,
+    ) -> Self {
+        Self {
+            destination_id,
+            state,
+            static_private_key,
+            ephemeral_private_key,
+            chaining_key,
+            _runtime: Default::default(),
+        }
+    }
+
     /// Generate garlic tags for the incoming `NewSessionReply`
     ///
     /// This function can only be called once, after the outbound session has been initialized and
     /// its state is `OutboundSessionPending`, for other states the call will panic.
     pub fn generate_new_session_reply_tags(&self) -> impl Iterator<Item = TagSetEntry> {
-        let OutboundSessionState::OutboundSessionPending { chaining_key, .. } = &self.state else {
-            unreachable!();
-        };
-
-        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&[]).finalize();
         let tag_set_key =
             Hmac::new(&temp_key).update(&b"SessionReplyTags").update(&[0x01]).finalize();
 
-        let mut nsr_tag_set = TagSet::new(&chaining_key, tag_set_key);
+        let mut nsr_tag_set = TagSet::new(&self.chaining_key, tag_set_key);
 
         temp_key.zeroize();
 
@@ -160,26 +125,10 @@ impl<R: Runtime> OutboundSession<R> {
         tag_set_entry: TagSetEntry,
         message: Vec<u8>,
     ) -> crate::Result<(Vec<u8>, TagSet, TagSet)> {
-        let OutboundSessionState::OutboundSessionPending {
-            destination_id,
-            state,
-            static_private_key,
-            ephemeral_private_key,
-            chaining_key,
-        } = &mut self.state
-        else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "invalid state for `NewSessionReply`"
-            );
-            debug_assert!(false);
-            return Err(Error::InvalidState);
-        };
-
         if message.len() < NSR_MINIMUM_LEN {
             tracing::warn!(
                 target: LOG_TARGET,
-                %destination_id,
+                remote = %self.destination_id,
                 payload_len = ?message.len(),
                 "`NewSessionReply` is too short",
             );
@@ -208,8 +157,10 @@ impl<R: Runtime> OutboundSession<R> {
 
         // calculate new state with garlic tag & remote's ephemeral public key
         let state = {
-            let state =
-                Sha256::new().update(&state).update(&tag_set_entry.tag.to_le_bytes()).finalize();
+            let state = Sha256::new()
+                .update(&self.state)
+                .update(&tag_set_entry.tag.to_le_bytes())
+                .finalize();
 
             Sha256::new().update(&state).update::<&[u8]>(public_key.as_ref()).finalize()
         };
@@ -217,12 +168,12 @@ impl<R: Runtime> OutboundSession<R> {
         // calculate keys from shared secrets derived from ee & es
         let (chaining_key, keydata) = {
             // ephemeral-ephemeral
-            let mut shared = ephemeral_private_key.diffie_hellman(&public_key);
-            let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+            let mut shared = self.ephemeral_private_key.diffie_hellman(&public_key);
+            let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
             let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
 
             // static-ephemeral
-            shared = static_private_key.diffie_hellman(&public_key);
+            shared = self.static_private_key.diffie_hellman(&public_key);
             temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
             chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
             let keydata = Hmac::new(&temp_key)

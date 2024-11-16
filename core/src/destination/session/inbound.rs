@@ -23,7 +23,6 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::{
-        session::PendingSessionEvent,
         tagset::{TagSet, TagSetEntry},
         KeyContext, NUM_TAGS_TO_GENERATE,
     },
@@ -31,13 +30,13 @@ use crate::{
     runtime::Runtime,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
-use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
+use bytes::{BufMut, BytesMut};
+use curve25519_elligator2::{MapToPointVariant, Randomized};
 use hashbrown::HashMap;
 use zeroize::Zeroize;
 
 use alloc::{vec, vec::Vec};
-use core::{fmt, iter, marker::PhantomData, mem};
+use core::{fmt, marker::PhantomData, mem};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination::session::inbound";
@@ -149,9 +148,7 @@ impl<R: Runtime> InboundSession<R> {
         }
     }
 
-    /// Create `NewSessionReply`.
-    ///
-    /// TODO: documentation
+    /// Create NSR message.
     pub fn create_new_session_reply(
         &mut self,
         mut payload: Vec<u8>,
@@ -183,8 +180,8 @@ impl<R: Runtime> InboundSession<R> {
 
                 // create garlic tag for the `NewSessionReply` message
                 let (nsr_tag_set, garlic_tag) = {
-                    let mut temp_key = Hmac::new(&ns_chaining_key).update(&[]).finalize();
-                    let mut tagset_key = Hmac::new(&temp_key)
+                    let temp_key = Hmac::new(&ns_chaining_key).update(&[]).finalize();
+                    let tagset_key = Hmac::new(&temp_key)
                         .update(&b"SessionReplyTags")
                         .update(&[0x01])
                         .finalize();
@@ -245,18 +242,17 @@ impl<R: Runtime> InboundSession<R> {
                 let state = Sha256::new().update(&state).update(&mac).finalize();
 
                 // split key into send and receive keys
-                let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-                let mut recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-                let mut send_key =
-                    Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
+                let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+                let recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+                let send_key = Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
 
                 // initialize send and receive tag sets
-                let mut send_tag_set = TagSet::new(&chaining_key, &send_key);
+                let send_tag_set = TagSet::new(&chaining_key, &send_key);
                 let mut recv_tag_set = TagSet::new(chaining_key, recv_key);
 
                 // decode payload of the `NewSessionReply` message
-                let mut temp_key = Hmac::new(&send_key).update(&[]).finalize();
-                let mut payload_key =
+                let temp_key = Hmac::new(&send_key).update(&[]).finalize();
+                let payload_key =
                     Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
 
                 ChaChaPoly::new(&payload_key).encrypt_with_ad_new(&state, &mut payload)?;
@@ -387,18 +383,17 @@ impl<R: Runtime> InboundSession<R> {
                 let state = Sha256::new().update(&state).update(&mac).finalize();
 
                 // split key into send and receive keys
-                let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-                let mut recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-                let mut send_key =
-                    Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
+                let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+                let recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+                let send_key = Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
 
                 // initialize send and receive tag sets
-                let mut send_tag_set = TagSet::new(&chaining_key, &send_key);
+                let send_tag_set = TagSet::new(&chaining_key, &send_key);
                 let mut recv_tag_set = TagSet::new(chaining_key, recv_key);
 
                 // decode payload of the `NewSessionReply` message
-                let mut temp_key = Hmac::new(&send_key).update(&[]).finalize();
-                let mut payload_key =
+                let temp_key = Hmac::new(&send_key).update(&[]).finalize();
+                let payload_key =
                     Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
 
                 ChaChaPoly::new(&payload_key).encrypt_with_ad_new(&state, &mut payload)?;
@@ -428,7 +423,11 @@ impl<R: Runtime> InboundSession<R> {
                     .map(|_| recv_tag_set.next_entry().expect("to succeed"))
                     .collect::<Vec<_>>();
 
-                // TODO: explain
+                // associated the garlic tags of `tags` with this send/receive tag set pair
+                // of this NSR message
+                //
+                // when an ES is received, the correct tag set pair is fetched from the context by
+                // mapping the received garlic tag to an index in `tag_set_mappings`
                 tags.iter().for_each(|entry| {
                     tag_set_mappings.insert(entry.tag, tag_sets.len());
                 });
@@ -467,7 +466,7 @@ impl<R: Runtime> InboundSession<R> {
         &mut self,
         garlic_tag: u64,
         tag_set_entry: TagSetEntry,
-        mut payload: Vec<u8>,
+        payload: Vec<u8>,
     ) -> crate::Result<(Vec<u8>, TagSet, TagSet)> {
         let InboundSessionState::NewSessionReplySent {
             mut tag_sets,
@@ -483,6 +482,11 @@ impl<R: Runtime> InboundSession<R> {
             return Err(Error::InvalidState);
         };
 
+        // try to associate `garlic_tag` with one of the generated send/receive tag set pairs
+        //
+        // this is necessary because multiple NSR messages may have been sent and remote destination
+        // responds to one of them and the response must be associated with the correct tag set pair
+        // so that remote is able to decrypt our messages
         let tag_set_index = tag_set_mappings.get(&garlic_tag).ok_or(Error::Missing)?;
         let (send_tag_set, recv_tag_set) = tag_sets.remove(tag_set_index).ok_or(Error::Missing)?;
 

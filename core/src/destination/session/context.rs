@@ -20,18 +20,11 @@ use crate::{
     crypto::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
-    destination::session::{
-        inbound::InboundSession,
-        outbound::{OutboundSession, OutboundSessionState},
-        tagset::{TagSet, TagSetEntry},
-    },
+    destination::session::{inbound::InboundSession, outbound::OutboundSession},
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind},
-        garlic::{
-            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder,
-            NextKeyBuilder, NextKeyKind,
-        },
-        Message, MessageType, I2NP_MESSAGE_EXPIRATION,
+        garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder},
+        MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{DestinationId, MessageId},
     runtime::Runtime,
@@ -39,16 +32,13 @@ use crate::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use curve25519_elligator2::{MapToPointVariant, MontgomeryPoint, Randomized};
+use curve25519_elligator2::{MapToPointVariant, Randomized};
 use rand_core::RngCore;
-use x25519_dalek::PublicKey;
 use zeroize::Zeroize;
 
 use alloc::vec::Vec;
 use core::{
-    fmt,
     marker::PhantomData,
-    mem,
     ops::{Range, RangeFrom},
 };
 
@@ -93,30 +83,6 @@ pub struct KeyContext<R: Runtime> {
 }
 
 impl<R: Runtime> KeyContext<R> {
-    /// Create new [`KeyContext`].
-    ///
-    /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
-    pub fn new() -> Self {
-        let chaining_key = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
-
-        // generate random static keypair for the session
-        let private_key = StaticPrivateKey::new(&mut R::rng());
-        let public_key = private_key.public();
-
-        let outbound_state = Sha256::new().update(&chaining_key).finalize();
-        let inbound_state =
-            Sha256::new().update(&outbound_state).update(public_key.to_bytes()).finalize();
-
-        Self {
-            chaining_key: Bytes::from(chaining_key),
-            inbound_state: Bytes::from(inbound_state),
-            outbound_state: Bytes::from(outbound_state),
-            private_key,
-            public_key,
-            _runtime: Default::default(),
-        }
-    }
-
     /// Create new [`KeyContext`] from `StaticPrivateKey`.
     ///
     /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
@@ -235,7 +201,7 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, static_key_ciphertext) = {
             let mut shared = private_key.diffie_hellman(remote_public_key);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
             let mut cipher_key = Hmac::new(&temp_key)
                 .update(&chaining_key)
                 .update(&b"")
@@ -268,10 +234,10 @@ impl<R: Runtime> KeyContext<R> {
 
         // encrypt payload section
         let (chaining_key, payload_ciphertext) = {
-            let shared = self.private_key.diffie_hellman(remote_public_key);
+            let mut shared = self.private_key.diffie_hellman(remote_public_key);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let cipher_key = Hmac::new(&temp_key)
+            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let mut cipher_key = Hmac::new(&temp_key)
                 .update(&chaining_key)
                 .update(&b"")
                 .update(&[0x02])
@@ -289,6 +255,10 @@ impl<R: Runtime> KeyContext<R> {
             ChaChaPoly::with_nonce(&cipher_key, 0u64)
                 .encrypt_with_ad_new(&state, &mut payload)
                 .expect("to succeed");
+
+            shared.zeroize();
+            temp_key.zeroize();
+            cipher_key.zeroize();
 
             (chaining_key, payload)
         };
@@ -312,16 +282,13 @@ impl<R: Runtime> KeyContext<R> {
         };
 
         (
-            OutboundSession {
-                state: OutboundSessionState::OutboundSessionPending {
-                    state,
-                    destination_id,
-                    static_private_key: self.private_key.clone(),
-                    ephemeral_private_key: private_key,
-                    chaining_key,
-                },
-                _runtime: Default::default(),
-            },
+            OutboundSession::new(
+                destination_id,
+                state,
+                self.private_key.clone(),
+                private_key,
+                chaining_key,
+            ),
             payload,
         )
     }
@@ -374,8 +341,8 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, mut cipher_key) = {
             let mut shared = self.private_key.diffie_hellman(&public_key);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let mut cipher_key = Hmac::new(&temp_key)
+            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let cipher_key = Hmac::new(&temp_key)
                 .update(&chaining_key)
                 .update(&b"")
                 .update(&[0x02])
@@ -407,7 +374,7 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, payload) = {
             let mut shared = self.private_key.diffie_hellman(&static_key);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
             let mut cipher_key = Hmac::new(&temp_key)
                 .update(&chaining_key)
                 .update(&b"")
@@ -434,10 +401,5 @@ impl<R: Runtime> KeyContext<R> {
             ),
             payload,
         ))
-    }
-
-    /// Get static public key.
-    pub fn public_key(&self) -> StaticPublicKey {
-        self.public_key.clone()
     }
 }

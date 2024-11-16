@@ -404,8 +404,9 @@ impl<R: Runtime> Destination<R> {
     pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
         match self.netdb_handle.store_leaseset(key.clone(), lease_set.clone()) {
             Ok(()) => {
-                self.lease_set = lease_set;
+                self.lease_set = lease_set.clone();
                 self.lease_set_publish_timer.reset::<R>();
+                self.session_manager.set_local_leaseset(lease_set);
             }
             Err(ChannelError::Full) => {
                 tracing::warn!(
