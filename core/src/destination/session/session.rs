@@ -25,7 +25,7 @@ use crate::{
         tagset::{TagSet, TagSetEntry},
         LOG_TARGET, NUM_TAGS_TO_GENERATE,
     },
-    error::Error,
+    error::SessionError,
     i2np::{
         garlic::{
             DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
@@ -268,7 +268,7 @@ impl<R: Runtime> PendingSession<R> {
         &mut self,
         lease_set: Bytes,
         message: Vec<u8>,
-    ) -> crate::Result<PendingSessionEvent<R>> {
+    ) -> Result<PendingSessionEvent<R>, SessionError> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive {
                 mut inbound,
@@ -386,7 +386,7 @@ impl<R: Runtime> PendingSession<R> {
                         "`TagSet` ran out of tags",
                     );
                     debug_assert!(false);
-                    Error::InvalidState
+                    SessionError::InvalidState
                 })?;
 
                 tracing::trace!(
@@ -445,7 +445,7 @@ impl<R: Runtime> PendingSession<R> {
                     "invalid session state",
                 );
                 debug_assert!(false);
-                return Err(Error::InvalidState);
+                Err(SessionError::InvalidState)
             }
         }
     }
@@ -458,7 +458,7 @@ impl<R: Runtime> PendingSession<R> {
         &mut self,
         garlic_tag: u64,
         message: Vec<u8>,
-    ) -> crate::Result<PendingSessionEvent<R>> {
+    ) -> Result<PendingSessionEvent<R>, SessionError> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::InboundActive {
                 mut inbound,
@@ -482,7 +482,7 @@ impl<R: Runtime> PendingSession<R> {
                     );
 
                     debug_assert!(false);
-                    Error::InvalidState
+                    SessionError::InvalidState
                 })?;
                 let tag_set_id = tag_set_entry.tag_set_id;
                 let tag_index = tag_set_entry.tag_index;
@@ -530,7 +530,7 @@ impl<R: Runtime> PendingSession<R> {
                         );
 
                         debug_assert!(false);
-                        Error::InvalidState
+                        SessionError::InvalidState
                     })?;
                 let tag_set_id = tag_set_entry.tag_set_id;
                 let tag_index = tag_set_entry.tag_index;
@@ -600,7 +600,7 @@ impl<R: Runtime> PendingSession<R> {
                         );
 
                         debug_assert!(false);
-                        Error::InvalidState
+                        SessionError::InvalidState
                     })?;
                 let tag_set_id = tag_set_entry.tag_set_id;
                 let tag_index = tag_set_entry.tag_index;
@@ -634,7 +634,7 @@ impl<R: Runtime> PendingSession<R> {
                     "session state has been poisoned",
                 );
                 debug_assert!(false);
-                return Err(Error::InvalidState);
+                Err(SessionError::InvalidState)
             }
         }
     }
@@ -685,19 +685,23 @@ impl<R: Runtime> NsrContext<R> {
     /// Attempt to decrypt `message` using an NSR tag set entry.
     ///
     /// Returns an error if the context is inactive or `garlic_tag` doesn't exist.
-    fn decrypt(&mut self, garlic_tag: u64, message: Vec<u8>) -> crate::Result<(u16, u16, Vec<u8>)> {
+    fn decrypt(
+        &mut self,
+        garlic_tag: u64,
+        message: Vec<u8>,
+    ) -> Result<(u16, u16, Vec<u8>), SessionError> {
         let NsrContext::Active {
             tag_set_entries,
             sessions,
             ..
         } = self
         else {
-            return Err(Error::Missing);
+            return Err(SessionError::UnknownTag);
         };
 
         let (session_idx, tag_set_entry) =
-            tag_set_entries.remove(&garlic_tag).ok_or(Error::Missing)?;
-        let session = sessions.get_mut(&session_idx).ok_or(Error::Missing)?;
+            tag_set_entries.remove(&garlic_tag).ok_or(SessionError::UnknownTag)?;
+        let session = sessions.get_mut(&session_idx).ok_or(SessionError::UnknownTag)?;
 
         tracing::debug!(
             target: LOG_TARGET,
@@ -836,7 +840,7 @@ impl<R: Runtime> Session<R> {
         &mut self,
         garlic_tag: u64,
         message: Vec<u8>,
-    ) -> crate::Result<(u16, u16, Vec<u8>)> {
+    ) -> Result<(u16, u16, Vec<u8>), SessionError> {
         tracing::trace!(
             target: LOG_TARGET,
             local = %self.local,
@@ -870,7 +874,7 @@ impl<R: Runtime> Session<R> {
                 );
 
                 debug_assert!(false);
-                Error::InvalidState
+                SessionError::InvalidState
             });
         };
 
@@ -904,7 +908,7 @@ impl<R: Runtime> Session<R> {
                 "malformed garlic message",
             );
 
-            Error::InvalidData
+            SessionError::Malformed
         })?;
 
         // handle `NextKey` blocks
@@ -954,9 +958,9 @@ impl<R: Runtime> Session<R> {
                     }
                 }
 
-                Ok::<_, Error>(())
+                Ok::<_, SessionError>(())
             }
-            _ => Ok::<_, Error>(()),
+            _ => Ok::<_, SessionError>(()),
         })?;
 
         Ok((tag_set_id, tag_index, payload))
@@ -966,7 +970,7 @@ impl<R: Runtime> Session<R> {
     pub fn encrypt(
         &mut self,
         mut message_builder: GarlicMessageBuilder,
-    ) -> crate::Result<(u16, u16, Vec<u8>)> {
+    ) -> Result<(u16, u16, Vec<u8>), SessionError> {
         let TagSetEntry {
             key,
             tag,
@@ -980,7 +984,7 @@ impl<R: Runtime> Session<R> {
                 "`TagSet` ran out of tags",
             );
             debug_assert!(false);
-            Error::InvalidState
+            SessionError::InvalidState
         })?;
 
         tracing::trace!(
@@ -1069,5 +1073,20 @@ impl<R: Runtime> Session<R> {
                 });
             }
         }
+    }
+
+    /// Destroy session and return all active and expiring garlic tags.
+    pub fn destroy(self) {
+        tracing::info!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            "destroy session",
+        );
+        let mut inner = self.garlic_tags.write();
+
+        self.tag_set_entries.keys().for_each(|tag| {
+            inner.remove(tag);
+        });
     }
 }

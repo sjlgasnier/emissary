@@ -153,6 +153,9 @@ pub struct StreamManager<R: Runtime> {
     /// ID of the `Destination` the stream manager is bound to.
     destination_id: DestinationId,
 
+    /// Destination ID -> stream ID mappings.
+    destination_streams: HashMap<DestinationId, HashSet<u32>>,
+
     /// Stream listener.
     listener: StreamListener<R>,
 
@@ -196,6 +199,7 @@ impl<R: Runtime> StreamManager<R> {
             active: HashMap::new(),
             destination,
             destination_id: destination_id.clone(),
+            destination_streams: HashMap::new(),
             listener: StreamListener::new(destination_id),
             outbound_rx,
             outbound_timers: R::join_set(),
@@ -345,11 +349,17 @@ impl<R: Runtime> StreamManager<R> {
                 );
 
                 // create new pending stream and send syn-ack for it
+                let destination_id = destination.id();
+
                 let (pending, packet) =
-                    PendingStream::new(destination.id(), recv_stream_id, payload.to_vec());
-                let _ = self.outbound_tx.try_send((destination.id(), packet));
+                    PendingStream::new(destination_id.clone(), recv_stream_id, payload.to_vec());
+                let _ = self.outbound_tx.try_send((destination_id.clone(), packet));
 
                 self.pending_inbound.insert(recv_stream_id, pending);
+                self.destination_streams
+                    .entry(destination_id.clone())
+                    .or_default()
+                    .insert(recv_stream_id);
             }
         }
 
@@ -399,6 +409,10 @@ impl<R: Runtime> StreamManager<R> {
         // `StreamManager` sends all inbound messages with `recv_stream_id` to this stream and all
         // outbound messages from the stream to remote peer are send through `event_tx`
         self.active.insert(recv_stream_id, (destination_id.clone(), tx));
+        self.destination_streams
+            .entry(destination_id.clone())
+            .or_default()
+            .insert(recv_stream_id);
 
         // if socket kind is `Connect` this is an outbound stream
         //
@@ -584,9 +598,15 @@ impl<R: Runtime> StreamManager<R> {
                         recv_stream_id = ?packet.recv_stream_id(),
                         "send packet and destroy pending stream",
                     );
-
                     let _ = self.outbound_tx.try_send((stream.destination_id.clone(), pkt));
-                    let _ = self.pending_inbound.remove(&packet.recv_stream_id());
+
+                    if let Some(PendingStream { destination_id, .. }) =
+                        self.pending_inbound.remove(&packet.recv_stream_id())
+                    {
+                        self.destination_streams.get_mut(&destination_id).map(|streams| {
+                            streams.remove(&packet.recv_stream_id());
+                        });
+                    }
                 }
                 PendingStreamResult::Destroy => {
                     tracing::debug!(
@@ -596,7 +616,13 @@ impl<R: Runtime> StreamManager<R> {
                         "destroy pending stream",
                     );
 
-                    let _ = self.pending_inbound.remove(&packet.recv_stream_id());
+                    if let Some(PendingStream { destination_id, .. }) =
+                        self.pending_inbound.remove(&packet.recv_stream_id())
+                    {
+                        self.destination_streams.get_mut(&destination_id).map(|streams| {
+                            streams.remove(&packet.recv_stream_id());
+                        });
+                    }
                 }
             }
 
@@ -664,13 +690,17 @@ impl<R: Runtime> StreamManager<R> {
         self.pending_outbound.insert(
             recv_stream_id,
             PendingOutboundStream {
-                destination_id,
+                destination_id: destination_id.clone(),
                 silent,
                 socket,
                 num_sent: 1usize,
                 packet: packet.clone().to_vec(),
             },
         );
+        self.destination_streams
+            .entry(destination_id)
+            .or_default()
+            .insert(recv_stream_id);
         self.outbound_timers.push(async move {
             R::delay(SYN_RETRY_TIMEOUT).await;
             recv_stream_id
@@ -680,8 +710,29 @@ impl<R: Runtime> StreamManager<R> {
     }
 
     /// Remove pending outbound stream associated with `recv_stream_id`.
-    pub fn remove_stream(&mut self, recv_stream_id: u32) {
+    pub fn remove_pending_stream(&mut self, recv_stream_id: u32) {
         self.pending_outbound.remove(&recv_stream_id);
+    }
+
+    /// Remove all streaming context associated with `destination_id`.
+    pub fn remove_session(&mut self, destination_id: &DestinationId) {
+        let Some(streams) = self.destination_streams.remove(destination_id) else {
+            return;
+        };
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            remote = %destination_id,
+            num_streams = ?streams.len(),
+            "remove session"
+        );
+
+        streams.into_iter().for_each(|stream_id| {
+            self.active.remove(&stream_id);
+            self.pending_inbound.remove(&stream_id);
+            self.pending_outbound.remove(&stream_id);
+        });
     }
 }
 
@@ -717,14 +768,15 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         "stream closed"
                     );
 
+                    // active stream may not exist if it was removed by calling
+                    // `StreamManager::remove_session()`
                     let Some((destination_id, _)) = self.active.remove(&stream_id) else {
-                        tracing::warn!(
+                        tracing::debug!(
                             target: LOG_TARGET,
                             local = %self.destination_id,
                             ?stream_id,
                             "active stream doesn't exist",
                         );
-                        debug_assert!(false);
                         continue;
                     };
 
@@ -1647,6 +1699,86 @@ mod tests {
         response.clear();
         reader.read_line(&mut response).await.unwrap();
         assert_eq!(response, "hello, world\n");
+    }
+
+    #[tokio::test]
+    async fn active_session_destroyed() {
+        crate::util::init_logger();
+
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager1 = {
+            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let destination = Destination::new(signing_key.public());
+            let destination_id = destination.id();
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // register listener for `manager1`
+        let (socket, mut listener_stream) = socket_factory.socket().await;
+        assert!(manager1
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true
+            })
+            .is_ok());
+
+        // create new oubound stream to `manager1`
+        let (socket, mut client_stream) = socket_factory.socket().await;
+        let (packet, stream_id) =
+            manager2.create_stream(manager1.destination_id.clone(), socket, false);
+
+        assert!(manager1.on_packet(0u16, 0u16, packet.to_vec()).is_ok());
+
+        assert!(std::matches!(
+            manager1.next().await,
+            Some(StreamManagerEvent::StreamOpened { .. })
+        ));
+
+        let (destination_id, packet) =
+            match tokio::time::timeout(Duration::from_secs(5), manager1.next())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                StreamManagerEvent::SendPacket {
+                    destination_id,
+                    packet,
+                } => (destination_id, packet),
+                _ => panic!("invalid event"),
+            };
+
+        assert_eq!(destination_id, manager2.destination_id);
+        assert!(manager2.on_packet(0u16, 0u16, packet).is_ok());
+
+        // remove session to manager2 due to error
+        manager1.remove_session(&manager2.destination_id);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = manager1.next() => {}
+                    _ = manager2.next() => {}
+                }
+            }
+        });
+
+        let mut reader = tokio::io::BufReader::new(client_stream);
+        let mut response = String::new();
+        reader.read_line(&mut response).await.unwrap();
+
+        assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
+
+        // verify that the stream has been closed
+        let mut buffer = vec![0u8; 12];
+        assert_eq!(listener_stream.read(&mut buffer).await.unwrap(), 0);
     }
 
     #[tokio::test]

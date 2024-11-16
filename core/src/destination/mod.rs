@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPrivateKey,
     destination::session::{SessionManager, SessionManagerEvent},
-    error::{ChannelError, Error, QueryError},
+    error::{ChannelError, Error, QueryError, SessionError},
     i2np::{
         database::store::{DatabaseStore, DatabaseStorePayload},
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
@@ -35,7 +35,7 @@ use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     mem,
     pin::Pin,
@@ -97,6 +97,12 @@ pub enum DestinationEvent {
     CreateLeaseSet {
         /// Leases.
         leases: Vec<Lease>,
+    },
+
+    /// Session with remote destination has been termianted.
+    SessionTerminated {
+        /// ID of the remote destination.
+        destination_id: DestinationId,
     },
 }
 
@@ -305,9 +311,10 @@ impl<R: Runtime> Destination<R> {
         destination_id: &DestinationId,
         message: Vec<u8>,
     ) -> crate::Result<()> {
-        let message = self.session_manager.encrypt(destination_id, message)?;
-
-        self.send_message_inner(destination_id, message)
+        match self.session_manager.encrypt(destination_id, message) {
+            Ok(message) => self.send_message_inner(destination_id, message),
+            Err(error) => Err(Error::Session(error)),
+        }
     }
 
     /// Handle garlic messages received into one of the [`Destination`]'s inbound tunnels.
@@ -337,7 +344,8 @@ impl<R: Runtime> Destination<R> {
 
         Ok(self
             .session_manager
-            .decrypt(message)?
+            .decrypt(message)
+            .map_err(|error| Error::Session(error))?
             .filter_map(|clove| match clove.message_type {
                 MessageType::DatabaseStore => {
                     tracing::debug!(
@@ -493,6 +501,10 @@ impl<R: Runtime> Stream for Destination<R> {
             match self.session_manager.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(SessionManagerEvent::SessionTerminated { destination_id })) =>
+                    return Poll::Ready(Some(DestinationEvent::SessionTerminated {
+                        destination_id,
+                    })),
                 Poll::Ready(Some(SessionManagerEvent::SendMessage {
                     destination_id,
                     message,

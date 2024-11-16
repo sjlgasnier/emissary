@@ -605,6 +605,7 @@ impl<R: Runtime> Future for SamSession<R> {
                             ?error,
                             "failed to encrypt message",
                         );
+                        debug_assert!(false);
                     };
                 }
                 Poll::Ready(Some(StreamManagerEvent::StreamOpened {
@@ -668,6 +669,15 @@ impl<R: Runtime> Future for SamSession<R> {
                     let destination_id = Bytes::from(self.dest.id().to_vec());
 
                     self.destination.publish_lease_set(destination_id, lease_set);
+                }
+                Poll::Ready(Some(DestinationEvent::SessionTerminated { destination_id })) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        destination_id = %destination_id,
+                        "session termianted with remote",
+                    );
+                    // TODO: implement
                 }
             }
         }

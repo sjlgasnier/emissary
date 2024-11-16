@@ -23,9 +23,9 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::tagset::{TagSet, TagSetEntry},
+    error::SessionError,
     primitives::DestinationId,
     runtime::Runtime,
-    Error,
 };
 
 use bytes::Bytes;
@@ -124,7 +124,7 @@ impl<R: Runtime> OutboundSession<R> {
         &mut self,
         tag_set_entry: TagSetEntry,
         message: Vec<u8>,
-    ) -> crate::Result<(Vec<u8>, TagSet, TagSet)> {
+    ) -> Result<(Vec<u8>, TagSet, TagSet), SessionError> {
         if message.len() < NSR_MINIMUM_LEN {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -134,7 +134,7 @@ impl<R: Runtime> OutboundSession<R> {
             );
             debug_assert!(false);
 
-            return Err(Error::InvalidData);
+            return Err(SessionError::Malformed);
         }
 
         // extract and decode elligator2-encoded public key of the remote destination

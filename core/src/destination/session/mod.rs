@@ -26,7 +26,7 @@ use crate::{
         context::KeyContext,
         session::{PendingSession, PendingSessionEvent, Session},
     },
-    error::Error,
+    error::{Error, SessionError},
     i2np::{
         database::store::{
             DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
@@ -58,6 +58,7 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
+use std::collections::VecDeque;
 
 mod context;
 mod inbound;
@@ -120,11 +121,18 @@ pub enum SessionManagerEvent {
     /// destination and there has been no upper-level protocol activity to use for bundling that
     /// information.
     SendMessage {
-        /// Destination ID.
+        /// ID of the remote destination.
         destination_id: DestinationId,
 
         /// Serialized garlic message.
         message: Vec<u8>,
+    },
+
+    /// Session has been terminated, either forcibly due to a protocol error or because it was
+    /// requested by either the local or remote destination.
+    SessionTerminated {
+        /// ID of the remote destination.
+        destination_id: DestinationId,
     },
 }
 
@@ -158,6 +166,9 @@ pub struct SessionManager<R: Runtime> {
     /// Pending sessions.
     pending: HashMap<DestinationId, PendingSession<R>>,
 
+    /// Pending events.
+    pending_events: VecDeque<SessionManagerEvent>,
+
     /// Known remote destinations and their public keys.
     remote_destinations: HashMap<DestinationId, StaticPublicKey>,
 
@@ -180,6 +191,7 @@ impl<R: Runtime> SessionManager<R> {
             lease_set,
             lease_set_publish_timers: R::join_set(),
             maintenance_timer: Box::pin(R::delay(MAINTENANCE_INTERVAL)),
+            pending_events: VecDeque::new(),
             pending: HashMap::new(),
             remote_destinations: HashMap::new(),
             waker: None,
@@ -236,6 +248,23 @@ impl<R: Runtime> SessionManager<R> {
     /// Remove remote destination from [`SessionKeyManager`].
     pub fn remove_remote_destination(&mut self, destination_id: &DestinationId) {
         self.remote_destinations.remove(destination_id);
+    }
+
+    /// Remove session for `destination_id` from active sessions.
+    fn remove_session(&mut self, destination_id: &DestinationId) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            ?destination_id,
+            "remove active session",
+        );
+
+        if let Some(session) = self.active.remove(destination_id) {
+            session.session.destroy();
+
+            self.pending_events.push_back(SessionManagerEvent::SessionTerminated {
+                destination_id: destination_id.clone(),
+            });
+        }
     }
 
     /// Attempt to publish local lease set to remote destination.
@@ -302,7 +331,7 @@ impl<R: Runtime> SessionManager<R> {
         &mut self,
         destination_id: &DestinationId,
         message: Vec<u8>,
-    ) -> crate::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, SessionError> {
         match self.active.get_mut(destination_id) {
             Some(session) => {
                 // TODO: ugly
@@ -328,13 +357,23 @@ impl<R: Runtime> SessionManager<R> {
                 }
 
                 match &session.lease_set {
-                    None => session.session.encrypt(builder).map(|(_, _, message)| {
-                        let mut out = BytesMut::with_capacity(message.len() + 4);
+                    None => session
+                        .session
+                        .encrypt(builder)
+                        .map(|(_, _, message)| {
+                            let mut out = BytesMut::with_capacity(message.len() + 4);
 
-                        out.put_u32(message.len() as u32);
-                        out.put_slice(&message);
-                        out.freeze().to_vec()
-                    }),
+                            out.put_u32(message.len() as u32);
+                            out.put_slice(&message);
+                            out.freeze().to_vec()
+                        })
+                        .map_err(|error| {
+                            if let SessionError::SessionTerminated = error {
+                                self.remove_session(destination_id);
+                            }
+
+                            error
+                        }),
                     Some(lease_set) => {
                         let database_store = DatabaseStoreBuilder::new(
                             Bytes::from(self.destination_id.to_vec()),
@@ -356,22 +395,31 @@ impl<R: Runtime> SessionManager<R> {
 
                         // save the `(tag_set_id, tag_index)` into `ActiveSession` so that inbound
                         // ack can be associated with an ack request sent in this message
-                        session.session.encrypt(builder).map(|(tag_set_id, tag_index, message)| {
-                            session.insert_outbound_ack_request(tag_set_id, tag_index);
+                        session
+                            .session
+                            .encrypt(builder)
+                            .map(|(tag_set_id, tag_index, message)| {
+                                session.insert_outbound_ack_request(tag_set_id, tag_index);
 
-                            let mut out = BytesMut::with_capacity(message.len() + 4);
+                                let mut out = BytesMut::with_capacity(message.len() + 4);
 
-                            out.put_u32(message.len() as u32);
-                            out.put_slice(&message);
-                            out.freeze().to_vec()
-                        })
+                                out.put_u32(message.len() as u32);
+                                out.put_slice(&message);
+                                out.freeze().to_vec()
+                            })
+                            .map_err(|error| {
+                                if let SessionError::SessionTerminated = error {
+                                    self.remove_session(destination_id);
+                                }
+
+                                error
+                            })
                     }
                 }
             }
             // no active session for `destination_id`, check if pending session exists
             None => match self.pending.get_mut(destination_id) {
                 Some(session) => {
-                    // TODO: this needs to be fixed
                     match session.advance_outbound(self.lease_set.clone(), message)? {
                         PendingSessionEvent::SendMessage { message } => Ok({
                             let mut out = BytesMut::with_capacity(message.len() + 4);
@@ -420,7 +468,7 @@ impl<R: Runtime> SessionManager<R> {
                             );
 
                             debug_assert!(false);
-                            Error::InvalidState
+                            SessionError::InvalidState
                         })?;
 
                     // wrap the garlic message inside a `NewSession` message
@@ -473,7 +521,7 @@ impl<R: Runtime> SessionManager<R> {
     pub fn decrypt(
         &mut self,
         message: Message,
-    ) -> crate::Result<impl Iterator<Item = GarlicClove>> {
+    ) -> Result<impl Iterator<Item = GarlicClove>, SessionError> {
         // extract garlic tag and attempt to find session key for the tag
         //
         // if no key is found, `message` is assumed to be `NewSession`
@@ -515,7 +563,7 @@ impl<R: Runtime> SessionManager<R> {
                         "failed to parse NS payload into a clove set",
                     );
 
-                    Error::InvalidData
+                    SessionError::Malformed
                 })?;
 
                 // TODO: verify `DateTime`
@@ -535,7 +583,7 @@ impl<R: Runtime> SessionManager<R> {
                         "clove set doesn't contain `DatabaseStore`, cannot reply",
                     );
 
-                    return Err(Error::InvalidData);
+                    return Err(SessionError::Malformed);
                 };
 
                 // attempt to parse the `DatabaseStore` as `LeaseSet2`
@@ -550,7 +598,7 @@ impl<R: Runtime> SessionManager<R> {
                         "`DatabaseStore` is not a valid `LeaseSet2` store, cannot reply",
                     );
 
-                    return Err(Error::InvalidData);
+                    return Err(SessionError::Malformed);
                 };
                 let destination_id = leaseset.header.destination.id();
 
@@ -586,11 +634,19 @@ impl<R: Runtime> SessionManager<R> {
                 (0u16, 0u16, destination_id, payload)
             }
             Some(destination_id) => match self.active.get_mut(&destination_id) {
-                Some(session) => session.session.decrypt(garlic_tag, message.payload).map(
-                    |(tag_set_id, tag_index, message)| {
+                Some(session) => session
+                    .session
+                    .decrypt(garlic_tag, message.payload)
+                    .map(|(tag_set_id, tag_index, message)| {
                         (tag_set_id, tag_index, destination_id.clone(), message)
-                    },
-                )?,
+                    })
+                    .map_err(|error| match error {
+                        SessionError::SessionTerminated => {
+                            self.remove_session(&destination_id);
+                            SessionError::SessionTerminated
+                        }
+                        error => error,
+                    })?,
                 None => match self.pending.get_mut(&destination_id) {
                     Some(session) => match session.advance_inbound(garlic_tag, message.payload)? {
                         PendingSessionEvent::SendMessage { .. } => unreachable!(),
@@ -630,7 +686,7 @@ impl<R: Runtime> SessionManager<R> {
                             "destination for garlic tag doesn't exist",
                         );
                         debug_assert!(false);
-                        return Err(Error::InvalidState);
+                        return Err(SessionError::InvalidState);
                     }
                 },
             },
@@ -647,7 +703,7 @@ impl<R: Runtime> SessionManager<R> {
                     "failed to parse NS payload into a clove set",
                 );
 
-                Error::InvalidData
+                SessionError::Malformed
             })?
             .blocks
             .into_iter()
@@ -768,6 +824,10 @@ impl<R: Runtime> Stream for SessionManager<R> {
     type Item = SessionManagerEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Poll::Ready(Some(event));
+        }
+
         loop {
             match self.lease_set_publish_timers.poll_next_unpin(cx) {
                 Poll::Pending => break,
@@ -2245,6 +2305,7 @@ mod tests {
                 assert_eq!(destination_id, inbound_destination_id);
                 message
             }
+            _ => panic!(""),
         };
 
         // verify there is an outbound ack request for `outbound_session`

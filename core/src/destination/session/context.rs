@@ -21,6 +21,7 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::{inbound::InboundSession, outbound::OutboundSession},
+    error::SessionError,
     i2np::{
         database::store::{DatabaseStoreBuilder, DatabaseStoreKind},
         garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder},
@@ -299,7 +300,7 @@ impl<R: Runtime> KeyContext<R> {
     pub fn create_inbound_session(
         &self,
         message: Vec<u8>,
-    ) -> crate::Result<(InboundSession<R>, Vec<u8>)> {
+    ) -> Result<(InboundSession<R>, Vec<u8>), SessionError> {
         if message.len() < NS_MINIMUM_SIZE {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -307,7 +308,7 @@ impl<R: Runtime> KeyContext<R> {
                 "`NewSession` message is too short",
             );
 
-            return Err(Error::InvalidData);
+            return Err(SessionError::Malformed);
         }
 
         // extract and decode elligator2-encoded public key
@@ -327,7 +328,7 @@ impl<R: Runtime> KeyContext<R> {
                         "failed to elligator2-decode public key",
                     );
 
-                    Error::InvalidData
+                    SessionError::Malformed
                 })?
                 .to_montgomery();
 

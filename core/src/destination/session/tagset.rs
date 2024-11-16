@@ -19,7 +19,7 @@
 use crate::{
     crypto::{hmac::Hmac, StaticPrivateKey, StaticPublicKey},
     destination::session::{LOG_TARGET, SESSION_DH_RATCHET_THRESHOLD},
-    error::Error,
+    error::SessionError,
     i2np::garlic::{NextKeyBuilder, NextKeyKind},
     runtime::Runtime,
 };
@@ -36,6 +36,11 @@ use core::{fmt, mem};
 ///
 /// [1]: https://geti2p.net/spec/ecies#new-session-tags-and-comparison-to-signal
 const MAX_TAGS: usize = 65535;
+
+/// Maximum key ID.
+///
+/// The session must be terminated after this.
+const MAX_KEY_ID: u16 = 32767;
 
 /// Key state of [`TagSet`].
 ///
@@ -376,7 +381,9 @@ impl TagSet {
     /// using the [`Tagset`].
     ///
     /// https://geti2p.net/spec/ecies#dh-ratchet-message-flow
-    pub fn try_generate_next_key<R: Runtime>(&mut self) -> crate::Result<Option<NextKeyKind>> {
+    pub fn try_generate_next_key<R: Runtime>(
+        &mut self,
+    ) -> Result<Option<NextKeyKind>, SessionError> {
         // more tags can be generated from the current dh ratchet
         if self.tag_index as usize <= SESSION_DH_RATCHET_THRESHOLD || self.key_state.is_pending() {
             return Ok(None);
@@ -418,6 +425,15 @@ impl TagSet {
                         let private_key = StaticPrivateKey::new(R::rng());
                         let public_key = private_key.public();
 
+                        if send_key_id + 1 > MAX_KEY_ID {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?send_key_id,
+                                "send key id is too large",
+                            );
+                            return Err(SessionError::SessionTerminated);
+                        }
+
                         self.key_state = KeyState::AwaitingReverseKeyConfirmation {
                             send_key_id: send_key_id + 1,
                             recv_key_id,
@@ -432,6 +448,15 @@ impl TagSet {
                         ))
                     }
                     false => {
+                        if recv_key_id + 1 > MAX_KEY_ID {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?send_key_id,
+                                "receive key id is too large",
+                            );
+                            return Err(SessionError::SessionTerminated);
+                        }
+
                         self.key_state = KeyState::AwaitingReverseKey {
                             send_key_id,
                             recv_key_id: recv_key_id + 1,
@@ -453,7 +478,7 @@ impl TagSet {
                     "invalid state for tag set when generating next key",
                 );
                 debug_assert!(false);
-                Err(Error::InvalidState)
+                Err(SessionError::InvalidState)
             }
         }
     }
@@ -462,7 +487,7 @@ impl TagSet {
     pub fn handle_next_key<R: Runtime>(
         &mut self,
         kind: &NextKeyKind,
-    ) -> crate::Result<Option<NextKeyKind>> {
+    ) -> Result<Option<NextKeyKind>, SessionError> {
         match (mem::replace(&mut self.key_state, KeyState::Poisoned), kind) {
             (
                 KeyState::Uninitialized,
@@ -548,6 +573,17 @@ impl TagSet {
                     reverse_key_requested: false,
                 },
             ) => {
+                if key_id > &MAX_KEY_ID {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        max_key_id = ?MAX_KEY_ID,
+                        ?key_id,
+                        "key id is too large",
+                    );
+                    debug_assert!(false);
+                    return Err(SessionError::SessionTerminated);
+                }
+
                 self.reinitialize_tag_set(
                     private_key,
                     remote_public_key.clone(),
@@ -575,6 +611,17 @@ impl TagSet {
                     reverse_key_requested: true,
                 },
             ) => {
+                if key_id > &MAX_KEY_ID {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        max_key_id = ?MAX_KEY_ID,
+                        ?key_id,
+                        "key id is too large",
+                    );
+                    debug_assert!(false);
+                    return Err(SessionError::SessionTerminated);
+                }
+
                 let private_key = StaticPrivateKey::new(R::rng());
                 let public_key = private_key.public();
 
@@ -597,7 +644,7 @@ impl TagSet {
                     "invalid key state/next key kind combination",
                 );
                 debug_assert!(false);
-                Err(Error::InvalidState)
+                Err(SessionError::InvalidState)
             }
         }
     }

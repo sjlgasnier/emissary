@@ -413,6 +413,16 @@ impl<R: Runtime> Future for I2cpSession<R> {
                     // wake the task so that the socket is polled and the message is sent to client
                     cx.waker().wake_by_ref();
                 }
+                Poll::Ready(Some(DestinationEvent::SessionTerminated { destination_id })) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        destination_id = %destination_id,
+                        "session termianted with remote",
+                    );
+
+                    // TODO: implement
+                }
             }
         }
 

@@ -26,7 +26,7 @@ use crate::{
         tagset::{TagSet, TagSetEntry},
         KeyContext, NUM_TAGS_TO_GENERATE,
     },
-    error::Error,
+    error::SessionError,
     runtime::Runtime,
 };
 
@@ -152,7 +152,7 @@ impl<R: Runtime> InboundSession<R> {
     pub fn create_new_session_reply(
         &mut self,
         mut payload: Vec<u8>,
-    ) -> crate::Result<(Vec<u8>, Vec<TagSetEntry>)> {
+    ) -> Result<(Vec<u8>, Vec<TagSetEntry>), SessionError> {
         match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
             InboundSessionState::AwaitingNewSessionReplyTransmit {
                 chaining_key: ns_chaining_key,
@@ -452,7 +452,7 @@ impl<R: Runtime> InboundSession<R> {
                     "invalid state for NSR",
                 );
                 debug_assert!(false);
-                Err(Error::InvalidState)
+                Err(SessionError::InvalidState)
             }
         }
     }
@@ -467,7 +467,7 @@ impl<R: Runtime> InboundSession<R> {
         garlic_tag: u64,
         tag_set_entry: TagSetEntry,
         payload: Vec<u8>,
-    ) -> crate::Result<(Vec<u8>, TagSet, TagSet)> {
+    ) -> Result<(Vec<u8>, TagSet, TagSet), SessionError> {
         let InboundSessionState::NewSessionReplySent {
             mut tag_sets,
             tag_set_mappings,
@@ -479,7 +479,7 @@ impl<R: Runtime> InboundSession<R> {
                 "invalid state for ES",
             );
             debug_assert!(false);
-            return Err(Error::InvalidState);
+            return Err(SessionError::InvalidState);
         };
 
         // try to associate `garlic_tag` with one of the generated send/receive tag set pairs
@@ -487,8 +487,9 @@ impl<R: Runtime> InboundSession<R> {
         // this is necessary because multiple NSR messages may have been sent and remote destination
         // responds to one of them and the response must be associated with the correct tag set pair
         // so that remote is able to decrypt our messages
-        let tag_set_index = tag_set_mappings.get(&garlic_tag).ok_or(Error::Missing)?;
-        let (send_tag_set, recv_tag_set) = tag_sets.remove(tag_set_index).ok_or(Error::Missing)?;
+        let tag_set_index = tag_set_mappings.get(&garlic_tag).ok_or(SessionError::UnknownTag)?;
+        let (send_tag_set, recv_tag_set) =
+            tag_sets.remove(tag_set_index).ok_or(SessionError::UnknownTag)?;
 
         let mut payload = payload[12..].to_vec();
 
