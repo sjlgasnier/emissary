@@ -42,7 +42,7 @@ use crate::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{Stream, StreamExt};
+use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
@@ -77,6 +77,9 @@ const SESSION_DH_RATCHET_THRESHOLD: usize = 150;
 /// How long is upper-layer protocol data awaited before a [`DatabaseStore`] message is sent to
 /// remote to update remote destination's `NetDb` with our new lease set.
 const LEASE_SET_PUBLISH_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Session manager maintenance interval.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2 * 60);
 
 /// Active session with remote destination.
 struct ActiveSession<R: Runtime> {
@@ -149,6 +152,9 @@ pub struct SessionManager<R: Runtime> {
     /// TODO: more documentain
     lease_set_publish_timers: R::JoinSet<DestinationId>,
 
+    /// Maintenance timer.
+    maintenance_timer: BoxFuture<'static, ()>,
+
     /// Pending sessions.
     pending: HashMap<DestinationId, PendingSession<R>>,
 
@@ -167,14 +173,15 @@ impl<R: Runtime> SessionManager<R> {
         lease_set: Bytes,
     ) -> Self {
         Self {
-            lease_set,
             active: HashMap::new(),
             destination_id,
             garlic_tags: Default::default(),
             key_context: KeyContext::from_private_key(private_key),
-            remote_destinations: HashMap::new(),
+            lease_set,
             lease_set_publish_timers: R::join_set(),
+            maintenance_timer: Box::pin(R::delay(MAINTENANCE_INTERVAL)),
             pending: HashMap::new(),
+            remote_destinations: HashMap::new(),
             waker: None,
         }
     }
@@ -731,6 +738,30 @@ impl<R: Runtime> SessionManager<R> {
 
         Ok(cloves.into_iter())
     }
+
+    /// Perform periodic maintenance of active and pending sessions.
+    ///
+    /// Removes all pending sessions that have expired and calls `Session::maintain()` for each
+    /// active session which removes expired tags of the active session.
+    fn maintain(&mut self) {
+        let remove = self
+            .pending
+            .iter()
+            .filter_map(|(key, session)| session.is_expired().then_some(key.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|remote| {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    %remote,
+                    "purging expired pending session",
+                );
+                self.pending.remove(&remote);
+            });
+
+        self.active.values_mut().for_each(|session| session.session.maintain());
+    }
 }
 
 impl<R: Runtime> Stream for SessionManager<R> {
@@ -752,6 +783,14 @@ impl<R: Runtime> Stream for SessionManager<R> {
                     }
                 }
             }
+        }
+
+        if self.maintenance_timer.poll_unpin(cx).is_ready() {
+            self.maintain();
+
+            // create new timer and poll it so it'll get registered into the executor
+            self.maintenance_timer = Box::pin(R::delay(MAINTENANCE_INTERVAL));
+            let _ = self.maintenance_timer.poll_unpin(cx);
         }
 
         self.waker = Some(cx.waker().clone());

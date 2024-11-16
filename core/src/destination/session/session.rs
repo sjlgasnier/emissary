@@ -34,11 +34,11 @@ use crate::{
         MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{DestinationId, MessageId},
-    runtime::Runtime,
+    runtime::{Instant, Runtime},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
 #[cfg(feature = "std")]
@@ -46,13 +46,22 @@ use parking_lot::RwLock;
 #[cfg(feature = "no_std")]
 use spin::rwlock::RwLock;
 
-use alloc::{sync::Arc, vec, vec::Vec};
-use core::{fmt, marker::PhantomData, mem};
+use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
+use core::{fmt, marker::PhantomData, mem, time::Duration};
 
 /// Garlic message overheard.
 ///
 /// 8 bytes for garlic tag and 16 bytes Poly1305 MAC.
 const GARLIC_MESSAGE_OVERHEAD: usize = 24usize;
+
+/// Maximum age for pending session.
+const PENDING_SESSION_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+
+/// Maximum age for [`NsrContext`].
+const NSR_CONTEXT_MAX_AGE: Duration = Duration::from_secs(3 * 60);
+
+/// Maximum age for a tag that belonged to a previous tag set.
+const PREV_TAG_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 
 /// Event emitted by [`PendingSession`].
 pub enum PendingSessionEvent<R: Runtime> {
@@ -172,6 +181,9 @@ impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
 
 /// Pending ECIES-X25519-AEAD-Ratchet session.
 pub struct PendingSession<R: Runtime> {
+    /// When was the pending session created.
+    created: R::Instant,
+
     /// Key context.
     key_context: KeyContext<R>,
 
@@ -195,6 +207,7 @@ impl<R: Runtime> PendingSession<R> {
         key_context: KeyContext<R>,
     ) -> Self {
         Self {
+            created: R::now(),
             key_context,
             local,
             remote,
@@ -229,6 +242,7 @@ impl<R: Runtime> PendingSession<R> {
         };
 
         Self {
+            created: R::now(),
             key_context,
             local,
             remote,
@@ -240,6 +254,11 @@ impl<R: Runtime> PendingSession<R> {
                 tag_set_entries: HashMap::new(),
             },
         }
+    }
+
+    /// Is the pending session expired.
+    pub fn is_expired(&self) -> bool {
+        self.created.elapsed() > PENDING_SESSION_MAX_AGE
     }
 
     /// Advance the state of [`PendingSession`] with an outbound `message`.
@@ -411,10 +430,7 @@ impl<R: Runtime> PendingSession<R> {
                         remote: self.remote.clone(),
                         send_tag_set,
                         tag_set_entries,
-                        nsr_context: NsrContext::Active {
-                            tag_set_entries: nsr_tag_set_entries,
-                            sessions: outbound,
-                        },
+                        nsr_context: NsrContext::new(nsr_tag_set_entries, outbound),
                     },
                     tag_set_id,
                     tag_index,
@@ -642,6 +658,9 @@ enum NsrContext<R: Runtime> {
 
     /// NSR context is active.
     Active {
+        /// When was the context created.
+        created: R::Instant,
+
         /// Garlic tag -> (session, session key) mapping for NSR message(s).
         tag_set_entries: HashMap<u64, (usize, TagSetEntry)>,
 
@@ -651,6 +670,18 @@ enum NsrContext<R: Runtime> {
 }
 
 impl<R: Runtime> NsrContext<R> {
+    /// Create new [`NsrContext`].
+    pub fn new(
+        tag_set_entries: HashMap<u64, (usize, TagSetEntry)>,
+        sessions: HashMap<usize, OutboundSession<R>>,
+    ) -> Self {
+        Self::Active {
+            created: R::now(),
+            tag_set_entries,
+            sessions,
+        }
+    }
+
     /// Attempt to decrypt `message` using an NSR tag set entry.
     ///
     /// Returns an error if the context is inactive or `garlic_tag` doesn't exist.
@@ -658,6 +689,7 @@ impl<R: Runtime> NsrContext<R> {
         let NsrContext::Active {
             tag_set_entries,
             sessions,
+            ..
         } = self
         else {
             return Err(Error::Missing);
@@ -679,6 +711,28 @@ impl<R: Runtime> NsrContext<R> {
         session
             .handle_new_session_reply(tag_set_entry, message)
             .map(|(message, _, _)| (tag_set_id, tag_index, message))
+    }
+
+    /// Attempt to expire
+    fn try_expire(&mut self) -> Option<impl Iterator<Item = u64>> {
+        match self {
+            Self::Inactive => None,
+            Self::Active {
+                created,
+                tag_set_entries,
+                sessions,
+            } if created.elapsed() < NSR_CONTEXT_MAX_AGE => None,
+            Self::Active {
+                created,
+                tag_set_entries,
+                sessions,
+            } => {
+                let garlic_tags = tag_set_entries.keys().copied().collect::<Vec<_>>();
+                *self = Self::Inactive;
+
+                Some(garlic_tags.into_iter())
+            }
+        }
     }
 }
 
@@ -713,6 +767,9 @@ pub struct SessionContext<R: Runtime> {
 
 /// Active ECIES-X25519-AEAD-Ratchet session.
 pub struct Session<R: Runtime> {
+    /// Tags that marked to expire.
+    expiring: VecDeque<(R::Instant, HashSet<u64>)>,
+
     /// Garlic tags, global mapping for all active and pending sessions.
     garlic_tags: Arc<RwLock<HashMap<u64, DestinationId>>>,
 
@@ -759,6 +816,7 @@ impl<R: Runtime> Session<R> {
         } = context;
 
         Self {
+            expiring: VecDeque::new(),
             garlic_tags,
             local,
             nsr_context,
@@ -864,6 +922,12 @@ impl<R: Runtime> Session<R> {
 
                 match kind {
                     NextKeyKind::ForwardKey { .. } => {
+                        // collect all tags of the current tag set into a separate storage from
+                        // which they're easy to expire once the tag set they belonged to us expires
+                        let expiring_tags =
+                            self.tag_set_entries.keys().copied().collect::<HashSet<_>>();
+                        self.expiring.push_back((R::now(), expiring_tags));
+
                         // handle `NextKey` block which does a DH ratchet and creates a new
                         // `TagSet`, replacing the old one
                         self.pending_next_key = self.recv_tag_set.handle_next_key::<R>(kind)?;
@@ -971,5 +1035,39 @@ impl<R: Runtime> Session<R> {
         out.put_slice(&message);
 
         Ok((tag_set_id, tag_index, out.freeze().to_vec()))
+    }
+
+    /// Do periodic maintenance for the session.
+    pub fn maintain(&mut self) {
+        if let Some(tags) = self.nsr_context.try_expire() {
+            let mut inner = self.garlic_tags.write();
+
+            tags.for_each(|tag| {
+                inner.remove(&tag);
+            });
+        }
+
+        loop {
+            let Some((created, _)) = self.expiring.front() else {
+                break;
+            };
+
+            if created.elapsed() < PREV_TAG_MAX_AGE {
+                break;
+            }
+
+            // entry must exist since it was just checked to exist
+            let (_, tags) = self.expiring.pop_front().expect("to exist");
+
+            // remove all expired tags from both the global and local storage
+            {
+                let mut inner = self.garlic_tags.write();
+
+                tags.into_iter().for_each(|tag| {
+                    inner.remove(&tag);
+                    self.tag_set_entries.remove(&tag);
+                });
+            }
+        }
     }
 }
