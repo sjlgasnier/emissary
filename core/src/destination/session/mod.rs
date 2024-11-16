@@ -364,24 +364,7 @@ impl<R: Runtime> SessionManager<R> {
             // no active session for `destination_id`, check if pending session exists
             None => match self.pending.get_mut(destination_id) {
                 Some(session) => {
-                    let message = GarlicMessageBuilder::new()
-                        .with_garlic_clove(
-                            MessageType::Data,
-                            MessageId::from(R::rng().next_u32()),
-                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                            GarlicDeliveryInstructions::Local,
-                            &{
-                                let mut out = BytesMut::with_capacity(message.len() + 4);
-
-                                out.put_u32(message.len() as u32);
-                                out.put_slice(&message);
-
-                                out.freeze().to_vec()
-                            },
-                        )
-                        .build();
-
-                    match session.advance_outbound(message)? {
+                    match session.advance_outbound(self.lease_set.clone(), message)? {
                         PendingSessionEvent::SendMessage { message } => Ok({
                             let mut out = BytesMut::with_capacity(message.len() + 4);
 
@@ -410,54 +393,13 @@ impl<R: Runtime> SessionManager<R> {
                             Error::InvalidState
                         })?;
 
-                    // create garlic message for establishing a new session
-                    //
-                    // the message consists of three parts
-                    //  * date time block
-                    //  * bundled leaseset
-                    //  * garlic clove for upper-level protocol data
-                    //
-                    // this garlic message is wrapped inside a `NewSession` message
-                    // and sent to remote
-                    let database_store = DatabaseStoreBuilder::new(
-                        Bytes::from(self.destination_id.to_vec()),
-                        DatabaseStoreKind::LeaseSet2 {
-                            leaseset: Bytes::from(self.lease_set.clone()),
-                        },
-                    )
-                    .build();
-
-                    let mut payload = GarlicMessageBuilder::new()
-                        .with_date_time(R::time_since_epoch().as_secs() as u32)
-                        .with_garlic_clove(
-                            MessageType::DatabaseStore,
-                            MessageId::from(R::rng().next_u32()),
-                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                            GarlicDeliveryInstructions::Local,
-                            &database_store,
-                        )
-                        .with_garlic_clove(
-                            MessageType::Data,
-                            MessageId::from(R::rng().next_u32()),
-                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                            GarlicDeliveryInstructions::Local,
-                            &{
-                                let mut out = BytesMut::with_capacity(message.len() + 4);
-
-                                out.put_u32(message.len() as u32);
-                                out.put_slice(&message);
-
-                                out.freeze().to_vec()
-                            },
-                        )
-                        .build();
-
                     // wrap the garlic message inside a `NewSession` message
                     // and create a pending outbound session
                     let (session, payload) = self.key_context.create_outbound_session(
                         destination_id.clone(),
                         &public_key,
-                        &payload,
+                        self.lease_set.clone(),
+                        &message,
                     );
 
                     self.pending.insert(
@@ -465,8 +407,10 @@ impl<R: Runtime> SessionManager<R> {
                         PendingSession::new_outbound(
                             self.destination_id.clone(),
                             destination_id.clone(),
+                            public_key.clone(),
                             session,
                             Arc::clone(&self.garlic_tags),
+                            self.key_context.clone(),
                         ),
                     );
 
@@ -520,7 +464,7 @@ impl<R: Runtime> SessionManager<R> {
                     target: LOG_TARGET,
                     id = %self.destination_id,
                     ?garlic_tag,
-                    "session key not found, asssume new session",
+                    "session key not found, assume new session",
                 );
 
                 // parse `NewSession` and attempt to create an inbound session
@@ -580,22 +524,30 @@ impl<R: Runtime> SessionManager<R> {
                 };
                 let destination_id = leaseset.header.destination.id();
 
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    remote = %destination_id,
-                    "inbound session created",
-                );
+                match self.pending.get_mut(&destination_id) {
+                    None => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            remote = %destination_id,
+                            "inbound session created",
+                        );
 
-                self.pending.insert(
-                    destination_id.clone(),
-                    PendingSession::new_inbound(
-                        self.destination_id.clone(),
-                        destination_id.clone(),
-                        session,
-                        Arc::clone(&self.garlic_tags),
-                    ),
-                );
+                        self.pending.insert(
+                            destination_id.clone(),
+                            PendingSession::new_inbound(
+                                self.destination_id.clone(),
+                                destination_id.clone(),
+                                session,
+                                Arc::clone(&self.garlic_tags),
+                                self.key_context.clone(),
+                            ),
+                        );
+                    }
+                    Some(pending_session) => {
+                        pending_session.register_inbound_session(session);
+                    }
+                }
 
                 // this is the first message of the session so both tag set id and tag index are 0
                 (0u16, 0u16, destination_id, payload)
@@ -795,7 +747,7 @@ mod tests {
     fn new_inbound_session() {
         let private_key = StaticPrivateKey::new(thread_rng());
         let public_key = private_key.public();
-        let destination_id = DestinationId::from(vec![1, 2, 3, 4]);
+        let destination_id = DestinationId::random();
         let (leaseset, signing_key) = LeaseSet2::random();
         let leaseset = Bytes::from(leaseset.serialize(&signing_key));
         let mut session =
@@ -887,7 +839,7 @@ mod tests {
     fn messages_out_of_order() {
         let private_key = StaticPrivateKey::new(thread_rng());
         let public_key = private_key.public();
-        let destination_id = DestinationId::from(vec![1, 2, 3, 4]);
+        let destination_id = DestinationId::random();
         let (leaseset, signing_key) = LeaseSet2::random();
         let leaseset = Bytes::from(leaseset.serialize(&signing_key));
         let mut session =
@@ -2300,4 +2252,147 @@ mod tests {
             .lease_set
             .is_none());
     }
+
+    #[test]
+    fn multiple_new_session_messages() {
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (
+            outbound_leaseset,
+            outbound_destination_id,
+            outbound_destination,
+            outbound_signing_key,
+        ) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let destination = leaseset.header.destination.clone();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+                destination,
+                signing_key,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key.clone(),
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // initialize outbound session and create three `NewSession` messages
+        let messages = [
+            outbound_session.encrypt(&inbound_destination_id, vec![1, 1, 1, 1]).unwrap(),
+            outbound_session.encrypt(&inbound_destination_id, vec![2, 2, 2, 2]).unwrap(),
+            outbound_session.encrypt(&inbound_destination_id, vec![3, 3, 3, 3]).unwrap(),
+        ];
+
+        // process inbound messages
+        for (i, payload) in messages.into_iter().enumerate() {
+            let mut message = inbound_session
+                .decrypt(Message {
+                    payload,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], vec![(i + 1) as u8; 4]);
+        }
+
+        // send `NewSessionReply` to remote
+        let message = inbound_session.encrypt(&outbound_destination_id, vec![4, 4, 4, 4]).unwrap();
+
+        // handle `NewSessionReply` for the second `NewSession` message
+        let message = {
+            let mut message = outbound_session
+                .decrypt(Message {
+                    payload: message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], [4, 4, 4, 4]);
+        };
+
+        // exchange few messages between the session to confirm they both work
+        for i in 5..=10 {
+            // send message from outbound to inbound
+            let mut message = inbound_session
+                .decrypt(Message {
+                    payload: outbound_session
+                        .encrypt(&inbound_destination_id, vec![i as u8; 4])
+                        .unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], vec![i as u8; 4]);
+
+            // send message from inbound to outbound
+            let mut message = outbound_session
+                .decrypt(Message {
+                    payload: inbound_session
+                        .encrypt(&outbound_destination_id, vec![i + 1 as u8; 4])
+                        .unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], vec![(i + 1) as u8; 4]);
+        }
+    }
+
+    #[test]
+    fn multiple_new_session_reply_messages() {
+        // TODO: figure out how java-i2p handles multiple newsessionreplies
+    }
+
+    #[test]
+    fn multiple_new_session_and_new_session_reply_messages() {}
+
+    #[test]
+    fn new_session_retried() {}
+
+    #[test]
+    fn new_session_reply_retried() {}
 }

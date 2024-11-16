@@ -26,10 +26,14 @@ use crate::{
         tagset::{TagSet, TagSetEntry},
     },
     i2np::{
-        garlic::{NextKeyBuilder, NextKeyKind},
-        Message,
+        database::store::{DatabaseStoreBuilder, DatabaseStoreKind},
+        garlic::{
+            DeliveryInstructions as GarlicDeliveryInstructions, GarlicMessageBuilder,
+            NextKeyBuilder, NextKeyKind,
+        },
+        Message, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
-    primitives::DestinationId,
+    primitives::{DestinationId, MessageId},
     runtime::Runtime,
     Error,
 };
@@ -158,8 +162,51 @@ impl<R: Runtime> KeyContext<R> {
         &mut self,
         destination_id: DestinationId,
         remote_public_key: &StaticPublicKey,
+        lease_set: Bytes,
         payload: &[u8],
     ) -> (OutboundSession<R>, Vec<u8>) {
+        // create garlic message for establishing a new session
+        //
+        // the message consists of three parts
+        //  * date time block
+        //  * bundled leaseset
+        //  * garlic clove for upper-level protocol data
+        //
+        // this garlic message is wrapped inside a `NewSession` message
+        // and sent to remote
+        let database_store = DatabaseStoreBuilder::new(
+            Bytes::from(destination_id.to_vec()),
+            DatabaseStoreKind::LeaseSet2 {
+                leaseset: Bytes::from(lease_set.clone()),
+            },
+        )
+        .build();
+
+        let payload = GarlicMessageBuilder::new()
+            .with_date_time(R::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::DatabaseStore,
+                MessageId::from(R::rng().next_u32()),
+                R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                GarlicDeliveryInstructions::Local,
+                &database_store,
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                MessageId::from(R::rng().next_u32()),
+                R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                GarlicDeliveryInstructions::Local,
+                &{
+                    let mut out = BytesMut::with_capacity(payload.len() + 4);
+
+                    out.put_u32(payload.len() as u32);
+                    out.put_slice(&payload);
+
+                    out.freeze().to_vec()
+                },
+            )
+            .build();
+
         // generate new elligator2-encodable ephemeral keypair
         let (private_key, public_key, representative) = {
             let (private_key, tweak) = Self::generate_ephemeral_keypair();
