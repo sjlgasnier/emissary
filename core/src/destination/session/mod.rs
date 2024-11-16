@@ -364,6 +364,7 @@ impl<R: Runtime> SessionManager<R> {
             // no active session for `destination_id`, check if pending session exists
             None => match self.pending.get_mut(destination_id) {
                 Some(session) => {
+                    // TODO: this needs to be fixed
                     match session.advance_outbound(self.lease_set.clone(), message)? {
                         PendingSessionEvent::SendMessage { message } => Ok({
                             let mut out = BytesMut::with_capacity(message.len() + 4);
@@ -372,7 +373,32 @@ impl<R: Runtime> SessionManager<R> {
                             out.put_slice(&message);
                             out.freeze().to_vec()
                         }),
-                        PendingSessionEvent::CreateSession { .. } => todo!(),
+                        PendingSessionEvent::CreateSession {
+                            message,
+                            context,
+                            tag_set_id,
+                            tag_index,
+                        } => {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                remote = %destination_id,
+                                "new session started",
+                            );
+
+                            self.pending.remove(destination_id);
+                            self.active.insert(
+                                destination_id.clone(),
+                                ActiveSession::new(Session::new(context)),
+                            );
+
+                            let mut out = BytesMut::with_capacity(message.len() + 4);
+
+                            out.put_u32(message.len() as u32);
+                            out.put_slice(&message);
+                            Ok(out.freeze().to_vec())
+                        }
+                        PendingSessionEvent::ReturnMessage { .. } => unreachable!(),
                     }
                 }
                 // no pending nor active session for `destination_id`, create new outbound session
@@ -482,7 +508,7 @@ impl<R: Runtime> SessionManager<R> {
                     tracing::warn!(
                         target: LOG_TARGET,
                         id = %self.destination_id,
-                        "failed to parse `NewSession` payload into a clove set",
+                        "failed to parse NS payload into a clove set",
                     );
 
                     Error::InvalidData
@@ -582,6 +608,11 @@ impl<R: Runtime> SessionManager<R> {
 
                             (tag_set_id, tag_index, destination_id, message)
                         }
+                        PendingSessionEvent::ReturnMessage {
+                            tag_set_id,
+                            tag_index,
+                            message,
+                        } => (tag_set_id, tag_index, destination_id, message),
                     },
                     None => {
                         tracing::warn!(
@@ -606,7 +637,7 @@ impl<R: Runtime> SessionManager<R> {
                 tracing::warn!(
                     target: LOG_TARGET,
                     id = %self.destination_id,
-                    "failed to parse `NewSession` payload into a clove set",
+                    "failed to parse NS payload into a clove set",
                 );
 
                 Error::InvalidData
@@ -742,6 +773,26 @@ mod tests {
     use bytes::{BufMut, BytesMut};
     use core::time::Duration;
     use rand::{thread_rng, RngCore};
+
+    /// Decrypt `message` using `session` and verify the inbound `Data` message
+    /// inside the garlic message matches `diff`
+    macro_rules! decrypt_and_verify {
+        ($session:expr, $message:expr, $diff:expr) => {
+            let mut message = $session
+                .decrypt(Message {
+                    payload: $message,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let Some(GarlicClove { message_body, .. }) =
+                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
+            else {
+                panic!("message not found");
+            };
+            assert_eq!(message_body[4..], $diff);
+        };
+    }
 
     #[test]
     fn new_inbound_session() {
@@ -1268,8 +1319,8 @@ mod tests {
         assert_eq!(inbound_session.pending.len(), 1);
         assert_eq!(outbound1_session.active.len(), 1);
         assert_eq!(outbound1_session.pending.len(), 0);
-        assert_eq!(outbound2_session.active.len(), 1);
-        assert_eq!(outbound2_session.pending.len(), 0);
+        assert_eq!(outbound2_session.active.len(), 0);
+        assert_eq!(outbound2_session.pending.len(), 1);
 
         // finalize inbound session by sending an `ExistingSession` message
         let message = outbound2_session.encrypt(&inbound_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -1463,8 +1514,8 @@ mod tests {
         assert_eq!(inbound1_session.pending.len(), 1);
         assert_eq!(inbound2_session.active.len(), 0);
         assert_eq!(inbound2_session.pending.len(), 1);
-        assert_eq!(outbound_session.active.len(), 2);
-        assert_eq!(outbound_session.pending.len(), 0);
+        assert_eq!(outbound_session.active.len(), 0);
+        assert_eq!(outbound_session.pending.len(), 2);
 
         // finalize first inbound session by sending an `ExistingSession` message
         let es1 = outbound_session.encrypt(&inbound1_destination_id, vec![1, 3, 3, 7]).unwrap();
@@ -1488,8 +1539,8 @@ mod tests {
         assert_eq!(inbound1_session.pending.len(), 0);
         assert_eq!(inbound2_session.active.len(), 0);
         assert_eq!(inbound2_session.pending.len(), 1);
-        assert_eq!(outbound_session.active.len(), 2);
-        assert_eq!(outbound_session.pending.len(), 0);
+        assert_eq!(outbound_session.active.len(), 1);
+        assert_eq!(outbound_session.pending.len(), 1);
 
         // finalize second inbound session by sending an `ExistingSession` message
         let es2 = outbound_session.encrypt(&inbound2_destination_id, vec![1, 3, 3, 8]).unwrap();
@@ -2309,86 +2360,192 @@ mod tests {
 
         // process inbound messages
         for (i, payload) in messages.into_iter().enumerate() {
-            let mut message = inbound_session
-                .decrypt(Message {
-                    payload,
-                    ..Default::default()
-                })
-                .unwrap();
-
-            let Some(GarlicClove { message_body, .. }) =
-                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
-            else {
-                panic!("message not found");
-            };
-            assert_eq!(message_body[4..], vec![(i + 1) as u8; 4]);
+            decrypt_and_verify!(&mut inbound_session, payload, vec![(i + 1) as u8; 4]);
         }
 
         // send `NewSessionReply` to remote
         let message = inbound_session.encrypt(&outbound_destination_id, vec![4, 4, 4, 4]).unwrap();
 
         // handle `NewSessionReply` for the second `NewSession` message
-        let message = {
-            let mut message = outbound_session
-                .decrypt(Message {
-                    payload: message,
-                    ..Default::default()
-                })
-                .unwrap();
-
-            let Some(GarlicClove { message_body, .. }) =
-                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
-            else {
-                panic!("message not found");
-            };
-            assert_eq!(message_body[4..], [4, 4, 4, 4]);
-        };
+        decrypt_and_verify!(&mut outbound_session, message, vec![4u8; 4]);
 
         // exchange few messages between the session to confirm they both work
         for i in 5..=10 {
             // send message from outbound to inbound
-            let mut message = inbound_session
-                .decrypt(Message {
-                    payload: outbound_session
-                        .encrypt(&inbound_destination_id, vec![i as u8; 4])
-                        .unwrap(),
-                    ..Default::default()
-                })
-                .unwrap();
-
-            let Some(GarlicClove { message_body, .. }) =
-                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
-            else {
-                panic!("message not found");
-            };
-            assert_eq!(message_body[4..], vec![i as u8; 4]);
+            let message =
+                outbound_session.encrypt(&inbound_destination_id, vec![i as u8; 4]).unwrap();
+            decrypt_and_verify!(&mut inbound_session, message, vec![i as u8; 4]);
 
             // send message from inbound to outbound
-            let mut message = outbound_session
-                .decrypt(Message {
-                    payload: inbound_session
-                        .encrypt(&outbound_destination_id, vec![i + 1 as u8; 4])
-                        .unwrap(),
-                    ..Default::default()
-                })
+            let message = inbound_session
+                .encrypt(&outbound_destination_id, vec![(i + 1) as u8; 4])
                 .unwrap();
-
-            let Some(GarlicClove { message_body, .. }) =
-                message.find(|clove| std::matches!(clove.message_type, MessageType::Data))
-            else {
-                panic!("message not found");
-            };
-            assert_eq!(message_body[4..], vec![(i + 1) as u8; 4]);
+            decrypt_and_verify!(&mut outbound_session, message, vec![(i + 1) as u8; 4]);
         }
     }
 
     #[test]
     fn multiple_new_session_reply_messages() {
-        // TODO: figure out how java-i2p handles multiple newsessionreplies
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (
+            outbound_leaseset,
+            outbound_destination_id,
+            outbound_destination,
+            outbound_signing_key,
+        ) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let destination = leaseset.header.destination.clone();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+                destination,
+                signing_key,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key.clone(),
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // initialize outbound session and create three NS messages
+        let message = outbound_session.encrypt(&inbound_destination_id, vec![1, 1, 1, 1]).unwrap();
+        decrypt_and_verify!(&mut inbound_session, message, vec![1u8; 4]);
+
+        // create multiple NSR messages
+        let messages = [
+            inbound_session.encrypt(&outbound_destination_id, vec![2, 2, 2, 2]).unwrap(),
+            inbound_session.encrypt(&outbound_destination_id, vec![3, 3, 3, 3]).unwrap(),
+            inbound_session.encrypt(&outbound_destination_id, vec![4, 4, 4, 4]).unwrap(),
+        ];
+
+        // handle NSR messages
+        for (i, message) in messages.into_iter().enumerate() {
+            decrypt_and_verify!(&mut outbound_session, message, vec![(i + 2) as u8; 4]);
+        }
+
+        // exchange few messages between the session to confirm they both work
+        for i in 5..=10 {
+            // send message from outbound to inbound
+            let message =
+                outbound_session.encrypt(&inbound_destination_id, vec![i as u8; 4]).unwrap();
+            decrypt_and_verify!(&mut inbound_session, message, vec![i as u8; 4]);
+
+            // send message from inbound to outbound
+            let message = inbound_session
+                .encrypt(&outbound_destination_id, vec![(i + 1) as u8; 4])
+                .unwrap();
+            decrypt_and_verify!(&mut outbound_session, message, vec![(i + 1) as u8; 4]);
+        }
     }
 
     #[test]
-    fn multiple_new_session_and_new_session_reply_messages() {}
+    fn multiple_new_session_and_new_session_reply_messages() {
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_public_key = outbound_private_key.public();
+        let (
+            outbound_leaseset,
+            outbound_destination_id,
+            outbound_destination,
+            outbound_signing_key,
+        ) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let destination = leaseset.header.destination.clone();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+                destination,
+                signing_key,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key.clone(),
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // send multiple NS messages
+        let messages = [
+            outbound_session.encrypt(&inbound_destination_id, vec![1, 1, 1, 1]).unwrap(),
+            outbound_session.encrypt(&inbound_destination_id, vec![2, 2, 2, 2]).unwrap(),
+        ];
+
+        // handle NS messages
+        for (i, message) in messages.into_iter().enumerate() {
+            decrypt_and_verify!(&mut inbound_session, message, vec![(i + 1) as u8; 4]);
+        }
+
+        // send multiple NSR messages as response to received NS messaages
+        let messages = [
+            inbound_session.encrypt(&outbound_destination_id, vec![3, 3, 3, 3]).unwrap(),
+            inbound_session.encrypt(&outbound_destination_id, vec![4, 4, 4, 4]).unwrap(),
+            inbound_session.encrypt(&outbound_destination_id, vec![5, 5, 5, 5]).unwrap(),
+        ];
+
+        // handle NSR messages
+        for (i, message) in messages.into_iter().enumerate() {
+            decrypt_and_verify!(&mut outbound_session, message, vec![(i + 3) as u8; 4]);
+        }
+
+        // exchange few messages between the session to confirm they both work
+        for i in 5..=10 {
+            // send message from outbound to inbound
+            let message =
+                outbound_session.encrypt(&inbound_destination_id, vec![i as u8; 4]).unwrap();
+            decrypt_and_verify!(&mut inbound_session, message, vec![i as u8; 4]);
+
+            // send message from inbound to outbound
+            let message = inbound_session
+                .encrypt(&outbound_destination_id, vec![(i + 1) as u8; 4])
+                .unwrap();
+            decrypt_and_verify!(&mut outbound_session, message, vec![(i + 1) as u8; 4]);
+        }
+    }
 
     #[test]
     fn new_session_retried() {}

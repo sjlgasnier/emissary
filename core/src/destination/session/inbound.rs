@@ -75,6 +75,25 @@ enum InboundSessionState {
 
         /// `TagSet` for decrypting inbound messages.
         recv_tag_set: TagSet,
+
+        /// `NewSessionReply` tag set.
+        nsr_tag_set: TagSet,
+
+        /// Ephemeral public key of remote destination.
+        remote_ephemeral_public_key: StaticPublicKey,
+
+        /// Static public key of remote destination.
+        remote_static_public_key: StaticPublicKey,
+
+        /// State from `NewSession`.
+        ///
+        /// Used if multiple `NewSessionReply` messages are sent.
+        state: Vec<u8>,
+
+        /// Chaining key from `NewSession`.
+        ///
+        /// Used if multiple `NewSessionReply` messages are sent.
+        chaining_key: Vec<u8>,
     },
 
     /// Inbound session state has been poisoned.
@@ -138,10 +157,10 @@ impl<R: Runtime> InboundSession<R> {
     ) -> crate::Result<(Vec<u8>, Vec<TagSetEntry>)> {
         match mem::replace(&mut self.state, InboundSessionState::Poisoned) {
             InboundSessionState::AwaitingNewSessionReplyTransmit {
-                chaining_key,
+                chaining_key: ns_chaining_key,
                 remote_ephemeral_public_key,
                 remote_static_public_key,
-                state,
+                state: ns_state,
             } => {
                 // generate new elligator2-encodable ephemeral keypair
                 let (ephemeral_private_key, ephemeral_public_key, representative) = {
@@ -162,16 +181,18 @@ impl<R: Runtime> InboundSession<R> {
                 };
 
                 // create garlic tag for the `NewSessionReply` message
-                let garlic_tag = {
-                    let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+                let (nsr_tag_set, garlic_tag) = {
+                    let mut temp_key = Hmac::new(&ns_chaining_key).update(&[]).finalize();
                     let mut tagset_key = Hmac::new(&temp_key)
                         .update(&b"SessionReplyTags")
                         .update(&[0x01])
                         .finalize();
-                    let mut nsr_tag_set = TagSet::new(&chaining_key, tagset_key);
+                    let mut nsr_tag_set = TagSet::new(&ns_chaining_key, tagset_key);
 
                     // `next_entry()` must succeed as `nsr_tag_set` is a fresh `TagSet`
-                    nsr_tag_set.next_entry().expect("to succeed").tag
+                    let garlic_tag = nsr_tag_set.next_entry().expect("to succeed").tag;
+
+                    (nsr_tag_set, garlic_tag)
                 };
 
                 tracing::trace!(
@@ -185,7 +206,7 @@ impl<R: Runtime> InboundSession<R> {
                     // ephemeral-ephemeral
                     let mut shared =
                         ephemeral_private_key.diffie_hellman(&remote_ephemeral_public_key);
-                    let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+                    let mut temp_key = Hmac::new(&ns_chaining_key).update(&shared).finalize();
                     let mut chaining_key =
                         Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
 
@@ -207,8 +228,10 @@ impl<R: Runtime> InboundSession<R> {
 
                 // calculate new state encrypting the empty key section
                 let state = {
-                    let state =
-                        Sha256::new().update(&state).update(&garlic_tag.to_le_bytes()).finalize();
+                    let state = Sha256::new()
+                        .update(&ns_state)
+                        .update(&garlic_tag.to_le_bytes())
+                        .finalize();
 
                     Sha256::new()
                         .update(&state)
@@ -265,6 +288,147 @@ impl<R: Runtime> InboundSession<R> {
                 self.state = InboundSessionState::NewSessionReplySent {
                     send_tag_set,
                     recv_tag_set,
+                    nsr_tag_set,
+                    remote_ephemeral_public_key,
+                    remote_static_public_key,
+                    state: ns_state,
+                    chaining_key: ns_chaining_key,
+                };
+
+                Ok((payload, tags))
+            }
+            InboundSessionState::NewSessionReplySent {
+                send_tag_set,
+                recv_tag_set,
+                mut nsr_tag_set,
+                remote_ephemeral_public_key,
+                remote_static_public_key,
+                state: ns_state,
+                chaining_key: ns_chaining_key,
+            } => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "send another `NewSessionReply`",
+                );
+
+                // generate new elligator2-encodable ephemeral keypair
+                let (ephemeral_private_key, ephemeral_public_key, representative) = {
+                    let (ephemeral_private_key, tweak) =
+                        KeyContext::<R>::generate_ephemeral_keypair();
+                    let sk = StaticPrivateKey::from(ephemeral_private_key.clone().to_vec());
+                    let ephemeral_public_key = StaticPublicKey::from(
+                        Randomized::mul_base_clamped(ephemeral_private_key).to_montgomery().0,
+                    );
+
+                    // conversion must succeed as `KeyContext::generate_ephemeral_keypair()`
+                    // has ensured that the public key is encodable
+                    let representative =
+                        Randomized::to_representative(&ephemeral_private_key, tweak)
+                            .expect("to succeed");
+
+                    (sk, ephemeral_public_key, representative)
+                };
+
+                let garlic_tag = nsr_tag_set.next_entry().expect("to succeed").tag;
+
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    ?garlic_tag,
+                    "garlic tag for `NewSessionReply`",
+                );
+
+                // calculate keys from shared secrets derived from ee & es
+                let (chaining_key, keydata) = {
+                    // ephemeral-ephemeral
+                    let mut shared =
+                        ephemeral_private_key.diffie_hellman(&remote_ephemeral_public_key);
+                    let mut temp_key = Hmac::new(&ns_chaining_key).update(&shared).finalize();
+                    let mut chaining_key =
+                        Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+
+                    // static-ephemeral
+                    shared = ephemeral_private_key.diffie_hellman(&remote_static_public_key);
+                    temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+                    chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+                    let keydata = Hmac::new(&temp_key)
+                        .update(&chaining_key)
+                        .update(&b"")
+                        .update(&[0x02])
+                        .finalize();
+
+                    shared.zeroize();
+                    temp_key.zeroize();
+
+                    (chaining_key, keydata)
+                };
+
+                // calculate new state encrypting the empty key section
+                let state = {
+                    let state = Sha256::new()
+                        .update(&ns_state)
+                        .update(&garlic_tag.to_le_bytes())
+                        .finalize();
+
+                    Sha256::new()
+                        .update(&state)
+                        .update::<&[u8]>(ephemeral_public_key.as_ref())
+                        .finalize()
+                };
+                let mac = ChaChaPoly::new(&keydata).encrypt_with_ad(&state, &mut vec![])?;
+
+                // include `mac` into state for payload section's encryption
+                let state = Sha256::new().update(&state).update(&mac).finalize();
+
+                // split key into send and receive keys
+                let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
+                let mut recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+                let mut send_key =
+                    Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
+
+                // initialize send and receive tag sets
+                let mut send_tag_set = TagSet::new(&chaining_key, &send_key);
+                let mut recv_tag_set = TagSet::new(chaining_key, recv_key);
+
+                // decode payload of the `NewSessionReply` message
+                let mut temp_key = Hmac::new(&send_key).update(&[]).finalize();
+                let mut payload_key =
+                    Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
+
+                ChaChaPoly::new(&payload_key).encrypt_with_ad_new(&state, &mut payload)?;
+
+                let payload = {
+                    let mut out = BytesMut::with_capacity(
+                        representative
+                            .len()
+                            .saturating_add(8) // garlic tag
+                            .saturating_add(mac.len())
+                            .saturating_add(payload.len()),
+                    );
+                    out.put_slice(&garlic_tag.to_le_bytes());
+                    out.put_slice(&representative);
+                    out.put_slice(&mac);
+                    out.put_slice(&payload);
+
+                    out.freeze().to_vec()
+                };
+
+                // generate garlic tag/session key pairs for reception
+                //
+                // `next_entry()` must succeed as this is a fresh `TagSet` and
+                // `NUM_TAGS_TO_GENERATE` is smaller than the maximum tag count
+                // in a `Tagset`
+                let tags = (0..NUM_TAGS_TO_GENERATE)
+                    .map(|_| recv_tag_set.next_entry().expect("to succeed"))
+                    .collect::<Vec<_>>();
+
+                self.state = InboundSessionState::NewSessionReplySent {
+                    send_tag_set,
+                    recv_tag_set,
+                    nsr_tag_set,
+                    remote_ephemeral_public_key,
+                    remote_static_public_key,
+                    state: ns_state,
+                    chaining_key: ns_chaining_key,
                 };
 
                 Ok((payload, tags))
@@ -294,6 +458,7 @@ impl<R: Runtime> InboundSession<R> {
         let InboundSessionState::NewSessionReplySent {
             send_tag_set,
             recv_tag_set,
+            ..
         } = mem::replace(&mut self.state, InboundSessionState::Poisoned)
         else {
             tracing::warn!(
