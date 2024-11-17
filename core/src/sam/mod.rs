@@ -275,6 +275,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 socket,
                                 destination,
                                 Arc::clone(&session_id),
+                                session_kind,
                                 options,
                                 version,
                                 rx,

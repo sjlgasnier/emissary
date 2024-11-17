@@ -22,7 +22,7 @@ use crate::{
     primitives::{Lease, TunnelId},
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamCommand, SamVersion},
+        parser::{DestinationKind, SamCommand, SamVersion, SessionKind},
         session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
@@ -61,6 +61,9 @@ pub struct SamSessionContext<R: Runtime> {
     /// Session ID.
     pub session_id: Arc<str>,
 
+    /// Session kind.
+    pub session_kind: SessionKind,
+
     /// Negotiated version.
     pub version: SamVersion,
 
@@ -86,6 +89,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// ID of the client session.
         session_id: Arc<str>,
+
+        /// Session kind.
+        session_kind: SessionKind,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -115,6 +121,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// Session ID.
         session_id: Arc<str>,
+
+        /// Session kind.
+        session_kind: SessionKind,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -161,6 +170,7 @@ impl<R: Runtime> PendingSamSession<R> {
         socket: SamSocket<R>,
         destination: DestinationKind,
         session_id: Arc<str>,
+        session_kind: SessionKind,
         options: HashMap<String, String>,
         version: SamVersion,
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
@@ -171,6 +181,7 @@ impl<R: Runtime> PendingSamSession<R> {
             state: PendingSessionState::BuildingTunnelPool {
                 socket,
                 session_id,
+                session_kind,
                 options,
                 version,
                 receiver,
@@ -191,6 +202,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                 PendingSessionState::BuildingTunnelPool {
                     socket,
                     session_id,
+                    session_kind,
                     options,
                     destination,
                     version,
@@ -208,6 +220,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
@@ -222,6 +235,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnelPool {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
@@ -235,6 +249,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                 PendingSessionState::BuildingTunnels {
                     socket,
                     session_id,
+                    session_kind,
                     options,
                     destination,
                     version,
@@ -248,6 +263,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
@@ -277,6 +293,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             self.state = PendingSessionState::BuildingTunnels {
                                 socket,
                                 session_id,
+                                session_kind,
                                 options,
                                 destination,
                                 version,
@@ -304,6 +321,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             outbound,
                             version,
                             session_id,
+                            session_kind,
                             socket,
                             receiver,
                             netdb_handle,
@@ -327,6 +345,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             self.state = PendingSessionState::BuildingTunnels {
                                 socket,
                                 session_id,
+                                session_kind,
                                 options,
                                 destination,
                                 version,
@@ -354,6 +373,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             outbound,
                             version,
                             session_id,
+                            session_kind,
                             socket,
                             receiver,
                             netdb_handle,
@@ -372,6 +392,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
@@ -394,6 +415,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
@@ -415,6 +437,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,

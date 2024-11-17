@@ -25,7 +25,7 @@ use crate::{
     protocol::Protocol,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamVersion},
+        parser::{DestinationKind, SamVersion, SessionKind},
         pending::session::SamSessionContext,
         protocol::streaming::{Direction, ListenerKind, StreamManager, StreamManagerEvent},
         socket::SamSocket,
@@ -180,6 +180,9 @@ pub struct SamSession<R: Runtime> {
     /// Session ID.
     session_id: Arc<str>,
 
+    /// Session kind.
+    session_kind: SessionKind,
+
     /// Signing key.
     signing_key: SigningPrivateKey,
 
@@ -205,6 +208,7 @@ impl<R: Runtime> SamSession<R> {
             outbound,
             receiver,
             session_id,
+            session_kind,
             tunnel_pool_handle,
             version,
         } = context;
@@ -309,6 +313,7 @@ impl<R: Runtime> SamSession<R> {
             socket,
             stream_manager: StreamManager::new(dest, signing_key),
             version,
+            session_kind,
         }
     }
 
@@ -321,6 +326,18 @@ impl<R: Runtime> SamSession<R> {
         destination: Dest,
         options: HashMap<String, String>,
     ) {
+        let SessionKind::Stream = &self.session_kind else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "received `STREAM CONNECT` but streams are not supported",
+            );
+            drop(socket);
+
+            return;
+        };
+
         tracing::info!(
             target: LOG_TARGET,
             session_id = %self.session_id,
@@ -362,6 +379,76 @@ impl<R: Runtime> SamSession<R> {
                     "received duplicate `STREAM CONNECT` for destination",
                 );
             }
+        }
+    }
+
+    /// Handle `STREAM ACCEPT` command.
+    ///
+    /// Register the socket as an active listener to [`StreamManager`].
+    ///
+    /// If the session wasn't configured to use streams, reject the accept request.
+    fn on_stream_accept(&mut self, socket: SamSocket<R>, options: HashMap<String, String>) {
+        let SessionKind::Stream = &self.session_kind else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "received `STREAM ACCEPT` but streams are not supported",
+            );
+
+            return drop(socket);
+        };
+
+        if let Err(error) = self.stream_manager.register_listener(ListenerKind::Ephemeral {
+            socket,
+            silent: options
+                .get("SILENT")
+                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                session_id = %self.session_id,
+                "failed to register ephemeral listener",
+            );
+        }
+    }
+
+    /// Handle `STREAM FORWARD` command.
+    ///
+    /// Register the socket as an active listener to [`StreamManager`].
+    ///
+    /// If the session wasn't configured to use streams, reject the forward request.
+    fn on_stream_forward(
+        &mut self,
+        socket: SamSocket<R>,
+        port: u16,
+        options: HashMap<String, String>,
+    ) {
+        let SessionKind::Stream = &self.session_kind else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "received `STREAM FORWARD` but streams are not supported",
+            );
+
+            return drop(socket);
+        };
+
+        if let Err(error) = self.stream_manager.register_listener(ListenerKind::Persistent {
+            socket,
+            port,
+            silent: options
+                .get("SILENT")
+                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                session_id = %self.session_id,
+                "failed to register persistent listener",
+            );
         }
     }
 
@@ -538,42 +625,12 @@ impl<R: Runtime> Future for SamSession<R> {
                     options,
                 })) => self.on_stream_connect(socket, destination, options),
                 Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) =>
-                    if let Err(error) =
-                        self.stream_manager.register_listener(ListenerKind::Ephemeral {
-                            socket,
-                            silent: options
-                                .get("SILENT")
-                                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
-                        })
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            session_id = %self.session_id,
-                            "failed to register ephemeral listener",
-                        );
-                    },
+                    self.on_stream_accept(socket, options),
                 Poll::Ready(Some(SamSessionCommand::Forward {
                     socket,
                     port,
                     options,
-                })) =>
-                    if let Err(error) =
-                        self.stream_manager.register_listener(ListenerKind::Persistent {
-                            socket,
-                            port,
-                            silent: options
-                                .get("SILENT")
-                                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
-                        })
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            session_id = %self.session_id,
-                            "failed to register persistent listener",
-                        );
-                    },
+                })) => self.on_stream_forward(socket, port, options),
                 Poll::Ready(Some(SamSessionCommand::Dummy)) => unreachable!(),
             }
         }
@@ -677,7 +734,7 @@ impl<R: Runtime> Future for SamSession<R> {
                         destination_id = %destination_id,
                         "session termianted with remote",
                     );
-                    // TODO: implement
+                    self.stream_manager.remove_session(&destination_id);
                 }
             }
         }
