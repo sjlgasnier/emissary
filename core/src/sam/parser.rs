@@ -293,6 +293,28 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
 
                 let session_kind = match value.key_value_pairs.remove("STYLE") {
                     Some("STREAM") => SessionKind::Stream,
+                    style @ (Some("RAW") | Some("DATAGRAM")) => {
+                        // currently only forwarded datagrams are supported
+                        let port = value.key_value_pairs.get("PORT").ok_or_else(|| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                "only forwarded raw datagrams are supported",
+                            );
+
+                            ()
+                        })?;
+
+                        // if no host was specified, default to localhost
+                        if value.key_value_pairs.get("HOST").is_none() {
+                            value.key_value_pairs.insert("HOST", "127.0.0.1");
+                        }
+
+                        match style {
+                            Some("RAW") => SessionKind::Anonymous,
+                            Some("DATAGRAM") => SessionKind::Datagram,
+                            _ => unreachable!(),
+                        }
+                    }
                     kind => {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -646,22 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_session_create_datagram() {
-        assert!(SamCommand::parse(
-            "SESSION CREATE STYLE=DATAGRAM ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn parse_session_create_anonymous() {
-        assert!(SamCommand::parse(
-            "SESSION CREATE STYLE=RAW ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
-        )
-        .is_none());
-    }
-
-    #[test]
     fn parse_stream_connect() {
         let destination = {
             let mut signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
@@ -771,5 +777,241 @@ mod tests {
 
         // invalid subcommand
         assert!(SamCommand::parse("DEST LOOKUP").is_none());
+    }
+
+    #[test]
+    fn parse_repliable_datagram() {
+        {
+            let command = "SESSION CREATE \
+                        STYLE=DATAGRAM \
+                        ID=test \
+                        PORT=8888 \
+                        HOST=127.2.2.2 \
+                        DESTINATION=TRANSIENT \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n";
+
+            match SamCommand::parse(command) {
+                Some(SamCommand::CreateSession {
+                    session_id,
+                    session_kind: SessionKind::Datagram,
+                    destination,
+                    options,
+                }) => {
+                    assert_eq!(session_id, "test");
+                    assert_eq!(options.get("HOST"), Some(&"127.2.2.2".to_string()));
+                }
+                response => panic!("invalid response: {response:?}"),
+            }
+        }
+
+        // no host specified, defaults to 127.0.0.1
+        {
+            let command = "SESSION CREATE \
+                        STYLE=DATAGRAM \
+                        ID=test \
+                        PORT=8888 \
+                        DESTINATION=TRANSIENT \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n";
+
+            match SamCommand::parse(command) {
+                Some(SamCommand::CreateSession {
+                    session_id,
+                    session_kind: SessionKind::Datagram,
+                    destination,
+                    options,
+                }) => {
+                    assert_eq!(session_id, "test");
+                    assert_eq!(options.get("HOST"), Some(&"127.0.0.1".to_string()));
+                }
+                response => panic!("invalid response: {response:?}"),
+            }
+        }
+
+        // no port specifed, currently not supported
+        {
+            let command = "SESSION CREATE \
+                        STYLE=DATAGRAM \
+                        ID=test \
+                        DESTINATION=TRANSIENT \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n";
+
+            assert!(SamCommand::parse(command).is_none());
+        }
+
+        // session with persistent destination
+        {
+            let privkey = {
+                let mut rng = MockRuntime::rng();
+
+                let signing_key = SigningPrivateKey::random(&mut rng);
+                let encryption_key = StaticPrivateKey::new(rng);
+
+                let destination = Destination::new(signing_key.public());
+                let destination_id = destination.id();
+
+                let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
+                out.put_slice(&destination.serialize());
+                out.put_slice(encryption_key.as_ref());
+                out.put_slice(signing_key.as_ref());
+
+                base64_encode(out)
+            };
+
+            let command = format!(
+                "SESSION CREATE \
+                        STYLE=DATAGRAM \
+                        ID=test \
+                        PORT=8888 \
+                        DESTINATION={privkey} \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n"
+            );
+
+            match SamCommand::parse(&command) {
+                Some(SamCommand::CreateSession {
+                    session_id,
+                    session_kind: SessionKind::Datagram,
+                    destination: DestinationKind::Persistent { .. },
+                    options,
+                }) => {
+                    assert_eq!(session_id.as_str(), "test");
+                    assert_eq!(options.get("i2cp.leaseSetEncType"), Some(&"4".to_string()));
+                }
+                response => panic!("invalid response: {response:?}"),
+            }
+        }
+
+        // invalid destination
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=DATAGRAM PORT=8888 ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
+
+        // session id missing
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=DATAGRAM PORT=8888 DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_anonymous_datagram() {
+        {
+            let command = "SESSION CREATE \
+                        STYLE=RAW \
+                        ID=test \
+                        PORT=8888 \
+                        HOST=127.2.2.2 \
+                        DESTINATION=TRANSIENT \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n";
+
+            match SamCommand::parse(command) {
+                Some(SamCommand::CreateSession {
+                    session_id,
+                    session_kind: SessionKind::Anonymous,
+                    destination,
+                    options,
+                }) => {
+                    assert_eq!(session_id, "test");
+                    assert_eq!(options.get("HOST"), Some(&"127.2.2.2".to_string()));
+                }
+                response => panic!("invalid response: {response:?}"),
+            }
+        }
+
+        // no host specified, defaults to 127.0.0.1
+        {
+            let command = "SESSION CREATE \
+                        STYLE=RAW \
+                        ID=test \
+                        PORT=8888 \
+                        DESTINATION=TRANSIENT \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n";
+
+            match SamCommand::parse(command) {
+                Some(SamCommand::CreateSession {
+                    session_id,
+                    session_kind: SessionKind::Anonymous,
+                    destination,
+                    options,
+                }) => {
+                    assert_eq!(session_id, "test");
+                    assert_eq!(options.get("HOST"), Some(&"127.0.0.1".to_string()));
+                }
+                response => panic!("invalid response: {response:?}"),
+            }
+        }
+
+        // no port specifed, currently not supported
+        {
+            let command = "SESSION CREATE \
+                        STYLE=RAW \
+                        ID=test \
+                        DESTINATION=TRANSIENT \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n";
+
+            assert!(SamCommand::parse(command).is_none());
+        }
+
+        // session with persistent destination
+        {
+            let privkey = {
+                let mut rng = MockRuntime::rng();
+
+                let signing_key = SigningPrivateKey::random(&mut rng);
+                let encryption_key = StaticPrivateKey::new(rng);
+
+                let destination = Destination::new(signing_key.public());
+                let destination_id = destination.id();
+
+                let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
+                out.put_slice(&destination.serialize());
+                out.put_slice(encryption_key.as_ref());
+                out.put_slice(signing_key.as_ref());
+
+                base64_encode(out)
+            };
+
+            let command = format!(
+                "SESSION CREATE \
+                        STYLE=RAW \
+                        ID=test \
+                        PORT=8888 \
+                        DESTINATION={privkey} \
+                        SIGNATURE_TYPE=7 \
+                        i2cp.leaseSetEncType=4\n"
+            );
+
+            match SamCommand::parse(&command) {
+                Some(SamCommand::CreateSession {
+                    session_id,
+                    session_kind: SessionKind::Anonymous,
+                    destination: DestinationKind::Persistent { .. },
+                    options,
+                }) => {
+                    assert_eq!(session_id.as_str(), "test");
+                    assert_eq!(options.get("i2cp.leaseSetEncType"), Some(&"4".to_string()));
+                }
+                response => panic!("invalid response: {response:?}"),
+            }
+        }
+
+        // invalid destination
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=RAW PORT=8888 ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
+
+        // session id missing
+        assert!(SamCommand::parse(
+            "SESSION CREATE STYLE=RAW PORT=8888 DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
+        )
+        .is_none());
     }
 }
