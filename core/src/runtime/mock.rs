@@ -20,7 +20,7 @@ use crate::{
     error::{ConnectionError, Error},
     runtime::{
         AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet,
-        MetricsHandle, Runtime, TcpListener, TcpStream,
+        MetricsHandle, Runtime, TcpListener, TcpStream, UdpSocket,
     },
 };
 
@@ -122,6 +122,22 @@ impl TcpListener<MockTcpStream> for MockTcpListener {
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<MockTcpStream>> {
         Poll::Pending
+    }
+}
+
+pub struct MockUdpSocket(net::UdpSocket);
+
+impl UdpSocket for MockUdpSocket {
+    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
+        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
+    }
+
+    fn send_to(&mut self, buf: &[u8], target: SocketAddr) -> impl Future<Output = Option<usize>> {
+        async move { self.0.send_to(buf, target).await.ok() }
+    }
+
+    fn recv_from(&mut self, buf: &mut [u8]) -> impl Future<Output = Option<(usize, SocketAddr)>> {
+        async { self.0.recv_from(buf).await.ok() }
     }
 }
 
@@ -257,6 +273,7 @@ impl MockRuntime {
 
 impl Runtime for MockRuntime {
     type TcpStream = MockTcpStream;
+    type UdpSocket = MockUdpSocket;
     type TcpListener = MockTcpListener;
     type JoinSet<T: Send + 'static> = MockJoinSet<T>;
     type MetricsHandle = MockMetricsHandle;

@@ -18,7 +18,7 @@
 
 use emissary::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
-    MetricsHandle, Runtime, TcpListener, TcpStream,
+    MetricsHandle, Runtime, TcpListener, TcpStream, UdpSocket,
 };
 use flate2::{
     write::{GzDecoder, GzEncoder},
@@ -140,6 +140,22 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
     }
 }
 
+pub struct TokioUdpSocket(net::UdpSocket);
+
+impl UdpSocket for TokioUdpSocket {
+    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
+        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
+    }
+
+    fn send_to(&mut self, buf: &[u8], target: SocketAddr) -> impl Future<Output = Option<usize>> {
+        async move { self.0.send_to(buf, target).await.ok() }
+    }
+
+    fn recv_from(&mut self, buf: &mut [u8]) -> impl Future<Output = Option<(usize, SocketAddr)>> {
+        async { self.0.recv_from(buf).await.ok() }
+    }
+}
+
 pub struct TokioJoinSet<T>(task::JoinSet<T>, Option<Waker>);
 
 impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
@@ -235,6 +251,7 @@ impl MetricsHandle for TokioMetricsHandle {
 
 impl Runtime for TokioRuntime {
     type TcpStream = TokioTcpStream;
+    type UdpSocket = TokioUdpSocket;
     type TcpListener = TokioTcpListener;
     type JoinSet<T: Send + 'static> = TokioJoinSet<T>;
     type MetricsHandle = TokioMetricsHandle;
