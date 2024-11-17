@@ -33,7 +33,10 @@ use nom::{
     Err, IResult, Parser,
 };
 
-use alloc::string::{String, ToString};
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+};
 use core::fmt;
 
 /// Logging target for the file.
@@ -527,6 +530,49 @@ impl SamCommand {
     }
 }
 
+/// Anonymous/repliable datagram.
+pub struct Datagram {
+    /// Session ID.
+    pub session_id: Arc<str>,
+
+    /// Destination of the remote peer where the datagram should be sent.
+    pub destination: Destination,
+
+    /// Datagram.
+    pub datagram: Vec<u8>,
+}
+
+impl Datagram {
+    /// Attempt to parse `input` into `Datagram`.
+    pub fn parse(input: &[u8]) -> Option<Self> {
+        // the datagram starts with `3.x ` sequence which is skipped
+        //
+        // after it follows the nickname of the session, followed by `Destination` of remote peer
+        //
+        // the "header" ends in `\n`, followed by the actual datagram
+        let nickname_end = input[4..].iter().position(|byte| byte == &b' ')?;
+        let dest_end = input[nickname_end + 5..].iter().position(|byte| byte == &b' ')?;
+        let dgram_start = input[dest_end..].iter().position(|byte| byte == &b'\n')?;
+
+        let session_id: Arc<str> =
+            Arc::from(core::str::from_utf8(&input[4..nickname_end + 4]).ok()?);
+
+        let destination = {
+            let destination = core::str::from_utf8(&input[nickname_end + 5..dest_end + 2]).ok()?;
+            let decoded = base64_decode(destination)?;
+
+            Destination::parse(&decoded)?
+        };
+        let datagram = input[dest_end + dgram_start + 1..].to_vec();
+
+        Some(Self {
+            session_id,
+            destination,
+            datagram,
+        })
+    }
+}
+
 fn parse_key_value_pairs(input: &str) -> IResult<&str, HashMap<&str, &str>> {
     let (input, key_value_pairs) = many0(preceded(multispace0, parse_key_value))(input)?;
     Ok((input, key_value_pairs.into_iter().collect()))
@@ -1013,5 +1059,38 @@ mod tests {
             "SESSION CREATE STYLE=RAW PORT=8888 DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         )
         .is_none());
+    }
+
+    #[test]
+    fn parse_datagram() {
+        let destination = {
+            let mut rng = MockRuntime::rng();
+            let signing_key = SigningPrivateKey::random(&mut rng);
+            let encryption_key = StaticPrivateKey::new(rng);
+
+            Destination::new(signing_key.public())
+        };
+        let serialized = {
+            let mut out = BytesMut::with_capacity(destination.serialized_len());
+            out.put_slice(&destination.serialize());
+
+            base64_encode(out)
+        };
+
+        let mut datagram = format!("3.0 test {serialized}\n").as_bytes().to_vec();
+        datagram.extend_from_slice(b"hello, world");
+
+        match Datagram::parse(&datagram) {
+            Some(Datagram {
+                session_id,
+                destination: parsed,
+                datagram,
+            }) => {
+                assert_eq!(parsed, destination);
+                assert_eq!(*session_id, *"test");
+                assert_eq!(datagram, b"hello, world");
+            }
+            response => panic!("invalid datagram"),
+        }
     }
 }
