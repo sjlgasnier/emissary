@@ -102,7 +102,7 @@ pub enum SamSessionCommand<R: Runtime> {
     },
 
     /// Send repliable datagram to remote destination.
-    SendRepliableDatagram {
+    SendDatagram {
         /// Destination of the receiver.
         destination: Dest,
 
@@ -122,6 +122,7 @@ impl<R: Runtime> Default for SamSessionCommand<R> {
 
 /// What kind of protocol is awaiting session to open.
 enum ProtocolKind<R: Runtime> {
+    /// Streaming protocol.
     Stream {
         /// SAMv3 client socket.
         socket: SamSocket<R>,
@@ -133,17 +134,8 @@ enum ProtocolKind<R: Runtime> {
         options: HashMap<String, String>,
     },
 
-    /// Repliable datagram.
-    Repliable {
-        /// Destination of the remote peer.
-        destination: Dest,
-
-        /// Datagrams that are waiting to be sent.
-        datagrams: Vec<Vec<u8>>,
-    },
-
-    /// Anonymous datagram.
-    Anonymous {
+    /// Datagram protocol.
+    Datagram {
         /// Destination of the remote peer.
         destination: Dest,
 
@@ -160,14 +152,10 @@ impl<R: Runtime> fmt::Debug for ProtocolKind<R> {
                 destination,
                 options,
             } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
-            Self::Repliable {
+            Self::Datagram {
                 destination,
                 datagrams,
-            } => f.debug_struct("ProtocolKind::Repliable").finish_non_exhaustive(),
-            Self::Anonymous {
-                destination,
-                datagrams,
-            } => f.debug_struct("ProtocolKind::Anonymous").finish_non_exhaustive(),
+            } => f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
         }
     }
 }
@@ -362,6 +350,7 @@ impl<R: Runtime> SamSession<R> {
                 datagram_tx,
                 options.clone(),
                 signing_key.clone(),
+                session_kind,
             ),
             dest: dest.clone(),
             destination: session_destination,
@@ -514,34 +503,35 @@ impl<R: Runtime> SamSession<R> {
         }
     }
 
-    /// Send repliable datagram to remote destination.
+    /// Send datagram to destination.
     ///
     /// If the session wasn't configured to use streams, the datagram is dropped.
-    fn on_send_repliable_datagram(&mut self, destination: Dest, datagram: Vec<u8>) {
-        let SessionKind::Datagram = &self.session_kind else {
+    fn on_send_datagram(&mut self, destination: Dest, datagram: Vec<u8>) {
+        if let SessionKind::Stream = &self.session_kind {
             tracing::warn!(
                 target: LOG_TARGET,
                 session_id = %self.session_id,
                 stream_kind = ?self.session_kind,
-                "session style doesn't support repliable datagrams",
+                "session style doesn't support datagrams",
             );
             return;
-        };
+        }
 
         tracing::info!(
             target: LOG_TARGET,
             session_id = %self.session_id,
             destination_id = %destination.id(),
-            "send repliable datagram",
+            style = ?self.session_kind,
+            "send datagram",
         );
         let destination_id = destination.id();
 
         match self.destination.query_lease_set(&destination_id) {
             LeaseSetStatus::Found => {
-                let datagram = self.datagram_manager.make_datagram(&datagram);
+                let datagram = self.datagram_manager.make_datagram(datagram);
 
                 if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
-                    .with_protocol(Protocol::Datagram)
+                    .with_protocol(self.session_kind.into())
                     .build()
                 {
                     if let Err(error) = self.destination.send_message(&destination_id, message) {
@@ -566,7 +556,7 @@ impl<R: Runtime> SamSession<R> {
                 self.pending_outbound.insert(
                     destination_id,
                     PendingSessionState::AwaitingLeaseSet {
-                        protocol: ProtocolKind::Repliable {
+                        protocol: ProtocolKind::Datagram {
                             destination,
                             datagrams: vec![datagram],
                         },
@@ -583,7 +573,7 @@ impl<R: Runtime> SamSession<R> {
 
                 match self.pending_outbound.get_mut(&destination_id) {
                     Some(PendingSessionState::AwaitingLeaseSet {
-                        protocol: ProtocolKind::Repliable { datagrams, .. },
+                        protocol: ProtocolKind::Datagram { datagrams, .. },
                     }) => {
                         datagrams.push(datagram);
                     }
@@ -664,14 +654,14 @@ impl<R: Runtime> SamSession<R> {
                         debug_assert!(false);
                     }
                 }
-                ProtocolKind::Repliable {
+                ProtocolKind::Datagram {
                     destination,
                     datagrams,
                 } => datagrams.into_iter().for_each(|datagram| {
-                    let datagram = self.datagram_manager.make_datagram(&datagram);
+                    let datagram = self.datagram_manager.make_datagram(datagram);
 
                     if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
-                        .with_protocol(Protocol::Datagram)
+                        .with_protocol(self.session_kind.into())
                         .build()
                     {
                         if let Err(error) = self.destination.send_message(&destination_id, message)
@@ -686,10 +676,6 @@ impl<R: Runtime> SamSession<R> {
                         }
                     };
                 }),
-                ProtocolKind::Anonymous {
-                    destination,
-                    datagrams,
-                } => tracing::error!(target: LOG_TARGET, "anonymous support not implemented"),
             },
             state => {
                 tracing::warn!(
@@ -765,7 +751,15 @@ impl<R: Runtime> SamSession<R> {
                                 );
                             }
                         }
-                        protocol => self.datagram_manager.on_datagram(payload),
+                        protocol =>
+                            if let Err(error) = self.datagram_manager.on_datagram(payload) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    session_id = ?self.session_id,
+                                    ?error,
+                                    "failed to handle datagram",
+                                );
+                            },
                     }
                 }
                 None => tracing::warn!(
@@ -812,10 +806,10 @@ impl<R: Runtime> Future for SamSession<R> {
                     port,
                     options,
                 })) => self.on_stream_forward(socket, port, options),
-                Poll::Ready(Some(SamSessionCommand::SendRepliableDatagram {
+                Poll::Ready(Some(SamSessionCommand::SendDatagram {
                     destination,
                     datagram,
-                })) => self.on_send_repliable_datagram(destination, datagram),
+                })) => self.on_send_datagram(destination, datagram),
                 Poll::Ready(Some(SamSessionCommand::Dummy)) => unreachable!(),
             }
         }

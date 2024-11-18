@@ -19,6 +19,7 @@
 use crate::{
     crypto::{base64_decode, SigningPrivateKey, StaticPrivateKey},
     primitives::Destination,
+    protocol::Protocol,
 };
 
 use hashbrown::HashMap;
@@ -74,6 +75,16 @@ pub enum SessionKind {
 
     /// Anonymous datagrams.
     Anonymous,
+}
+
+impl Into<Protocol> for SessionKind {
+    fn into(self) -> Protocol {
+        match self {
+            Self::Stream => Protocol::Streaming,
+            Self::Datagram => Protocol::Datagram,
+            Self::Anonymous => Protocol::Anonymous,
+        }
+    }
 }
 
 /// Supported SAM versions.

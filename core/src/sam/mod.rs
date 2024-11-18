@@ -272,7 +272,7 @@ impl<R: Runtime> Future for SamServer<R> {
 
                     if let Err(error) = this.active_sessions.send_command(
                         &session_id,
-                        SamSessionCommand::SendRepliableDatagram {
+                        SamSessionCommand::SendDatagram {
                             destination,
                             datagram,
                         },

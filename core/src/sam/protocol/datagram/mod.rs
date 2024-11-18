@@ -18,9 +18,12 @@
 
 use crate::{
     crypto::{base64_encode, SigningPrivateKey},
+    error::Error,
     i2cp::I2cpPayload,
     primitives::Destination,
+    protocol::Protocol,
     runtime::Runtime,
+    sam::parser::SessionKind,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -41,6 +44,9 @@ pub struct DatagramManager<R: Runtime> {
     /// Session options.
     options: HashMap<String, String>,
 
+    /// Session kind.
+    session_kind: SessionKind,
+
     /// Signing key.
     signing_key: SigningPrivateKey,
 
@@ -55,30 +61,40 @@ impl<R: Runtime> DatagramManager<R> {
         datagram_tx: Sender<(u16, Vec<u8>)>,
         options: HashMap<String, String>,
         signing_key: SigningPrivateKey,
+        session_kind: SessionKind,
     ) -> Self {
         Self {
             datagram_tx,
             destination,
             options,
+            session_kind,
             signing_key,
             _runtime: Default::default(),
         }
     }
 
     /// Make repliable datagram.
-    pub fn make_datagram(&mut self, datagram: &[u8]) -> Vec<u8> {
-        let signature = self.signing_key.sign(&datagram);
-        let destination = self.destination.serialize();
+    pub fn make_datagram(&mut self, datagram: Vec<u8>) -> Vec<u8> {
+        match self.session_kind {
+            SessionKind::Datagram => {
+                let signature = self.signing_key.sign(&datagram);
+                let destination = self.destination.serialize();
 
-        let mut out = BytesMut::with_capacity(destination.len() + signature.len() + datagram.len());
-        out.put_slice(&destination);
-        out.put_slice(&signature);
-        out.put_slice(datagram);
+                let mut out =
+                    BytesMut::with_capacity(destination.len() + signature.len() + datagram.len());
+                out.put_slice(&destination);
+                out.put_slice(&signature);
+                out.put_slice(&datagram);
 
-        out.to_vec()
+                out.to_vec()
+            }
+            SessionKind::Anonymous => datagram,
+            SessionKind::Stream => unreachable!(), // TODO: technically not unreachable
+        }
     }
 
-    pub fn on_datagram(&self, payload: I2cpPayload) {
+    /// Handle inbound datagram.
+    pub fn on_datagram(&self, payload: I2cpPayload) -> crate::Result<()> {
         let I2cpPayload {
             dst_port,
             payload,
@@ -86,25 +102,43 @@ impl<R: Runtime> DatagramManager<R> {
             src_port,
         } = payload;
 
-        // TODO: verify signature
-        let (rest, destination) = Destination::parse_frame(&payload).unwrap();
-        let (rest, signature) = take::<_, _, ()>(64usize)(rest).unwrap();
+        match protocol {
+            Protocol::Datagram => {
+                // TODO: verify signature
+                let (rest, destination) =
+                    Destination::parse_frame(&payload).map_err(|_| Error::InvalidData)?;
+                let (rest, signature) =
+                    take::<_, _, ()>(64usize)(rest).map_err(|_| Error::InvalidData)?;
 
-        if let Some(port) = self.options.get("PORT") {
-            let info = format!(
-                "{} FROM_PORT={dst_port} TO_PORT={src_port}\n",
-                base64_encode(&destination.serialize())
-            )
-            .as_bytes()
-            .to_vec();
+                // TODO: ensure there is a listener in `src_port`
+                let port = self.options.get("PORT").ok_or(Error::InvalidState)?;
 
-            let mut out = BytesMut::with_capacity(info.len() + rest.len());
-            out.put_slice(&info);
-            out.put_slice(rest);
+                let info = format!(
+                    "{} FROM_PORT={dst_port} TO_PORT={src_port}\n",
+                    base64_encode(&destination.serialize())
+                )
+                .as_bytes()
+                .to_vec();
 
-            let _ = self
-                .datagram_tx
-                .try_send((port.parse::<u16>().expect("to succeed"), out.to_vec()));
+                let mut out = BytesMut::with_capacity(info.len() + rest.len());
+                out.put_slice(&info);
+                out.put_slice(rest);
+
+                let _ = self
+                    .datagram_tx
+                    .try_send((port.parse::<u16>().expect("to succeed"), out.to_vec()));
+
+                Ok(())
+            }
+            Protocol::Anonymous => {
+                let port = self.options.get("PORT").ok_or(Error::InvalidState)?;
+
+                let _ =
+                    self.datagram_tx.try_send((port.parse::<u16>().expect("to succeed"), payload));
+
+                Ok(())
+            }
+            Protocol::Streaming => unreachable!(),
         }
     }
 }
