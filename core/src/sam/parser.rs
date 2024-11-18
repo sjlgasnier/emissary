@@ -545,25 +545,29 @@ pub struct Datagram {
 impl Datagram {
     /// Attempt to parse `input` into `Datagram`.
     pub fn parse(input: &[u8]) -> Option<Self> {
+        // TODO: reimplement using now
+        // TODO: add support for options
+        //
         // the datagram starts with `3.x ` sequence which is skipped
         //
         // after it follows the nickname of the session, followed by `Destination` of remote peer
         //
         // the "header" ends in `\n`, followed by the actual datagram
         let nickname_end = input[4..].iter().position(|byte| byte == &b' ')?;
-        let dest_end = input[nickname_end + 5..].iter().position(|byte| byte == &b' ')?;
-        let dgram_start = input[dest_end..].iter().position(|byte| byte == &b'\n')?;
+        let dgram_start = input[nickname_end + 5..].iter().position(|byte| byte == &b'\n')?;
 
         let session_id: Arc<str> =
             Arc::from(core::str::from_utf8(&input[4..nickname_end + 4]).ok()?);
 
         let destination = {
-            let destination = core::str::from_utf8(&input[nickname_end + 5..dest_end + 2]).ok()?;
+            let destination =
+                core::str::from_utf8(&input[nickname_end + 5..dgram_start + nickname_end + 5])
+                    .ok()?;
             let decoded = base64_decode(destination)?;
 
             Destination::parse(&decoded)?
         };
-        let datagram = input[dest_end + dgram_start + 1..].to_vec();
+        let datagram = input[nickname_end + dgram_start + 6..].to_vec();
 
         Some(Self {
             session_id,
@@ -1086,11 +1090,34 @@ mod tests {
                 destination: parsed,
                 datagram,
             }) => {
-                assert_eq!(parsed, destination);
                 assert_eq!(*session_id, *"test");
                 assert_eq!(datagram, b"hello, world");
             }
             response => panic!("invalid datagram"),
+        }
+
+        {
+            let datagram = "3.0 12OzbmMqo3bdv3w8 Mja~hsQgYVQblsiubtnLHkZ8ULQP1RyVUnZChevHgZEyNr-Gx\
+            CBhVBuWyK5u2cseRnxQtA~VHJVSdkKF68eBkTI2v4bEIGFUG5bIrm7Zyx5GfFC0D9UclVJ2QoXrx4GRMja~hsQ\
+            gYVQblsiubtnLHkZ8ULQP1RyVUnZChevHgZEyNr-GxCBhVBuWyK5u2cseRnxQtA~VHJVSdkKF68eBkTI2v4bEI\
+            GFUG5bIrm7Zyx5GfFC0D9UclVJ2QoXrx4GRMja~hsQgYVQblsiubtnLHkZ8ULQP1RyVUnZChevHgZEyNr-GxCB\
+            hVBuWyK5u2cseRnxQtA~VHJVSdkKF68eBkTI2v4bEIGFUG5bIrm7Zyx5GfFC0D9UclVJ2QoXrx4GRMja~hsQgY\
+            VQblsiubtnLHkZ8ULQP1RyVUnZChevHgZEyNr-GxCBhVBuWyK5u2cseRnxQtA~VHJVSdkKF68eBkQL4ggEoB~o\
+            SzcMX2fuc~MDG6lmUbi6G9sfRnscl9uh4BQAEAAcAAA==\nhello, world 1"
+                .as_bytes()
+                .to_vec();
+
+            match Datagram::parse(&datagram) {
+                Some(Datagram {
+                    session_id,
+                    datagram,
+                    ..
+                }) => {
+                    assert_eq!(*session_id, *"12OzbmMqo3bdv3w8");
+                    assert_eq!(datagram, b"hello, world 1");
+                }
+                response => panic!("invalid datagram"),
+            }
         }
     }
 }

@@ -28,7 +28,7 @@ use futures::{AsyncRead as _, AsyncWrite as _, Stream};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use rand_core::{CryptoRng, RngCore};
-use tokio::{net, task};
+use tokio::{io::ReadBuf, net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
@@ -147,12 +147,29 @@ impl UdpSocket for TokioUdpSocket {
         async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
     }
 
-    fn send_to(&mut self, buf: &[u8], target: SocketAddr) -> impl Future<Output = Option<usize>> {
-        async move { self.0.send_to(buf, target).await.ok() }
+    fn poll_send_to(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<Option<usize>> {
+        Poll::Ready(futures::ready!(self.0.poll_send_to(cx, buf, target)).ok())
     }
 
-    fn recv_from(&mut self, buf: &mut [u8]) -> impl Future<Output = Option<(usize, SocketAddr)>> {
-        async { self.0.recv_from(buf).await.ok() }
+    fn poll_recv_from(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>> {
+        let mut buf = ReadBuf::new(buf);
+
+        match futures::ready!(self.0.poll_recv_from(cx, &mut buf)) {
+            Err(_) => return Poll::Ready(None),
+            Ok(from) => {
+                let nread = buf.filled().len();
+                Poll::Ready(Some((nread, from)))
+            }
+        }
     }
 }
 

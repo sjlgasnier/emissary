@@ -64,10 +64,19 @@ pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
 }
 
-pub trait UdpSocket: Unpin + Send + Sized {
+pub trait UdpSocket: Unpin + Send + Sync + Sized {
     fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>>;
-    fn send_to(&mut self, buf: &[u8], target: SocketAddr) -> impl Future<Output = Option<usize>>;
-    fn recv_from(&mut self, buf: &mut [u8]) -> impl Future<Output = Option<(usize, SocketAddr)>>;
+    fn poll_send_to(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<Option<usize>>;
+    fn poll_recv_from(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>>;
 }
 
 pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {

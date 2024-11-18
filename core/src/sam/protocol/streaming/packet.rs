@@ -22,7 +22,7 @@ use crate::{
     sam::protocol::streaming::LOG_TARGET,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -342,7 +342,7 @@ impl<'a> Packet<'a> {
 /// Flags builder for [`PacketBuilder`].
 pub struct FlagsBuilder<'a> {
     /// Included destination, if received.
-    destination: Option<BytesMut>,
+    destination: Option<Bytes>,
 
     /// Flags.
     flags: u16,

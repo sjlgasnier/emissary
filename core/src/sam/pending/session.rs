@@ -31,6 +31,7 @@ use crate::{
 
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use thingbuf::mpsc::{Receiver, Sender};
 
 use alloc::{string::String, sync::Arc};
 use core::{
@@ -39,7 +40,6 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::pending::session";
@@ -78,6 +78,9 @@ pub struct SamSessionContext<R: Runtime> {
 
     /// RX channel for receiving commands to an active session.
     pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+    /// TX channel which can be used to send datagrams to clients.
+    pub datagram_tx: Sender<(u16, Vec<u8>)>,
 }
 
 /// State of the pending I2CP client session.
@@ -112,6 +115,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// RX channel for receiving commands to an active session.
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+        /// TX channel which can be used to send datagrams to clients.
+        datagram_tx: Sender<(u16, Vec<u8>)>,
     },
 
     /// Building tunnels.
@@ -142,6 +148,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// RX channel for receiving commands to an active session.
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+        /// TX channel which can be used to send datagrams to clients.
+        datagram_tx: Sender<(u16, Vec<u8>)>,
 
         /// Active inbound tunnels and their leases.
         inbound: HashMap<TunnelId, Lease>,
@@ -174,11 +183,13 @@ impl<R: Runtime> PendingSamSession<R> {
         options: HashMap<String, String>,
         version: SamVersion,
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+        datagram_tx: Sender<(u16, Vec<u8>)>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
         netdb_handle: NetDbHandle,
     ) -> Self {
         Self {
             state: PendingSessionState::BuildingTunnelPool {
+                datagram_tx,
                 socket,
                 session_id,
                 session_kind,
@@ -207,6 +218,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     destination,
                     version,
                     receiver,
+                    datagram_tx,
                     netdb_handle,
                     mut tunnel_pool_future,
                 } => match tunnel_pool_future.poll_unpin(cx) {
@@ -226,6 +238,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             version,
                             handle,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             inbound: HashMap::new(),
                             outbound: HashSet::new(),
@@ -240,6 +253,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             destination,
                             version,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             tunnel_pool_future,
                         };
@@ -254,6 +268,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     destination,
                     version,
                     receiver,
+                    datagram_tx,
                     netdb_handle,
                     mut handle,
                     mut inbound,
@@ -269,6 +284,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             version,
                             netdb_handle,
                             receiver,
+                            datagram_tx,
                             handle,
                             inbound,
                             outbound,
@@ -300,6 +316,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 netdb_handle,
                                 handle,
                                 receiver,
+                                datagram_tx,
                                 inbound,
                                 outbound,
                             };
@@ -324,6 +341,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_kind,
                             socket,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
@@ -352,6 +370,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                                 netdb_handle,
                                 handle,
                                 receiver,
+                                datagram_tx,
                                 inbound,
                                 outbound,
                             };
@@ -376,6 +395,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             session_kind,
                             socket,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
@@ -399,6 +419,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             netdb_handle,
                             handle,
                             receiver,
+                            datagram_tx,
                             inbound,
                             outbound,
                         };
@@ -422,6 +443,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             netdb_handle,
                             handle,
                             receiver,
+                            datagram_tx,
                             inbound,
                             outbound,
                         };
@@ -444,6 +466,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             netdb_handle,
                             handle,
                             receiver,
+                            datagram_tx,
                             inbound,
                             outbound,
                         };

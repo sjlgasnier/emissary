@@ -15,3 +15,96 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
+
+use crate::{
+    crypto::{base64_encode, SigningPrivateKey},
+    i2cp::I2cpPayload,
+    primitives::Destination,
+    runtime::Runtime,
+};
+
+use bytes::{BufMut, BytesMut};
+use hashbrown::HashMap;
+use nom::bytes::complete::take;
+use thingbuf::mpsc::Sender;
+
+use core::marker::PhantomData;
+
+/// Datagram manager.
+pub struct DatagramManager<R: Runtime> {
+    /// TX channel which can be used to send datagrams to clients.
+    datagram_tx: Sender<(u16, Vec<u8>)>,
+
+    /// Local destination.
+    destination: Destination,
+
+    /// Session options.
+    options: HashMap<String, String>,
+
+    /// Signing key.
+    signing_key: SigningPrivateKey,
+
+    /// Marker for `Runtime`
+    _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> DatagramManager<R> {
+    /// Create new [`DatagramManager`].
+    pub fn new(
+        destination: Destination,
+        datagram_tx: Sender<(u16, Vec<u8>)>,
+        options: HashMap<String, String>,
+        signing_key: SigningPrivateKey,
+    ) -> Self {
+        Self {
+            datagram_tx,
+            destination,
+            options,
+            signing_key,
+            _runtime: Default::default(),
+        }
+    }
+
+    /// Make repliable datagram.
+    pub fn make_datagram(&mut self, datagram: &[u8]) -> Vec<u8> {
+        let signature = self.signing_key.sign(&datagram);
+        let destination = self.destination.serialize();
+
+        let mut out = BytesMut::with_capacity(destination.len() + signature.len() + datagram.len());
+        out.put_slice(&destination);
+        out.put_slice(&signature);
+        out.put_slice(datagram);
+
+        out.to_vec()
+    }
+
+    pub fn on_datagram(&self, payload: I2cpPayload) {
+        let I2cpPayload {
+            dst_port,
+            payload,
+            protocol,
+            src_port,
+        } = payload;
+
+        // TODO: verify signature
+        let (rest, destination) = Destination::parse_frame(&payload).unwrap();
+        let (rest, signature) = take::<_, _, ()>(64usize)(rest).unwrap();
+
+        if let Some(port) = self.options.get("PORT") {
+            let info = format!(
+                "{} FROM_PORT={dst_port} TO_PORT={src_port}\n",
+                base64_encode(&destination.serialize())
+            )
+            .as_bytes()
+            .to_vec();
+
+            let mut out = BytesMut::with_capacity(info.len() + rest.len());
+            out.put_slice(&info);
+            out.put_slice(rest);
+
+            let _ = self
+                .datagram_tx
+                .try_send((port.parse::<u16>().expect("to succeed"), out.to_vec()));
+        }
+    }
+}

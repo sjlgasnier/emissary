@@ -95,12 +95,21 @@ impl UdpSocket for NoopUdpSocket {
         std::future::pending()
     }
 
-    fn send_to(&mut self, buf: &[u8], target: SocketAddr) -> impl Future<Output = Option<usize>> {
-        std::future::pending()
+    fn poll_send_to(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+        _target: SocketAddr,
+    ) -> Poll<Option<usize>> {
+        Poll::Pending
     }
 
-    fn recv_from(&mut self, buf: &mut [u8]) -> impl Future<Output = Option<(usize, SocketAddr)>> {
-        std::future::pending()
+    fn poll_recv_from(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>> {
+        Poll::Pending
     }
 }
 
