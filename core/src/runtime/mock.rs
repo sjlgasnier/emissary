@@ -20,7 +20,7 @@ use crate::{
     error::{ConnectionError, Error},
     runtime::{
         AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet,
-        MetricsHandle, Runtime, TcpListener, TcpStream,
+        MetricsHandle, Runtime, TcpListener, TcpStream, UdpSocket,
     },
 };
 
@@ -33,7 +33,7 @@ use futures_io::{AsyncRead as _, AsyncWrite as _};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use rand_core::{CryptoRng, RngCore};
-use tokio::{net, task};
+use tokio::{io::ReadBuf, net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
@@ -122,6 +122,39 @@ impl TcpListener<MockTcpStream> for MockTcpListener {
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<MockTcpStream>> {
         Poll::Pending
+    }
+}
+
+pub struct MockUdpSocket(net::UdpSocket);
+
+impl UdpSocket for MockUdpSocket {
+    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
+        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
+    }
+
+    fn poll_send_to(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<Option<usize>> {
+        Poll::Ready(futures::ready!(self.0.poll_send_to(cx, buf, target)).ok())
+    }
+
+    fn poll_recv_from(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>> {
+        let mut buf = ReadBuf::new(buf);
+
+        match futures::ready!(self.0.poll_recv_from(cx, &mut buf)) {
+            Err(_) => return Poll::Ready(None),
+            Ok(from) => {
+                let nread = buf.filled().len();
+                Poll::Ready(Some((nread, from)))
+            }
+        }
     }
 }
 
@@ -257,6 +290,7 @@ impl MockRuntime {
 
 impl Runtime for MockRuntime {
     type TcpStream = MockTcpStream;
+    type UdpSocket = MockUdpSocket;
     type TcpListener = MockTcpListener;
     type JoinSet<T: Send + 'static> = MockJoinSet<T>;
     type MetricsHandle = MockMetricsHandle;

@@ -24,9 +24,9 @@ use crate::{
     error::{ChannelError, ConnectionError, Error},
     netdb::NetDbHandle,
     primitives::Str,
-    runtime::{JoinSet, MetricsHandle, Runtime, TcpListener},
+    runtime::{JoinSet, MetricsHandle, Runtime, TcpListener, UdpSocket},
     sam::{
-        parser::SamCommand,
+        parser::{Datagram, SamCommand},
         pending::{
             connection::{ConnectionKind, PendingSamConnection},
             session::{PendingSamSession, SamSessionContext},
@@ -36,14 +36,15 @@ use crate::{
     tunnel::{TunnelManagerHandle, TunnelPoolConfig},
 };
 
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use hashbrown::HashMap;
-use thingbuf::mpsc::{with_recycle, Sender};
+use thingbuf::mpsc::{channel, with_recycle, Receiver, Sender};
 
 use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{
     future::Future,
-    net::{IpAddr, SocketAddr},
+    mem,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -128,10 +129,34 @@ impl<R: Runtime, T: 'static + Send + Unpin> Stream for SessionContext<R, T> {
     }
 }
 
+/// Datagram write state.
+enum DatagramWriterState {
+    /// Get next message from the datagram channel.
+    GetMessage,
+
+    /// Write current message to socket.
+    WriteMessage {
+        /// Client address.
+        target: SocketAddr,
+
+        /// Datagram.
+        datagram: Vec<u8>,
+    },
+}
+
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
     /// Active SAMV3 sessions.
     active_sessions: SessionContext<R, Arc<str>>,
+
+    /// RX channel for receiving datagrams that should be to clients.
+    datagram_rx: Receiver<(u16, Vec<u8>)>,
+
+    /// TX channel given to active sessions they can use to send datagrams to clients.
+    datagram_tx: Sender<(u16, Vec<u8>)>,
+
+    /// Datagra writer state.
+    datagram_writer_state: DatagramWriterState,
 
     /// TCP listener.
     listener: R::TcpListener,
@@ -152,6 +177,12 @@ pub struct SamServer<R: Runtime> {
     /// Pending SAMv3 sessions that are in the process of building a tunnel pool.
     pending_sessions: SessionContext<R, crate::Result<SamSessionContext<R>>>,
 
+    /// Datagram read buffer.
+    read_buffer: Vec<u8>,
+
+    /// SAMv3 datagram socket.
+    socket: R::UdpSocket,
+
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
 }
@@ -160,7 +191,7 @@ impl<R: Runtime> SamServer<R> {
     /// Create new [`SamServer`]
     pub async fn new(
         tcp_port: u16,
-        _udp_port: u16,
+        udp_port: u16,
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
@@ -168,24 +199,38 @@ impl<R: Runtime> SamServer<R> {
         tracing::info!(
             target: LOG_TARGET,
             ?tcp_port,
+            ?udp_port,
             "starting sam server",
         );
 
-        let address = SocketAddr::new(
+        let listener = R::TcpListener::bind(SocketAddr::new(
             "127.0.0.1".parse::<IpAddr>().expect("valid address"),
             tcp_port,
-        );
-        let listener = R::TcpListener::bind(address)
-            .await
-            .ok_or(Error::Connection(ConnectionError::BindFailure))?;
+        ))
+        .await
+        .ok_or(Error::Connection(ConnectionError::BindFailure))?;
+
+        let socket = R::UdpSocket::bind(SocketAddr::new(
+            "127.0.0.1".parse::<IpAddr>().expect("valid address"),
+            udp_port,
+        ))
+        .await
+        .ok_or(Error::Connection(ConnectionError::BindFailure))?;
+
+        let (datagram_tx, datagram_rx) = channel(1024);
 
         Ok(Self {
             active_sessions: SessionContext::new(),
+            datagram_rx,
+            datagram_tx,
+            datagram_writer_state: DatagramWriterState::GetMessage,
             listener,
             metrics,
             netdb_handle,
             pending_inbound_connections: R::join_set(),
             pending_sessions: SessionContext::new(),
+            read_buffer: vec![0u8; 0xfff],
+            socket,
             tunnel_manager_handle,
         })
     }
@@ -195,18 +240,89 @@ impl<R: Runtime> Future for SamServer<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = Pin::into_inner(self);
+
         loop {
-            match self.listener.poll_accept(cx) {
+            match this.listener.poll_accept(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(stream)) => {
-                    self.pending_inbound_connections.push(PendingSamConnection::new(stream));
+                    this.pending_inbound_connections.push(PendingSamConnection::new(stream));
                 }
             }
         }
 
         loop {
-            match self.pending_inbound_connections.poll_next_unpin(cx) {
+            match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.read_buffer) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some((nread, address))) => {
+                    let Some(Datagram {
+                        session_id,
+                        destination,
+                        datagram,
+                    }) = Datagram::parse(&this.read_buffer[..nread])
+                    else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "malformed datagram",
+                        );
+                        continue;
+                    };
+
+                    if let Err(error) = this.active_sessions.send_command(
+                        &session_id,
+                        SamSessionCommand::SendDatagram {
+                            destination,
+                            datagram,
+                        },
+                    ) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            "failed to send datagram to active session",
+                        );
+                    }
+                }
+            }
+        }
+
+        loop {
+            match mem::replace(
+                &mut this.datagram_writer_state,
+                DatagramWriterState::GetMessage,
+            ) {
+                DatagramWriterState::GetMessage => match this.datagram_rx.poll_recv(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(None) => return Poll::Ready(()),
+                    Poll::Ready(Some((port, datagram))) => {
+                        this.datagram_writer_state = DatagramWriterState::WriteMessage {
+                            target: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                            datagram,
+                        };
+                    }
+                },
+                DatagramWriterState::WriteMessage { target, datagram } => {
+                    match Pin::new(&mut this.socket).poll_send_to(cx, &datagram, target) {
+                        Poll::Pending => {
+                            this.datagram_writer_state =
+                                DatagramWriterState::WriteMessage { target, datagram };
+                            break;
+                        }
+                        Poll::Ready(Some(_)) => {
+                            this.datagram_writer_state = DatagramWriterState::GetMessage;
+                        }
+                        Poll::Ready(None) => tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to write to socket",
+                        ),
+                    }
+                }
+            }
+        }
+
+        loop {
+            match this.pending_inbound_connections.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(Ok(kind))) => match kind {
@@ -222,8 +338,8 @@ impl<R: Runtime> Future for SamServer<R> {
                         // in use by either an active or a pending session
                         //
                         // reject connection by closing the socket
-                        if self.active_sessions.contains_key(&session_id)
-                            || self.pending_sessions.contains_key(&session_id)
+                        if this.active_sessions.contains_key(&session_id)
+                            || this.pending_sessions.contains_key(&session_id)
                         {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -248,7 +364,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         // until the desired amount of inbound/outbound tunnels have been built at
                         // which point an active samv3 session can be constructed
                         let tunnel_pool_future =
-                            match self.tunnel_manager_handle.create_tunnel_pool(TunnelPoolConfig {
+                            match this.tunnel_manager_handle.create_tunnel_pool(TunnelPoolConfig {
                                 name: Str::from(Arc::clone(&session_id)),
                                 ..Default::default()
                             }) {
@@ -266,18 +382,20 @@ impl<R: Runtime> Future for SamServer<R> {
 
                         let (tx, rx) =
                             with_recycle(COMMAND_CHANNEL_SIZE, SamSessionCommandRecycle::default());
-                        let netdb_handle = self.netdb_handle.clone();
+                        let netdb_handle = this.netdb_handle.clone();
 
-                        self.pending_sessions.insert(
+                        this.pending_sessions.insert(
                             Arc::clone(&session_id),
                             tx,
                             PendingSamSession::new(
                                 socket,
                                 destination,
                                 Arc::clone(&session_id),
+                                session_kind,
                                 options,
                                 version,
                                 rx,
+                                this.datagram_tx.clone(),
                                 Box::pin(tunnel_pool_future),
                                 netdb_handle,
                             ),
@@ -290,7 +408,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         destination,
                         options,
                     } => {
-                        if let Err(error) = self.active_sessions.send_command(
+                        if let Err(error) = this.active_sessions.send_command(
                             &session_id,
                             SamSessionCommand::Connect {
                                 socket,
@@ -312,7 +430,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         version,
                         options,
                     } => {
-                        if let Err(error) = self.active_sessions.send_command(
+                        if let Err(error) = this.active_sessions.send_command(
                             &session_id,
                             SamSessionCommand::Accept { socket, options },
                         ) {
@@ -331,7 +449,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         port,
                         options,
                     } => {
-                        if let Err(error) = self.active_sessions.send_command(
+                        if let Err(error) = this.active_sessions.send_command(
                             &session_id,
                             SamSessionCommand::Forward {
                                 socket,
@@ -362,13 +480,13 @@ impl<R: Runtime> Future for SamServer<R> {
         }
 
         loop {
-            match self.pending_sessions.poll_next_unpin(cx) {
+            match this.pending_sessions.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(Ok(context))) =>
-                    match self.pending_sessions.remove(&context.session_id) {
+                    match this.pending_sessions.remove(&context.session_id) {
                         Some(tx) => {
-                            self.active_sessions.insert(
+                            this.active_sessions.insert(
                                 Arc::clone(&context.session_id),
                                 tx,
                                 SamSession::new(context),
@@ -392,7 +510,7 @@ impl<R: Runtime> Future for SamServer<R> {
         }
 
         loop {
-            match self.active_sessions.poll_next_unpin(cx) {
+            match this.active_sessions.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(session_id)) => {
@@ -401,7 +519,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         %session_id,
                         "session terminated",
                     );
-                    self.active_sessions.remove(&session_id);
+                    this.active_sessions.remove(&session_id);
                 }
             }
         }

@@ -64,6 +64,21 @@ pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
 }
 
+pub trait UdpSocket: Unpin + Send + Sync + Sized {
+    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>>;
+    fn poll_send_to(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<Option<usize>>;
+    fn poll_recv_from(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>>;
+}
+
 pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
     /// Returns whether the `JoinSet` is empty.
     fn is_empty(&self) -> bool;
@@ -137,6 +152,7 @@ pub enum MetricType {
 
 pub trait Runtime: Clone + Unpin + Send + 'static {
     type TcpStream: TcpStream;
+    type UdpSocket: UdpSocket;
     type TcpListener: TcpListener<Self::TcpStream>;
     type JoinSet<T: Send + 'static>: JoinSet<T>;
     type MetricsHandle: MetricsHandle;

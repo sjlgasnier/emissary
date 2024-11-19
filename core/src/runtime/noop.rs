@@ -18,7 +18,7 @@
 
 use crate::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricsHandle,
-    Runtime, TcpListener,
+    Runtime, TcpListener, UdpSocket,
 };
 
 use futures::Stream;
@@ -84,6 +84,31 @@ impl TcpListener<NoopTcpStream> for NoopTcpListener {
     }
 
     fn poll_accept(&self, _cx: &mut Context<'_>) -> Poll<Option<NoopTcpStream>> {
+        Poll::Pending
+    }
+}
+
+pub struct NoopUdpSocket();
+
+impl UdpSocket for NoopUdpSocket {
+    fn bind(_address: SocketAddr) -> impl Future<Output = Option<Self>> {
+        std::future::pending()
+    }
+
+    fn poll_send_to(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+        _target: SocketAddr,
+    ) -> Poll<Option<usize>> {
+        Poll::Pending
+    }
+
+    fn poll_recv_from(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>> {
         Poll::Pending
     }
 }
@@ -185,6 +210,7 @@ impl NoopRuntime {
 
 impl Runtime for NoopRuntime {
     type TcpStream = NoopTcpStream;
+    type UdpSocket = NoopUdpSocket;
     type TcpListener = NoopTcpListener;
     type JoinSet<T: Send + 'static> = NoopJoinSet<T>;
     type MetricsHandle = NoopMetricsHandle;

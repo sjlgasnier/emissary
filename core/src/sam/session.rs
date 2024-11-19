@@ -25,9 +25,12 @@ use crate::{
     protocol::Protocol,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamVersion},
+        parser::{DestinationKind, SamVersion, SessionKind},
         pending::session::SamSessionContext,
-        protocol::streaming::{Direction, ListenerKind, StreamManager, StreamManagerEvent},
+        protocol::{
+            datagram::DatagramManager,
+            streaming::{Direction, ListenerKind, StreamManager, StreamManagerEvent},
+        },
         socket::SamSocket,
     },
 };
@@ -98,6 +101,15 @@ pub enum SamSessionCommand<R: Runtime> {
         options: HashMap<String, String>,
     },
 
+    /// Send repliable datagram to remote destination.
+    SendDatagram {
+        /// Destination of the receiver.
+        destination: Dest,
+
+        /// Datagram.
+        datagram: Vec<u8>,
+    },
+
     /// Dummy event, never constructed.
     Dummy,
 }
@@ -108,10 +120,10 @@ impl<R: Runtime> Default for SamSessionCommand<R> {
     }
 }
 
-/// State of a pending outbound stream.
-enum PendingStreamState<R: Runtime> {
-    /// Awaiting lease set query result.
-    AwaitingLeaseSet {
+/// What kind of protocol is awaiting session to open.
+enum ProtocolKind<R: Runtime> {
+    /// Streaming protocol.
+    Stream {
         /// SAMv3 client socket.
         socket: SamSocket<R>,
 
@@ -122,6 +134,37 @@ enum PendingStreamState<R: Runtime> {
         options: HashMap<String, String>,
     },
 
+    /// Datagram protocol.
+    Datagram {
+        /// Destination of the remote peer.
+        destination: Dest,
+
+        /// Datagrams that are waiting to be sent.
+        datagrams: Vec<Vec<u8>>,
+    },
+}
+
+impl<R: Runtime> fmt::Debug for ProtocolKind<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stream {
+                socket,
+                destination,
+                options,
+            } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
+            Self::Datagram {
+                destination,
+                datagrams,
+            } => f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
+        }
+    }
+}
+
+/// State of a pending outbound session.
+enum PendingSessionState<R: Runtime> {
+    /// Awaiting lease set query result.
+    AwaitingLeaseSet { protocol: ProtocolKind<R> },
+
     /// Awaiting session to be created
     AwaitingSession {
         /// Stream ID assigned by [`StreamManager`].
@@ -129,19 +172,15 @@ enum PendingStreamState<R: Runtime> {
     },
 }
 
-impl<R: Runtime> fmt::Debug for PendingStreamState<R> {
+impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AwaitingLeaseSet {
-                socket,
-                destination,
-                options,
-            } => f
-                .debug_struct("PendingStreamState::AwaitingLeaseSet")
-                .field("destination", &format_args!("{}", destination.id()))
+            Self::AwaitingLeaseSet { protocol } => f
+                .debug_struct("PendingSessionState::AwaitingLeaseSet")
+                .field("protocol", &protocol)
                 .finish_non_exhaustive(),
             Self::AwaitingSession { stream_id } => f
-                .debug_struct("PendingStreamState::AwaitingSession")
+                .debug_struct("PendingSessionState::AwaitingSession")
                 .field("stream_id", &stream_id)
                 .finish(),
         }
@@ -150,6 +189,9 @@ impl<R: Runtime> fmt::Debug for PendingStreamState<R> {
 
 /// Active SAMv3 session.
 pub struct SamSession<R: Runtime> {
+    /// I2P datagram manager.
+    datagram_manager: DatagramManager<R>,
+
     /// [`Dest`] of the session.
     ///
     /// Used to create new lease sets.
@@ -169,7 +211,7 @@ pub struct SamSession<R: Runtime> {
     /// `STREAM CONNECT` is marked pending if there is no active lease set for the remote
     /// destination. The stream is moved from pending to active/rejected, based on the lease set
     /// query result.
-    pending_outbound: HashMap<DestinationId, PendingStreamState<R>>,
+    pending_outbound: HashMap<DestinationId, PendingSessionState<R>>,
 
     /// Receiver for commands sent for this session.
     ///
@@ -179,6 +221,9 @@ pub struct SamSession<R: Runtime> {
 
     /// Session ID.
     session_id: Arc<str>,
+
+    /// Session kind.
+    session_kind: SessionKind,
 
     /// Signing key.
     signing_key: SigningPrivateKey,
@@ -204,7 +249,9 @@ impl<R: Runtime> SamSession<R> {
             options,
             outbound,
             receiver,
+            datagram_tx,
             session_id,
+            session_kind,
             tunnel_pool_handle,
             version,
         } = context;
@@ -298,6 +345,13 @@ impl<R: Runtime> SamSession<R> {
         );
 
         Self {
+            datagram_manager: DatagramManager::new(
+                dest.clone(),
+                datagram_tx,
+                options.clone(),
+                signing_key.clone(),
+                session_kind,
+            ),
             dest: dest.clone(),
             destination: session_destination,
             encryption_key,
@@ -305,6 +359,7 @@ impl<R: Runtime> SamSession<R> {
             pending_outbound: HashMap::new(),
             receiver,
             session_id,
+            session_kind,
             signing_key: signing_key.clone(),
             socket,
             stream_manager: StreamManager::new(dest, signing_key),
@@ -321,6 +376,17 @@ impl<R: Runtime> SamSession<R> {
         destination: Dest,
         options: HashMap<String, String>,
     ) {
+        let SessionKind::Stream = &self.session_kind else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "session style doesn't support streams",
+            );
+
+            return drop(socket);
+        };
+
         tracing::info!(
             target: LOG_TARGET,
             session_id = %self.session_id,
@@ -347,10 +413,12 @@ impl<R: Runtime> SamSession<R> {
 
                 self.pending_outbound.insert(
                     destination_id,
-                    PendingStreamState::AwaitingLeaseSet {
-                        socket,
-                        destination,
-                        options,
+                    PendingSessionState::AwaitingLeaseSet {
+                        protocol: ProtocolKind::Stream {
+                            socket,
+                            destination,
+                            options,
+                        },
                     },
                 );
             }
@@ -365,6 +433,165 @@ impl<R: Runtime> SamSession<R> {
         }
     }
 
+    /// Handle `STREAM ACCEPT` command.
+    ///
+    /// Register the socket as an active listener to [`StreamManager`].
+    ///
+    /// If the session wasn't configured to use streams, reject the accept request.
+    fn on_stream_accept(&mut self, socket: SamSocket<R>, options: HashMap<String, String>) {
+        let SessionKind::Stream = &self.session_kind else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "session style doesn't support streams",
+            );
+
+            return drop(socket);
+        };
+
+        if let Err(error) = self.stream_manager.register_listener(ListenerKind::Ephemeral {
+            socket,
+            silent: options
+                .get("SILENT")
+                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                session_id = %self.session_id,
+                "failed to register ephemeral listener",
+            );
+        }
+    }
+
+    /// Handle `STREAM FORWARD` command.
+    ///
+    /// Register the socket as an active listener to [`StreamManager`].
+    ///
+    /// If the session wasn't configured to use streams, reject the forward request.
+    fn on_stream_forward(
+        &mut self,
+        socket: SamSocket<R>,
+        port: u16,
+        options: HashMap<String, String>,
+    ) {
+        let SessionKind::Stream = &self.session_kind else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "session style doesn't support streams",
+            );
+
+            return drop(socket);
+        };
+
+        if let Err(error) = self.stream_manager.register_listener(ListenerKind::Persistent {
+            socket,
+            port,
+            silent: options
+                .get("SILENT")
+                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                session_id = %self.session_id,
+                "failed to register persistent listener",
+            );
+        }
+    }
+
+    /// Send datagram to destination.
+    ///
+    /// If the session wasn't configured to use streams, the datagram is dropped.
+    fn on_send_datagram(&mut self, destination: Dest, datagram: Vec<u8>) {
+        if let SessionKind::Stream = &self.session_kind {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                stream_kind = ?self.session_kind,
+                "session style doesn't support datagrams",
+            );
+            return;
+        }
+
+        tracing::info!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            destination_id = %destination.id(),
+            style = ?self.session_kind,
+            "send datagram",
+        );
+        let destination_id = destination.id();
+
+        match self.destination.query_lease_set(&destination_id) {
+            LeaseSetStatus::Found => {
+                let datagram = self.datagram_manager.make_datagram(datagram);
+
+                if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
+                    .with_protocol(self.session_kind.into())
+                    .build()
+                {
+                    if let Err(error) = self.destination.send_message(&destination_id, message) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = %self.session_id,
+                            destination_id = %destination.id(),
+                            ?error,
+                            "failed to send repliable datagram",
+                        )
+                    }
+                };
+            }
+            LeaseSetStatus::NotFound => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    session_id = %self.session_id,
+                    %destination_id,
+                    "lease set query started, mark outbound datagram as pending",
+                );
+
+                self.pending_outbound.insert(
+                    destination_id,
+                    PendingSessionState::AwaitingLeaseSet {
+                        protocol: ProtocolKind::Datagram {
+                            destination,
+                            datagrams: vec![datagram],
+                        },
+                    },
+                );
+            }
+            LeaseSetStatus::Pending => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = %self.session_id,
+                    %destination_id,
+                    "received datagram while session was pending",
+                );
+
+                match self.pending_outbound.get_mut(&destination_id) {
+                    Some(PendingSessionState::AwaitingLeaseSet {
+                        protocol: ProtocolKind::Datagram { datagrams, .. },
+                    }) => {
+                        datagrams.push(datagram);
+                    }
+                    state => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = %self.session_id,
+                            %destination_id,
+                            ?state,
+                            "invalid state for repliable datagram",
+                        );
+                        debug_assert!(false);
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle succeeded lease set query result.
     ///
     /// Lease set query is initiated only if the client wants to create a new session with remote
@@ -372,56 +599,84 @@ impl<R: Runtime> SamSession<R> {
     /// remote destination.
     fn on_lease_set_found(&mut self, destination_id: DestinationId) {
         match self.pending_outbound.remove(&destination_id) {
-            Some(PendingStreamState::AwaitingLeaseSet {
-                socket,
-                destination,
-                options,
-            }) => {
-                let destination_id = destination.id();
-                let (packet, stream_id) = self.stream_manager.create_stream(
-                    destination_id.clone(),
+            Some(PendingSessionState::AwaitingLeaseSet { protocol }) => match protocol {
+                ProtocolKind::Stream {
                     socket,
-                    options
-                        .get("SILENT")
-                        .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
-                );
+                    destination,
+                    options,
+                } => {
+                    let destination_id = destination.id();
+                    let (packet, stream_id) = self.stream_manager.create_stream(
+                        destination_id.clone(),
+                        socket,
+                        options
+                            .get("SILENT")
+                            .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+                    );
 
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    session_id = ?self.session_id,
-                    %destination_id,
-                    ?stream_id,
-                    "lease set found, create outbound stream",
-                );
-
-                self.pending_outbound.insert(
-                    destination_id.clone(),
-                    PendingStreamState::AwaitingSession { stream_id },
-                );
-
-                let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
-                    .with_protocol(Protocol::Streaming)
-                    .build()
-                else {
-                    tracing::error!(
+                    tracing::trace!(
                         target: LOG_TARGET,
                         session_id = ?self.session_id,
-                        "failed to create i2cp payload",
+                        %destination_id,
+                        ?stream_id,
+                        "lease set found, create outbound stream",
                     );
-                    debug_assert!(false);
-                    return;
-                };
 
-                if let Err(error) = self.destination.send_message(&destination_id, message) {
-                    tracing::error!(
-                        target: LOG_TARGET,
-                        session_id = ?self.session_id,
-                        ?error,
-                        "failed to send message to remote peer",
+                    // mark the stream as pending & waiting for session to be opened
+                    //
+                    // from now on `StreamManager` will drive forward the stream progress and will
+                    // emit an event when the stream opens/fails to open
+                    self.pending_outbound.insert(
+                        destination_id.clone(),
+                        PendingSessionState::AwaitingSession { stream_id },
                     );
-                    debug_assert!(false);
+
+                    let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
+                        .with_protocol(Protocol::Streaming)
+                        .build()
+                    else {
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            "failed to create i2cp payload",
+                        );
+                        debug_assert!(false);
+                        return;
+                    };
+
+                    if let Err(error) = self.destination.send_message(&destination_id, message) {
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            ?error,
+                            "failed to send message to remote peer",
+                        );
+                        debug_assert!(false);
+                    }
                 }
-            }
+                ProtocolKind::Datagram {
+                    destination,
+                    datagrams,
+                } => datagrams.into_iter().for_each(|datagram| {
+                    let datagram = self.datagram_manager.make_datagram(datagram);
+
+                    if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
+                        .with_protocol(self.session_kind.into())
+                        .build()
+                    {
+                        if let Err(error) = self.destination.send_message(&destination_id, message)
+                        {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                session_id = %self.session_id,
+                                destination_id = %destination.id(),
+                                ?error,
+                                "failed to send repliable datagram",
+                            )
+                        }
+                    };
+                }),
+            },
             state => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -440,12 +695,22 @@ impl<R: Runtime> SamSession<R> {
     /// Client is notified that the remote destination is not reachable and the socket is closed.
     fn on_lease_set_not_found(&mut self, destination_id: DestinationId, error: QueryError) {
         match self.pending_outbound.remove(&destination_id) {
-            Some(PendingStreamState::AwaitingLeaseSet { mut socket, .. }) => {
-                R::spawn(async move {
-                    socket
-                        .send_message_blocking(b"STREAM STATUS STATUS=CANT_REACH_PEER".to_vec())
-                        .await;
-                });
+            Some(PendingSessionState::AwaitingLeaseSet { protocol }) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = ?self.session_id,
+                    %destination_id,
+                    ?protocol,
+                    "failed to find lease set",
+                );
+
+                if let ProtocolKind::Stream { mut socket, .. } = protocol {
+                    R::spawn(async move {
+                        socket
+                            .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
+                            .await;
+                    });
+                }
             }
             state => {
                 tracing::warn!(
@@ -465,26 +730,19 @@ impl<R: Runtime> SamSession<R> {
         messages
             .into_iter()
             .for_each(|message| match I2cpPayload::decompress::<R>(message) {
-                Some(I2cpPayload {
-                    dst_port,
-                    payload,
-                    protocol,
-                    src_port,
-                }) => {
+                Some(payload) => {
                     tracing::trace!(
                         target: LOG_TARGET,
                         session_id = ?self.session_id,
-                        ?src_port,
-                        ?dst_port,
-                        ?protocol,
+                        src_port = ?payload.src_port,
+                        dst_port = ?payload.dst_port,
+                        protocol = ?payload.protocol,
                         "handle protocol payload",
                     );
 
-                    match protocol {
+                    match payload.protocol {
                         Protocol::Streaming => {
-                            if let Err(error) =
-                                self.stream_manager.on_packet(src_port, dst_port, payload)
-                            {
+                            if let Err(error) = self.stream_manager.on_packet(payload) {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     session_id = ?self.session_id,
@@ -493,11 +751,15 @@ impl<R: Runtime> SamSession<R> {
                                 );
                             }
                         }
-                        protocol => tracing::warn!(
-                            target: LOG_TARGET,
-                            ?protocol,
-                            "unsupported protocol",
-                        ),
+                        protocol =>
+                            if let Err(error) = self.datagram_manager.on_datagram(payload) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    session_id = ?self.session_id,
+                                    ?error,
+                                    "failed to handle datagram",
+                                );
+                            },
                     }
                 }
                 None => tracing::warn!(
@@ -538,42 +800,16 @@ impl<R: Runtime> Future for SamSession<R> {
                     options,
                 })) => self.on_stream_connect(socket, destination, options),
                 Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) =>
-                    if let Err(error) =
-                        self.stream_manager.register_listener(ListenerKind::Ephemeral {
-                            socket,
-                            silent: options
-                                .get("SILENT")
-                                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
-                        })
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            session_id = %self.session_id,
-                            "failed to register ephemeral listener",
-                        );
-                    },
+                    self.on_stream_accept(socket, options),
                 Poll::Ready(Some(SamSessionCommand::Forward {
                     socket,
                     port,
                     options,
-                })) =>
-                    if let Err(error) =
-                        self.stream_manager.register_listener(ListenerKind::Persistent {
-                            socket,
-                            port,
-                            silent: options
-                                .get("SILENT")
-                                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
-                        })
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            session_id = %self.session_id,
-                            "failed to register persistent listener",
-                        );
-                    },
+                })) => self.on_stream_forward(socket, port, options),
+                Poll::Ready(Some(SamSessionCommand::SendDatagram {
+                    destination,
+                    datagram,
+                })) => self.on_send_datagram(destination, datagram),
                 Poll::Ready(Some(SamSessionCommand::Dummy)) => unreachable!(),
             }
         }
@@ -677,7 +913,7 @@ impl<R: Runtime> Future for SamSession<R> {
                         destination_id = %destination_id,
                         "session termianted with remote",
                     );
-                    // TODO: implement
+                    self.stream_manager.remove_session(&destination_id);
                 }
             }
         }

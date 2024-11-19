@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 /// Protocol type.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Protocol {
     /// Streaming protocol.
     Streaming,

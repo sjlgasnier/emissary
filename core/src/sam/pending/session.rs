@@ -22,7 +22,7 @@ use crate::{
     primitives::{Lease, TunnelId},
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamCommand, SamVersion},
+        parser::{DestinationKind, SamCommand, SamVersion, SessionKind},
         session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
@@ -31,6 +31,7 @@ use crate::{
 
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use thingbuf::mpsc::{Receiver, Sender};
 
 use alloc::{string::String, sync::Arc};
 use core::{
@@ -39,7 +40,6 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use thingbuf::mpsc::Receiver;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::pending::session";
@@ -61,6 +61,9 @@ pub struct SamSessionContext<R: Runtime> {
     /// Session ID.
     pub session_id: Arc<str>,
 
+    /// Session kind.
+    pub session_kind: SessionKind,
+
     /// Negotiated version.
     pub version: SamVersion,
 
@@ -75,6 +78,9 @@ pub struct SamSessionContext<R: Runtime> {
 
     /// RX channel for receiving commands to an active session.
     pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+    /// TX channel which can be used to send datagrams to clients.
+    pub datagram_tx: Sender<(u16, Vec<u8>)>,
 }
 
 /// State of the pending I2CP client session.
@@ -86,6 +92,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// ID of the client session.
         session_id: Arc<str>,
+
+        /// Session kind.
+        session_kind: SessionKind,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -106,6 +115,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// RX channel for receiving commands to an active session.
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+        /// TX channel which can be used to send datagrams to clients.
+        datagram_tx: Sender<(u16, Vec<u8>)>,
     },
 
     /// Building tunnels.
@@ -115,6 +127,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// Session ID.
         session_id: Arc<str>,
+
+        /// Session kind.
+        session_kind: SessionKind,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -133,6 +148,9 @@ enum PendingSessionState<R: Runtime> {
 
         /// RX channel for receiving commands to an active session.
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+        /// TX channel which can be used to send datagrams to clients.
+        datagram_tx: Sender<(u16, Vec<u8>)>,
 
         /// Active inbound tunnels and their leases.
         inbound: HashMap<TunnelId, Lease>,
@@ -161,16 +179,20 @@ impl<R: Runtime> PendingSamSession<R> {
         socket: SamSocket<R>,
         destination: DestinationKind,
         session_id: Arc<str>,
+        session_kind: SessionKind,
         options: HashMap<String, String>,
         version: SamVersion,
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+        datagram_tx: Sender<(u16, Vec<u8>)>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
         netdb_handle: NetDbHandle,
     ) -> Self {
         Self {
             state: PendingSessionState::BuildingTunnelPool {
+                datagram_tx,
                 socket,
                 session_id,
+                session_kind,
                 options,
                 version,
                 receiver,
@@ -191,10 +213,12 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                 PendingSessionState::BuildingTunnelPool {
                     socket,
                     session_id,
+                    session_kind,
                     options,
                     destination,
                     version,
                     receiver,
+                    datagram_tx,
                     netdb_handle,
                     mut tunnel_pool_future,
                 } => match tunnel_pool_future.poll_unpin(cx) {
@@ -208,11 +232,13 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
                             handle,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             inbound: HashMap::new(),
                             outbound: HashSet::new(),
@@ -222,10 +248,12 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnelPool {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             tunnel_pool_future,
                         };
@@ -235,10 +263,12 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                 PendingSessionState::BuildingTunnels {
                     socket,
                     session_id,
+                    session_kind,
                     options,
                     destination,
                     version,
                     receiver,
+                    datagram_tx,
                     netdb_handle,
                     mut handle,
                     mut inbound,
@@ -248,11 +278,13 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
                             netdb_handle,
                             receiver,
+                            datagram_tx,
                             handle,
                             inbound,
                             outbound,
@@ -277,12 +309,14 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             self.state = PendingSessionState::BuildingTunnels {
                                 socket,
                                 session_id,
+                                session_kind,
                                 options,
                                 destination,
                                 version,
                                 netdb_handle,
                                 handle,
                                 receiver,
+                                datagram_tx,
                                 inbound,
                                 outbound,
                             };
@@ -304,8 +338,10 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             outbound,
                             version,
                             session_id,
+                            session_kind,
                             socket,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
@@ -327,12 +363,14 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             self.state = PendingSessionState::BuildingTunnels {
                                 socket,
                                 session_id,
+                                session_kind,
                                 options,
                                 destination,
                                 version,
                                 netdb_handle,
                                 handle,
                                 receiver,
+                                datagram_tx,
                                 inbound,
                                 outbound,
                             };
@@ -354,8 +392,10 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             outbound,
                             version,
                             session_id,
+                            session_kind,
                             socket,
                             receiver,
+                            datagram_tx,
                             netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
@@ -372,12 +412,14 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
                             netdb_handle,
                             handle,
                             receiver,
+                            datagram_tx,
                             inbound,
                             outbound,
                         };
@@ -394,12 +436,14 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
                             netdb_handle,
                             handle,
                             receiver,
+                            datagram_tx,
                             inbound,
                             outbound,
                         };
@@ -415,12 +459,14 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         self.state = PendingSessionState::BuildingTunnels {
                             socket,
                             session_id,
+                            session_kind,
                             options,
                             destination,
                             version,
                             netdb_handle,
                             handle,
                             receiver,
+                            datagram_tx,
                             inbound,
                             outbound,
                         };

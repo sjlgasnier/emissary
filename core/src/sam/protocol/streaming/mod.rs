@@ -19,6 +19,7 @@
 use crate::{
     crypto::{base64_encode, SigningPrivateKey},
     error::StreamingError,
+    i2cp::I2cpPayload,
     primitives::{Destination, DestinationId},
     runtime::{Instant, JoinSet, Runtime},
     sam::{
@@ -551,12 +552,14 @@ impl<R: Runtime> StreamManager<R> {
     }
 
     /// Handle `payload` received from `src_port` to `dst_port`.
-    pub fn on_packet(
-        &mut self,
-        src_port: u16,
-        dst_port: u16,
-        payload: Vec<u8>,
-    ) -> Result<(), StreamingError> {
+    pub fn on_packet(&mut self, payload: I2cpPayload) -> Result<(), StreamingError> {
+        let I2cpPayload {
+            dst_port,
+            payload,
+            src_port,
+            ..
+        } = payload;
+
         let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
         tracing::trace!(
@@ -903,6 +906,7 @@ mod tests {
     use super::*;
     use crate::{
         primitives::Destination,
+        protocol::Protocol,
         runtime::{
             mock::{MockRuntime, MockTcpStream},
             TcpStream,
@@ -982,7 +986,14 @@ mod tests {
             .collect::<VecDeque<_>>();
 
         // register syn packet and verify the stream is pending
-        assert!(manager.on_packet(0u16, 0u16, packets.pop_front().unwrap()).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload: packets.pop_front().unwrap(),
+            })
+            .is_ok());
         assert_eq!(manager.pending_inbound.len(), 1);
 
         // reset timer
@@ -992,8 +1003,22 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(20)).await;
 
         // register two other pending streams
-        assert!(manager.on_packet(0u16, 0u16, packets.pop_front().unwrap()).is_ok());
-        assert!(manager.on_packet(0u16, 0u16, packets.pop_front().unwrap()).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload: packets.pop_front().unwrap(),
+            })
+            .is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload: packets.pop_front().unwrap(),
+            })
+            .is_ok());
         assert_eq!(manager.pending_inbound.len(), 3);
 
         // poll manager until the first stream is pruned
@@ -1057,7 +1082,14 @@ mod tests {
             .build_and_sign(&signing_key)
             .to_vec();
 
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload: packet,
+            })
+            .is_ok());
         assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
@@ -1126,7 +1158,14 @@ mod tests {
             .build_and_sign(&signing_key)
             .to_vec();
 
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload: packet,
+            })
+            .is_ok());
         assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
@@ -1190,7 +1229,14 @@ mod tests {
             .build_and_sign(&signing_key)
             .to_vec();
 
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
         assert_eq!(manager.pending_inbound.len(), 1);
 
         // register new silent listener which is ready immediately
@@ -1262,7 +1308,14 @@ mod tests {
             .build_and_sign(&signing_key)
             .to_vec();
 
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
         assert_eq!(manager.pending_inbound.len(), 1);
 
         // poll manager until ack packet is received
@@ -1309,7 +1362,14 @@ mod tests {
                     .build()
                     .to_vec();
 
-                assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+                assert!(manager
+                    .on_packet(I2cpPayload {
+                        src_port: 0u16,
+                        dst_port: 0u16,
+                        protocol: Protocol::Streaming,
+                        payload: packet
+                    })
+                    .is_ok());
 
                 // poll manager until ack packet is received
                 match tokio::time::timeout(Duration::from_secs(5), manager.next())
@@ -1399,7 +1459,14 @@ mod tests {
         let (packet, stream_id) =
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
-        assert!(manager1.on_packet(0u16, 0u16, packet.to_vec()).is_ok());
+        assert!(manager1
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet.to_vec()
+            })
+            .is_ok());
 
         assert!(std::matches!(
             manager1.next().await,
@@ -1420,7 +1487,15 @@ mod tests {
             };
 
         assert_eq!(destination_id, manager2.destination_id);
-        assert!(manager2.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager2
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
+
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1524,7 +1599,14 @@ mod tests {
             .to_vec();
 
         // handle syn packet and spawn manager in the background
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
 
         tokio::spawn(async move { while let Some(_) = manager.next().await {} });
 
@@ -1574,7 +1656,14 @@ mod tests {
             .to_vec();
 
         // handle syn packet and spawn manager in the background
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
 
         tokio::spawn(async move { while let Some(_) = manager.next().await {} });
 
@@ -1621,7 +1710,14 @@ mod tests {
             .to_vec();
 
         // handle syn packet and spawn manager in the background
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
         assert!(!manager.pending_inbound.is_empty());
 
         // register listener for `manager1`
@@ -1678,7 +1774,14 @@ mod tests {
             .to_vec();
 
         // handle syn packet and spawn manager in the background
-        assert!(manager.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
         assert!(!manager.pending_inbound.is_empty());
 
         // register listener for `manager1`
@@ -1735,7 +1838,14 @@ mod tests {
         let (packet, stream_id) =
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
-        assert!(manager1.on_packet(0u16, 0u16, packet.to_vec()).is_ok());
+        assert!(manager1
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet.to_vec(),
+            })
+            .is_ok());
 
         assert!(std::matches!(
             manager1.next().await,
@@ -1756,7 +1866,14 @@ mod tests {
             };
 
         assert_eq!(destination_id, manager2.destination_id);
-        assert!(manager2.on_packet(0u16, 0u16, packet).is_ok());
+        assert!(manager2
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet,
+            })
+            .is_ok());
 
         // remove session to manager2 due to error
         manager1.remove_session(&manager2.destination_id);
@@ -1821,7 +1938,14 @@ mod tests {
             78, 128, 175, 18, 79, 142, 32, 0, 13, 28, 247, 4, 222, 7,
         ];
 
-        assert!(manager.on_packet(13, 37, payload).is_ok());
+        assert!(manager
+            .on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload,
+            })
+            .is_ok());
     }
 
     #[tokio::test]
@@ -1865,7 +1989,12 @@ mod tests {
         ];
 
         assert_eq!(
-            manager.on_packet(13, 37, payload),
+            manager.on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload,
+            }),
             Err(StreamingError::InvalidSignature)
         );
     }
@@ -1911,7 +2040,12 @@ mod tests {
         ];
 
         assert_eq!(
-            manager.on_packet(13, 37, payload),
+            manager.on_packet(I2cpPayload {
+                src_port: 13u16,
+                dst_port: 37u16,
+                protocol: Protocol::Streaming,
+                payload,
+            }),
             Err(StreamingError::ReplayProtectionCheckFailed)
         );
     }

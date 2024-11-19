@@ -102,14 +102,17 @@ impl<T: AsRef<[u8]>> From<T> for DestinationId {
 /// Destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
-    /// Destination's verifying key.
-    verifying_key: Option<SigningPublicKey>,
+    /// Destination ID.
+    destination_id: DestinationId,
 
     /// Destinations' identity hash.
     identity_hash: Bytes,
 
-    /// Destination ID.
-    destination_id: DestinationId,
+    /// Serialized destination, if any.
+    serialized: Option<Bytes>,
+
+    /// Destination's verifying key.
+    verifying_key: Option<SigningPublicKey>,
 }
 
 impl Destination {
@@ -118,18 +121,20 @@ impl Destination {
         let identity_hash = Sha256::new()
             .update(
                 Self {
-                    verifying_key: Some(verifying_key.clone()),
-                    identity_hash: Bytes::from(vec![0]),
                     destination_id: DestinationId::from(vec![0]),
+                    identity_hash: Bytes::from(vec![0]),
+                    serialized: None,
+                    verifying_key: Some(verifying_key.clone()),
                 }
                 .serialize(),
             )
             .finalize();
 
         Self {
+            destination_id: DestinationId::from(identity_hash.clone()),
+            identity_hash: Bytes::from(identity_hash),
+            serialized: None,
             verifying_key: Some(verifying_key),
-            identity_hash: Bytes::from(identity_hash.clone()),
-            destination_id: DestinationId::from(identity_hash),
         }
     }
 
@@ -190,13 +195,15 @@ impl Destination {
         };
 
         let identity_hash = Bytes::from(Sha256::new().update(&input[..destination_len]).finalize());
+        let serialized = Some(Bytes::from(input[..destination_len].to_vec()));
 
         Ok((
             rest,
             Destination {
+                destination_id: DestinationId::from(identity_hash.clone()),
+                identity_hash,
+                serialized,
                 verifying_key,
-                identity_hash: identity_hash.clone(),
-                destination_id: DestinationId::from(identity_hash),
             },
         ))
     }
@@ -207,7 +214,11 @@ impl Destination {
     }
 
     /// Serialize [`Destination`] into a byte vector.
-    pub fn serialize(&self) -> BytesMut {
+    pub fn serialize(&self) -> Bytes {
+        if let Some(serialized) = &self.serialized {
+            return serialized.clone();
+        }
+
         let mut out = BytesMut::with_capacity(self.serialized_len());
 
         out.put_slice(&[0u8; 32]);
@@ -228,7 +239,7 @@ impl Destination {
             }
         }
 
-        out
+        out.freeze()
     }
 
     /// Get serialized length of [`Destination`].
@@ -280,7 +291,7 @@ mod tests {
 
     #[test]
     fn deserialize_valid_destination() {
-        let input = [
+        let input = vec![
             216, 194, 83, 151, 200, 24, 84, 242, 184, 222, 34, 89, 37, 175, 254, 228, 173, 78, 114,
             24, 15, 104, 241, 215, 166, 166, 102, 40, 136, 138, 22, 252, 114, 203, 192, 101, 32,
             156, 212, 74, 177, 120, 153, 172, 221, 181, 175, 190, 178, 17, 71, 33, 39, 211, 208,
@@ -304,12 +315,15 @@ mod tests {
             104, 19, 165, 200, 234, 67, 168, 253, 137, 220, 5, 0, 4, 0, 7, 0, 0,
         ];
 
-        assert!(Destination::parse(input).is_some());
+        let destination = Destination::parse(&input).unwrap();
+        let serialized = destination.serialize();
+
+        assert_eq!(input, *serialized);
     }
 
     #[test]
     fn null_certificate_works() {
-        let input = [
+        let input = vec![
             89, 215, 97, 216, 78, 133, 203, 37, 193, 23, 180, 175, 81, 129, 202, 116, 223, 175,
             141, 253, 255, 55, 171, 170, 65, 99, 94, 4, 52, 204, 208, 253, 247, 98, 56, 144, 8,
             235, 50, 121, 218, 227, 152, 54, 102, 88, 90, 215, 80, 151, 201, 45, 105, 194, 111,
@@ -334,6 +348,9 @@ mod tests {
             2, 17, 1, 239, 1, 16, 254, 186, 2, 0, 215, 250, 169, 148, 79, 97,
         ];
 
-        assert!(Destination::parse(&input[..387]).is_some());
+        let destination = Destination::parse(&input[..387]).unwrap();
+        let serialized = destination.serialize();
+
+        assert_eq!(&input[..387], &*serialized);
     }
 }
