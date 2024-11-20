@@ -113,6 +113,9 @@ pub struct NetDb<R: Runtime> {
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
 
+    /// Has the router been configured to act as a floodfill router.
+    floodfill: bool,
+
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<NetDbAction, NetDbActionRecycle>,
 
@@ -139,6 +142,7 @@ impl<R: Runtime> NetDb<R> {
     /// Create new [`NetDb`].
     pub fn new(
         local_router_id: RouterId,
+        floodfill: bool,
         service: TransportService,
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
@@ -152,9 +156,10 @@ impl<R: Runtime> NetDb<R> {
 
         metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
 
-        tracing::trace!(
+        tracing::info!(
             target: LOG_TARGET,
             num_floodfills = ?floodfills.len(),
+            ?floodfill,
             "starting netdb",
         );
 
@@ -165,6 +170,7 @@ impl<R: Runtime> NetDb<R> {
                 active: HashMap::new(),
                 dht: Dht::new(local_router_id.clone(), floodfills, metrics.clone()),
                 exploratory_pool_handle,
+                floodfill,
                 handle_rx,
                 local_router_id,
                 metrics,

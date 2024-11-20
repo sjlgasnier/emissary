@@ -34,6 +34,10 @@ pub struct Arguments {
     #[arg(short, long)]
     pub log: Option<String>,
 
+    /// Should the node be run as floodfill router.
+    #[arg(long, action=clap::ArgAction::SetTrue)]
+    pub floodfill: Option<bool>,
+
     /// Command.
     ///
     /// If no command is provided, `emissary` starts as an i2p router

@@ -74,6 +74,7 @@ impl<R: Runtime> Router<R> {
         let ntcp2_config = config.ntcp2_config.clone();
         let i2cp_config = config.i2cp_config.clone();
         let sam_config = config.samv3_config.clone();
+        let floodfill = config.floodfill;
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -135,6 +136,7 @@ impl<R: Runtime> Router<R> {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
             let (netdb, netdb_handle) = NetDb::<R>::new(
                 local_router_id,
+                floodfill,
                 transport_service,
                 router_storage.clone(),
                 metrics_handle.clone(),

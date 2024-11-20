@@ -143,7 +143,7 @@ impl<R: Runtime> TunnelManager<R> {
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
     ) -> (Self, TunnelManagerHandle, TunnelPoolHandle) {
-        tracing::trace!(
+        tracing::info!(
             target: LOG_TARGET,
             "starting tunnel manager",
         );
