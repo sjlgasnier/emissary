@@ -56,6 +56,14 @@ impl RouterStorage {
         }
     }
 
+    /// Insert `router` into [`RouterStorage`].
+    pub fn insert(&self, router: RouterInfo) {
+        let router_id = router.identity().id();
+        let mut inner = self.routers.write();
+
+        inner.insert(router_id, router);
+    }
+
     /// Return the number of routers in [`RouterStorage`].
     pub fn len(&self) -> usize {
         self.routers.read().len()

@@ -36,6 +36,7 @@ use crate::{
         StaticPublicKey,
     },
     primitives::{RouterInfo, Str, TransportKind},
+    router_storage::RouterStorage,
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     transports::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
@@ -48,7 +49,7 @@ use crate::{
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use alloc::{vec, vec::Vec};
-use core::{future::Future, net::SocketAddr, str::FromStr};
+use core::{future::Future, marker::PhantomData, net::SocketAddr, str::FromStr};
 
 mod active;
 mod initiator;
@@ -123,34 +124,36 @@ pub(super) struct ResponderOptions {
 ///
 /// Responsible for creating context for inbound and outboudn NTCP2 sessions.
 pub struct SessionManager<R: Runtime> {
-    /// Runtime.
-    runtime: R,
-
-    /// State that is common for all outbound connections.
-    outbound_initial_state: Vec<u8>,
+    /// Chaining key.
+    // TODO: `bytes::Bytes`?
+    chaining_key: Vec<u8>,
 
     /// State that is common for all inbound connections.
     // TODO: `bytes::Bytes`?
     inbound_initial_state: Vec<u8>,
 
-    /// Chaining key.
-    // TODO: `bytes::Bytes`?
-    chaining_key: Vec<u8>,
+    /// Local NTCP2 IV.
+    local_iv: Vec<u8>,
 
     /// Local NTCP2 static key.
     local_key: StaticPrivateKey,
 
-    /// Local NTCP2 IV.
-    local_iv: Vec<u8>,
+    /// Local router info.
+    local_router_info: RouterInfo,
 
     /// Local signing key.
     local_signing_key: SigningPrivateKey,
 
-    /// Local router info.
-    local_router_info: RouterInfo,
+    /// State that is common for all outbound connections.
+    outbound_initial_state: Vec<u8>,
 
+    /// Router storage.
+    router_storage: RouterStorage,
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
 }
 
 impl<R: Runtime> SessionManager<R> {
@@ -168,6 +171,7 @@ impl<R: Runtime> SessionManager<R> {
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
+        router_storage: RouterStorage,
     ) -> crate::Result<Self> {
         let local_key = StaticPrivateKey::from(local_key);
 
@@ -187,15 +191,16 @@ impl<R: Runtime> SessionManager<R> {
             .finalize();
 
         Ok(Self {
-            runtime,
-            local_key,
-            local_iv,
-            local_signing_key,
-            local_router_info,
             chaining_key,
             inbound_initial_state,
+            local_iv,
+            local_key,
+            local_router_info,
+            local_signing_key,
             outbound_initial_state,
+            router_storage,
             subsystem_handle,
+            _runtime: Default::default(),
         })
     }
 
@@ -216,7 +221,6 @@ impl<R: Runtime> SessionManager<R> {
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
-        let runtime = self.runtime.clone();
         let mut subsystem_handle = self.subsystem_handle.clone();
 
         async move {
@@ -322,7 +326,6 @@ impl<R: Runtime> SessionManager<R> {
             Ok(Ntcp2Session::<R>::new(
                 Role::Initiator,
                 router,
-                runtime.clone(),
                 stream,
                 key_context,
                 subsystem_handle,
@@ -339,10 +342,10 @@ impl<R: Runtime> SessionManager<R> {
         let local_router_hash = self.local_router_info.identity().hash().to_vec();
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
-        let runtime = self.runtime.clone();
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
         let iv = self.local_iv.clone();
+        let router_storage = self.router_storage.clone();
 
         async move {
             tracing::trace!(
@@ -375,14 +378,17 @@ impl<R: Runtime> SessionManager<R> {
             stream.read_exact(&mut message).await?;
 
             match responder.finalize(message) {
-                Ok((key_context, router)) => Ok(Ntcp2Session::new(
-                    Role::Responder,
-                    router,
-                    runtime.clone(),
-                    stream,
-                    key_context,
-                    subsystem_handle,
-                )),
+                Ok((key_context, router)) => {
+                    router_storage.insert(router.clone());
+
+                    Ok(Ntcp2Session::new(
+                        Role::Responder,
+                        router,
+                        stream,
+                        key_context,
+                        subsystem_handle,
+                    ))
+                }
                 Err(error) => {
                     tracing::warn!(
                         target: LOG_TARGET,

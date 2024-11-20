@@ -126,9 +126,6 @@ pub struct Ntcp2Session<R: Runtime> {
     /// `RouterInfo` of the remote peer.
     router_info: RouterInfo,
 
-    /// Runtime.
-    runtime: R,
-
     /// Cipher for outbound messages.
     send_cipher: ChaChaPoly,
 
@@ -150,7 +147,6 @@ impl<R: Runtime> Ntcp2Session<R> {
     pub fn new(
         role: Role,
         router_info: RouterInfo,
-        runtime: R,
         stream: R::TcpStream,
         key_context: KeyContext,
         mut subsystem_handle: SubsystemHandle,
@@ -173,7 +169,6 @@ impl<R: Runtime> Ntcp2Session<R> {
             role,
             router: router_info.identity().id(),
             router_info,
-            runtime,
             send_cipher: ChaChaPoly::new(&send_key),
             sip,
             stream,

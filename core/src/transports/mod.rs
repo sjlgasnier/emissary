@@ -368,6 +368,7 @@ impl<R: Runtime> TransportManager<R> {
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),
+                self.router_storage.clone(),
             )
             .await?,
         ));
