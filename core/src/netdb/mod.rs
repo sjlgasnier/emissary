@@ -21,7 +21,7 @@ use crate::{
     error::QueryError,
     i2np::{
         database::{
-            lookup::{DatabaseLookupBuilder, LookupType},
+            lookup::{DatabaseLookupBuilder, LookupType, ReplyType},
             store::{DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload},
         },
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
@@ -31,12 +31,12 @@ use crate::{
         handle::{NetDbAction, NetDbActionRecycle},
         metrics::*,
     },
-    primitives::{LeaseSet2, RouterId},
+    primitives::{Lease, LeaseSet2, RouterId, TunnelId},
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
-    tunnel::TunnelPoolHandle,
+    tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use bytes::Bytes;
@@ -69,6 +69,53 @@ const LOG_TARGET: &str = "emissary::netdb";
 
 /// `NetDb` query timeout.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Tunnel selector.
+///
+/// Distributes tunnel usage fairly across all tunnels.
+struct TunnelSelector<T: Clone> {
+    /// Iterator index.
+    iterator: usize,
+
+    /// Tunnels.
+    tunnels: Vec<T>,
+}
+
+impl<T: Clone> TunnelSelector<T> {
+    /// Create new [`TunnelSelector`].
+    pub fn new() -> Self {
+        Self {
+            iterator: 0usize,
+            tunnels: Vec::new(),
+        }
+    }
+
+    /// Add `tunnel` into [`TunnelSelector`].
+    pub fn add_tunnel(&mut self, tunnel: T) {
+        self.tunnels.push(tunnel);
+    }
+
+    /// Remove tunnel from [`TunnelSelector`] using predicate.
+    pub fn remove_tunnel(&mut self, predicate: impl Fn(&T) -> bool) {
+        self.tunnels.retain(|tunnel| predicate(tunnel))
+    }
+
+    /// Get next tunnel from [`TunnelSelector`], if any exists.
+    pub fn next_tunnel(&mut self) -> Option<T> {
+        if self.tunnels.is_empty() {
+            return None;
+        }
+
+        let index = {
+            let index = self.iterator;
+            self.iterator = self.iterator.wrapping_add(1usize);
+
+            index
+        };
+
+        Some(self.tunnels[index % self.tunnels.len()].clone())
+    }
+}
 
 /// Floodfill state.
 #[derive(Debug)]
@@ -119,11 +166,17 @@ pub struct NetDb<R: Runtime> {
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<NetDbAction, NetDbActionRecycle>,
 
+    /// Active inbound tunnels.
+    inbound_tunnels: TunnelSelector<Lease>,
+
     /// Local router ID.
     local_router_id: RouterId,
 
     /// Metrics handle.
     metrics: R::MetricsHandle,
+
+    /// Active inbound tunhnels
+    outbound_tunnels: TunnelSelector<TunnelId>,
 
     /// Query timers.
     query_timers: R::JoinSet<Bytes>,
@@ -172,8 +225,10 @@ impl<R: Runtime> NetDb<R> {
                 exploratory_pool_handle,
                 floodfill,
                 handle_rx,
+                inbound_tunnels: TunnelSelector::new(),
                 local_router_id,
                 metrics,
+                outbound_tunnels: TunnelSelector::new(),
                 query_timers: R::join_set(),
                 routers: HashMap::new(),
                 router_storage,
@@ -324,15 +379,44 @@ impl<R: Runtime> NetDb<R> {
             "query leaseset",
         );
 
-        let message = DatabaseLookupBuilder::new(
-            key.clone(),
-            self.local_router_id.clone(),
-            LookupType::Leaseset,
-        )
-        .build();
+        let Some(Lease {
+            router_id,
+            tunnel_id,
+            ..
+        }) = self.inbound_tunnels.next_tunnel()
+        else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                key = ?base32_encode(&key),
+                "cannot send lease set query, no inbound tunnel available",
+            );
+            debug_assert!(false);
+
+            tx.send(Err(QueryError::NoTunnel));
+            return;
+        };
+
+        let Some(outbound_tunnel) = self.outbound_tunnels.next_tunnel() else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                key = ?base32_encode(&key),
+                "cannot send lease set query, no outbound tunnel available",
+            );
+            debug_assert!(false);
+
+            tx.send(Err(QueryError::NoTunnel));
+            return;
+        };
+
+        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
+            .with_reply_type(ReplyType::Tunnel {
+                tunnel_id,
+                router_id,
+            })
+            .build();
 
         let message_id = R::rng().next_u32();
-        let message = MessageBuilder::short()
+        let message = MessageBuilder::standard()
             .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
             .with_message_type(MessageType::DatabaseLookup)
             .with_message_id(message_id)
@@ -349,9 +433,11 @@ impl<R: Runtime> NetDb<R> {
                 let _ = tx.send(Err(QueryError::NoFloodfills));
             }
             false => {
-                // TODO: send over exploratory tunnel pool
-                // TODO: send to multiple floodfills
-                match self.service.send(&floodfills[0], message) {
+                match self.exploratory_pool_handle.send_to_router(
+                    outbound_tunnel,
+                    floodfills[0].clone(),
+                    message,
+                ) {
                     Err(error) => {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -436,6 +522,20 @@ impl<R: Runtime> Future for NetDb<R> {
             match self.exploratory_pool_handle.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
+                    self.outbound_tunnels.add_tunnel(tunnel_id);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
+                    self.outbound_tunnels.remove_tunnel(|tunnel| tunnel != &tunnel_id);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { lease, .. })) => {
+                    self.inbound_tunnels.add_tunnel(lease);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
+                    self.inbound_tunnels.remove_tunnel(|lease| lease.tunnel_id != tunnel_id);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::Message { message })) => self.on_message(message),
+                Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) => return Poll::Ready(()),
                 Poll::Ready(Some(_)) => {}
             }
         }
