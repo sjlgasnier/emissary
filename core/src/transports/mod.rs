@@ -217,6 +217,32 @@ impl TransportService {
             (error, inner)
         })
     }
+
+    /// Create new [`TransportService`] for testing.
+    #[cfg(test)]
+    pub fn new() -> (
+        Self,
+        Receiver<ProtocolCommand>,
+        Sender<InnerSubsystemEvent>,
+        RouterStorage,
+    ) {
+        let (event_tx, event_rx) = channel(64);
+        let (cmd_tx, cmd_rx) = channel(64);
+        let router_storage = RouterStorage::new(&Vec::new());
+
+        (
+            TransportService {
+                cmd_tx,
+                event_rx,
+                pending_events: VecDeque::new(),
+                routers: HashMap::new(),
+                router_storage: router_storage.clone(),
+            },
+            cmd_rx,
+            event_tx,
+            router_storage,
+        )
+    }
 }
 
 impl Stream for TransportService {
