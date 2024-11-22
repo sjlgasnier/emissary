@@ -63,9 +63,8 @@ mod transit;
 #[cfg(test)]
 mod tests;
 
-// TODO: remove `TunnelPoolContextHandle` re-export
 pub use handle::TunnelManagerHandle;
-pub use pool::{TunnelPoolConfig, TunnelPoolContextHandle, TunnelPoolEvent, TunnelPoolHandle};
+pub use pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";

@@ -26,17 +26,13 @@ use crate::{
         },
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
-    netdb::{
-        dht::Dht,
-        handle::{NetDbAction, NetDbActionRecycle},
-        metrics::*,
-    },
+    netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
     primitives::{Lease, LeaseSet2, RouterId, TunnelId},
     router_storage::RouterStorage,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
-    tunnel::{TunnelPoolEvent, TunnelPoolHandle},
+    tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
 use bytes::Bytes;
@@ -56,6 +52,11 @@ use core::{
 };
 
 pub use handle::NetDbHandle;
+
+#[cfg(test)]
+pub use handle::NetDbAction;
+#[cfg(not(test))]
+use handle::NetDbAction;
 
 mod bucket;
 mod dht;
@@ -433,7 +434,7 @@ impl<R: Runtime> NetDb<R> {
                 let _ = tx.send(Err(QueryError::NoFloodfills));
             }
             false => {
-                match self.exploratory_pool_handle.send_to_router(
+                match self.exploratory_pool_handle.sender().try_send_to_router(
                     outbound_tunnel,
                     floodfills[0].clone(),
                     message,
@@ -498,6 +499,12 @@ impl<R: Runtime> NetDb<R> {
                 },
         }
     }
+
+    /// Get `RouterId`'s of the floodfills closest to `key`.
+    fn on_get_closest_floodfills(&mut self, key: Bytes, tx: oneshot::Sender<Vec<RouterId>>) {
+        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+        let _ = tx.send(floodfills);
+    }
 }
 
 impl<R: Runtime> Future for NetDb<R> {
@@ -548,6 +555,8 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_query_leaseset(key, tx),
                 Poll::Ready(Some(NetDbAction::StoreLeaseSet2 { key, leaseset })) =>
                     self.on_store_leaseset(key, leaseset),
+                Poll::Ready(Some(NetDbAction::GetClosestFloodfills { key, tx })) =>
+                    self.on_get_closest_floodfills(key, tx),
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
             }
         }

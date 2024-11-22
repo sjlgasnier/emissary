@@ -99,6 +99,123 @@ impl Default for TunnelPoolEvent {
     }
 }
 
+/// Tunnel sender.
+pub trait TunnelSender: Clone {
+    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
+    ///
+    /// Return an error if the channel is busy/closed.
+    fn try_send_to_router(
+        &self,
+        gateway: TunnelId,
+        router_id: RouterId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError>;
+
+    /// Send `message` via one of the `TunnelPool`'s outbound tunnels to remote tunnel
+    /// identified by (`gateway`, `tunnel_id`) tuple.
+    ///
+    /// Return an error if the channel is busy/closed.
+    fn try_send_to_tunnel(
+        &self,
+        gateway: RouterId,
+        tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError>;
+
+    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
+    ///
+    /// Blocks until the message is sent and returns an error if the channel is closed.
+    fn send_to_router(
+        &self,
+        gateway: TunnelId,
+        router_id: RouterId,
+        message: Vec<u8>,
+    ) -> impl Future<Output = Result<(), ChannelError>> + Send;
+
+    /// Send `message` via one of the `TunnelPool`'s outbound tunnels to remote tunnel
+    /// identified by (`gateway`, `tunnel_id`) tuple.
+    ///
+    /// Blocks until the message is sent and returns an error if the channel is closed.
+    fn send_to_tunnel(
+        &self,
+        gateway: RouterId,
+        tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> impl Future<Output = Result<(), ChannelError>> + Send;
+}
+
+/// Tunnel message sender.
+#[derive(Clone)]
+struct TunnelMessageSender(mpsc::Sender<TunnelMessage>);
+
+impl TunnelSender for TunnelMessageSender {
+    fn try_send_to_router(
+        &self,
+        gateway: TunnelId,
+        router_id: RouterId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError> {
+        self.0
+            .try_send(TunnelMessage::RouterDelivery {
+                gateway,
+                router_id,
+                message,
+            })
+            .map_err(From::from)
+    }
+
+    fn try_send_to_tunnel(
+        &self,
+        gateway: RouterId,
+        tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError> {
+        self.0
+            .try_send(TunnelMessage::TunnelDelivery {
+                gateway,
+                tunnel_id,
+                message,
+            })
+            .map_err(From::from)
+    }
+
+    fn send_to_router(
+        &self,
+        gateway: TunnelId,
+        router_id: RouterId,
+        message: Vec<u8>,
+    ) -> impl Future<Output = Result<(), ChannelError>> {
+        async move {
+            self.0
+                .send(TunnelMessage::RouterDelivery {
+                    gateway,
+                    router_id,
+                    message,
+                })
+                .await
+                .map_err(|_| ChannelError::Closed)
+        }
+    }
+
+    fn send_to_tunnel(
+        &self,
+        gateway: RouterId,
+        tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> impl Future<Output = Result<(), ChannelError>> {
+        async move {
+            self.0
+                .send(TunnelMessage::TunnelDelivery {
+                    gateway,
+                    tunnel_id,
+                    message,
+                })
+                .await
+                .map_err(|_| ChannelError::Closed)
+        }
+    }
+}
+
 /// Tunnel pool handle.
 ///
 /// Allows `Destination`s to communicate with their `TunnelPool`.
@@ -109,8 +226,8 @@ pub struct TunnelPoolHandle {
     /// RX channel for receiving events from `TunnelPool`.
     event_rx: mpsc::Receiver<TunnelPoolEvent>,
 
-    /// TX channel for sending messages to `TunnelPool`.
-    message_tx: mpsc::Sender<TunnelMessage>,
+    /// Implementation of [`TunnelSender`].
+    sender: TunnelMessageSender,
 
     /// TX channel for sending a shutdown command to `TunnelPool`.
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -129,45 +246,12 @@ impl TunnelPoolHandle {
             Self {
                 config,
                 event_rx,
-                message_tx,
+                sender: TunnelMessageSender(message_tx),
                 shutdown_tx: Some(shutdown_tx),
             },
             event_tx,
             shutdown_rx,
         )
-    }
-
-    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
-    pub fn send_to_router(
-        &self,
-        gateway: TunnelId,
-        router_id: RouterId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError> {
-        self.message_tx
-            .try_send(TunnelMessage::RouterDelivery {
-                gateway,
-                router_id,
-                message,
-            })
-            .map_err(From::from)
-    }
-
-    /// Send `message` via one of the `TunnelPool`'s outbound tunnels to remote tunnel
-    /// identified by (`gateway`, `tunnel_id`) tuple.
-    pub fn send_to_tunnel(
-        &self,
-        gateway: RouterId,
-        tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError> {
-        self.message_tx
-            .try_send(TunnelMessage::TunnelDelivery {
-                gateway,
-                tunnel_id,
-                message,
-            })
-            .map_err(From::from)
     }
 
     /// Send shutdown signal to `TunnelPool`.
@@ -180,6 +264,11 @@ impl TunnelPoolHandle {
     /// Get reference to [`TunnelPoolConfig`] of the tunnel pool.
     pub fn config(&self) -> &TunnelPoolConfig {
         &self.config
+    }
+
+    /// Get reference to [`TunnelSender`].
+    pub fn sender(&self) -> &impl TunnelSender {
+        &self.sender
     }
 
     #[cfg(test)]
@@ -198,7 +287,7 @@ impl TunnelPoolHandle {
             Self {
                 config: Default::default(),
                 event_rx,
-                message_tx,
+                sender: TunnelMessageSender(message_tx),
                 shutdown_tx: Some(shutdown_tx),
             },
             message_rx,
@@ -225,7 +314,7 @@ impl TunnelPoolHandle {
             Self {
                 config,
                 event_rx,
-                message_tx,
+                sender: TunnelMessageSender(message_tx),
                 shutdown_tx: Some(shutdown_tx),
             },
             message_rx,

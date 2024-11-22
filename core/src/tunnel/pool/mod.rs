@@ -60,7 +60,7 @@ use core::{
 };
 
 pub use context::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle};
-pub use handle::{TunnelPoolEvent, TunnelPoolHandle};
+pub use handle::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
 pub use selector::{ClientSelector, ExploratorySelector};
 
 mod context;

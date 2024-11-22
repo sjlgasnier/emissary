@@ -21,13 +21,15 @@ use crate::{
     destination::session::{SessionManager, SessionManagerEvent},
     error::{ChannelError, Error, QueryError, SessionError},
     i2np::{
-        database::store::{DatabaseStore, DatabaseStorePayload},
+        database::store::{
+            DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload, ReplyType,
+        },
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
-    primitives::{DestinationId, Lease, LeaseSet2},
+    primitives::{DestinationId, Lease, LeaseSet2, TunnelId},
     runtime::{Instant, JoinSet, Runtime},
-    tunnel::{TunnelPoolEvent, TunnelPoolHandle},
+    tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
 use bytes::Bytes;
@@ -48,8 +50,9 @@ pub mod session;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination";
 
-/// Retry timeout for lease set query.
-const QUERY_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long should [`Destination`] wait before attempting to recontact [`NetDb`]
+/// after the previous call was rejected.
+const NETDB_BACKOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Local lease set expiration timeout.
 const LEASE_SET_EXPIRATION: Duration = Duration::from_secs(9 * 60);
@@ -141,6 +144,9 @@ pub struct Destination<R: Runtime> {
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
 
+    /// Active outbound tunnels.
+    outbound_tunnels: Vec<TunnelId>,
+
     /// Inbound tunnels waiting to be published to `NetDb`.
     pending_inbound: Vec<(Lease, R::Instant)>,
 
@@ -176,16 +182,17 @@ impl<R: Runtime> Destination<R> {
         tunnel_pool_handle: TunnelPoolHandle,
     ) -> Self {
         Self {
-            pending_inbound: Vec::new(),
             destination_id: destination_id.clone(),
             lease_set: lease_set.clone(),
+            lease_set_publish_timer: LeaseSetPublishTimer::new::<R>(),
             netdb_handle,
+            outbound_tunnels: Vec::new(),
+            pending_inbound: Vec::new(),
             pending_queries: HashSet::new(),
             query_futures: R::join_set(),
             remote_destinations: HashMap::new(),
             session_manager: SessionManager::new(destination_id, private_key, lease_set),
             tunnel_pool_handle,
-            lease_set_publish_timer: LeaseSetPublishTimer::new::<R>(),
             waker: None,
         }
     }
@@ -225,7 +232,7 @@ impl<R: Runtime> Destination<R> {
         self.query_futures.push(async move {
             for _ in 0..NUM_QUERY_RETRIES {
                 let Ok(rx) = handle.query_leaseset(Bytes::from(destination_id.to_vec())) else {
-                    R::delay(QUERY_RETRY_TIMEOUT).await;
+                    R::delay(NETDB_BACKOFF_TIMEOUT).await;
                     continue;
                 };
 
@@ -286,7 +293,7 @@ impl<R: Runtime> Destination<R> {
             .with_payload(&message)
             .build();
 
-        if let Err(error) = self.tunnel_pool_handle.send_to_tunnel(
+        if let Err(error) = self.tunnel_pool_handle.sender().try_send_to_tunnel(
             leases[0].router_id.clone(),
             leases[0].tunnel_id,
             message,
@@ -410,31 +417,88 @@ impl<R: Runtime> Destination<R> {
 
     /// Attempt to publish new lease set to `NetDb`.
     pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
-        match self.netdb_handle.store_leaseset(key.clone(), lease_set.clone()) {
-            Ok(()) => {
-                self.lease_set = lease_set.clone();
-                self.lease_set_publish_timer.reset::<R>();
-                self.session_manager.set_local_leaseset(lease_set);
-            }
-            Err(ChannelError::Full) => {
+        let netdb_handle = self.netdb_handle.clone();
+        let tunnel_sender = self.tunnel_pool_handle.sender().clone();
+
+        // store our new lease set proactively to `SessionManager` so it can be given to all active
+        // session right away while publishing the new lease set to NetDb in the background
+        self.session_manager.set_local_leaseset(lease_set.clone());
+
+        // attempt to get an outbound tunnel for sending the database store message
+        //
+        // while technically the destination should always have at least one outbound tunnel, it's
+        // possible that an outbound tunnel built has failed so many times that the previous
+        // outbound tunnels expired, leaving the destination with no outbound tunnel
+        //
+        // TODO: make tunnel selection more random
+        let gateway = match self.outbound_tunnels.get(0) {
+            Some(gateway) => *gateway,
+            None => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     local = %self.destination_id,
-                    "channel to netdb is clogged, try publishing lease set later",
+                    "no outbound tunnel available for lease set publication",
                 );
-                self.lease_set_publish_timer.retry::<R>(key, lease_set);
-
-                if let Some(waker) = self.waker.take() {
-                    waker.wake_by_ref();
-                }
+                debug_assert!(false);
+                return;
             }
-            Err(error) => tracing::error!(
+        };
+
+        R::spawn(async move {
+            let floodfills = {
+                let mut floodfills = None;
+
+                for _ in 0..3 {
+                    match netdb_handle.get_closest_floodfills(key.clone()) {
+                        Ok(query_rx) => match query_rx.await {
+                            Ok(queried) => {
+                                floodfills = Some(queried);
+                                break;
+                            }
+                            Err(_) => return,
+                        },
+                        Err(_) => R::delay(NETDB_BACKOFF_TIMEOUT).await,
+                    }
+                }
+
+                match floodfills {
+                    Some(floodfills) => floodfills,
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to contact netdb after three retries, aborting lease set publish",
+                        );
+                        debug_assert!(false);
+                        return;
+                    }
+                }
+            };
+
+            tracing::trace!(
                 target: LOG_TARGET,
-                local = %self.destination_id,
-                ?error,
-                "failed to publish lease set",
-            ),
-        }
+                "publish local lease set",
+            );
+
+            // create database store and send it to a floodfill router over
+            // one of the destination's outbound tunnels
+            let message = DatabaseStoreBuilder::new(
+                key,
+                DatabaseStoreKind::LeaseSet2 {
+                    leaseset: lease_set,
+                },
+            )
+            .with_reply_type(ReplyType::None)
+            .build();
+
+            let message = MessageBuilder::standard()
+                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                .with_message_type(MessageType::DatabaseStore)
+                .with_message_id(R::rng().next_u32())
+                .with_payload(&message)
+                .build();
+
+            tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
+        })
     }
 }
 
@@ -478,9 +542,13 @@ impl<R: Runtime> Stream for Destination<R> {
                         return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
                     }
                 }
-                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { .. })) => {}
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
+                    self.outbound_tunnels.push(tunnel_id);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
+                    self.outbound_tunnels.retain(|tunnel| tunnel != &tunnel_id);
+                }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { .. })) => {}
-                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { .. })) => {}
                 Poll::Ready(Some(TunnelPoolEvent::Message { message })) =>
                     match self.decrypt_message(message) {
                         Err(error) => tracing::warn!(
@@ -679,6 +747,7 @@ impl Stream for LeaseSetPublishTimer {
 mod tests {
     use super::*;
     use crate::{
+        netdb::NetDbAction,
         primitives::{RouterId, TunnelId},
         runtime::{mock::MockRuntime, Runtime},
         tunnel::TunnelPoolConfig,
@@ -915,10 +984,8 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_publish_retried() {
-        crate::util::init_logger();
-
         let (netdb_handle, mut rx) = NetDbHandle::create();
-        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+        let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
             num_inbound: 3usize,
             ..Default::default()
         });
@@ -953,6 +1020,13 @@ mod tests {
                 .unwrap();
         }
 
+        // issue one event for an outbound tunnel which is used for publication
+        let gateway = TunnelId::random();
+        tp_tx
+            .send(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id: gateway })
+            .await
+            .unwrap();
+
         // verify that inbound tunnel is not built because 3 inbound tunnels are needed
         assert!(destination.next().now_or_never().is_none());
 
@@ -967,21 +1041,29 @@ mod tests {
         }
 
         destination.publish_lease_set(Bytes::from(vec![1, 2, 3]), Bytes::from(vec![4, 5, 6]));
-        assert!(std::matches!(
-            destination.lease_set_publish_timer,
-            LeaseSetPublishTimer::Republish { .. }
-        ));
 
         // drain events from netdb queue, giving space for the lease set publication
-        while let Ok(_) = rx.try_recv() {}
+        tokio::spawn(async move {
+            // drain the queue from useless events
+            while let Ok(_) = rx.try_recv() {}
 
-        // poll destination for 5 seconds, allowing it to republish the destination
-        tokio::time::timeout(Duration::from_secs(5), destination.next())
+            match rx.recv().await.unwrap() {
+                NetDbAction::GetClosestFloodfills { key, tx } => tx.send(vec![
+                    RouterId::random(),
+                    RouterId::random(),
+                    RouterId::random(),
+                ]),
+                _ => panic!("unexpected event"),
+            }
+        });
+
+        // poll destination for 10 seconds, allowing it to republish the destination
+        tokio::time::timeout(Duration::from_secs(10), destination.next())
             .await
             .unwrap_err();
 
-        // poll lease set store
-        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        // verify that a command is received to the tunnel pool
+        tokio::time::timeout(Duration::from_secs(5), tm_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed");
