@@ -21,8 +21,12 @@ use crate::{
     destination::session::{SessionManager, SessionManagerEvent},
     error::{ChannelError, Error, QueryError, SessionError},
     i2np::{
-        database::store::{
-            DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload, ReplyType,
+        database::{
+            lookup::{DatabaseLookupBuilder, LookupType, ReplyType as LookupReplyType},
+            store::{
+                DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
+                ReplyType,
+            },
         },
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
@@ -134,6 +138,9 @@ pub struct Destination<R: Runtime> {
     /// Destination ID of the client.
     destination_id: DestinationId,
 
+    /// Active inbound tunnels.
+    inbound_tunnels: Vec<Lease>,
+
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
     lease_set: Bytes,
 
@@ -152,6 +159,11 @@ pub struct Destination<R: Runtime> {
 
     /// Pending lease set queries:
     pending_queries: HashSet<DestinationId>,
+
+    /// Pending lease set storage verification(s).
+    ///
+    /// Realistically this has only one entry, unless the network is lagging.
+    pending_storage_verifications: HashMap<Bytes, R::Instant>,
 
     /// Pending `LeaseSet2` query futures.
     query_futures: R::JoinSet<(DestinationId, Result<LeaseSet2, QueryError>)>,
@@ -183,12 +195,14 @@ impl<R: Runtime> Destination<R> {
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
+            inbound_tunnels: Vec::new(),
             lease_set: lease_set.clone(),
             lease_set_publish_timer: LeaseSetPublishTimer::new::<R>(),
             netdb_handle,
             outbound_tunnels: Vec::new(),
             pending_inbound: Vec::new(),
             pending_queries: HashSet::new(),
+            pending_storage_verifications: HashMap::new(),
             query_futures: R::join_set(),
             remote_destinations: HashMap::new(),
             session_manager: SessionManager::new(destination_id, private_key, lease_set),
@@ -444,6 +458,29 @@ impl<R: Runtime> Destination<R> {
             }
         };
 
+        // attempt to get an IBGW for lease set storage verification
+        //
+        // see comment above why this check must be made
+        let Some(
+            (Lease {
+                router_id: gateway_router_id,
+                tunnel_id: gateway_tunnel_id,
+                ..
+            }),
+        ) = self.inbound_tunnels.get(0).cloned()
+        else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "no inbound tunnel available for lease set storage verification",
+            );
+            debug_assert!(false);
+            return;
+        };
+
+        // mark the key as "pending", waiting for lease set storage verification to end
+        self.pending_storage_verifications.insert(key.clone(), R::now());
+
         R::spawn(async move {
             let floodfills = {
                 let mut floodfills = None;
@@ -482,7 +519,7 @@ impl<R: Runtime> Destination<R> {
             // create database store and send it to a floodfill router over
             // one of the destination's outbound tunnels
             let message = DatabaseStoreBuilder::new(
-                key,
+                key.clone(),
                 DatabaseStoreKind::LeaseSet2 {
                     leaseset: lease_set,
                 },
@@ -490,6 +527,38 @@ impl<R: Runtime> Destination<R> {
             .with_reply_type(ReplyType::None)
             .build();
 
+            // TODO: garlic encrypt
+            let message = MessageBuilder::standard()
+                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                .with_message_type(MessageType::DatabaseStore)
+                .with_message_id(R::rng().next_u32())
+                .with_payload(&message)
+                .build();
+
+            tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
+
+            // verify there's at least one other floodfill before proceeding to storage verification
+            if floodfills.len() == 1 {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "not enough floodfills to verify lease set storage",
+                );
+                return;
+            }
+
+            // wait 10 seconds and verify the lease set has been flooded to other floodfill routers
+            //
+            // `LeaseSet Storage Verification` in https://geti2p.net/en/docs/how/network-database
+            R::delay(Duration::from_secs(10)).await;
+
+            let message = DatabaseLookupBuilder::new(key, LookupType::Leaseset)
+                .with_reply_type(LookupReplyType::Tunnel {
+                    tunnel_id: gateway_tunnel_id,
+                    router_id: gateway_router_id,
+                })
+                .build();
+
+            // TODO: garlic encrypt
             let message = MessageBuilder::standard()
                 .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
                 .with_message_type(MessageType::DatabaseStore)
@@ -519,6 +588,7 @@ impl<R: Runtime> Stream for Destination<R> {
                         ?tunnel_id,
                         "inbound tunnel built",
                     );
+                    self.inbound_tunnels.push(lease.clone());
                     self.pending_inbound.push((lease, R::now()));
 
                     // return event before the publish timer expires if there are enough leases
@@ -548,7 +618,9 @@ impl<R: Runtime> Stream for Destination<R> {
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
                     self.outbound_tunnels.retain(|tunnel| tunnel != &tunnel_id);
                 }
-                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { .. })) => {}
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
+                    self.inbound_tunnels.retain(|lease| lease.tunnel_id != tunnel_id);
+                }
                 Poll::Ready(Some(TunnelPoolEvent::Message { message })) =>
                     match self.decrypt_message(message) {
                         Err(error) => tracing::warn!(
