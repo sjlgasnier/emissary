@@ -418,7 +418,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
-                    let router = router_info.identity().id();
+                    let router = router_info.identity.id();
 
                     tracing::debug!(
                         target: LOG_TARGET,

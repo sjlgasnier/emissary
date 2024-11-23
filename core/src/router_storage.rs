@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::{RouterId, RouterInfo};
+use crate::{
+    primitives::{RouterId, RouterInfo},
+    runtime::Runtime,
+};
 
 use hashbrown::HashMap;
 #[cfg(feature = "std")]
@@ -25,9 +28,13 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use spin::rwlock::{RwLock, RwLockReadGuard};
 
 use alloc::{sync::Arc, vec::Vec};
+use core::time::Duration;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::router-storage";
+
+/// Maximum age for a [`RouterInfo`] before it's pruned from [`RouterStorage`].
+const ROUTER_INFO_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Router storage.
 #[derive(Clone)]
@@ -41,7 +48,7 @@ impl RouterStorage {
         let routers = routers
             .into_iter()
             .filter_map(|router| {
-                RouterInfo::from_bytes(router).map(|router| (router.identity().id(), router))
+                RouterInfo::parse(router).map(|router| (router.identity.id(), router))
             })
             .collect::<HashMap<_, _>>();
 
@@ -58,7 +65,7 @@ impl RouterStorage {
 
     /// Insert `router` into [`RouterStorage`].
     pub fn insert(&self, router: RouterInfo) {
-        let router_id = router.identity().id();
+        let router_id = router.identity.id();
         let mut inner = self.routers.write();
 
         inner.insert(router_id, router);
@@ -82,17 +89,42 @@ impl RouterStorage {
         num_routers: usize,
         filter: impl Fn(&RouterId, &RouterInfo) -> bool,
     ) -> Vec<RouterInfo> {
-        let this = self.routers.read();
+        let inner = self.routers.read();
 
-        this.iter()
+        inner
+            .iter()
             .filter_map(|(router, info)| filter(router, info).then_some(info.clone()))
             .take(num_routers)
             .collect()
     }
 
     // TODO: zzz
-    pub fn routers<'a>(&'a self) -> RwLockReadGuard<'_, HashMap<RouterId, RouterInfo>> {
+    pub fn routers<'a>(&'a self) -> RwLockReadGuard<'a, HashMap<RouterId, RouterInfo>> {
         self.routers.read()
+    }
+
+    /// Prune stale [`RouterInfo`]s from [`RouterStorage`].
+    ///
+    /// [`RouterInfo`] is considered stale if it has been published over 60 minutes ago.
+    pub fn prune<R: Runtime>(&self) {
+        let stale = {
+            let now = R::time_since_epoch();
+            let inner = self.routers.read();
+
+            inner
+                .iter()
+                .filter_map(|(router_id, router_info)| {
+                    (*router_info.published.date()
+                        < (R::time_since_epoch() - Duration::from_secs(6 * 60)).as_millis() as u64)
+                        .then_some(router_id.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut inner = self.routers.write();
+        stale.into_iter().for_each(|router_id| {
+            let _ = inner.remove(&router_id);
+        });
     }
 
     /// Create new [`RouterStorage`] from random `routers`.
@@ -102,7 +134,7 @@ impl RouterStorage {
     pub fn from_random(routers: Vec<RouterInfo>) -> Self {
         let routers = routers
             .into_iter()
-            .map(|router| (router.identity().id(), router))
+            .map(|router| (router.identity.id(), router))
             .collect::<HashMap<_, _>>();
 
         Self {

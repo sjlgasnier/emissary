@@ -90,7 +90,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
     ) -> crate::Result<Self> {
         // TODO: handle the case when user doesn't want to enable ntcp2 listener
         let socket_address = local_router_info
-            .addresses()
+            .addresses
             .get(&TransportKind::Ntcp2)
             .expect("to exist")
             .socket_address()
@@ -133,7 +133,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
     fn connect(&mut self, router: RouterInfo) {
         tracing::trace!(
             target: LOG_TARGET,
-            router = ?router.identity().id(),
+            router = ?router.identity.id(),
             "negotiate ntcp2 session with router",
         );
 
@@ -220,7 +220,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     tracing::debug!(
                         target: LOG_TARGET,
                         role = ?session.role(),
-                        router = %session.router().identity().id(),
+                        router = %session.router().identity.id(),
                         "ntcp2 connection opened",
                     );
 
@@ -230,7 +230,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     //
                     // `TransportManager` will either accept or reject the session
                     let router_info = session.router();
-                    let router = router_info.identity().id();
+                    let router = router_info.identity.id();
 
                     self.pending_connections.insert(router, session);
 

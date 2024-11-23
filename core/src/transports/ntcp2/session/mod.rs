@@ -216,8 +216,8 @@ impl<R: Runtime> SessionManager<R> {
         router: RouterInfo,
     ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
-        let local_router_hash = self.local_router_info.identity().hash().to_vec();
-        let router_id = router.identity().id();
+        let local_router_hash = self.local_router_info.identity.hash().to_vec();
+        let router_id = router.identity.id();
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
@@ -226,7 +226,7 @@ impl<R: Runtime> SessionManager<R> {
         async move {
             let (remote_key, iv, socket_address) = {
                 let ntcp2 =
-                    router.addresses().get(&TransportKind::Ntcp2).ok_or(Error::NotSupported)?;
+                    router.addresses.get(&TransportKind::Ntcp2).ok_or(Error::NotSupported)?;
 
                 let static_key = ntcp2
                     .options()
@@ -296,7 +296,7 @@ impl<R: Runtime> SessionManager<R> {
                     return Err(Error::DialFailure);
                 }
             };
-            let router_hash = router.identity().hash().to_vec();
+            let router_hash = router.identity.hash().to_vec();
 
             // create `SessionRequest` message and send it remote peer
             let (mut initiator, message) = Initiator::new::<R>(
@@ -339,7 +339,7 @@ impl<R: Runtime> SessionManager<R> {
         mut stream: R::TcpStream,
     ) -> impl Future<Output = crate::Result<(Ntcp2Session<R>)>> {
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
-        let local_router_hash = self.local_router_info.identity().hash().to_vec();
+        let local_router_hash = self.local_router_info.identity.hash().to_vec();
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let subsystem_handle = self.subsystem_handle.clone();

@@ -34,6 +34,9 @@ use zerocopy::AsBytes;
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
+#[cfg(test)]
+use crate::crypto::{SigningPrivateKey, StaticPrivateKey};
+
 /// Short router identity hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RouterId(Arc<String>);
@@ -45,6 +48,11 @@ impl RouterId {
 
         let bytes = rand::thread_rng().gen::<[u8; 32]>();
         RouterId::from(bytes)
+    }
+
+    /// Copy [`RouterId`] into a byte vector.
+    pub fn to_vec(&self) -> Vec<u8> {
+        base64_decode(&self.0.as_bytes()).expect("to succeed")
     }
 }
 
@@ -210,6 +218,33 @@ impl RouterIdentity {
     /// Get serialized length of [`RouterIdentity`].
     pub fn serialized_len(&self) -> usize {
         core::mem::size_of::<RouterIdentitySerialized>()
+    }
+
+    /// Generate random [`RouterIdentity`].
+    #[cfg(test)]
+    pub fn random() -> (Self, StaticPrivateKey, SigningPrivateKey) {
+        use rand::{thread_rng, RngCore};
+
+        let sk = {
+            let mut out = vec![0u8; 32];
+            thread_rng().fill_bytes(&mut out);
+
+            out
+        };
+        let sgk = {
+            let mut out = vec![0u8; 32];
+            thread_rng().fill_bytes(&mut out);
+
+            out
+        };
+
+        let identity = RouterIdentity::from_keys(sk.clone(), sgk.clone()).unwrap();
+
+        (
+            identity,
+            StaticPrivateKey::from(sk),
+            SigningPrivateKey::new(&sgk).unwrap(),
+        )
     }
 }
 

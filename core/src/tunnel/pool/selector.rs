@@ -164,8 +164,8 @@ impl HopSelector for ExploratorySelector {
                 .into_iter()
                 .map(|info| {
                     (
-                        info.identity().hash().clone(),
-                        info.identity().static_key().clone(),
+                        info.identity.hash().clone(),
+                        info.identity.static_key().clone(),
                     )
                 })
                 .collect(),
@@ -255,8 +255,8 @@ impl HopSelector for ClientSelector {
                 .into_iter()
                 .map(|info| {
                     (
-                        info.identity().hash().clone(),
-                        info.identity().static_key().clone(),
+                        info.identity.hash().clone(),
+                        info.identity.static_key().clone(),
                     )
                 })
                 .collect(),

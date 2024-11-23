@@ -78,7 +78,7 @@ impl<R: Runtime> Router<R> {
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
-        let local_router_id = local_router_info.identity().id();
+        let local_router_id = local_router_info.identity.id();
 
         let local_test = local_key.public().to_vec();
         let ntcp_test = StaticPrivateKey::from(ntcp2_config.as_ref().unwrap().key.clone())
@@ -87,7 +87,7 @@ impl<R: Runtime> Router<R> {
 
         tracing::info!(
             target: LOG_TARGET,
-            local_router_hash = ?base64_encode(local_router_info.identity().hash()),
+            local_router_hash = ?base64_encode(local_router_info.identity.hash()),
             "start emissary",
         );
 

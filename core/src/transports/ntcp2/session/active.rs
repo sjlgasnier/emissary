@@ -151,7 +151,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         key_context: KeyContext,
         mut subsystem_handle: SubsystemHandle,
     ) -> Self {
-        let router = router_info.identity().id();
+        let router = router_info.identity.id();
         let KeyContext {
             send_key,
             recv_key,
@@ -167,7 +167,7 @@ impl<R: Runtime> Ntcp2Session<R> {
             read_state: ReadState::ReadSize { offset: 0usize },
             recv_cipher: ChaChaPoly::new(&recv_key),
             role,
-            router: router_info.identity().id(),
+            router: router_info.identity.id(),
             router_info,
             send_cipher: ChaChaPoly::new(&send_key),
             sip,

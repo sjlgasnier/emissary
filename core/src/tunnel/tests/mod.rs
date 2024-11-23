@@ -63,7 +63,7 @@ pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
     let pk = sk.public();
 
     let router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-    let router_hash: Vec<u8> = router_info.identity().id().into();
+    let router_hash: Vec<u8> = router_info.identity.id().into();
     let router_hash = Bytes::from(router_hash);
 
     (
