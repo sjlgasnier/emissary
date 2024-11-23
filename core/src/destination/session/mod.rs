@@ -286,7 +286,7 @@ impl<R: Runtime> SessionManager<R> {
         let database_store = DatabaseStoreBuilder::new(
             Bytes::from(self.destination_id.to_vec()),
             DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(self.lease_set.clone()),
+                lease_set: Bytes::from(self.lease_set.clone()),
             },
         )
         .build();
@@ -378,7 +378,7 @@ impl<R: Runtime> SessionManager<R> {
                         let database_store = DatabaseStoreBuilder::new(
                             Bytes::from(self.destination_id.to_vec()),
                             DatabaseStoreKind::LeaseSet2 {
-                                leaseset: Bytes::from(lease_set.clone()),
+                                lease_set: Bytes::from(lease_set.clone()),
                             },
                         )
                         .build();
@@ -588,7 +588,7 @@ impl<R: Runtime> SessionManager<R> {
 
                 // attempt to parse the `DatabaseStore` as `LeaseSet2`
                 let Some(DatabaseStore {
-                    payload: DatabaseStorePayload::LeaseSet2 { leaseset },
+                    payload: DatabaseStorePayload::LeaseSet2 { lease_set },
                     ..
                 }) = DatabaseStore::<R>::parse(&message_body)
                 else {
@@ -600,7 +600,7 @@ impl<R: Runtime> SessionManager<R> {
 
                     return Err(SessionError::Malformed);
                 };
-                let destination_id = leaseset.header.destination.id();
+                let destination_id = lease_set.header.destination.id();
 
                 match self.pending.get_mut(&destination_id) {
                     None => {

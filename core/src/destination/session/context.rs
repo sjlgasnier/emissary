@@ -144,7 +144,7 @@ impl<R: Runtime> KeyContext<R> {
         let database_store = DatabaseStoreBuilder::new(
             Bytes::from(destination_id.to_vec()),
             DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(lease_set.clone()),
+                lease_set: Bytes::from(lease_set.clone()),
             },
         )
         .build();

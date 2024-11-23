@@ -377,14 +377,14 @@ impl<R: Runtime> Destination<R> {
 
                     match DatabaseStore::<R>::parse(&clove.message_body) {
                         Some(DatabaseStore {
-                            payload: DatabaseStorePayload::LeaseSet2 { leaseset },
+                            payload: DatabaseStorePayload::LeaseSet2 { lease_set },
                             ..
                         }) => {
-                            if leaseset.leases.is_empty() {
+                            if lease_set.leases.is_empty() {
                                 tracing::error!(
                                     target: LOG_TARGET,
                                     local = %self.destination_id,
-                                    remote = %leaseset.header.destination.id(),
+                                    remote = %lease_set.header.destination.id(),
                                     "remote didn't send any leases",
                                 );
                                 return None;
@@ -393,12 +393,12 @@ impl<R: Runtime> Destination<R> {
                             tracing::trace!(
                                 target: LOG_TARGET,
                                 local = %self.destination_id,
-                                remote = %leaseset.header.destination.id(),
+                                remote = %lease_set.header.destination.id(),
                                 "store lease set for remote destination",
                             );
 
                             self.remote_destinations
-                                .insert(leaseset.header.destination.id(), leaseset);
+                                .insert(lease_set.header.destination.id(), lease_set);
                         }
                         database_store => {
                             tracing::warn!(
@@ -518,14 +518,10 @@ impl<R: Runtime> Destination<R> {
 
             // create database store and send it to a floodfill router over
             // one of the destination's outbound tunnels
-            let message = DatabaseStoreBuilder::new(
-                key.clone(),
-                DatabaseStoreKind::LeaseSet2 {
-                    leaseset: lease_set,
-                },
-            )
-            .with_reply_type(ReplyType::None)
-            .build();
+            let message =
+                DatabaseStoreBuilder::new(key.clone(), DatabaseStoreKind::LeaseSet2 { lease_set })
+                    .with_reply_type(ReplyType::None)
+                    .build();
 
             // TODO: garlic encrypt
             let message = MessageBuilder::standard()
