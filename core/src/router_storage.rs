@@ -115,7 +115,7 @@ impl RouterStorage {
                 .iter()
                 .filter_map(|(router_id, router_info)| {
                     (*router_info.published.date()
-                        < (R::time_since_epoch() - Duration::from_secs(6 * 60)).as_millis() as u64)
+                        < (R::time_since_epoch() - Duration::from_secs(60 * 60)).as_millis() as u64)
                         .then_some(router_id.clone())
                 })
                 .collect::<Vec<_>>()

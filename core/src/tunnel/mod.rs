@@ -62,6 +62,8 @@ mod transit;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub use pool::TunnelMessage;
 
 pub use handle::TunnelManagerHandle;
 pub use pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TunnelSender};

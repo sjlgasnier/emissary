@@ -105,16 +105,16 @@ pub enum ReplyType {
 /// Database store message.
 pub struct DatabaseLookup {
     /// Routers to ignore from reply.
-    ignore: HashSet<RouterId>,
+    pub ignore: HashSet<RouterId>,
 
     /// Search Key.
-    key: Vec<u8>,
+    pub key: Bytes,
 
     /// Lookup type.
-    lookup: LookupType,
+    pub lookup: LookupType,
 
     /// Reply type.
-    reply: ReplyType,
+    pub reply: ReplyType,
 }
 
 impl DatabaseLookup {
@@ -191,7 +191,7 @@ impl DatabaseLookup {
             rest,
             Self {
                 ignore,
-                key: key.to_vec(),
+                key: Bytes::from(key.to_vec()),
                 lookup,
                 reply,
             },
