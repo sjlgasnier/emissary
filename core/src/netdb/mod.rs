@@ -580,6 +580,7 @@ impl<R: Runtime> NetDb<R> {
                         target: LOG_TARGET,
                         %router_id,
                         %tunnel_id,
+                        ?error,
                         "failed to send database lookup reply to tunnel",
                     );
                 }
@@ -596,6 +597,110 @@ impl<R: Runtime> NetDb<R> {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
+                        ?error,
+                        "failed to send database lookup reply to router",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Handle [`DatabaseLookup`] for a [`RouterInfo`].
+    ///
+    /// If router info under `key` is not found in local storage, a [`DatabaseSearchReply`] message
+    /// with floodfills closest to `key`, ignoring floodfills listed in `ignore`, is sent the sender
+    /// either directly or via an exploratory tunnel.
+    fn on_router_info_lookup(
+        &mut self,
+        key: Bytes,
+        reply_type: ReplyType,
+        ignore: HashSet<RouterId>,
+    ) {
+        let (message_type, message) = match self.router_infos.get(&key) {
+            None => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    key = ?key[..4],
+                    "router info not found from local storage",
+                );
+
+                // get floodfills closest to `key`, ignoring floodfills listed in `ignore`
+                //
+                // the reply list is limited to 16 floodfills
+                let routers = self
+                    .dht
+                    .closest_with_ignore(&key, SEARCH_REPLY_MAX_ROUTERS, &ignore)
+                    .collect::<Vec<_>>();
+
+                (
+                    MessageType::DatabaseSearchReply,
+                    DatabaseSearchReply {
+                        from: self.local_router_id.to_vec(),
+                        key,
+                        routers,
+                    }
+                    .serialize(),
+                )
+            }
+            Some((router_info, _)) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    key = ?key[..4],
+                    "router info found from local storage",
+                );
+
+                (
+                    MessageType::DatabaseStore,
+                    DatabaseStoreBuilder::new(
+                        key,
+                        DatabaseStoreKind::RouterInfo {
+                            router_info: router_info.clone(),
+                        },
+                    )
+                    .build(),
+                )
+            }
+        };
+
+        match reply_type {
+            ReplyType::Tunnel {
+                tunnel_id,
+                router_id,
+            } => {
+                let message = MessageBuilder::standard()
+                    .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_message_type(message_type)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(&message)
+                    .build();
+
+                if let Err(error) = self.exploratory_pool_handle.sender().try_send_to_tunnel(
+                    router_id.clone(),
+                    tunnel_id,
+                    message,
+                ) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        %tunnel_id,
+                        ?error,
+                        "failed to send database lookup reply to tunnel",
+                    );
+                }
+            }
+            ReplyType::Router { router_id } => {
+                let message = MessageBuilder::short()
+                    .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_message_type(message_type)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(&message)
+                    .build();
+
+                if let Err(error) = self.service.send(&router_id, message) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        ?error,
                         "failed to send database lookup reply to router",
                     );
                 }
@@ -671,7 +776,7 @@ impl<R: Runtime> NetDb<R> {
 
                 match lookup {
                     LookupType::Leaseset => self.on_lease_set_lookup(key, reply, ignore),
-                    LookupType::Router => todo!(),
+                    LookupType::Router => self.on_router_info_lookup(key, reply, ignore),
                     kind => tracing::warn!(
                         target: LOG_TARGET,
                         ?kind,
@@ -1067,9 +1172,11 @@ mod tests {
             RouterInfo, TransportKind,
         },
         runtime::mock::MockRuntime,
+        subsystem::{InnerSubsystemEvent, SubsystemCommand},
         transports::ProtocolCommand,
         tunnel::TunnelMessage,
     };
+    use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn lease_set_store_to_floodfill() {
@@ -1835,8 +1942,6 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_query_value_not_found() {
-        crate::util::init_logger();
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
@@ -1900,6 +2005,173 @@ mod tests {
                 assert_eq!(message.key, key);
             }
             _ => panic!("invalid message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_info_query() {
+        let (mut service, rx, tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // register new router into `service`
+        let router_id = RouterId::random();
+        let (conn_tx, conn_rx) = channel(16);
+        tx.send(InnerSubsystemEvent::ConnectionEstablished {
+            router: router_id.clone(),
+            tx: conn_tx,
+        })
+        .await
+        .unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(200), service.next()).await;
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.insert(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        let (key, router_info) = {
+            let (identity, _sk, sgk) = RouterIdentity::random();
+            let id = identity.id();
+
+            (
+                Bytes::from(id.to_vec()),
+                Bytes::from(
+                    MockRuntime::gzip_compress(
+                        RouterInfo {
+                            identity,
+                            published: Date::new(
+                                (MockRuntime::time_since_epoch()
+                                    - Duration::from_secs(60 * 60 + 60))
+                                .as_millis() as u64,
+                            ),
+                            addresses: HashMap::from_iter([(
+                                TransportKind::Ntcp2,
+                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                            )]),
+                            options: HashMap::new(),
+                        }
+                        .serialize(&sgk),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        netdb.router_infos.insert(key.clone(), (router_info, Duration::from_secs(10)));
+
+        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Router)
+            .with_reply_type(ReplyType::Router {
+                router_id: router_id.clone(),
+            })
+            .build();
+
+        assert!(netdb
+            .on_message(Message {
+                payload: message.to_vec(),
+                message_type: MessageType::DatabaseLookup,
+                ..Default::default()
+            })
+            .is_ok());
+
+        assert!(tm_rx.try_recv().is_err());
+
+        match conn_rx.try_recv().unwrap() {
+            SubsystemCommand::SendMessage { message } => {
+                let message = Message::parse_short(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::DatabaseStore);
+
+                match DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap().payload {
+                    DatabaseStorePayload::RouterInfo { router_info } => {
+                        assert_eq!(key, Bytes::from(router_info.identity.id().to_vec()));
+                    }
+                    _ => panic!("invalid payload type"),
+                }
+            }
+            _ => panic!("invalid command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_info_query_value_not_found() {
+        let (mut service, rx, tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // register new router into `service`
+        let router_id = RouterId::random();
+        let (conn_tx, conn_rx) = channel(16);
+        tx.send(InnerSubsystemEvent::ConnectionEstablished {
+            router: router_id.clone(),
+            tx: conn_tx,
+        })
+        .await
+        .unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(200), service.next()).await;
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.insert(info);
+
+                id
+            })
+            .collect::<Vec<_>>();
+
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        let key = Bytes::from(RouterId::random().to_vec());
+        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Router)
+            .with_reply_type(ReplyType::Router {
+                router_id: router_id.clone(),
+            })
+            .with_ignored_routers(vec![floodfills[0].clone(), floodfills[2].clone()])
+            .build();
+
+        assert!(netdb
+            .on_message(Message {
+                payload: message.to_vec(),
+                message_type: MessageType::DatabaseLookup,
+                ..Default::default()
+            })
+            .is_ok());
+
+        assert!(tm_rx.try_recv().is_err());
+
+        match conn_rx.try_recv().unwrap() {
+            SubsystemCommand::SendMessage { message } => {
+                let message = Message::parse_short(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::DatabaseSearchReply);
+
+                let message = DatabaseSearchReply::parse(&message.payload).unwrap();
+
+                assert_eq!(message.routers.len(), 1);
+                assert_eq!(message.routers[0], floodfills[1]);
+                assert_eq!(message.from, netdb.local_router_id.to_vec());
+                assert_eq!(message.key, key);
+            }
+            _ => panic!("invalid command"),
         }
     }
 }
