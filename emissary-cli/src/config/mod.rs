@@ -387,7 +387,7 @@ impl Config {
             routers: Vec::new(),
             ntcp2_config: Some(emissary::Ntcp2Config {
                 port: config.ntcp2.port,
-                host: String::from("127.0.0.1"),
+                host: config.ntcp2.host.unwrap_or(String::from("127.0.0.1")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
