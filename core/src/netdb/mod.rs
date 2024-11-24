@@ -125,6 +125,35 @@ impl<T: Clone> TunnelSelector<T> {
     }
 }
 
+/// Message kind.
+#[derive(Clone)]
+enum MessageKind {
+    /// Expiring message, e.g., flooded [`DatabaseStore`] for a [`LeaseSet2`] or [`RouterInfo`].
+    Expiring {
+        /// Serialized I2NP message.
+        message: Vec<u8>,
+
+        /// When does the payload of the message expires.
+        expires: Duration,
+    },
+
+    /// Non-expiring message, e.g, router exploration.
+    NonExpiring {
+        /// Serialized I2NP message.
+        message: Vec<u8>,
+    },
+}
+
+impl MessageKind {
+    /// Convert [`MessageKind`] into serialized I2NP message.
+    pub fn into_inner(self) -> Vec<u8> {
+        match self {
+            Self::Expiring { message, .. } => message,
+            Self::NonExpiring { message } => message,
+        }
+    }
+}
+
 /// Floodfill state.
 enum FloodfillState {
     /// FloodFill is connected.
@@ -133,7 +162,7 @@ enum FloodfillState {
     /// FloodFill is being dialed.
     Dialing {
         /// Pending messages.
-        pending_messages: Vec<Vec<u8>>,
+        pending_messages: Vec<MessageKind>,
     },
 
     /// Floodfill is disconnected.
@@ -290,45 +319,70 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle established connection to `router`.
     fn on_connection_established(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
-            None =>
-                match self.router_storage.get(&router_id).expect("router to exist").is_floodfill() {
-                    true => {
+        // did the floodfill already exist in `floodfills`
+        let did_exist = self.floodfills.contains_key(&router_id);
+
+        // send any pending messages to the connected router
+        //
+        // if the message was of the expiring kind (flooding) and the payload inside the i2np
+        // message has expired, the message is skipped
+        if let Some(FloodfillState::Dialing { pending_messages }) =
+            self.floodfills.remove(&router_id)
+        {
+            let now = R::time_since_epoch();
+
+            pending_messages.into_iter().for_each(|message| {
+                let message = match message {
+                    MessageKind::NonExpiring { message } => Some(message),
+                    MessageKind::Expiring { message, expires } if expires > now => Some(message),
+                    MessageKind::Expiring { expires, .. } => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?expires,
+                            "message has expired, will not flood",
+                        );
+                        None
+                    }
+                };
+
+                if let Some(message) = message {
+                    if let Err(error) = self.service.send(&router_id, message) {
                         tracing::debug!(
                             target: LOG_TARGET,
                             %router_id,
-                            "new floodfill connected",
-                        );
-
-                        // insert new floodfills into `Dht` as well
-                        self.dht.add_floodfill(router_id.clone());
-
-                        self.floodfills.insert(router_id, FloodfillState::Connected);
-                        self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
-                        self.metrics.counter(NUM_FLOODFILLS).increment(1);
-                    }
-                    false => {
-                        tracing::trace!(
-                            target: LOG_TARGET,
-                            %router_id,
-                            "connection established",
+                            ?error,
+                            "failed to send message",
                         );
                     }
-                },
-            Some(_) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    "known floodfill connected",
-                );
-
-                // "insert" floodfill into `Dht` so their "last active" status gets updated
-                self.dht.add_floodfill(router_id.clone());
-
-                self.floodfills.insert(router_id, FloodfillState::Connected);
-                self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
-            }
+                }
+            });
         }
+
+        // non-floodfills must not be stored into `floodfills`
+        //
+        // the router must exist in `router_storage` as connection was established to them
+        if !self.router_storage.get(&router_id).expect("router to exist").is_floodfill() {
+            return;
+        }
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            "floodfill connected",
+        );
+
+        if !did_exist {
+            tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                "new floodfill connected",
+            );
+            self.metrics.counter(NUM_FLOODFILLS).increment(1);
+        }
+
+        self.dht.add_floodfill(router_id.clone());
+        self.floodfills.insert(router_id, FloodfillState::Connected);
+        self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
     }
 
     /// Handle closed connection to `router`.
@@ -352,8 +406,8 @@ impl<R: Runtime> NetDb<R> {
         }
     }
 
-    // TODO: come up with a better name
-    fn send_message(&mut self, routers: &[RouterId], message: Vec<u8>) {
+    /// Flood `message` to `routers`.
+    fn send_message(&mut self, routers: &[RouterId], message: MessageKind) {
         routers.iter().for_each(|router_id| match self.floodfills.get_mut(router_id) {
             None | Some(FloodfillState::Disconnected) => match self.service.connect(router_id) {
                 Err(error) => tracing::debug!(
@@ -375,7 +429,7 @@ impl<R: Runtime> NetDb<R> {
                 pending_messages.push(message.clone());
             }
             Some(FloodfillState::Connected) =>
-                if let Err(error) = self.service.send(router_id, message.clone()) {
+                if let Err(error) = self.service.send(router_id, message.clone().into_inner()) {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
@@ -395,13 +449,13 @@ impl<R: Runtime> NetDb<R> {
             %router_id,
             "router info store",
         );
+        let expires =
+            Duration::from_millis(*router_info.published.date()) + Duration::from_secs(60 * 60);
 
-        if *router_info.published.date()
-            < (R::time_since_epoch() - Duration::from_secs(60 * 60)).as_millis() as u64
-        {
+        if expires < R::time_since_epoch() {
             tracing::debug!(
                 target: LOG_TARGET,
-                published = ?Duration::from_millis(*router_info.published.date()),
+                ?expires,
                 "stale router info, ignoring",
             );
             return;
@@ -444,7 +498,7 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(&message)
             .build();
 
-        self.send_message(&floodfills, message);
+        self.send_message(&floodfills, MessageKind::Expiring { message, expires });
     }
 
     /// Handle [`DatabaseStore`] for [`LeasetSet2`] if the local router is run as a floodfill.
@@ -470,8 +524,9 @@ impl<R: Runtime> NetDb<R> {
         // parse the raw lease set from the database store, store it in the set of leases we keep
         // track of and flood it to three floodfills closest to `key`
         let raw_lease_set = DatabaseStore::<R>::extract_raw_lease_set(&message);
-        self.lease_sets
-            .insert(key.clone(), (raw_lease_set.clone(), lease_set.expires()));
+        let expires = lease_set.expires();
+
+        self.lease_sets.insert(key.clone(), (raw_lease_set.clone(), expires));
 
         let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
         if floodfills.is_empty() {
@@ -499,7 +554,7 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(&message)
             .build();
 
-        self.send_message(&floodfills, message);
+        self.send_message(&floodfills, MessageKind::Expiring { message, expires });
     }
 
     /// Handle [`DatabaseLookup`] for a [`LeaseSet2`].
@@ -960,6 +1015,34 @@ impl<R: Runtime> NetDb<R> {
 
     /// Perform general maintenance of [`NetDb`].
     fn maintain_netdb(&mut self) {
+        // prune expired lease sets
+        {
+            let now = R::time_since_epoch();
+            let num_pruned = self
+                .lease_sets
+                .iter()
+                .filter_map(|(key, (_, expires))| (expires < &now).then_some(key.clone()))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .fold(0usize, |count, key| {
+                    self.lease_sets.remove(&key);
+                    count + 1
+                });
+
+            if num_pruned > 0 {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    ?num_pruned,
+                    "pruned expired lease sets",
+                );
+            }
+        }
+
+        // don't do exploration if the router is run as a floodfill router
+        if self.floodfill {
+            return;
+        }
+
         let key = {
             let mut key = BytesMut::zeroed(32);
             R::rng().fill_bytes(&mut key);
@@ -989,80 +1072,7 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(&message)
             .build();
 
-        // prune expired lease sets
-        {
-            let now = R::time_since_epoch();
-            let num_pruned = self
-                .lease_sets
-                .iter()
-                .filter_map(|(key, (_, expires))| (expires < &now).then_some(key.clone()))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .fold(0usize, |count, key| {
-                    self.lease_sets.remove(&key);
-                    count + 1
-                });
-
-            if num_pruned > 0 {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    ?num_pruned,
-                    "pruned expired lease sets",
-                );
-            }
-        }
-
-        // don't do exploration if the router is run as a floodfill router
-        if self.floodfill {
-            return;
-        }
-
-        match self.floodfills.get_mut(floodfill) {
-            None | Some(FloodfillState::Disconnected) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    %floodfill,
-                    "floodfill not connected, start dialing",
-                );
-
-                match self.service.connect(floodfill) {
-                    Ok(()) => {
-                        self.floodfills.insert(
-                            floodfill.clone(),
-                            FloodfillState::Dialing {
-                                pending_messages: vec![message],
-                            },
-                        );
-                    }
-                    Err(error) => tracing::debug!(
-                        target: LOG_TARGET,
-                        %floodfill,
-                        ?error,
-                        "failed to dial floodfill",
-                    ),
-                }
-            }
-            Some(FloodfillState::Dialing { pending_messages }) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    %floodfill,
-                    "floodfill is being dialed",
-                );
-
-                pending_messages.push(message);
-            }
-            Some(FloodfillState::Connected) => match self.service.send(floodfill, message) {
-                Ok(()) => {
-                    self.active.insert(key, QueryKind::Exploration);
-                }
-                Err(error) => tracing::debug!(
-                    target: LOG_TARGET,
-                    %floodfill,
-                    ?error,
-                    "failed to send message to floodfill",
-                ),
-            },
-        }
+        self.send_message(&[floodfill.clone()], MessageKind::NonExpiring { message });
     }
 }
 
@@ -2172,6 +2182,512 @@ mod tests {
                 assert_eq!(message.key, key);
             }
             _ => panic!("invalid command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_messages_sent_when_floodfill_connects() {
+        let (service, rx, tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.insert(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            false,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        // set timer to a shorter timeout and poll netdb until it sends a router exploration
+        netdb.maintenance_timer = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+        tokio::time::timeout(Duration::from_secs(5), &mut netdb).await.unwrap_err();
+
+        let selected_floofill = netdb
+            .floodfills
+            .iter()
+            .find(|(key, state)| match state {
+                FloodfillState::Dialing { pending_messages } if pending_messages.len() == 1 => true,
+                _ => false,
+            })
+            .unwrap()
+            .0;
+
+        // register the selected floodfill into netdb
+        let (conn_tx, conn_rx) = channel(16);
+        tx.send(InnerSubsystemEvent::ConnectionEstablished {
+            router: selected_floofill.clone(),
+            tx: conn_tx,
+        })
+        .await
+        .unwrap();
+
+        let future = async {
+            loop {
+                tokio::select! {
+                    _ = &mut netdb => {}
+                    event = conn_rx.recv() => match event.unwrap() {
+                        SubsystemCommand::SendMessage { message } => break message,
+                        _ => panic!("invalid command"),
+                    }
+                }
+            }
+        };
+
+        let message = tokio::time::timeout(Duration::from_secs(2), future).await.unwrap();
+        let message = Message::parse_short(&message).unwrap();
+
+        assert_eq!(message.message_type, MessageType::DatabaseLookup);
+        assert_eq!(
+            DatabaseLookup::parse(&message.payload).unwrap().lookup,
+            LookupType::Exploration
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_pending_lease_sets_not_flooded() {
+        let (service, _rx, tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let netdb = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        let (service, rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.insert(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        let (key1, expired_lease_set1) = {
+            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let destination = Destination::new(sgk.public());
+            let id = destination.id();
+
+            let lease1 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: MockRuntime::time_since_epoch() + Duration::from_secs(80),
+            };
+            let lease2 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: MockRuntime::time_since_epoch() + Duration::from_secs(60),
+            };
+
+            (
+                Bytes::from(id.to_vec()),
+                Bytes::from(
+                    LeaseSet2 {
+                        header: LeaseSet2Header {
+                            destination,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
+                            expires: Duration::from_secs(5).as_secs() as u32,
+                        },
+                        public_keys: vec![sk.public()],
+                        leases: vec![lease1.clone(), lease2.clone()],
+                    }
+                    .serialize(&sgk),
+                ),
+            )
+        };
+
+        let (key2, valid_lease_set) = {
+            let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
+            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let destination = Destination::new(sgk.public());
+            let id = destination.id();
+
+            let lease1 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: MockRuntime::time_since_epoch() + Duration::from_secs(80),
+            };
+            let lease2 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: MockRuntime::time_since_epoch() + Duration::from_secs(60),
+            };
+
+            (
+                Bytes::from(id.to_vec()),
+                Bytes::from(
+                    LeaseSet2 {
+                        header: LeaseSet2Header {
+                            destination,
+                            published: (MockRuntime::time_since_epoch() - Duration::from_secs(60))
+                                .as_secs() as u32,
+                            expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                        },
+                        public_keys: vec![sk.public()],
+                        leases: vec![lease1.clone(), lease2.clone()],
+                    }
+                    .serialize(&sgk),
+                ),
+            )
+        };
+
+        // store first lease set that is about to expire
+        {
+            let message = DatabaseStoreBuilder::new(
+                key1,
+                DatabaseStoreKind::LeaseSet2 {
+                    lease_set: expired_lease_set1,
+                },
+            )
+            .build();
+
+            assert!(netdb.lease_sets.is_empty());
+            assert!(netdb
+                .on_message(Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                })
+                .is_ok());
+            assert_eq!(netdb.lease_sets.len(), 1);
+            assert_eq!(netdb.floodfills.len(), 3);
+            assert!((0..3).all(|_| match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router } => {
+                    assert!(floodfills.remove(&router.identity.id()));
+                    true
+                }
+                _ => false,
+            }));
+            assert!(netdb.floodfills.values().all(|state| match state {
+                FloodfillState::Dialing { pending_messages } => {
+                    assert_eq!(pending_messages.len(), 1);
+                    true
+                }
+                _ => false,
+            }));
+        }
+
+        // store second expiring lease set and verify floodfills are pending
+        {
+            let message = DatabaseStoreBuilder::new(
+                key2.clone(),
+                DatabaseStoreKind::LeaseSet2 {
+                    lease_set: valid_lease_set,
+                },
+            )
+            .build();
+
+            assert_eq!(netdb.lease_sets.len(), 1);
+            assert!(netdb
+                .on_message(Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                })
+                .is_ok());
+            assert_eq!(netdb.lease_sets.len(), 2);
+            assert_eq!(netdb.floodfills.len(), 3);
+            assert!(rx.try_recv().is_err());
+            assert!(netdb.floodfills.values().all(|state| match state {
+                FloodfillState::Dialing { pending_messages } => {
+                    assert_eq!(pending_messages.len(), 2);
+                    true
+                }
+                _ => false,
+            }));
+        }
+
+        // wait for 10 seconds so the first lease set expires
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        // register all floodfills to netdb and spawn it int the background
+        let channels = floodfills
+            .iter()
+            .map(|router_id| {
+                let (conn_tx, conn_rx) = channel(16);
+                tx.try_send(InnerSubsystemEvent::ConnectionEstablished {
+                    router: router_id.clone(),
+                    tx: conn_tx,
+                })
+                .unwrap();
+
+                conn_rx
+            })
+            .collect::<Vec<_>>();
+        tokio::spawn(netdb);
+
+        // verify that all floodfillls receive one lease set store, for the still valid lease set
+        for channel in channels {
+            match tokio::time::timeout(Duration::from_secs(1), channel.recv())
+                .await
+                .expect("no timeout")
+                .expect("to succeed")
+            {
+                SubsystemCommand::SendMessage { message } => {
+                    let message = Message::parse_short(&message).unwrap();
+                    assert_eq!(message.message_type, MessageType::DatabaseStore);
+
+                    let DatabaseStore {
+                        key,
+                        payload,
+                        reply,
+                        ..
+                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+
+                    assert_eq!(key, key2);
+                    assert!(std::matches!(
+                        payload,
+                        DatabaseStorePayload::LeaseSet2 { .. }
+                    ));
+                }
+                _ => panic!("invalid event"),
+            }
+
+            // verify there are no other messages pending
+            match tokio::time::timeout(Duration::from_secs(1), channel.recv()).await {
+                Err(_) => {}
+                _ => panic!("expected timeout"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_pending_router_infos_not_flooded() {
+        let (service, _rx, tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let netdb = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        let (service, rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.insert(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+        );
+
+        let (key1, expiring_router_info) = {
+            let (identity, _sk, sgk) = RouterIdentity::random();
+            let id = identity.id();
+
+            (
+                Bytes::from(id.to_vec()),
+                Bytes::from(
+                    MockRuntime::gzip_compress(
+                        RouterInfo {
+                            identity,
+                            published: Date::new(
+                                (MockRuntime::time_since_epoch() + Duration::from_secs(5))
+                                    .as_millis() as u64,
+                            ),
+                            addresses: HashMap::from_iter([(
+                                TransportKind::Ntcp2,
+                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                            )]),
+                            options: HashMap::new(),
+                        }
+                        .serialize(&sgk),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+
+        let (key2, valid_router_info) = {
+            let (identity, _sk, sgk) = RouterIdentity::random();
+            let id = identity.id();
+
+            (
+                Bytes::from(id.to_vec()),
+                Bytes::from(
+                    MockRuntime::gzip_compress(
+                        RouterInfo {
+                            identity,
+                            published: Date::new(
+                                (MockRuntime::time_since_epoch()
+                                    + Duration::from_secs(60 * 60 + 60))
+                                .as_millis() as u64,
+                            ),
+                            addresses: HashMap::from_iter([(
+                                TransportKind::Ntcp2,
+                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                            )]),
+                            options: HashMap::new(),
+                        }
+                        .serialize(&sgk),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+
+        // store first lease set that is about to expire
+        {
+            let message = DatabaseStoreBuilder::new(
+                key1,
+                DatabaseStoreKind::RouterInfo {
+                    router_info: expiring_router_info,
+                },
+            )
+            .build();
+
+            assert!(netdb.lease_sets.is_empty());
+            assert!(netdb
+                .on_message(Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                })
+                .is_ok());
+            assert_eq!(netdb.router_infos.len(), 1);
+            assert_eq!(netdb.floodfills.len(), 3);
+            assert!((0..3).all(|_| match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router } => {
+                    assert!(floodfills.remove(&router.identity.id()));
+                    true
+                }
+                _ => false,
+            }));
+            assert!(netdb.floodfills.values().all(|state| match state {
+                FloodfillState::Dialing { pending_messages } => {
+                    assert_eq!(pending_messages.len(), 1);
+                    true
+                }
+                _ => false,
+            }));
+        }
+
+        // store second expiring lease set and verify floodfills are pending
+        {
+            let message = DatabaseStoreBuilder::new(
+                key2.clone(),
+                DatabaseStoreKind::RouterInfo {
+                    router_info: valid_router_info,
+                },
+            )
+            .build();
+
+            assert_eq!(netdb.router_infos.len(), 1);
+            assert!(netdb
+                .on_message(Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                })
+                .is_ok());
+            assert_eq!(netdb.router_infos.len(), 2);
+            assert_eq!(netdb.floodfills.len(), 3);
+            assert!(rx.try_recv().is_err());
+            assert!(netdb.floodfills.values().all(|state| match state {
+                FloodfillState::Dialing { pending_messages } => {
+                    assert_eq!(pending_messages.len(), 2);
+                    true
+                }
+                _ => false,
+            }));
+        }
+
+        // wait for 10 seconds so the first lease set expires
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        // register all floodfills to netdb and spawn it int the background
+        let channels = floodfills
+            .iter()
+            .map(|router_id| {
+                let (conn_tx, conn_rx) = channel(16);
+                tx.try_send(InnerSubsystemEvent::ConnectionEstablished {
+                    router: router_id.clone(),
+                    tx: conn_tx,
+                })
+                .unwrap();
+
+                conn_rx
+            })
+            .collect::<Vec<_>>();
+        tokio::spawn(netdb);
+
+        // verify that all floodfillls receive one lease set store, for the still valid lease set
+        for channel in channels {
+            match tokio::time::timeout(Duration::from_secs(1), channel.recv())
+                .await
+                .expect("no timeout")
+                .expect("to succeed")
+            {
+                SubsystemCommand::SendMessage { message } => {
+                    let message = Message::parse_short(&message).unwrap();
+                    assert_eq!(message.message_type, MessageType::DatabaseStore);
+
+                    let DatabaseStore {
+                        key,
+                        payload,
+                        reply,
+                        ..
+                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+
+                    assert_eq!(key, key2);
+                    assert!(std::matches!(
+                        payload,
+                        DatabaseStorePayload::RouterInfo { .. }
+                    ));
+                }
+                _ => panic!("invalid event"),
+            }
+
+            // verify there are no other messages pending
+            match tokio::time::timeout(Duration::from_secs(1), channel.recv()).await {
+                Err(_) => {}
+                _ => panic!("expected timeout"),
+            }
         }
     }
 }
