@@ -217,6 +217,32 @@ impl TransportService {
             (error, inner)
         })
     }
+
+    /// Create new [`TransportService`] for testing.
+    #[cfg(test)]
+    pub fn new() -> (
+        Self,
+        Receiver<ProtocolCommand>,
+        Sender<InnerSubsystemEvent>,
+        RouterStorage,
+    ) {
+        let (event_tx, event_rx) = channel(64);
+        let (cmd_tx, cmd_rx) = channel(64);
+        let router_storage = RouterStorage::new(&Vec::new());
+
+        (
+            TransportService {
+                cmd_tx,
+                event_rx,
+                pending_events: VecDeque::new(),
+                routers: HashMap::new(),
+                router_storage: router_storage.clone(),
+            },
+            cmd_rx,
+            event_tx,
+            router_storage,
+        )
+    }
 }
 
 impl Stream for TransportService {
@@ -368,6 +394,7 @@ impl<R: Runtime> TransportManager<R> {
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),
+                self.router_storage.clone(),
             )
             .await?,
         ));
@@ -391,7 +418,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
-                    let router = router_info.identity().id();
+                    let router = router_info.identity.id();
 
                     tracing::debug!(
                         target: LOG_TARGET,

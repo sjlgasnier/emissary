@@ -164,6 +164,30 @@ impl TunnelPoolContextHandle {
                     }
                 }
             }
+            MessageType::DatabaseStore
+            | MessageType::DatabaseLookup
+            | MessageType::DatabaseSearchReply => {
+                return self.event_tx.try_send(TunnelPoolEvent::Message { message }).map_err(
+                    |error| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?message_id,
+                            ?error,
+                            "failed to route netdb message",
+                        );
+
+                        match error {
+                            mpsc::errors::TrySendError::Full(TunnelPoolEvent::Message {
+                                message,
+                            }) => RoutingError::ChannelFull(message),
+                            mpsc::errors::TrySendError::Closed(TunnelPoolEvent::Message {
+                                message,
+                            }) => RoutingError::ChannelClosed(message),
+                            _ => unreachable!(),
+                        }
+                    },
+                );
+            }
             MessageType::OutboundTunnelBuildReply => {
                 inner
                     .message_ids

@@ -18,7 +18,7 @@
 
 use crate::{
     error::{ChannelError, QueryError},
-    primitives::LeaseSet2,
+    primitives::{LeaseSet2, RouterId},
 };
 
 use bytes::Bytes;
@@ -46,7 +46,7 @@ pub enum NetDbAction {
         /// Key,
         key: Bytes,
 
-        /// Oneshot sender for query result.
+        /// Oneshot sender used to send the result to caller.
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
     },
 
@@ -57,6 +57,15 @@ pub enum NetDbAction {
 
         /// Serialized `LeaseSet2`.
         leaseset: Bytes,
+    },
+
+    /// Get `RouterId`'s of the floodfills closest to `key`.
+    GetClosestFloodfills {
+        /// Key.
+        key: Bytes,
+
+        /// Oneshot sender used to send the result to caller.
+        tx: oneshot::Sender<Vec<RouterId>>,
     },
 
     /// Dummy value.
@@ -106,6 +115,19 @@ impl NetDbHandle {
         self.tx
             .try_send(NetDbAction::StoreLeaseSet2 { key, leaseset })
             .map(|_| ())
+            .map_err(From::from)
+    }
+
+    /// Get `RouterId`'s of the floodfills closest to `key`.
+    pub fn get_closest_floodfills(
+        &self,
+        key: Bytes,
+    ) -> Result<oneshot::Receiver<Vec<RouterId>>, ChannelError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx
+            .try_send(NetDbAction::GetClosestFloodfills { key, tx })
+            .map(|_| rx)
             .map_err(From::from)
     }
 

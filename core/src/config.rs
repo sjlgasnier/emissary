@@ -79,4 +79,7 @@ pub struct Config {
 
     /// Known routers.
     pub routers: Vec<Vec<u8>>,
+
+    /// Should the node be run as a floodfill router.
+    pub floodfill: bool,
 }

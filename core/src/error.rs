@@ -110,6 +110,9 @@ pub enum QueryError {
 
     /// Retry limimt reached.
     RetryFailure,
+
+    /// No tunnel available to send/receive query/query result.
+    NoTunnel,
 }
 
 impl fmt::Display for QueryError {
@@ -120,6 +123,7 @@ impl fmt::Display for QueryError {
             Self::ValueNotFound => write!(f, "value not found"),
             Self::Malformed => write!(f, "malformed reply"),
             Self::RetryFailure => write!(f, "operation retried too many times"),
+            Self::NoTunnel => write!(f, "no tunnel available"),
         }
     }
 }

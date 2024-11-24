@@ -1,3 +1,5 @@
+floodfill = false
+
 [ntcp2]
 enabled = true
 port = 8888

@@ -158,7 +158,7 @@ pub enum DatabaseStorePayload {
     /// Lease set type 2.
     LeaseSet2 {
         /// Lease set.
-        leaseset: LeaseSet2,
+        lease_set: LeaseSet2,
     },
 }
 
@@ -168,12 +168,12 @@ impl fmt::Display for DatabaseStorePayload {
             Self::RouterInfo { router_info } => write!(
                 f,
                 "DatabaseStorePayload::RouterInfo ({})",
-                router_info.identity().id()
+                router_info.identity.id()
             ),
-            Self::LeaseSet2 { leaseset } => write!(
+            Self::LeaseSet2 { lease_set } => write!(
                 f,
                 "DatabaseStorePayload::LeaseSet2 ({})",
-                leaseset.header.destination.id()
+                lease_set.header.destination.id()
             ),
         }
     }
@@ -184,7 +184,7 @@ impl DatabaseStorePayload {
         match self {
             // TODO: calculate actual size
             Self::RouterInfo { router_info } => 2048usize,
-            Self::LeaseSet2 { leaseset } => leaseset.serialized_len(),
+            Self::LeaseSet2 { lease_set } => lease_set.serialized_len(),
         }
     }
 }
@@ -264,7 +264,7 @@ impl<R: Runtime> DatabaseStore<R> {
                     Err::Error(make_error(input, ErrorKind::Fail))
                 })?;
 
-                let router_info = RouterInfo::from_bytes(&data).ok_or_else(|| {
+                let router_info = RouterInfo::parse(&data).ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         "failed to parse gzipped router info",
@@ -284,13 +284,13 @@ impl<R: Runtime> DatabaseStore<R> {
                 ))
             }
             StoreType::LeaseSet2 => {
-                let (rest, leaseset) = LeaseSet2::parse_frame(rest)?;
+                let (rest, lease_set) = LeaseSet2::parse_frame(rest)?;
 
                 Ok((
                     rest,
                     Self {
                         key: Bytes::from(key.to_vec()),
-                        payload: DatabaseStorePayload::LeaseSet2 { leaseset },
+                        payload: DatabaseStorePayload::LeaseSet2 { lease_set },
                         reply,
                         _runtime: Default::default(),
                     },
@@ -304,14 +304,55 @@ impl<R: Runtime> DatabaseStore<R> {
     pub fn parse(input: &[u8]) -> Option<Self> {
         Self::parse_frame(input).ok().map(|(_, message)| message)
     }
+
+    /// Extract raw payload from [`DatabaseStore`] message.
+    fn extraw_raw_data_payload(input: &[u8]) -> Bytes {
+        let (rest, _) = take::<_, _, ()>(DATABASE_KEY_SIZE)(input).expect("to succeed");
+        let (rest, _) = be_u8::<_, ()>(rest).expect("to succeed");
+        let (rest, reply_token) = be_u32::<_, ()>(rest).expect("to succeed");
+
+        let rest = match reply_token == NO_REPLY {
+            true => rest,
+            false => {
+                let (rest, _) = be_u32::<_, ()>(rest).expect("to succeed");
+                let (rest, _) = take::<_, _, ()>(ROUTER_HASH_LEN)(rest).expect("to succeed");
+
+                rest
+            }
+        };
+
+        BytesMut::from(rest).freeze()
+    }
+
+    /// Extract raw, unserialized [`LeaseSet`] from `input`.
+    ///
+    /// Caller is expected to ensure that `input` it is a valid [`DatabaseStore`] that contains
+    /// a valid [`LeaseSet2`].
+    pub fn extract_raw_lease_set(input: &[u8]) -> Bytes {
+        Self::extraw_raw_data_payload(input)
+    }
+
+    /// Extract raw, unserialized [`RouterInfo`] from `input`.
+    ///
+    /// Caller is expected to ensure that `input` it is a valid [`DatabaseStore`] that contains
+    /// a valid [`RouterInfo`].
+    pub fn extract_raw_router_info(input: &[u8]) -> Bytes {
+        Self::extraw_raw_data_payload(input)
+    }
 }
 
 /// Database store kind.
 pub enum DatabaseStoreKind {
+    /// [`RouterInfo`].
+    RouterInfo {
+        /// Serialized [`RouterInfo`].
+        router_info: Bytes,
+    },
+
     /// [`LeaseSet2`].
     LeaseSet2 {
         /// Serialized [`LeaseSet2`].
-        leaseset: Bytes,
+        lease_set: Bytes,
     },
 }
 
@@ -319,7 +360,8 @@ impl DatabaseStoreKind {
     /// Get serialized length of the payload.
     fn serialized_len(&self) -> usize {
         match self {
-            Self::LeaseSet2 { leaseset } => leaseset.len(),
+            Self::RouterInfo { router_info } => router_info.len(),
+            Self::LeaseSet2 { lease_set } => lease_set.len(),
         }
     }
 }
@@ -365,6 +407,8 @@ impl DatabaseStoreBuilder {
         out.put_slice(&self.key);
 
         match &self.kind {
+            DatabaseStoreKind::RouterInfo { router_info } =>
+                out.put_u8(StoreType::RouterInfo.as_u8()),
             DatabaseStoreKind::LeaseSet2 { .. } => out.put_u8(StoreType::LeaseSet2.as_u8()),
         }
 
@@ -379,7 +423,7 @@ impl DatabaseStoreBuilder {
             } => {
                 out.put_u32(reply_token);
                 out.put_u32(*tunnel_id);
-                out.put_slice(&Into::<Vec<u8>>::into(router_id));
+                out.put_slice(&router_id.to_vec());
             }
             ReplyType::Router {
                 reply_token,
@@ -387,14 +431,16 @@ impl DatabaseStoreBuilder {
             } => {
                 out.put_u32(reply_token);
                 out.put_u32(NO_REPLY);
-                out.put_slice(&Into::<Vec<u8>>::into(router_id));
+                out.put_slice(&router_id.to_vec());
             }
         }
 
         match self.kind {
-            DatabaseStoreKind::LeaseSet2 { leaseset } => {
-                out.put_slice(&leaseset);
+            DatabaseStoreKind::RouterInfo { router_info } => {
+                out.put_u16(router_info.len() as u16);
+                out.put_slice(&router_info);
             }
+            DatabaseStoreKind::LeaseSet2 { lease_set } => out.put_slice(&lease_set),
         }
 
         out
@@ -509,6 +555,9 @@ mod tests {
         ];
 
         let _ = DatabaseStore::<MockRuntime>::parse(&buffer).unwrap();
+        let raw_lease_set = DatabaseStore::<MockRuntime>::extract_raw_lease_set(&buffer);
+
+        assert!(LeaseSet2::parse(&raw_lease_set).is_some());
     }
 
     #[test]
@@ -524,7 +573,7 @@ mod tests {
         let serialized = DatabaseStoreBuilder::new(
             key.clone(),
             DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(leaseset.clone().serialize(&signing_key)),
+                lease_set: Bytes::from(leaseset.clone().serialize(&signing_key)),
             },
         )
         .build();
@@ -535,7 +584,7 @@ mod tests {
         assert!(std::matches!(store.reply, ReplyType::None));
 
         match store.payload {
-            DatabaseStorePayload::LeaseSet2 { leaseset: parsed } => assert!(parsed
+            DatabaseStorePayload::LeaseSet2 { lease_set: parsed } => assert!(parsed
                 .leases
                 .iter()
                 .zip(leaseset.leases.iter())
@@ -558,7 +607,7 @@ mod tests {
         let serialized = DatabaseStoreBuilder::new(
             key.clone(),
             DatabaseStoreKind::LeaseSet2 {
-                leaseset: Bytes::from(leaseset.clone().serialize(&signing_key)),
+                lease_set: Bytes::from(leaseset.clone().serialize(&signing_key)),
             },
         )
         .with_reply_type(ReplyType::Tunnel {
@@ -586,7 +635,7 @@ mod tests {
         }
 
         match store.payload {
-            DatabaseStorePayload::LeaseSet2 { leaseset: parsed } => assert!(parsed
+            DatabaseStorePayload::LeaseSet2 { lease_set: parsed } => assert!(parsed
                 .leases
                 .iter()
                 .zip(leaseset.leases.iter())

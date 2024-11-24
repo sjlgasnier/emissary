@@ -69,7 +69,7 @@ impl<R: Runtime> Dht<R> {
         self.routing_table.add_floodfill(router_id);
     }
 
-    /// Get closest floodfills to `key`.
+    /// Get `limit` many floodfills clost to `key`.
     pub fn closest(
         &mut self,
         key: impl AsRef<[u8]>,
@@ -79,5 +79,18 @@ impl<R: Runtime> Dht<R> {
             Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
 
         self.routing_table.closest(target, limit)
+    }
+
+    /// Get closest floodfills to `key`.
+    pub fn closest_with_ignore<'a>(
+        &'a mut self,
+        key: impl AsRef<[u8]>,
+        limit: usize,
+        ignore: &'a HashSet<RouterId>,
+    ) -> impl Iterator<Item = RouterId> + 'a {
+        let target =
+            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+
+        self.routing_table.closest_with_ignore(target, limit, ignore)
     }
 }

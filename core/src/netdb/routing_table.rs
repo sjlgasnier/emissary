@@ -32,6 +32,7 @@ use crate::{
 
 use alloc::vec::Vec;
 use core::ops::Deref;
+use hashbrown::HashSet;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb::routing-table";
@@ -119,7 +120,7 @@ impl<R: Runtime> RoutingTable<R> {
         }
     }
 
-    /// Get `limit` closests floodfill routers to `target` from the k-buckets.
+    /// Get `limit` many floodfills closest to `target` from the k-buckets.
     pub fn closest<'a, K: Clone + 'a>(
         &'a mut self,
         target: Key<K>,
@@ -128,6 +129,21 @@ impl<R: Runtime> RoutingTable<R> {
         ClosestBucketsIter::new(self.local_key.distance(&target))
             .map(move |index| self.buckets[*index].closest_iter(&target))
             .flatten()
+            .take(limit)
+    }
+
+    /// Get `limit` many floodfills closest to `target` from the k-buckets, ignoring routers
+    /// specified in `ignore`.
+    pub fn closest_with_ignore<'a, 'b: 'a, K: Clone + 'a>(
+        &'a mut self,
+        target: Key<K>,
+        limit: usize,
+        ignore: &'b HashSet<RouterId>,
+    ) -> impl Iterator<Item = RouterId> + 'a {
+        ClosestBucketsIter::new(self.local_key.distance(&target))
+            .map(move |index| self.buckets[*index].closest_iter(&target))
+            .flatten()
+            .filter(|router_id| !ignore.contains(router_id))
             .take(limit)
     }
 }

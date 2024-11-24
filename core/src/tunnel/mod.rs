@@ -62,10 +62,11 @@ mod transit;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub use pool::TunnelMessage;
 
-// TODO: remove `TunnelPoolContextHandle` re-export
 pub use handle::TunnelManagerHandle;
-pub use pool::{TunnelPoolConfig, TunnelPoolContextHandle, TunnelPoolEvent, TunnelPoolHandle};
+pub use pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel";
@@ -143,17 +144,17 @@ impl<R: Runtime> TunnelManager<R> {
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
     ) -> (Self, TunnelManagerHandle, TunnelPoolHandle) {
-        tracing::trace!(
+        tracing::info!(
             target: LOG_TARGET,
             "starting tunnel manager",
         );
 
-        let noise = NoiseContext::new(local_key, router_info.identity().hash());
+        let noise = NoiseContext::new(local_key, router_info.identity.hash());
         let (routing_table, message_rx, transit_rx) = {
             let (message_tx, message_rx) = channel(DEFAULT_CHANNEL_SIZE);
             let (transit_tx, transit_rx) = channel(DEFAULT_CHANNEL_SIZE);
             let routing_table =
-                RoutingTable::new(router_info.identity().id(), message_tx, transit_tx);
+                RoutingTable::new(router_info.identity.id(), message_tx, transit_tx);
 
             (routing_table, message_rx, transit_rx)
         };
@@ -253,7 +254,7 @@ impl<R: Runtime> TunnelManager<R> {
                 );
                 pending_messages.push(message);
             }
-            None => match router == &self.router_info.identity().id() {
+            None => match router == &self.router_info.identity.id() {
                 true => {
                     tracing::warn!(
                         target: LOG_TARGET,

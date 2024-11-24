@@ -74,10 +74,11 @@ impl<R: Runtime> Router<R> {
         let ntcp2_config = config.ntcp2_config.clone();
         let i2cp_config = config.i2cp_config.clone();
         let sam_config = config.samv3_config.clone();
+        let floodfill = config.floodfill;
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
-        let local_router_id = local_router_info.identity().id();
+        let local_router_id = local_router_info.identity.id();
 
         let local_test = local_key.public().to_vec();
         let ntcp_test = StaticPrivateKey::from(ntcp2_config.as_ref().unwrap().key.clone())
@@ -86,7 +87,7 @@ impl<R: Runtime> Router<R> {
 
         tracing::info!(
             target: LOG_TARGET,
-            local_router_hash = ?base64_encode(local_router_info.identity().hash()),
+            local_router_hash = ?base64_encode(local_router_info.identity.hash()),
             "start emissary",
         );
 
@@ -135,6 +136,7 @@ impl<R: Runtime> Router<R> {
             let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
             let (netdb, netdb_handle) = NetDb::<R>::new(
                 local_router_id,
+                floodfill,
                 transport_service,
                 router_storage.clone(),
                 metrics_handle.clone(),

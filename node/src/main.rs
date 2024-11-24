@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         base_path,
         log,
         command,
+        floodfill,
     } = Arguments::parse();
 
     // initialize logger
@@ -56,6 +57,11 @@ async fn main() -> anyhow::Result<()> {
     // parse router config
     // TODO: this should also take any cli params
     let mut config = Config::try_from(base_path)?;
+
+    // TODO: ugly
+    if let Some(floodfill) = floodfill {
+        config.floodfill = floodfill;
+    }
 
     match command {
         None => {

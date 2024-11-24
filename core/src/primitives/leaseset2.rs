@@ -19,6 +19,7 @@
 use crate::{
     crypto::{SigningPrivateKey, StaticPublicKey},
     primitives::{Destination, Mapping, RouterId, TunnelId, LOG_TARGET},
+    runtime::Runtime,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -29,8 +30,8 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
-use core::time::Duration;
+use alloc::{collections::BTreeSet, vec::Vec};
+use core::{iter, time::Duration};
 
 /// Header for [`LeaseSet2`].
 ///
@@ -83,7 +84,7 @@ impl LeaseSet2Header {
 
         out.put_slice(&self.destination.serialize());
         out.put_u32(self.published);
-        out.put_u16(self.expires.saturating_sub(self.published) as u16);
+        out.put_u16(self.expires as u16);
         out.put_u16(0u16); // flags
 
         out
@@ -373,6 +374,28 @@ impl LeaseSet2 {
         out.put_slice(&signature);
 
         out[1..].to_vec()
+    }
+
+    /// Has the [`LeaseSet2`] expired.
+    pub fn is_expired<R: Runtime>(&self) -> bool {
+        let now = R::time_since_epoch();
+
+        self.header.expires < now.as_secs() as u32
+            || self.leases.iter().all(|lease| lease.expires < now)
+    }
+
+    /// When does the [`LeaseSet2`] expires, from seconds since epoch.
+    pub fn expires(&self) -> Duration {
+        // expiration must exist since the header contains an expiration and a valid (parsed)
+        // `LeaseSet2` always contains at least one `Lease` which in turn contains an expiration
+        Duration::from_secs(
+            *BTreeSet::from_iter(
+                iter::once(self.header.expires)
+                    .chain(self.leases.iter().map(|lease| lease.expires.as_secs() as u32)),
+            )
+            .first()
+            .expect("expiration to exist") as u64,
+        )
     }
 
     #[cfg(test)]
@@ -675,5 +698,125 @@ mod tests {
 
         assert_eq!(leaseset2.public_keys.len(), 1);
         assert_eq!(leaseset2.leases.len(), 3);
+    }
+
+    #[test]
+    fn expired_lease_set() {
+        // field in the header says it's expired
+        {
+            let now = MockRuntime::time_since_epoch();
+
+            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let destination =
+                Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+            let id = destination.id();
+
+            let lease1 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: now + Duration::from_secs(80),
+            };
+            let lease2 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: now + Duration::from_secs(60),
+            };
+
+            let lease_set = LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination,
+                    published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
+                    expires: Duration::from_secs(60).as_secs() as u32,
+                },
+                public_keys: vec![sk.public()],
+                leases: vec![lease1.clone(), lease2.clone()],
+            }
+            .serialize(&sgk);
+            let lease_set = LeaseSet2::parse(&lease_set).unwrap();
+
+            assert!(lease_set.is_expired::<MockRuntime>());
+            assert_eq!(
+                lease_set.expires().as_secs(),
+                (now - Duration::from_secs(4 * 60)).as_secs()
+            );
+        }
+
+        // all of the leases are expired
+        {
+            let now = MockRuntime::time_since_epoch();
+            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let destination =
+                Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+            let id = destination.id();
+
+            let lease1 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: now - Duration::from_secs(80),
+            };
+            let lease2 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: now - Duration::from_secs(60),
+            };
+
+            let lease_set = LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination,
+                    published: (now - Duration::from_secs(60)).as_secs() as u32,
+                    expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                },
+                public_keys: vec![sk.public()],
+                leases: vec![lease1.clone(), lease2.clone()],
+            }
+            .serialize(&sgk);
+            let lease_set = LeaseSet2::parse(&lease_set).unwrap();
+
+            assert!(lease_set.is_expired::<MockRuntime>());
+            assert_eq!(
+                lease_set.expires().as_secs(),
+                (now - Duration::from_secs(80)).as_secs()
+            );
+        }
+
+        // non-expired leaset
+        {
+            let now = MockRuntime::time_since_epoch();
+            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let destination = Destination::new(sgk.public());
+            let id = destination.id();
+
+            let lease1 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: now + Duration::from_secs(80),
+            };
+            let lease2 = Lease {
+                router_id: RouterId::random(),
+                tunnel_id: TunnelId::random(),
+                expires: now + Duration::from_secs(60),
+            };
+
+            let serialized = LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination,
+                    published: (now).as_secs() as u32,
+                    expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                },
+                public_keys: vec![sk.public()],
+                leases: vec![lease1.clone(), lease2.clone()],
+            }
+            .serialize(&sgk);
+            let lease_set = LeaseSet2::parse(&serialized).unwrap();
+
+            assert!(!lease_set.is_expired::<MockRuntime>());
+            assert_eq!(
+                lease_set.expires().as_secs(),
+                (now + Duration::from_secs(60)).as_secs()
+            );
+        }
     }
 }

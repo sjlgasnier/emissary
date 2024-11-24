@@ -29,7 +29,6 @@ use crate::{
         metrics::*,
         noise::NoiseContext,
         pool::{
-            context::TunnelMessage,
             listener::TunnelBuildListener,
             selector::{HopSelector, TunnelSelector},
             timer::{TunnelKind, TunnelTimer, TunnelTimerEvent},
@@ -59,8 +58,10 @@ use core::{
     time::Duration,
 };
 
-pub use context::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle};
-pub use handle::{TunnelPoolEvent, TunnelPoolHandle};
+pub use context::{
+    TunnelMessage, TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle,
+};
+pub use handle::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
 pub use selector::{ClientSelector, ExploratorySelector};
 
 mod context;

@@ -42,16 +42,16 @@ use super::router_address::TransportKind;
 #[derive(Debug, Clone)]
 pub struct RouterInfo {
     /// Router identity.
-    identity: RouterIdentity,
+    pub identity: RouterIdentity,
 
     /// When the router info was published.
-    published: Date,
+    pub published: Date,
 
     /// Router addresses.
-    addresses: HashMap<TransportKind, RouterAddress>,
+    pub addresses: HashMap<TransportKind, RouterAddress>,
 
     /// Router options.
-    options: HashMap<Str, Str>,
+    pub options: HashMap<Str, Str>,
 }
 
 // TODO: remove
@@ -183,30 +183,8 @@ impl RouterInfo {
     }
 
     /// Try to parse router information from `bytes`.
-    //
-    // TODO: rename to `parse()`
-    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
+    pub fn parse<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
-    }
-
-    /// Get reference to router addresses.
-    pub fn addresses(&self) -> &HashMap<TransportKind, RouterAddress> {
-        &self.addresses
-    }
-
-    /// Get reference to router options.
-    pub fn options(&self) -> &HashMap<Str, Str> {
-        &self.options
-    }
-
-    /// Get reference to [`RouterIdentity`](super::RouterIdentity)
-    pub fn identity(&self) -> &RouterIdentity {
-        &self.identity
-    }
-
-    /// Get reference to router's publish date.
-    pub fn date(&self) -> &Date {
-        &self.published
     }
 
     /// Returns `true` if the router is a floodfill router.
@@ -236,6 +214,28 @@ impl RouterInfo {
         };
 
         Self::from_keys::<R>(static_key, signing_key)
+    }
+
+    /// Create new random [`RouterInfo`] for a floodfill router.
+    pub fn floodfill<R: Runtime>() -> Self {
+        let static_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+
+        let signing_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+
+        let mut info = Self::from_keys::<R>(static_key, signing_key);
+        info.options.insert(Str::from("caps"), Str::from("f"));
+
+        info
     }
 
     /// Create new random [`RouterInfo`] from static and signing keys.
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn parse_router_1() {
         let router_info_bytes = include_bytes!("../../test-vectors/router1.dat");
-        let router_info = RouterInfo::from_bytes(router_info_bytes).unwrap();
+        let router_info = RouterInfo::parse(router_info_bytes).unwrap();
 
         assert_eq!(router_info.addresses.len(), 2);
 
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn parse_router_2() {
         let router_info_bytes = include_bytes!("../../test-vectors/router2.dat");
-        let router_info = RouterInfo::from_bytes(router_info_bytes).unwrap();
+        let router_info = RouterInfo::parse(router_info_bytes).unwrap();
 
         assert_eq!(router_info.addresses.len(), 2);
 
@@ -421,20 +421,20 @@ mod tests {
     #[test]
     fn parse_router_3() {
         let router_info_bytes = include_bytes!("../../test-vectors/router3.dat");
-        assert!(RouterInfo::from_bytes(router_info_bytes).is_none());
+        assert!(RouterInfo::parse(router_info_bytes).is_none());
     }
 
     #[test]
     fn is_not_floodfill() {
         let router_info_bytes = include_bytes!("../../test-vectors/router2.dat");
 
-        assert!(!RouterInfo::from_bytes(router_info_bytes).unwrap().is_floodfill())
+        assert!(!RouterInfo::parse(router_info_bytes).unwrap().is_floodfill())
     }
 
     #[test]
     fn is_floodfill() {
         let router_info_bytes = include_bytes!("../../test-vectors/router4.dat");
 
-        assert!(RouterInfo::from_bytes(router_info_bytes).unwrap().is_floodfill())
+        assert!(RouterInfo::parse(router_info_bytes).unwrap().is_floodfill())
     }
 }

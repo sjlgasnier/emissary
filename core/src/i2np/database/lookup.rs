@@ -105,16 +105,16 @@ pub enum ReplyType {
 /// Database store message.
 pub struct DatabaseLookup {
     /// Routers to ignore from reply.
-    ignore: HashSet<RouterId>,
+    pub ignore: HashSet<RouterId>,
 
     /// Search Key.
-    key: Vec<u8>,
+    pub key: Bytes,
 
     /// Lookup type.
-    lookup: LookupType,
+    pub lookup: LookupType,
 
     /// Reply type.
-    reply: ReplyType,
+    pub reply: ReplyType,
 }
 
 impl DatabaseLookup {
@@ -191,7 +191,7 @@ impl DatabaseLookup {
             rest,
             Self {
                 ignore,
-                key: key.to_vec(),
+                key: Bytes::from(key.to_vec()),
                 lookup,
                 reply,
             },
@@ -212,9 +212,8 @@ pub struct DatabaseLookupBuilder {
     /// Lookup type.
     lookup: LookupType,
 
-    /// ID of the router who is asking or
-    /// ID of the gateway where the reply should be sent to.
-    router_id: RouterId,
+    /// Reply type.
+    reply_type: Option<ReplyType>,
 
     /// IDs of the routers that should be ignored.
     routers_to_ignore: Vec<RouterId>,
@@ -222,13 +221,19 @@ pub struct DatabaseLookupBuilder {
 
 impl DatabaseLookupBuilder {
     /// Create new [`DatabaseLookupBuilder`].
-    pub fn new(key: Bytes, router_id: RouterId, lookup: LookupType) -> Self {
+    pub fn new(key: Bytes, lookup: LookupType) -> Self {
         Self {
             key,
             lookup,
-            router_id,
+            reply_type: None,
             routers_to_ignore: Vec::new(),
         }
+    }
+
+    /// Specify reply type.
+    pub fn with_reply_type(mut self, reply_type: ReplyType) -> Self {
+        self.reply_type = Some(reply_type);
+        self
     }
 
     /// Specify which routers should be ignored in the reply.
@@ -248,8 +253,21 @@ impl DatabaseLookupBuilder {
         );
 
         out.put_slice(&self.key);
-        out.put_slice(&Into::<Vec<u8>>::into(self.router_id));
-        out.put_u8(self.lookup.as_u8());
+
+        match self.reply_type.expect("reply type to exist") {
+            ReplyType::Tunnel {
+                tunnel_id,
+                router_id,
+            } => {
+                out.put_slice(&Into::<Vec<u8>>::into(router_id));
+                out.put_u8(self.lookup.as_u8() | 0x01); // send reply to tunnel
+                out.put_u32(*tunnel_id);
+            }
+            ReplyType::Router { router_id } => {
+                out.put_slice(&Into::<Vec<u8>>::into(router_id));
+                out.put_u8(self.lookup.as_u8());
+            }
+        }
         out.put_u16(self.routers_to_ignore.len() as u16);
 
         self.routers_to_ignore.into_iter().for_each(|router| {
@@ -294,12 +312,12 @@ mod tests {
 
     #[test]
     fn normal_lookup() {
-        let mut message = DatabaseLookupBuilder::new(
-            Bytes::from(vec![1u8; 32]),
-            RouterId::from(vec![0u8; 32]),
-            LookupType::Normal,
-        )
-        .build();
+        let mut message =
+            DatabaseLookupBuilder::new(Bytes::from(vec![1u8; 32]), LookupType::Normal)
+                .with_reply_type(ReplyType::Router {
+                    router_id: RouterId::from(vec![0u8; 32]),
+                })
+                .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Normal);
@@ -313,31 +331,38 @@ mod tests {
 
     #[test]
     fn leaseset_lookup() {
-        let mut message = DatabaseLookupBuilder::new(
-            Bytes::from(vec![2u8; 32]),
-            RouterId::from(vec![1u8; 32]),
-            LookupType::Leaseset,
-        )
-        .build();
+        let mut message =
+            DatabaseLookupBuilder::new(Bytes::from(vec![2u8; 32]), LookupType::Leaseset)
+                .with_reply_type(ReplyType::Tunnel {
+                    router_id: RouterId::from(vec![1u8; 32]),
+                    tunnel_id: TunnelId::from(1337u32),
+                })
+                .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Leaseset);
         assert_eq!(message.key, vec![2u8; 32]);
 
         match message.reply {
-            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![1u8; 32])),
+            ReplyType::Tunnel {
+                router_id,
+                tunnel_id,
+            } => {
+                assert_eq!(router_id, RouterId::from(vec![1u8; 32]));
+                assert_eq!(tunnel_id, TunnelId::from(1337u32));
+            }
             _ => panic!("invalid reply type"),
         }
     }
 
     #[test]
     fn router_lookup() {
-        let mut message = DatabaseLookupBuilder::new(
-            Bytes::from(vec![3u8; 32]),
-            RouterId::from(vec![2u8; 32]),
-            LookupType::Router,
-        )
-        .build();
+        let mut message =
+            DatabaseLookupBuilder::new(Bytes::from(vec![3u8; 32]), LookupType::Router)
+                .with_reply_type(ReplyType::Router {
+                    router_id: RouterId::from(vec![2u8; 32]),
+                })
+                .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Router);
@@ -354,20 +379,20 @@ mod tests {
         let mut ignored =
             (5..10).map(|id| RouterId::from(vec![id as u8; 32])).collect::<HashSet<_>>();
 
-        let mut message = DatabaseLookupBuilder::new(
-            Bytes::from(vec![3u8; 32]),
-            RouterId::from(vec![2u8; 32]),
-            LookupType::Router,
-        )
-        .with_ignored_routers(ignored.clone().into_iter().collect())
-        .build();
+        let mut message =
+            DatabaseLookupBuilder::new(Bytes::from(vec![3u8; 32]), LookupType::Router)
+                .with_reply_type(ReplyType::Router {
+                    router_id: RouterId::from(vec![3u8; 32]),
+                })
+                .with_ignored_routers(ignored.clone().into_iter().collect())
+                .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Router);
         assert_eq!(message.key, vec![3u8; 32]);
 
         match message.reply {
-            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![2u8; 32])),
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![3u8; 32])),
             _ => panic!("invalid reply type"),
         }
 
@@ -380,19 +405,19 @@ mod tests {
 
     #[test]
     fn exploration_lookup() {
-        let mut message = DatabaseLookupBuilder::new(
-            Bytes::from(vec![4u8; 32]),
-            RouterId::from(vec![3u8; 32]),
-            LookupType::Exploration,
-        )
-        .build();
+        let mut message =
+            DatabaseLookupBuilder::new(Bytes::from(vec![4u8; 32]), LookupType::Exploration)
+                .with_reply_type(ReplyType::Router {
+                    router_id: RouterId::from(vec![4u8; 32]),
+                })
+                .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Exploration);
         assert_eq!(message.key, vec![4u8; 32]);
 
         match message.reply {
-            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![3u8; 32])),
+            ReplyType::Router { router_id } => assert_eq!(router_id, RouterId::from(vec![4u8; 32])),
             _ => panic!("invalid reply type"),
         }
     }
