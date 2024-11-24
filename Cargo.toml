@@ -11,10 +11,10 @@ categories = []
 resolver = "2"
 
 members = [
-  "core",
-  "node",
+  "emissary-core",
+  "emissary-cli",
 ]
 
-default-members = ["node"]
+default-members = ["emissary-cli"]
 
 [workspace.dependencies]

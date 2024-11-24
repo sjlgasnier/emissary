@@ -1,5 +1,5 @@
 [package]
-name = "emissary-node"
+name = "emissary-cli"
 version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
@@ -13,7 +13,7 @@ readme.workspace = true
 anyhow = "1.0.86"
 clap = { version = "4.5.7", features = ["derive"] }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
-emissary-core = { path = "../core", features = ["std"] }
+emissary-core = { path = "../emissary-core", features = ["std"] }
 flate2 = "1.0.33"
 futures = "0.3.30"
 home = "0.5.9"
