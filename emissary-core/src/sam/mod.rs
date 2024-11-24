@@ -40,7 +40,7 @@ use futures::{FutureExt, Stream, StreamExt};
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, with_recycle, Receiver, Sender};
 
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     future::Future,
     mem,

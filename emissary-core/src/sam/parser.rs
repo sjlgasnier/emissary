@@ -37,6 +37,7 @@ use nom::{
 use alloc::{
     string::{String, ToString},
     sync::Arc,
+    vec::Vec,
 };
 use core::fmt;
 

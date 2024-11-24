@@ -33,7 +33,7 @@ use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{Receiver, Sender};
 
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{
     future::Future,
     mem,

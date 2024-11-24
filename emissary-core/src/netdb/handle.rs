@@ -25,6 +25,8 @@ use bytes::Bytes;
 use futures_channel::oneshot;
 use thingbuf::mpsc;
 
+use alloc::vec::Vec;
+
 /// Recycling strategy for [`NetDbAction`].
 #[derive(Default, Clone)]
 pub struct NetDbActionRecycle(());

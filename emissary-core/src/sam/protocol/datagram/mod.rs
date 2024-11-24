@@ -31,6 +31,7 @@ use hashbrown::HashMap;
 use nom::bytes::complete::take;
 use thingbuf::mpsc::Sender;
 
+use alloc::{format, string::String, vec::Vec};
 use core::marker::PhantomData;
 
 /// Datagram manager.

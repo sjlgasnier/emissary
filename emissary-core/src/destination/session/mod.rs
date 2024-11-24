@@ -51,14 +51,13 @@ use parking_lot::RwLock;
 #[cfg(feature = "no_std")]
 use spin::rwlock::RwLock;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     mem,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use std::collections::VecDeque;
 
 mod context;
 mod inbound;

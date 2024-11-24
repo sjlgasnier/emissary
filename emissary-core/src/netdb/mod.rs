@@ -43,7 +43,7 @@ use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
