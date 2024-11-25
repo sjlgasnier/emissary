@@ -40,6 +40,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::runtime::tokio";
+
 #[derive(Clone)]
 pub struct TokioRuntime {}
 
@@ -110,14 +113,18 @@ impl AsyncWrite for TokioTcpStream {
 
 impl TcpStream for TokioTcpStream {
     async fn connect(address: SocketAddr) -> Option<Self> {
-        net::TcpStream::connect(address)
-            .await
-            .map_err(|error| {
-                tracing::debug!("error: {error:?}");
-                ()
-            })
-            .ok()
-            .map(|stream| Self::new(stream))
+        match tokio::time::timeout(Duration::from_secs(10), net::TcpStream::connect(address)).await
+        {
+            Err(error) => {
+                tracing::debug!(target: LOG_TARGET, ?address, ?error, "failed to connect");
+                None
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(target: LOG_TARGET, ?address, ?error, "failed to connect");
+                None
+            }
+            Ok(Ok(stream)) => Some(Self::new(stream)),
+        }
     }
 }
 
@@ -126,6 +133,12 @@ pub struct TokioTcpListener(net::TcpListener);
 impl TcpListener<TokioTcpStream> for TokioTcpListener {
     // TODO: can be made sync with `socket2`
     async fn bind(address: SocketAddr) -> Option<Self> {
+        tracing::debug!(
+            target: LOG_TARGET,
+            ?address,
+            "create tcp socket",
+        );
+
         net::TcpListener::bind(&address)
             .await
             .ok()

@@ -406,6 +406,25 @@ impl<R: Runtime> NetDb<R> {
         }
     }
 
+    // Handle connection failure to `router_id`.
+    fn on_connection_failure(&mut self, router_id: RouterId) {
+        match self.floodfills.remove(&router_id) {
+            Some(FloodfillState::Dialing { pending_messages }) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    num_pending_messages = ?pending_messages.len(),
+                    "failed to establish connection",
+                );
+                self.floodfills.insert(router_id, FloodfillState::Disconnected);
+            }
+            Some(state) => {
+                self.floodfills.insert(router_id, FloodfillState::Disconnected);
+            }
+            None => {}
+        }
+    }
+
     /// Flood `message` to `routers`.
     fn send_message(&mut self, routers: &[RouterId], message: MessageKind) {
         routers.iter().for_each(|router_id| match self.floodfills.get_mut(router_id) {
@@ -1091,6 +1110,8 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_connection_established(router),
                 Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
                     self.on_connection_closed(router),
+                Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
+                    self.on_connection_failure(router),
                 _ => {}
             }
         }
