@@ -33,7 +33,7 @@ export interface Router {
   setHost(host: string): void;
   generateRouterInfo(path: string): Promise<RouterInfo>;
   populateNetDb(routerInfos: RouterInfo[]): Promise<void>;
-  start(): Promise<void>;
+  start(): Promise<string | null>;
   stop(): Promise<void>;
 }
 

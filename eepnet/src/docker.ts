@@ -53,7 +53,7 @@ export class Network {
 
     let config = {
       Name: "i2p-simnet",
-      Internal: true,
+      Internal: false,
       IPAM: {
         Config: [
           {
@@ -142,17 +142,24 @@ export class Container {
     this.address = address;
   }
 
-  async create(binds: string[], command: string[]) {
+  async create(
+    binds: string[],
+    ports: { [key: string]: any[] },
+    exposedPorts: { [key: string]: any },
+    command: string[],
+  ) {
     let body = {
       Hostname: this.name,
       Image: this.image,
       Cmd: command,
       AttachStdout: true,
       AttachStderr: true,
+      ExposedPorts: exposedPorts,
       HostConfig: {
         Binds: binds,
         AutoRemove: false,
         NetworkMode: "i2p-simnet",
+        PortBindings: ports,
         LogConfig: {
           Type: "json-file",
         },
@@ -196,5 +203,13 @@ export class Container {
     } catch (error) {
       console.log(error);
     }
+  }
+
+  async inspect(): Promise<any> {
+    return (
+      await axios.get(`http://localhost/containers/${this.name}/json`, {
+        socketPath: "/var/run/docker.sock",
+      })
+    ).data;
   }
 }

@@ -313,7 +313,13 @@ impl Runtime for TokioRuntime {
 
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
         let builder = PrometheusBuilder::new()
-            .with_http_listener("127.0.0.1:12842".parse::<SocketAddr>().expect(""));
+            .with_http_listener("0.0.0.0:12842".parse::<SocketAddr>().expect(""));
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            port = 12842,
+            "starting prometheus server",
+        );
 
         metrics
             .into_iter()

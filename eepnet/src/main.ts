@@ -21,7 +21,7 @@ import { promises as fs } from "fs";
 
 import { Network } from "./docker";
 import { parseConfig, Router, RouterInfo } from "./config";
-import { buildEmissary } from "./router/emissary";
+import { buildEmissary, Emissary } from "./router/emissary";
 import { waitForExit } from "./router/util";
 
 const spawn = command({
@@ -36,7 +36,7 @@ const spawn = command({
     }),
     purge: flag({
       long: "purge",
-    })
+    }),
   },
   handler: async ({ path, rebuild, purge }) => {
     let network = new Network();
@@ -89,13 +89,30 @@ const spawn = command({
       }),
     );
 
-    console.log("starting network, press ctrl-c to stop it");
-
     // start network
     await Promise.allSettled(
       [emissary, i2pd].flat().map(async (router: Router) => {
         await router.start();
       }),
+    );
+
+    // fetch metrics info for emissaries
+    let scrapeEndpoints = (
+      await Promise.allSettled(
+        emissary.map(
+          async (router: Emissary) => await router.getScrapeEndpoint(),
+        ),
+      )
+    )
+      .filter(
+        (result: PromiseSettledResult<any>) => result.status === "fulfilled",
+      )
+      .map((result: PromiseFulfilledResult<any>) => result.value);
+
+    await fs.writeFile(
+      "/tmp/i2p-simnet/scrape_configs.json",
+      JSON.stringify(scrapeEndpoints),
+      "utf8",
     );
 
     await waitForExit();

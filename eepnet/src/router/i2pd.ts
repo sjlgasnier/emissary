@@ -77,6 +77,8 @@ export class I2pd implements Router {
   }
 
   async populateNetDb(routerInfos: RouterInfo[]): Promise<void> {}
-  async start(): Promise<void> {}
+  async start(): Promise<string | null> {
+    return null;
+  }
   async stop(): Promise<void> {}
 }

@@ -1,7 +1,7 @@
 [[routers]]
 type = "emissary"
 log = "-lemissary=trace,emissary::subsystem=off"
-count = 3
+count = 10
 
 # [[routers]]
 # type = "i2pd"

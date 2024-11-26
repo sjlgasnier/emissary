@@ -85,10 +85,12 @@ export class Emissary implements Router {
     // after waiting for 2 secons for initialization finish, is collected
     // from `this.path` and returned to the caller
     const container = new Container("emissary", this.name, path, this.host);
-    await container.create(
-      [`${path}:/var/lib/emissary`],
-      ["emissary-cli", "-lemissary=trace", "--base-path", "/var/lib/emissary"],
-    );
+    await container.create([`${path}:/var/lib/emissary`], {}, {}, [
+      "emissary-cli",
+      "-lemissary=trace",
+      "--base-path",
+      "/var/lib/emissary",
+    ]);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await container.destroy();
 
@@ -114,26 +116,38 @@ export class Emissary implements Router {
       );
   }
 
-  async start(): Promise<void> {
+  async start(): Promise<any | null> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
     console.log(`starting ${this.name}...`);
 
-    this.container = new Container(
-      "emissary",
-      this.name,
-      this.path,
-      this.host,
-    );
+    this.container = new Container("emissary", this.name, this.path, this.host);
     await this.container.create(
       [`${this.path}:/var/lib/emissary`],
+      { ["12842/tcp"]: [{}] },
+      { ["12842/tcp"]: {} },
       ["emissary-cli", "-lemissary=trace", "--base-path", "/var/lib/emissary"],
     );
   }
 
+  async getScrapeEndpoint(): Promise<any> {
+    if (!this.container) throw new Error("container is not running");
+
+    // fetch port mapping for prometheus on host
+    let info = await this.container.inspect();
+
+    return {
+      targets: [
+        `0.0.0.0:${info["NetworkSettings"]["Ports"]["12842/tcp"][0]["HostPort"]}`,
+      ],
+      labels: {
+        router: info["Name"].substring(1),
+      },
+    };
+  }
+
   async stop(): Promise<void> {
-    if (this.container)
-      await this.container.destroy();
+    if (this.container) await this.container.destroy();
   }
 }
 
