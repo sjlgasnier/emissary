@@ -34,12 +34,12 @@ use crate::{
         HopRole, Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
-    runtime::{JoinSet, Runtime},
+    runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
     tunnel::{
+        metrics::*,
         noise::{NoiseContext, TunnelKeys},
         routing_table::RoutingTable,
         transit::{inbound::InboundGateway, outbound::OutboundEndpoint, participant::Participant},
-        TUNNEL_EXPIRATION,
     },
     Error,
 };
@@ -236,8 +236,8 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     ?error,
                     "tunnel already exists in routing table, rejecting",
                 );
+                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
 
-                // TODO: metrics
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
                 record[511] = 0x30; // reject
@@ -245,7 +245,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 session.encrypt_build_record(&mut record)?;
             }
             Ok(receiver) => {
-                // TODO: metrics
+                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
+                self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
                 record[511] = 0x00; // accept
@@ -366,8 +368,8 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     ?error,
                     "tunnel already exists in routing table, rejecting",
                 );
+                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
 
-                // TODO: metrics
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
                 record[201] = 0x30; // reject
@@ -376,7 +378,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 session.encrypt_build_records(&mut payload, record_idx)?;
             }
             Ok(receiver) => {
-                // TODO: metrics
+                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
+                self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
                 record[201] = 0x00; // accept
@@ -510,6 +514,7 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                         "transit tunnel expired",
                     );
                     self.routing_table.remove_tunnel(&tunnel_id);
+                    self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).decrement(1);
                 }
             }
         }

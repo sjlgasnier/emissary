@@ -22,11 +22,11 @@ use crate::{
     i2np::Message,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
     router_storage::RouterStorage,
-    runtime::{MetricType, Runtime},
+    runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
-    transports::ntcp2::Ntcp2Transport,
+    transports::{metrics::*, ntcp2::Ntcp2Transport},
     Error, Ntcp2Config,
 };
 
@@ -41,6 +41,7 @@ use core::{
     task::{Context, Poll},
 };
 
+mod metrics;
 mod ntcp2;
 mod ssu2;
 
@@ -345,6 +346,7 @@ impl<R: Runtime> TransportManager<R> {
 
     /// Collect `TransportManager`-related metric counters, gauges and histograms.
     pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
+        let metrics = register_metrics(metrics);
         let metrics = Ntcp2Transport::<R>::metrics(metrics);
 
         metrics
@@ -395,6 +397,7 @@ impl<R: Runtime> TransportManager<R> {
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),
                 self.router_storage.clone(),
+                self.metrics_handle.clone(),
             )
             .await?,
         ));
@@ -427,7 +430,10 @@ impl<R: Runtime> Future for TransportManager<R> {
                     );
 
                     match self.routers.insert(router.clone()) {
-                        true => self.transports[index].accept(&router),
+                        true => {
+                            self.transports[index].accept(&router);
+                            self.metrics_handle.gauge(NUM_CONNECTIONS).increment(1);
+                        }
                         false => {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -446,6 +452,10 @@ impl<R: Runtime> Future for TransportManager<R> {
                     );
 
                     self.routers.remove(&router);
+                    self.metrics_handle.gauge(NUM_CONNECTIONS).decrement(1);
+                }
+                Poll::Ready(Some(TransportEvent::ConnectionFailure {})) => {
+                    self.metrics_handle.counter(NUM_DIAL_FAILURES).increment(1);
                 }
                 Poll::Ready(Some(event)) => {
                     tracing::warn!("unhandled event: {event:?}");

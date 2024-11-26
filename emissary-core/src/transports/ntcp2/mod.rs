@@ -22,9 +22,10 @@ use crate::{
     },
     primitives::{RouterAddress, RouterId, RouterInfo, Str, TransportKind},
     router_storage::RouterStorage,
-    runtime::{JoinSet, MetricType, Runtime, TcpListener, TcpStream},
+    runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener, TcpStream},
     subsystem::SubsystemHandle,
     transports::{
+        metrics::*,
         ntcp2::{
             listener::Ntcp2Listener,
             message::MessageBlock,
@@ -59,6 +60,9 @@ pub struct Ntcp2Transport<R: Runtime> {
     /// NTCP2 connection listener.
     listener: Ntcp2Listener<R>,
 
+    /// Metrics handle.
+    metrics: R::MetricsHandle,
+
     /// Open connections.
     open_connections: R::JoinSet<RouterId>,
 
@@ -87,6 +91,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
         router_storage: RouterStorage,
+        metrics: R::MetricsHandle,
     ) -> crate::Result<Self> {
         // TODO: handle the case when user doesn't want to enable ntcp2 listener
         let socket_address = local_router_info
@@ -115,6 +120,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
         Ok(Ntcp2Transport {
             listener,
+            metrics,
             open_connections: R::join_set(),
             pending_connections: HashMap::new(),
             pending_handshakes: R::join_set(),
@@ -140,6 +146,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
         self.waker.as_mut().map(|waker| waker.wake_by_ref());
+        self.metrics.counter(NUM_OUTBOUND).increment(1);
     }
 
     fn accept(&mut self, router: &RouterId) {
@@ -173,6 +180,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                     %router,
                     "ntcp2 session rejected, closing connection",
                 );
+                self.metrics.counter(NUM_REJECTED).increment(1);
                 drop(connection);
             }
             None => {
@@ -211,6 +219,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
                 let future = self.session_manager.accept_session(stream);
                 self.pending_handshakes.push(future);
+                self.metrics.counter(NUM_INBOUND).increment(1);
             }
         }
 

@@ -20,7 +20,7 @@ use crate::{
     error::{ChannelError, Error},
     i2np::{Message, MessageBuilder, MessageType},
     primitives::{Lease, MessageId, RouterId, Str, TunnelId},
-    runtime::{Counter, Gauge, Instant, JoinSet, MetricsHandle, Runtime},
+    runtime::{Counter, Gauge, Histogram, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
@@ -565,6 +565,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                     "failed to send message to outbound tunnel"
                                 );
                             }
+                            self.metrics.histogram(NUM_FRAGMENTS).record(1f64);
                         }
                     }
                 }
@@ -661,6 +662,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         self.context.remove_listener(&message_id);
                     }
                 }
+                self.metrics.histogram(NUM_FRAGMENTS).record(1f64);
 
                 debug_assert!(messages.next().is_none());
             });
@@ -698,6 +700,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.outbound.insert(tunnel_id, tunnel);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                     self.metrics.gauge(NUM_OUTBOUND_TUNNELS).increment(1);
+                    self.metrics.counter(NUM_BUILD_SUCCESSES).increment(1);
 
                     // inform the owner of the tunnel pool that a new outbound tunnel has been built
                     if let Err(error) = self.context.register_outbound_tunnel_built(tunnel_id) {
@@ -767,6 +770,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.inbound.push(tunnel);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).increment(1);
                     self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).decrement(1);
+                    self.metrics.counter(NUM_BUILD_SUCCESSES).increment(1);
                 }
             }
         }
@@ -788,6 +792,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.context.remove_lease(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
+                    self.metrics.gauge(NUM_INBOUND_TUNNELS).decrement(1);
 
                     // inform the owner of the tunnel pool that an inbound tunnel has expired
                     if let Err(error) =
@@ -837,7 +842,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         Some(tunnel) => {
                             let (router_id, messages) = tunnel.send_to_router(router_id, message);
 
-                            messages.into_iter().for_each(|message| {
+                            let count = messages.into_iter().fold(0usize, |count, message| {
                                 if let Err(error) =
                                     self.routing_table.send_message(router_id.clone(), message)
                                 {
@@ -849,7 +854,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                                         "failed to send tunnel message to router",
                                     );
                                 }
+
+                                count + 1
                             });
+                            self.metrics.histogram(NUM_FRAGMENTS).record(count as f64);
                         }
                     },
                     TunnelMessage::TunnelDelivery {
@@ -877,7 +885,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         let (router_id, messages) =
                             tunnel.send_to_tunnel(gateway.clone(), tunnel_id, message);
 
-                        messages.into_iter().for_each(|message| {
+                        let count = messages.into_iter().fold(0usize, |count, message| {
                             if let Err(error) =
                                 self.routing_table.send_message(router_id.clone(), message)
                             {
@@ -889,7 +897,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                                     "failed to send tunnel message to router",
                                 );
                             }
+
+                            count + 1
                         });
+                        self.metrics.histogram(NUM_FRAGMENTS).record(count as f64);
                     }
                     TunnelMessage::Inbound { message } => tracing::warn!(
                         target: LOG_TARGET,
@@ -929,6 +940,9 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         );
 
                         self.metrics.counter(NUM_TEST_SUCCESSES).increment(1);
+                        self.metrics
+                            .histogram(TUNNEL_TEST_DURATIONS)
+                            .record(elapsed.as_millis() as f64);
                     }
                 },
             }
