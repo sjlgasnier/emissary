@@ -1,12 +1,12 @@
-[[routers]]
-type = "emissary"
-log = "-lemissary=trace,emissary::subsystem=off"
-count = 10
-
 # [[routers]]
-# type = "i2pd"
-# log = "debug"
-# count = 1
+# type = "emissary"
+# log = "-lemissary=trace,emissary::subsystem=off"
+# count = 10
+
+[[routers]]
+type = "i2pd"
+log = "debug"
+count = 1
 
 # [[routers]]
 # name = "emissary-floodfill-1"

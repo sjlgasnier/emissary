@@ -116,7 +116,7 @@ export class Emissary implements Router {
       );
   }
 
-  async start(): Promise<any | null> {
+  async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
     console.log(`starting ${this.name}...`);
@@ -128,6 +128,10 @@ export class Emissary implements Router {
       { ["12842/tcp"]: {} },
       ["emissary-cli", "-lemissary=trace", "--base-path", "/var/lib/emissary"],
     );
+  }
+
+  async stop(): Promise<void> {
+    if (this.container) await this.container.destroy();
   }
 
   async getScrapeEndpoint(): Promise<any> {
@@ -144,10 +148,6 @@ export class Emissary implements Router {
         router: info["Name"].substring(1),
       },
     };
-  }
-
-  async stop(): Promise<void> {
-    if (this.container) await this.container.destroy();
   }
 }
 

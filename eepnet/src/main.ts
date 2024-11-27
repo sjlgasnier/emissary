@@ -23,6 +23,7 @@ import { Network } from "./docker";
 import { parseConfig, Router, RouterInfo } from "./config";
 import { buildEmissary, Emissary } from "./router/emissary";
 import { waitForExit } from "./router/util";
+import { buildI2pd } from "./router/i2pd";
 
 const spawn = command({
   name: "spawn",
@@ -49,7 +50,8 @@ const spawn = command({
     });
 
     if (rebuild) {
-      await buildEmissary();
+      await buildI2pd();
+      // await buildEmissary();
     }
 
     // assign ip address for each router

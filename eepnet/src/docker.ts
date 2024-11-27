@@ -17,7 +17,6 @@
 // DEALINGS IN THE SOFTWARE.
 
 import axios from "axios";
-import FormData from "form-data";
 import { promises as fs } from "fs";
 
 export class Network {
@@ -109,11 +108,11 @@ export class Image {
     this.name = name;
   }
 
-  async build() {
+  async build(file?: string) {
     console.log("building docker image for i2p-simnet");
 
     await axios.post(
-      `http://localhost/build?t=${this.name}`,
+      `http://localhost/build?t=${this.name}${file ? `&dockerfile=${file}` : ""}`,
       await fs.readFile(this.path),
       {
         headers: {

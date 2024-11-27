@@ -16,8 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-import { identity } from "cmd-ts/dist/cjs/from";
+import { create } from "tar";
+import { promises as fs } from "fs";
+import * as toml from "@iarna/toml";
+
+import { Container, Image } from "../docker";
 import { Router, RouterInfo } from "../config";
+import { getRouterHash } from "./util";
 
 export class I2pd implements Router {
   name: string;
@@ -25,6 +30,8 @@ export class I2pd implements Router {
   caps: string;
   host: null | string;
   config: null | string;
+  path: null | string;
+  container: null | Container;
 
   constructor(name: string, log: string, caps: string) {
     this.name = name;
@@ -33,6 +40,8 @@ export class I2pd implements Router {
 
     this.host = null;
     this.config = null;
+    this.path = null;
+    this.container = null;
   }
 
   getName(): string {
@@ -43,42 +52,84 @@ export class I2pd implements Router {
     this.host = host;
   }
 
-  generateRouterInfo(path: string): Promise<RouterInfo> {
+  async generateRouterInfo(path: string): Promise<RouterInfo> {
+    this.path = path;
+
     if (!this.host)
       return Promise.reject(new Error(`host missing for ${this.name}`));
 
-    let config = {
-      host: this.host,
-      reservedrange: false,
-      loglevel: this.log,
-      ipv4: true,
-      ipv6: false,
-      ntcp2: {
-        enabled: true,
-        published: true,
-        port: 8888,
-      },
-      reseed: {
-        urls: "",
-      },
-    };
+    let config = toml
+      .stringify({
+        host: this.host,
+        reservedrange: false,
+        loglevel: this.log,
+        ipv4: true,
+        ipv6: false,
+        ntcp2: {
+          enabled: true,
+          published: true,
+          port: 9999,
+        },
+        reseed: {
+          urls: "",
+        },
+      })
+      // the format isn't strictly toml so some modification have to be made
+      // so i2pd is able to parse the configuration correctly
+      .replace("9_999", "9999")
+      .replace(`\"${this.host}\"`, `${this.host}`);
 
-    // TODO: map datadir to host
-    // TODO: start i2pd
-    // TODO: stop i2pd
-    // TODO: copy generated routerinfo
-    // TODO: verify it's valid
+    await fs.writeFile(`${path}/i2pd.conf`, config);
 
-    return Promise.resolve({
-      name: this.name,
-      hash: "",
-      info: new Uint8Array(),
-    });
+    const container = new Container("i2pd", this.name, path, this.host);
+    await container.create([`${path}:/var/lib/i2pd`], {}, {}, [
+      "i2pd",
+      "--datadir",
+      "/var/lib/i2pd",
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await container.destroy();
+
+    let routerInfo = new Uint8Array(
+      await fs.readFile(`${path}/router.info`),
+    );
+    let routerHash = getRouterHash(routerInfo.subarray(0, 391));
+
+    return { name: this.name, hash: routerHash, info: routerInfo };
   }
 
-  async populateNetDb(routerInfos: RouterInfo[]): Promise<void> {}
-  async start(): Promise<string | null> {
-    return null;
+  async populateNetDb(routerInfos: RouterInfo[]): Promise<void> {
+    // TODO: 
   }
-  async stop(): Promise<void> {}
+
+  async start(): Promise<void> {
+    if (!this.path || !this.host) throw new Error("path or host not set");
+
+    console.log(`starting ${this.name}...`);
+
+    this.container = new Container("i2pd", this.name, this.path, this.host);
+    await this.container.create(
+      [`${this.path}:/var/lib/i2pd`],
+      {},
+      {},
+      ["i2pd", "--loglevel", this.log, "--datadir", "/var/lib/i2pd"],
+    );
+  }
+
+  async stop(): Promise<void> {
+    if (this.container) await this.container.destroy();
+  }
+}
+
+export async function buildI2pd() {
+  await create(
+    {
+      gzip: true,
+      file: "/tmp/i2p-simnet/i2pd.tar",
+      cwd: "resources/",
+    },
+    ["Dockerfile.i2pd", "range.patch"],
+  );
+
+  await new Image("i2pd", "/tmp/i2p-simnet/i2pd.tar").build("Dockerfile.i2pd");
 }
