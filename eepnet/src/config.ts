@@ -58,7 +58,7 @@ export async function parseConfig(config: string): Promise<Config> {
               new Emissary(
                 router.name ?? `${router.type}-${index}`,
                 router.log,
-                router.caps ?? "L",
+                router.floodfill ?? false,
               ),
           ),
         );
@@ -72,7 +72,7 @@ export async function parseConfig(config: string): Promise<Config> {
               new I2pd(
                 router.name ?? `${router.type}-${index}`,
                 router.log,
-                router.caps ?? "L",
+                router.floodfill ?? false,
               ),
           ),
         );

@@ -27,15 +27,15 @@ import { getRouterHash } from "./util";
 export class Emissary implements Router {
   name: string;
   log: string;
-  caps: string;
+  floodfill: boolean;
   host: null | string;
   path: null | string;
   container: null | Container;
 
-  constructor(name: string, log: string, caps: string) {
+  constructor(name: string, log: string, floodfill: boolean) {
     this.name = name;
     this.log = log;
-    this.caps = caps;
+    this.floodfill = floodfill;
 
     this.host = null;
     this.path = null;
@@ -58,6 +58,7 @@ export class Emissary implements Router {
     if (!this.host) throw new Error("host not specified");
 
     let config = toml.stringify({
+      floodfill: this.floodfill,
       ntcp2: {
         enabled: true,
         host: this.host,

@@ -1,7 +1,7 @@
-# [[routers]]
-# type = "emissary"
-# log = "-lemissary=trace,emissary::subsystem=off"
-# count = 10
+[[routers]]
+type = "emissary"
+log = "-lemissary=trace,emissary::subsystem=off"
+count = 1
 
 [[routers]]
 type = "i2pd"
@@ -12,10 +12,9 @@ count = 1
 # name = "emissary-floodfill-1"
 # type = "emissary"
 # log = "-lemissary=trace,emissary::subsystem=off"
-# caps = "Xf"
 
-# [[routers]]
-# name = "i2pd-floodfill-1"
-# type = "i2pd"
-# log = "debug"
-# caps = "Xf"
+[[routers]]
+name = "i2pd-floodfill-1"
+type = "i2pd"
+log = "debug"
+floodfill = true

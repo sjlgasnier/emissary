@@ -27,16 +27,16 @@ import { getRouterHash } from "./util";
 export class I2pd implements Router {
   name: string;
   log: string;
-  caps: string;
+  floodfill: boolean;
   host: null | string;
   config: null | string;
   path: null | string;
   container: null | Container;
 
-  constructor(name: string, log: string, caps: string) {
+  constructor(name: string, log: string, floodfill: boolean) {
     this.name = name;
     this.log = log;
-    this.caps = caps;
+    this.floodfill = floodfill;
 
     this.host = null;
     this.config = null;
@@ -63,6 +63,7 @@ export class I2pd implements Router {
         host: this.host,
         reservedrange: false,
         loglevel: this.log,
+        floodfill: this.floodfill,
         ipv4: true,
         ipv6: false,
         ntcp2: {
