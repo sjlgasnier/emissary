@@ -56,10 +56,14 @@ export class Network {
       IPAM: {
         Config: [
           {
-            Subnet: "172.18.0.0/24",
+            Subnet: "172.19.0.0/16"
           },
         ],
-        Options: {},
+        Options: {}
+      },
+      Options: {
+        "com.docker.network.bridge.enable_ip_masquerade": "false",
+        "com.docker.network.bridge.enable_icc": "true",
       },
     };
 
@@ -68,7 +72,7 @@ export class Network {
         socketPath: "/var/run/docker.sock",
       });
 
-      this.address = "172.18.0.2";
+      this.address = "172.19.0.2";
     } catch (error) {
       console.log(error);
     }
