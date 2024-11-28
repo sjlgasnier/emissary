@@ -38,8 +38,11 @@ const spawn = command({
     no_purge: flag({
       long: "no-purge",
     }),
+    remove_network: flag({
+      long: "remove-network",
+    }),
   },
-  handler: async ({ path, no_rebuild, no_purge }) => {
+  handler: async ({ path, no_rebuild, no_purge, remove_network }) => {
     let network = new Network();
     await network.create();
 
@@ -126,13 +129,13 @@ const spawn = command({
       }),
     );
 
-    if (!no_purge) {
+    if (!no_purge)
       await fs.rm("/tmp/i2p-simnet", {
         force: true,
         recursive: true,
       });
-      await network.destroy();
-    }
+
+    if (remove_network) await network.destroy();
 
     process.exit(0);
   },

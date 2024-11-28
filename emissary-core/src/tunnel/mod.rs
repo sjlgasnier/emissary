@@ -330,22 +330,22 @@ impl<R: Runtime> TunnelManager<R> {
         self.routers.remove(router);
     }
 
-    /// Handle connection failure to `router`
+    /// Handle connection failure to `router_id`
     ///
-    /// Remove `router` from `routers` and drop any pending messages to them.
-    fn on_connection_failure(&mut self, router: &RouterId) {
-        tracing::debug!(
+    /// Remove `router_id` from `routers` and drop any pending messages to them.
+    fn on_connection_failure(&mut self, router_id: &RouterId) {
+        tracing::trace!(
             target: LOG_TARGET,
-            %router,
+            %router_id,
             "failed to open connection to router",
         );
 
-        if self.routers.remove(router).is_none() {
-            tracing::warn!(
+        if self.routers.remove(router_id).is_none() {
+            tracing::debug!(
                 target: LOG_TARGET,
+                %router_id,
                 "connection failure for unknown router",
             );
-            debug_assert!(false);
         }
     }
 
