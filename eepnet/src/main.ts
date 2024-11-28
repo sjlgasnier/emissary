@@ -32,14 +32,14 @@ const spawn = command({
       type: string,
       long: "path",
     }),
-    rebuild: flag({
-      long: "rebuild",
+    no_rebuild: flag({
+      long: "no-rebuild",
     }),
-    purge: flag({
-      long: "purge",
+    no_purge: flag({
+      long: "no-purge",
     }),
   },
-  handler: async ({ path, rebuild, purge }) => {
+  handler: async ({ path, no_rebuild, no_purge }) => {
     let network = new Network();
     await network.create();
 
@@ -49,9 +49,9 @@ const spawn = command({
       recursive: true,
     });
 
-    if (rebuild) {
+    if (!no_rebuild) {
       await buildI2pd();
-      // await buildEmissary();
+      await buildEmissary();
     }
 
     // assign ip address for each router
@@ -126,7 +126,7 @@ const spawn = command({
       }),
     );
 
-    if (purge) {
+    if (!no_purge) {
       await fs.rm("/tmp/i2p-simnet", {
         force: true,
         recursive: true,

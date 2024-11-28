@@ -91,16 +91,22 @@ export class I2pd implements Router {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await container.destroy();
 
-    let routerInfo = new Uint8Array(
-      await fs.readFile(`${path}/router.info`),
-    );
+    let routerInfo = new Uint8Array(await fs.readFile(`${path}/router.info`));
     let routerHash = getRouterHash(routerInfo.subarray(0, 391));
 
     return { name: this.name, hash: routerHash, info: routerInfo };
   }
 
   async populateNetDb(routerInfos: RouterInfo[]): Promise<void> {
-    // TODO: 
+    routerInfos
+      .filter((info: RouterInfo) => info.name != this.name)
+      .map((info: RouterInfo) => info)
+      .forEach(async (info: RouterInfo) => {
+        await fs.writeFile(
+          `${this.path}/netDb/r${info.hash[0]}/routerInfo-${info.hash}.dat`,
+          info.info,
+        );
+      });
   }
 
   async start(): Promise<void> {
@@ -109,12 +115,13 @@ export class I2pd implements Router {
     console.log(`starting ${this.name}...`);
 
     this.container = new Container("i2pd", this.name, this.path, this.host);
-    await this.container.create(
-      [`${this.path}:/var/lib/i2pd`],
-      {},
-      {},
-      ["i2pd", "--loglevel", this.log, "--datadir", "/var/lib/i2pd"],
-    );
+    await this.container.create([`${this.path}:/var/lib/i2pd`], {}, {}, [
+      "i2pd",
+      "--loglevel",
+      this.log,
+      "--datadir",
+      "/var/lib/i2pd",
+    ]);
   }
 
   async stop(): Promise<void> {

@@ -56,10 +56,10 @@ export class Network {
       IPAM: {
         Config: [
           {
-            Subnet: "172.19.0.0/16"
+            Subnet: "172.19.0.0/16",
           },
         ],
-        Options: {}
+        Options: {},
       },
       Options: {
         "com.docker.network.bridge.enable_ip_masquerade": "false",
@@ -113,7 +113,7 @@ export class Image {
   }
 
   async build(file?: string) {
-    console.log("building docker image for i2p-simnet");
+    console.log(`building docker image for ${this.name}`);
 
     await axios.post(
       `http://localhost/build?t=${this.name}${file ? `&dockerfile=${file}` : ""}`,
@@ -158,6 +158,7 @@ export class Container {
       AttachStdout: true,
       AttachStderr: true,
       ExposedPorts: exposedPorts,
+      User: "1000:1000",
       HostConfig: {
         Binds: binds,
         AutoRemove: false,
