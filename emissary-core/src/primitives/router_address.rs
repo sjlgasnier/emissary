@@ -229,13 +229,16 @@ impl RouterAddress {
 
     // TODO: zzz
     pub fn serialize(&self) -> Vec<u8> {
-        let options = self
-            .options
-            .clone()
-            .into_iter()
-            .map(|(key, value)| Mapping::new(key, value).serialize())
-            .flatten()
-            .collect::<Vec<_>>();
+        let options = {
+            let mut options = self.options.clone().into_iter().collect::<Vec<_>>();
+            options.sort_by(|a, b| a.0.cmp(&b.0));
+
+            options
+                .into_iter()
+                .map(|(key, value)| Mapping::new(key, value).serialize())
+                .flatten()
+                .collect::<Vec<_>>()
+        };
 
         let transport = self.transport.serialize();
         let size = (options.len() as u16).to_be_bytes().to_vec();

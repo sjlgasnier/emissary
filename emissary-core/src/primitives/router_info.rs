@@ -154,13 +154,16 @@ impl RouterInfo {
         let identity = self.identity.serialize();
         let published = self.published.serialize();
         let ntcp2 = self.addresses.get(&TransportKind::Ntcp2).unwrap().serialize();
-        let options = self
-            .options
-            .clone()
-            .into_iter()
-            .map(|(key, value)| Mapping::new(key, value).serialize())
-            .flatten()
-            .collect::<Vec<_>>();
+        let options = {
+            let mut options = self.options.clone().into_iter().collect::<Vec<_>>();
+            options.sort_by(|a, b| a.0.cmp(&b.0));
+
+            options
+                .into_iter()
+                .map(|(key, value)| Mapping::new(key, value).serialize())
+                .flatten()
+                .collect::<Vec<_>>()
+        };
 
         let size = identity.len() + published.len() + ntcp2.len() + options.len() + 4 + 64;
         let mut out = vec![0u8; size];
