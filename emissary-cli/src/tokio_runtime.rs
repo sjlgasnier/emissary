@@ -123,7 +123,17 @@ impl TcpStream for TokioTcpStream {
                 tracing::debug!(target: LOG_TARGET, ?address, ?error, "failed to connect");
                 None
             }
-            Ok(Ok(stream)) => Some(Self::new(stream)),
+            Ok(Ok(stream)) => stream
+                .set_nodelay(true)
+                .map(|()| Self::new(stream))
+                .map_err(|error| {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to configure `TCP_NODELAY`",
+                    )
+                })
+                .ok(),
         }
     }
 }
@@ -147,8 +157,21 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
         match futures::ready!(self.0.poll_accept(cx)) {
-            Err(_) => return Poll::Ready(None),
-            Ok((stream, _)) => return Poll::Ready(Some(TokioTcpStream::new(stream))),
+            Err(_) => Poll::Ready(None),
+            Ok((stream, _)) =>
+                return Poll::Ready(
+                    stream
+                        .set_nodelay(true)
+                        .map(|()| TokioTcpStream::new(stream))
+                        .map_err(|error| {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "failed to configure `TCP_NODELAY`",
+                            )
+                        })
+                        .ok(),
+                ),
         }
     }
 }
