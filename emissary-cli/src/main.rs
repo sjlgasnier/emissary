@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         log,
         command,
         floodfill,
+        caps,
     } = Arguments::parse();
 
     // initialize logger
@@ -63,6 +64,10 @@ async fn main() -> anyhow::Result<()> {
         if !config.floodfill {
             config.floodfill = true;
         }
+    }
+
+    if let Some(caps) = caps {
+        config.caps = Some(caps);
     }
 
     match command {

@@ -82,4 +82,7 @@ pub struct Config {
 
     /// Should the node be run as a floodfill router.
     pub floodfill: bool,
+
+    /// Router capabilities.
+    pub caps: Option<String>,
 }

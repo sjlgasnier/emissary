@@ -49,6 +49,7 @@ struct I2cpConfig {
 struct EmissaryConfig {
     #[serde(default)]
     floodfill: bool,
+    caps: Option<String>,
     ntcp2: Ntcp2Config,
     i2cp: I2cpConfig,
 }
@@ -78,6 +79,9 @@ pub struct Config {
 
     /// Should the node be run as a floodfill router.
     pub floodfill: bool,
+
+    /// Router capabilities.
+    pub caps: Option<String>,
 }
 
 impl Into<emissary::Config> for Config {
@@ -90,6 +94,7 @@ impl Into<emissary::Config> for Config {
             routers: self.routers,
             samv3_config: self.sam_config,
             floodfill: self.floodfill,
+            caps: self.caps,
         }
     }
 }
@@ -318,6 +323,7 @@ impl Config {
                 port: 7654,
             },
             floodfill: false,
+            caps: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -346,6 +352,7 @@ impl Config {
             static_key,
             signing_key,
             floodfill: false,
+            caps: None,
         })
     }
 
@@ -372,6 +379,7 @@ impl Config {
                         port: 7654,
                     },
                     floodfill: false,
+                    caps: None,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -399,6 +407,7 @@ impl Config {
             static_key,
             signing_key,
             floodfill: config.floodfill,
+            caps: config.caps,
         })
     }
 
@@ -598,6 +607,7 @@ mod tests {
                 port: 0u16,
             },
             floodfill: false,
+            caps: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

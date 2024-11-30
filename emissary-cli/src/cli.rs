@@ -38,6 +38,10 @@ pub struct Arguments {
     #[arg(long, action=clap::ArgAction::SetTrue)]
     pub floodfill: Option<bool>,
 
+    /// Router capabilities.
+    #[arg(long)]
+    pub caps: Option<String>,
+
     /// Command.
     ///
     /// If no command is provided, `emissary` starts as an i2p router

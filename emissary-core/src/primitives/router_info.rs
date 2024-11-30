@@ -83,6 +83,7 @@ impl RouterInfo {
             static_key,
             signing_key,
             ntcp2_config,
+            caps,
             ..
         } = config;
 
@@ -100,11 +101,15 @@ impl RouterInfo {
 
         let caps = Mapping::new(
             Str::from("caps"),
-            match config.floodfill {
-                true => Str::from("Xf"),
-                false => Str::from("L"),
+            match caps {
+                Some(caps) => Str::from(caps),
+                None => match config.floodfill {
+                    true => Str::from("Xf"),
+                    false => Str::from("L"),
+                },
             },
         );
+
         let router_version = Mapping::new(
             Str::from_str("router.version").unwrap(),
             Str::from_str("0.9.62").unwrap(),
