@@ -97,7 +97,14 @@ impl RouterInfo {
 
         let ntcp2 = RouterAddress::new_published(ntcp2_key, ntcp2_iv, ntcp2_port, ntcp2_host);
         let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
-        let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
+
+        let caps = Mapping::new(
+            Str::from("caps"),
+            match config.floodfill {
+                true => Str::from("Xf"),
+                false => Str::from("L"),
+            },
+        );
         let router_version = Mapping::new(
             Str::from_str("router.version").unwrap(),
             Str::from_str("0.9.62").unwrap(),
