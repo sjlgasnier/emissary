@@ -59,8 +59,10 @@ async fn main() -> anyhow::Result<()> {
     let mut config = Config::try_from(base_path)?;
 
     // TODO: ugly
-    if let Some(floodfill) = floodfill {
-        config.floodfill = floodfill;
+    if let Some(true) = floodfill {
+        if !config.floodfill {
+            config.floodfill = true;
+        }
     }
 
     match command {

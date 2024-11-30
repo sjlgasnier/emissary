@@ -398,7 +398,7 @@ impl Config {
             }),
             static_key,
             signing_key,
-            floodfill: false,
+            floodfill: config.floodfill,
         })
     }
 
