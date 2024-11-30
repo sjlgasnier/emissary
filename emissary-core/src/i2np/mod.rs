@@ -351,7 +351,7 @@ impl<'a> MessageBuilder<'a> {
                 out.put_u32(message_id.expect("to exist"));
                 out.put_u64(expiration.expect("to exist").as_millis() as u64);
                 out.put_u16((payload.len() as u16));
-                out.put_u8(0x00); // checksum
+                out.put_u8(Sha256::new().update(&payload).finalize()[0]); // checksum
                 out.put_slice(&payload);
 
                 out.freeze().to_vec()
