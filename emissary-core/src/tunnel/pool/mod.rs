@@ -39,7 +39,7 @@ use crate::{
     },
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{
     future::{select, BoxFuture, Either},
     FutureExt, StreamExt,
@@ -620,11 +620,19 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                 // create dummy test message and send it through the outbound tunnel
                 // to the selected inbound tunnel's gateway
+                let payload = {
+                    let mut out = BytesMut::with_capacity(11 + 4);
+                    out.put_u32(11);
+                    out.put_slice(&b"tunnel test".to_vec());
+
+                    out
+                };
+
                 let message = MessageBuilder::standard()
                     .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
                     .with_message_type(MessageType::Data)
                     .with_message_id(message_id)
-                    .with_payload(b"tunnel test")
+                    .with_payload(&payload)
                     .build();
 
                 // outbound tunnel must exist since it was jus iterated over
