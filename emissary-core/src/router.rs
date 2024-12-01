@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
+    error::Error,
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
@@ -74,7 +75,16 @@ impl<R: Runtime> Router<R> {
         let local_key = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
         let local_signing_key = SigningPrivateKey::new(&test).unwrap();
-        let ntcp2_config = config.ntcp2_config.clone();
+        let ntcp2_config = match &config.ntcp2_config {
+            None => {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "no transport enabled, cannot start router",
+                );
+                return Err(Error::InvalidData);
+            }
+            Some(config) => config.clone(),
+        };
         let i2cp_config = config.i2cp_config.clone();
         let sam_config = config.samv3_config.clone();
         let exploratory_config = config.exploratory.clone();
@@ -86,9 +96,7 @@ impl<R: Runtime> Router<R> {
         let local_router_id = local_router_info.identity.id();
 
         let local_test = local_key.public().to_vec();
-        let ntcp_test = StaticPrivateKey::from(ntcp2_config.as_ref().unwrap().key.clone())
-            .public()
-            .to_vec();
+        let ntcp_test = StaticPrivateKey::from(ntcp2_config.key.clone()).public().to_vec();
 
         tracing::info!(
             target: LOG_TARGET,
@@ -179,9 +187,7 @@ impl<R: Runtime> Router<R> {
         }
 
         // initialize and start ntcp2
-        transport_manager
-            .register_transport(TransportKind::Ntcp2, ntcp2_config.expect("to exist"))
-            .await?;
+        transport_manager.register_transport(TransportKind::Ntcp2, ntcp2_config).await?;
 
         Ok((
             Self {

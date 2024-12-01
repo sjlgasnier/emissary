@@ -43,15 +43,19 @@ struct ExploratoryConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Ntcp2Config {
-    enabled: bool,
     port: u16,
     host: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct I2cpConfig {
-    enabled: bool,
     port: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SamConfig {
+    tcp_port: u16,
+    udp_port: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,8 +64,9 @@ struct EmissaryConfig {
     floodfill: bool,
     caps: Option<String>,
     net_id: Option<u8>,
-    ntcp2: Ntcp2Config,
-    i2cp: I2cpConfig,
+    ntcp2: Option<Ntcp2Config>,
+    i2cp: Option<I2cpConfig>,
+    sam: Option<SamConfig>,
     exploratory: Option<ExploratoryConfig>,
 }
 
@@ -333,15 +338,15 @@ impl Config {
 
         let config = EmissaryConfig {
             exploratory: None,
-            ntcp2: Ntcp2Config {
-                enabled: true,
+            ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
                 host: None,
-            },
-            i2cp: I2cpConfig {
-                enabled: true,
-                port: 7654,
-            },
+            }),
+            i2cp: Some(I2cpConfig { port: 7654 }),
+            sam: Some(SamConfig {
+                tcp_port: 7656,
+                udp_port: 7655,
+            }),
             floodfill: false,
             caps: None,
             net_id: None,
@@ -393,15 +398,15 @@ impl Config {
             None => {
                 let config = EmissaryConfig {
                     exploratory: None,
-                    ntcp2: Ntcp2Config {
-                        enabled: true,
+                    ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
-                    },
-                    i2cp: I2cpConfig {
-                        enabled: true,
-                        port: 7654,
-                    },
+                    }),
+                    i2cp: Some(I2cpConfig { port: 7654 }),
+                    sam: Some(SamConfig {
+                        tcp_port: 7656,
+                        udp_port: 7655,
+                    }),
                     floodfill: false,
                     caps: None,
                     net_id: None,
@@ -424,16 +429,16 @@ impl Config {
                 outbound_len: config.outbound_len,
                 outbound_count: config.outbound_count,
             }),
-            ntcp2_config: Some(emissary::Ntcp2Config {
-                port: config.ntcp2.port,
-                host: config.ntcp2.host.unwrap_or(String::from("127.0.0.1")),
+            ntcp2_config: config.ntcp2.map(|config| emissary::Ntcp2Config {
+                port: config.port,
+                host: config.host.unwrap_or(String::from("127.0.0.1")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: Some(emissary::I2cpConfig { port: 7654u16 }),
-            sam_config: Some(emissary::SamConfig {
-                tcp_port: 7656u16,
-                udp_port: 7655u16,
+            i2cp_config: config.i2cp.map(|config| emissary::I2cpConfig { port: config.port }),
+            sam_config: config.sam.map(|config| emissary::SamConfig {
+                tcp_port: config.tcp_port,
+                udp_port: config.udp_port,
             }),
             static_key,
             signing_key,
@@ -673,15 +678,12 @@ mod tests {
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
             exploratory: None,
-            ntcp2: Ntcp2Config {
-                enabled: true,
+            ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
-            },
-            i2cp: I2cpConfig {
-                enabled: false,
-                port: 0u16,
-            },
+            }),
+            i2cp: Some(I2cpConfig { port: 0u16 }),
+            sam: None,
             floodfill: false,
             caps: None,
             net_id: None,
