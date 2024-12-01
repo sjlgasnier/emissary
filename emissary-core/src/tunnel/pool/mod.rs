@@ -241,6 +241,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             ..
         } = build_parameters;
 
+        tracing::debug!(
+            target: LOG_TARGET,
+            name = %config.name,
+            num_inbound = ?config.num_inbound,
+            num_inbound_hops = ?config.num_inbound_hops,
+            num_outbound = ?config.num_outbound,
+            num_outbound_hops = ?config.num_outbound_hops,
+            "create tunnel pool",
+        );
+
         (
             Self {
                 config,

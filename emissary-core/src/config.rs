@@ -16,11 +16,46 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::{primitives::Str, tunnel::TunnelPoolConfig};
+
 use alloc::{string::String, vec::Vec};
 
 pub enum Transport {
     Enabled { port: u16, host: Option<String> },
     Disabled,
+}
+
+/// Exploratory tunnel pool config.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExploratoryConfig {
+    /// Length of an inbound exploratory tunnel.
+    pub inbound_len: Option<usize>,
+
+    /// Number of inbound exploratory tunnels.
+    pub inbound_count: Option<usize>,
+
+    /// Length of an outbound exploratory tunnel.
+    pub outbound_len: Option<usize>,
+
+    /// Number of outbound exploratory tunnels.
+    pub outbound_count: Option<usize>,
+}
+
+impl From<Option<ExploratoryConfig>> for TunnelPoolConfig {
+    fn from(value: Option<ExploratoryConfig>) -> Self {
+        let default_config = TunnelPoolConfig::default();
+
+        match value {
+            None => default_config,
+            Some(config) => TunnelPoolConfig {
+                name: Str::from("exploratory"),
+                num_inbound: config.inbound_count.unwrap_or(default_config.num_inbound),
+                num_inbound_hops: config.inbound_len.unwrap_or(default_config.num_inbound_hops),
+                num_outbound: config.outbound_count.unwrap_or(default_config.num_outbound),
+                num_outbound_hops: config.outbound_len.unwrap_or(default_config.num_outbound_hops),
+            },
+        }
+    }
 }
 
 /// NTCP2 configuration.
@@ -88,4 +123,7 @@ pub struct Config {
 
     /// Network ID.
     pub net_id: Option<u8>,
+
+    /// Exploratory tunnel pool config.
+    pub exploratory: Option<ExploratoryConfig>,
 }

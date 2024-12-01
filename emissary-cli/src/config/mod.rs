@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    cli::Arguments,
     error::Error,
     su3::{ContentType, FileType, Su3},
     LOG_TARGET,
@@ -31,6 +32,14 @@ use std::{
     io::{self, Read, Write},
     path::PathBuf,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExploratoryConfig {
+    inbound_len: Option<usize>,
+    inbound_count: Option<usize>,
+    outbound_len: Option<usize>,
+    outbound_count: Option<usize>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Ntcp2Config {
@@ -53,6 +62,7 @@ struct EmissaryConfig {
     net_id: Option<u8>,
     ntcp2: Ntcp2Config,
     i2cp: I2cpConfig,
+    exploratory: Option<ExploratoryConfig>,
 }
 
 /// Router configuration.
@@ -65,6 +75,9 @@ pub struct Config {
 
     /// NTCP2 config.
     ntcp2_config: Option<emissary::Ntcp2Config>,
+
+    /// Exploratory tunnel pool config.
+    pub exploratory: Option<emissary::ExploratoryConfig>,
 
     /// Router info.
     routers: Vec<Vec<u8>>,
@@ -100,6 +113,7 @@ impl Into<emissary::Config> for Config {
             floodfill: self.floodfill,
             caps: self.caps,
             net_id: self.net_id,
+            exploratory: self.exploratory,
         }
     }
 }
@@ -318,6 +332,7 @@ impl Config {
         let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
 
         let config = EmissaryConfig {
+            exploratory: None,
             ntcp2: Ntcp2Config {
                 enabled: true,
                 port: 8888u16,
@@ -344,6 +359,7 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
+            exploratory: None,
             ntcp2_config: Some(emissary::Ntcp2Config {
                 port: 8888u16,
                 host: String::from("127.0.0.1"),
@@ -376,6 +392,7 @@ impl Config {
             Some(config) => config,
             None => {
                 let config = EmissaryConfig {
+                    exploratory: None,
                     ntcp2: Ntcp2Config {
                         enabled: true,
                         port: 8888u16,
@@ -401,6 +418,12 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
+            exploratory: config.exploratory.map(|config| emissary::ExploratoryConfig {
+                inbound_len: config.inbound_len,
+                inbound_count: config.inbound_count,
+                outbound_len: config.outbound_len,
+                outbound_count: config.outbound_count,
+            }),
             ntcp2_config: Some(emissary::Ntcp2Config {
                 port: config.ntcp2.port,
                 host: config.ntcp2.host.unwrap_or(String::from("127.0.0.1")),
@@ -520,6 +543,49 @@ impl Config {
 
         Ok(())
     }
+
+    /// Attempt to merge `arguments` with [`Config`].
+    pub fn merge(mut self, arguments: &Arguments) -> Self {
+        if let Some(true) = arguments.floodfill {
+            if !self.floodfill {
+                self.floodfill = true;
+            }
+        }
+
+        if let Some(ref caps) = arguments.caps {
+            self.caps = Some(caps.clone());
+        }
+
+        if let Some(net_id) = arguments.net_id {
+            self.net_id = Some(net_id);
+        }
+
+        self.exploratory = match &mut self.exploratory {
+            None => Some(emissary::ExploratoryConfig {
+                inbound_len: arguments.exploratory.exploratory_inbound_len,
+                inbound_count: arguments.exploratory.exploratory_inbound_count,
+                outbound_len: arguments.exploratory.exploratory_outbound_len,
+                outbound_count: arguments.exploratory.exploratory_outbound_count,
+            }),
+            Some(config) => Some(emissary::ExploratoryConfig {
+                inbound_len: arguments.exploratory.exploratory_inbound_len.or(config.inbound_len),
+                inbound_count: arguments
+                    .exploratory
+                    .exploratory_inbound_count
+                    .or(config.inbound_count),
+                outbound_len: arguments
+                    .exploratory
+                    .exploratory_outbound_len
+                    .or(config.outbound_len),
+                outbound_count: arguments
+                    .exploratory
+                    .exploratory_outbound_count
+                    .or(config.outbound_count),
+            }),
+        };
+
+        self
+    }
 }
 
 #[cfg(test)]
@@ -606,6 +672,7 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
+            exploratory: None,
             ntcp2: Ntcp2Config {
                 enabled: true,
                 port: 1337u16,

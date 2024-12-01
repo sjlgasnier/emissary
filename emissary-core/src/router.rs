@@ -77,6 +77,7 @@ impl<R: Runtime> Router<R> {
         let ntcp2_config = config.ntcp2_config.clone();
         let i2cp_config = config.i2cp_config.clone();
         let sam_config = config.samv3_config.clone();
+        let exploratory_config = config.exploratory.clone();
         let floodfill = config.floodfill;
         let net_id = config.net_id.unwrap_or(NET_ID);
         let router_storage = RouterStorage::new(&config.routers);
@@ -129,6 +130,7 @@ impl<R: Runtime> Router<R> {
                     local_key,
                     metrics_handle.clone(),
                     router_storage.clone(),
+                    exploratory_config.into(),
                 );
 
             R::spawn(tunnel_manager);

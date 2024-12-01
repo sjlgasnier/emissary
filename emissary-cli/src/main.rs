@@ -44,38 +44,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let Arguments {
-        base_path,
-        log,
-        command,
-        floodfill,
-        caps,
-        net_id,
-    } = Arguments::parse();
+    let arguments = Arguments::parse();
 
     // initialize logger
-    init_logger(log)?;
+    init_logger(arguments.log.clone())?;
 
-    // parse router config
-    // TODO: this should also take any cli params
-    let mut config = Config::try_from(base_path)?;
+    // parse router config and merge it with cli options
+    let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
 
-    // TODO: ugly
-    if let Some(true) = floodfill {
-        if !config.floodfill {
-            config.floodfill = true;
-        }
-    }
-
-    if let Some(caps) = caps {
-        config.caps = Some(caps);
-    }
-
-    if let Some(net_id) = net_id {
-        config.net_id = Some(net_id);
-    }
-
-    match command {
+    match arguments.command {
         None => {
             let path = config.base_path.clone();
             let config: emissary::Config = config.into();

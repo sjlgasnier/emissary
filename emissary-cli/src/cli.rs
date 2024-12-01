@@ -16,9 +16,29 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use std::path::PathBuf;
+
+/// Tunnel configuration.
+#[derive(Args)]
+pub struct TunnelConfig {
+    /// Length of an inbound exploratory tunnel.
+    #[arg(long, value_name = "NUM")]
+    pub exploratory_inbound_len: Option<usize>,
+
+    /// Number of inbound exploratory tunnels.
+    #[arg(long, value_name = "NUM")]
+    pub exploratory_inbound_count: Option<usize>,
+
+    /// Length of an outbound exploratory tunnel.
+    #[arg(long, value_name = "NUM")]
+    pub exploratory_outbound_len: Option<usize>,
+
+    /// Number of outbound exploratory tunnels.
+    #[arg(long, value_name = "NUM")]
+    pub exploratory_outbound_count: Option<usize>,
+}
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -45,6 +65,10 @@ pub struct Arguments {
     /// Network ID.
     #[arg(long)]
     pub net_id: Option<u8>,
+
+    /// Exploratory tunnel configuration.
+    #[clap(flatten)]
+    pub exploratory: TunnelConfig,
 
     /// Command.
     ///

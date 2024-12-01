@@ -143,6 +143,7 @@ impl<R: Runtime> TunnelManager<R> {
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
+        exploratory_config: TunnelPoolConfig,
     ) -> (Self, TunnelManagerHandle, TunnelPoolHandle) {
         tracing::info!(
             target: LOG_TARGET,
@@ -173,7 +174,7 @@ impl<R: Runtime> TunnelManager<R> {
         //
         // `TunnelPool` communicates with `TunnelManager` via `RoutingTable`
         let (pool_handle, exploratory_selector) = {
-            let build_parameters = TunnelPoolBuildParameters::new(TunnelPoolConfig::default());
+            let build_parameters = TunnelPoolBuildParameters::new(exploratory_config);
             let selector = ExploratorySelector::new(
                 router_storage.clone(),
                 build_parameters.context_handle.clone(),
