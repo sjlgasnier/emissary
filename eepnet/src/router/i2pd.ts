@@ -77,6 +77,7 @@ export class I2pd implements Router {
         },
         reseed: {
           urls: "",
+          verify: false,
         },
       })
       // the format isn't strictly toml so some modification have to be made
@@ -125,6 +126,8 @@ export class I2pd implements Router {
       this.log,
       "--datadir",
       "/var/lib/i2pd",
+      "--reseed.urls",
+      "",
     ]);
   }
 
