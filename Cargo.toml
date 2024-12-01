@@ -11,10 +11,25 @@ categories = []
 resolver = "2"
 
 members = [
-  "core",
-  "node",
+  "emissary-core",
+  "emissary-cli",
 ]
 
-default-members = ["node"]
+default-members = ["emissary-cli"]
 
 [workspace.dependencies]
+ed25519-dalek = { version = "2.1.1", default-features = false }
+flate2 = "1.0.33"
+rand = "0.8.5"
+rand_core = { version = "0.6.4", default-features = false }
+tokio-util = { version = "0.7.11", features = ["compat"] }
+tokio = { version = "1.38.0", features = ["full"] }
+tracing-subscriber = { version = "0.3.18", features = ["chrono", "env-filter", "time"] }
+tracing = { version = "0.1.40", default-features = false }
+x25519-dalek = { version = "2.0.1", default-features = false }
+
+[profile.testnet]
+inherits = "release"
+debug = 1
+debug-assertions = true
+overflow-checks = true

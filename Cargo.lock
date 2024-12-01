@@ -655,6 +655,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
 
 [[package]]
+name = "emissary-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ed25519-dalek",
+ "emissary-core",
+ "flate2",
+ "futures",
+ "home",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "nom 6.1.2",
+ "rand",
+ "rand_core",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "x25519-dalek",
+ "zip",
+]
+
+[[package]]
 name = "emissary-core"
 version = "0.1.0"
 dependencies = [
@@ -692,34 +720,6 @@ dependencies = [
  "x25519-dalek",
  "zerocopy",
  "zeroize",
-]
-
-[[package]]
-name = "emissary-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ed25519-dalek",
- "emissary-core",
- "flate2",
- "futures",
- "home",
- "metrics",
- "metrics-exporter-prometheus",
- "nom 6.1.2",
- "rand",
- "rand_core",
- "serde",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "x25519-dalek",
- "zip",
 ]
 
 [[package]]
@@ -1889,9 +1889,6 @@ name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
-dependencies = [
- "rand_core",
-]
 
 [[package]]
 name = "siphasher"
@@ -2591,7 +2588,6 @@ checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
 dependencies = [
  "curve25519-dalek",
  "rand_core",
- "serde",
  "zeroize",
 ]
 

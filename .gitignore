@@ -2,3 +2,5 @@ target/
 core/fuzz/target
 core/fuzz/artifacts
 core/fuzz/corpus
+eepnet/node_modules
+eepnet/data

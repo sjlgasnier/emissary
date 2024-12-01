@@ -1,0 +1,15 @@
+FROM alpine:3.17.1 as builder
+
+WORKDIR /src/i2pd
+
+COPY i2pd.patch .
+
+RUN apk add build-base cmake git openssl-dev boost-dev yaml-cpp-dev
+RUN git clone https://github.com/PurpleI2P/i2pd  \
+  && cd i2pd \
+  && git checkout 2.52.0 \
+  && git apply ../i2pd.patch \
+  && make -j$(nproc) \
+  && cp i2pd /usr/local/bin
+
+CMD ["i2pd"]

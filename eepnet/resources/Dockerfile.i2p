@@ -1,0 +1,32 @@
+FROM alpine:3.17.1 as builder
+
+ENV APP_HOME="/i2p"
+
+WORKDIR /tmp/build
+COPY i2p.patch .
+
+RUN apk add --virtual build-base git gettext tar bzip2 apache-ant openjdk17 \
+  && git clone https://github.com/i2p/i2p.i2p \
+  && cd i2p.i2p \
+  && git checkout i2p-2.7.0 \
+  && git apply ../i2p.patch \
+  && echo "build.built-by=Docker" >> override.properties \
+  && ant preppkg-linux-only \
+  && rm -rf pkg-temp/osid pkg-temp/lib/wrapper pkg-temp/lib/wrapper.* \
+  && apk del build-base gettext tar bzip2 apache-ant openjdk17
+
+FROM alpine:3.17.1
+ENV APP_HOME="/i2p"
+
+RUN apk add openjdk17-jre ttf-dejavu
+
+WORKDIR ${APP_HOME}
+COPY --from=builder /tmp/build/i2p.i2p/pkg-temp/ .
+
+COPY --from=builder --chown=root:root /tmp/build/i2p.i2p/docker/rootfs/ /
+RUN chmod +x /startapp.sh
+
+VOLUME ["${APP_HOME}/.i2p"]
+VOLUME ["/i2psnark"]
+
+ENTRYPOINT ["/startapp.sh"]

@@ -1,0 +1,105 @@
+diff --git a/libi2pd/util.cpp b/libi2pd/util.cpp
+index d1ed9992..d6b6138c 100644
+--- a/libi2pd/util.cpp
++++ b/libi2pd/util.cpp
+@@ -635,53 +635,53 @@ namespace net
+ 
+ 	bool IsInReservedRange (const boost::asio::ip::address& host)
+ 	{
+-		// https://en.wikipedia.org/wiki/Reserved_IP_addresses
+-		if (host.is_unspecified ()) return false;
+-		if (host.is_v4())
+-		{
+-			static const std::vector< std::pair<uint32_t, uint32_t> > reservedIPv4Ranges {
+-				address_pair_v4("0.0.0.0",      "0.255.255.255"),
+-				address_pair_v4("10.0.0.0",     "10.255.255.255"),
+-				address_pair_v4("100.64.0.0",   "100.127.255.255"),
+-				address_pair_v4("127.0.0.0",    "127.255.255.255"),
+-				address_pair_v4("169.254.0.0",  "169.254.255.255"),
+-				address_pair_v4("172.16.0.0",   "172.31.255.255"),
+-				address_pair_v4("192.0.0.0",    "192.0.0.255"),
+-				address_pair_v4("192.0.2.0",    "192.0.2.255"),
+-				address_pair_v4("192.88.99.0",  "192.88.99.255"),
+-				address_pair_v4("192.168.0.0",  "192.168.255.255"),
+-				address_pair_v4("198.18.0.0",   "192.19.255.255"),
+-				address_pair_v4("198.51.100.0", "198.51.100.255"),
+-				address_pair_v4("203.0.113.0",  "203.0.113.255"),
+-				address_pair_v4("224.0.0.0",    "255.255.255.255")
+-			};
+-
+-			uint32_t ipv4_address = host.to_v4 ().to_ulong ();
+-			for (const auto& it : reservedIPv4Ranges) {
+-				if (ipv4_address >= it.first && ipv4_address <= it.second)
+-					return true;
+-			}
+-		}
+-		if (host.is_v6())
+-		{
+-			static const std::vector< std::pair<boost::asio::ip::address_v6::bytes_type, boost::asio::ip::address_v6::bytes_type> > reservedIPv6Ranges {
+-				address_pair_v6("64:ff9b::",  "64:ff9b:ffff:ffff:ffff:ffff:ffff:ffff"),  // NAT64
+-				address_pair_v6("2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"),
+-				address_pair_v6("fc00::",     "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+-				address_pair_v6("fe80::",     "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+-				address_pair_v6("ff00::",     "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+-				address_pair_v6("::",         "::"),
+-				address_pair_v6("::1",        "::1")
+-			};
+-
+-			boost::asio::ip::address_v6::bytes_type ipv6_address = host.to_v6 ().to_bytes ();
+-			for (const auto& it : reservedIPv6Ranges) {
+-				if (ipv6_address >= it.first && ipv6_address <= it.second)
+-					return true;
+-			}
+-			if (IsYggdrasilAddress (ipv6_address.data ())) // yggdrasil?
+-				return true;
+-		}
++		// // https://en.wikipedia.org/wiki/Reserved_IP_addresses
++		// if (host.is_unspecified ()) return false;
++		// if (host.is_v4())
++		// {
++		// 	static const std::vector< std::pair<uint32_t, uint32_t> > reservedIPv4Ranges {
++		// 		address_pair_v4("0.0.0.0",      "0.255.255.255"),
++		// 		address_pair_v4("10.0.0.0",     "10.255.255.255"),
++		// 		address_pair_v4("100.64.0.0",   "100.127.255.255"),
++		// 		address_pair_v4("127.0.0.0",    "127.255.255.255"),
++		// 		address_pair_v4("169.254.0.0",  "169.254.255.255"),
++		// 		address_pair_v4("172.16.0.0",   "172.31.255.255"),
++		// 		address_pair_v4("192.0.0.0",    "192.0.0.255"),
++		// 		address_pair_v4("192.0.2.0",    "192.0.2.255"),
++		// 		address_pair_v4("192.88.99.0",  "192.88.99.255"),
++		// 		address_pair_v4("192.168.0.0",  "192.168.255.255"),
++		// 		address_pair_v4("198.18.0.0",   "192.19.255.255"),
++		// 		address_pair_v4("198.51.100.0", "198.51.100.255"),
++		// 		address_pair_v4("203.0.113.0",  "203.0.113.255"),
++		// 		address_pair_v4("224.0.0.0",    "255.255.255.255")
++		// 	};
++
++		// 	uint32_t ipv4_address = host.to_v4 ().to_ulong ();
++		// 	for (const auto& it : reservedIPv4Ranges) {
++		// 		if (ipv4_address >= it.first && ipv4_address <= it.second)
++		// 			return true;
++		// 	}
++		// }
++		// if (host.is_v6())
++		// {
++		// 	static const std::vector< std::pair<boost::asio::ip::address_v6::bytes_type, boost::asio::ip::address_v6::bytes_type> > reservedIPv6Ranges {
++		// 		address_pair_v6("64:ff9b::",  "64:ff9b:ffff:ffff:ffff:ffff:ffff:ffff"),  // NAT64
++		// 		address_pair_v6("2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"),
++		// 		address_pair_v6("fc00::",     "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
++		// 		address_pair_v6("fe80::",     "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
++		// 		address_pair_v6("ff00::",     "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
++		// 		address_pair_v6("::",         "::"),
++		// 		address_pair_v6("::1",        "::1")
++		// 	};
++
++		// 	boost::asio::ip::address_v6::bytes_type ipv6_address = host.to_v6 ().to_bytes ();
++		// 	for (const auto& it : reservedIPv6Ranges) {
++		// 		if (ipv6_address >= it.first && ipv6_address <= it.second)
++		// 			return true;
++		// 	}
++		// 	if (IsYggdrasilAddress (ipv6_address.data ())) // yggdrasil?
++		// 		return true;
++		// }
+ 		return false;
+ 	}
+ } // net

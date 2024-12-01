@@ -1,0 +1,38 @@
+[package]
+name = "emissary-cli"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[dependencies]
+anyhow = "1.0.86"
+clap = { version = "4.5.7", features = ["derive"] }
+emissary-core = { path = "../emissary-core", features = ["std"] }
+futures = "0.3.30"
+home = "0.5.9"
+metrics = "0.23.0"
+metrics-exporter-prometheus = "0.15.3"
+nom = "6.1.2"
+serde = { version = "1.0.203", features = ["derive"] }
+thiserror = "1.0.61"
+toml = "0.8.14"
+zip = { version = "2.1.3", features = ["deflate-zlib-ng"], default-features = false }
+
+# workspace dependencies
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+flate2 = { workspace = true }
+rand_core = { workspace = true }
+rand = { workspace = true }
+tokio-util = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+x25519-dalek = { workspace = true, features = ["getrandom", "static_secrets"] }
+
+[dev-dependencies]
+tempfile = "3.10.1"
