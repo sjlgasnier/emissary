@@ -97,7 +97,12 @@ impl RouterInfo {
         let ntcp2_iv = ntcp2_config.iv;
 
         let ntcp2 = RouterAddress::new_published(ntcp2_key, ntcp2_iv, ntcp2_port, ntcp2_host);
-        let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
+        let net_id = Mapping::new(
+            Str::from_str("netId").unwrap(),
+            config
+                .net_id
+                .map_or_else(|| Str::from("2"), |value| Str::from(value.to_string())),
+        );
 
         let caps = Mapping::new(
             Str::from("caps"),
@@ -207,6 +212,14 @@ impl RouterInfo {
         self.options
             .get(&Str::from_str("caps").expect("valid string"))
             .map_or_else(|| false, |caps| caps.contains("f"))
+    }
+
+    /// Get network ID of the [`RouterInfo`].
+    pub fn net_id(&self) -> Option<u8> {
+        self.options
+            .get(&Str::from("netId"))
+            .map(|value| value.parse::<u8>().ok())
+            .flatten()
     }
 }
 

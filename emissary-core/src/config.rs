@@ -85,4 +85,7 @@ pub struct Config {
 
     /// Router capabilities.
     pub caps: Option<String>,
+
+    /// Network ID.
+    pub net_id: Option<u8>,
 }

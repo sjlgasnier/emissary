@@ -42,6 +42,10 @@ pub struct Arguments {
     #[arg(long)]
     pub caps: Option<String>,
 
+    /// Network ID.
+    #[arg(long)]
+    pub net_id: Option<u8>,
+
     /// Command.
     ///
     /// If no command is provided, `emissary` starts as an i2p router

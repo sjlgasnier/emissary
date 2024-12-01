@@ -338,6 +338,7 @@ impl<R: Runtime> SessionManager<R> {
         &self,
         mut stream: R::TcpStream,
     ) -> impl Future<Output = crate::Result<(Ntcp2Session<R>)>> {
+        let net_id = self.local_router_info.net_id();
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
         let local_router_hash = self.local_router_info.identity.hash().to_vec();
         let inbound_initial_state = self.inbound_initial_state.clone();
@@ -379,6 +380,18 @@ impl<R: Runtime> SessionManager<R> {
 
             match responder.finalize(message) {
                 Ok((key_context, router)) => {
+                    if router.net_id() != net_id {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local_net_id = ?net_id,
+                            remote_net_id = ?router.net_id(),
+                            "remote router is part of a different network",
+                        );
+
+                        let _ = stream.close().await;
+                        return Err(Error::NetworkMismatch);
+                    }
+
                     router_storage.insert(router.clone());
 
                     Ok(Ntcp2Session::new(

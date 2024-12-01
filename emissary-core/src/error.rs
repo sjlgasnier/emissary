@@ -348,6 +348,7 @@ pub enum Error {
     Custom(String),
     Missing,
     Session(SessionError),
+    NetworkMismatch,
 }
 
 impl fmt::Display for Error {
@@ -372,6 +373,7 @@ impl fmt::Display for Error {
             Self::Custom(error) => write!(f, "{error}"),
             Self::Missing => write!(f, "value missing"),
             Self::Session(error) => write!(f, "session error: {error}"),
+            Self::NetworkMismatch => write!(f, "network mismatch"),
         }
     }
 }

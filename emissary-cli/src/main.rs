@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         command,
         floodfill,
         caps,
+        net_id,
     } = Arguments::parse();
 
     // initialize logger
@@ -68,6 +69,10 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(caps) = caps {
         config.caps = Some(caps);
+    }
+
+    if let Some(net_id) = net_id {
+        config.net_id = Some(net_id);
     }
 
     match command {

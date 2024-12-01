@@ -50,6 +50,7 @@ struct EmissaryConfig {
     #[serde(default)]
     floodfill: bool,
     caps: Option<String>,
+    net_id: Option<u8>,
     ntcp2: Ntcp2Config,
     i2cp: I2cpConfig,
 }
@@ -82,6 +83,9 @@ pub struct Config {
 
     /// Router capabilities.
     pub caps: Option<String>,
+
+    /// Network ID.
+    pub net_id: Option<u8>,
 }
 
 impl Into<emissary::Config> for Config {
@@ -95,6 +99,7 @@ impl Into<emissary::Config> for Config {
             samv3_config: self.sam_config,
             floodfill: self.floodfill,
             caps: self.caps,
+            net_id: self.net_id,
         }
     }
 }
@@ -324,6 +329,7 @@ impl Config {
             },
             floodfill: false,
             caps: None,
+            net_id: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -353,6 +359,7 @@ impl Config {
             signing_key,
             floodfill: false,
             caps: None,
+            net_id: None,
         })
     }
 
@@ -380,6 +387,7 @@ impl Config {
                     },
                     floodfill: false,
                     caps: None,
+                    net_id: None,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -408,6 +416,7 @@ impl Config {
             signing_key,
             floodfill: config.floodfill,
             caps: config.caps,
+            net_id: config.net_id,
         })
     }
 
@@ -608,6 +617,7 @@ mod tests {
             },
             floodfill: false,
             caps: None,
+            net_id: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

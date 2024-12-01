@@ -44,6 +44,9 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::router";
 
+/// Default network ID.
+const NET_ID: u8 = 2u8;
+
 #[derive(Debug)]
 pub enum RouterEvent {}
 
@@ -75,6 +78,7 @@ impl<R: Runtime> Router<R> {
         let i2cp_config = config.i2cp_config.clone();
         let sam_config = config.samv3_config.clone();
         let floodfill = config.floodfill;
+        let net_id = config.net_id.unwrap_or(NET_ID);
         let router_storage = RouterStorage::new(&config.routers);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -88,6 +92,7 @@ impl<R: Runtime> Router<R> {
         tracing::info!(
             target: LOG_TARGET,
             local_router_hash = ?base64_encode(local_router_info.identity.hash()),
+            ?net_id,
             "start emissary",
         );
 
@@ -141,6 +146,7 @@ impl<R: Runtime> Router<R> {
                 router_storage.clone(),
                 metrics_handle.clone(),
                 exploratory_pool_handle,
+                net_id,
             );
 
             R::spawn(netdb);

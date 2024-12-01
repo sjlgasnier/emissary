@@ -240,6 +240,9 @@ pub struct NetDb<R: Runtime> {
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
+    // Network ID.
+    net_id: u8,
+
     /// Active inbound tunhnels
     outbound_tunnels: TunnelSelector<TunnelId>,
 
@@ -267,6 +270,7 @@ impl<R: Runtime> NetDb<R> {
         router_storage: RouterStorage,
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
+        net_id: u8,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_storage
             .routers()
@@ -302,6 +306,7 @@ impl<R: Runtime> NetDb<R> {
                 local_router_id,
                 maintenance_timer: Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL)),
                 metrics,
+                net_id,
                 outbound_tunnels: TunnelSelector::new(),
                 query_timers: R::join_set(),
                 router_infos: HashMap::new(),
@@ -462,6 +467,16 @@ impl<R: Runtime> NetDb<R> {
     /// Handle [`DatabaseStore`] for [`RouterInfo`] if the local router is run as a floodfill.
     fn on_router_info_store(&mut self, key: Bytes, message: &[u8], router_info: RouterInfo) {
         let router_id = router_info.identity.id();
+
+        if router_info.net_id() != Some(self.net_id) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local_net_id = ?self.net_id,
+                remote_net_id = ?router_info.net_id(),
+                "invalid network id, ignoring router info store",
+            );
+            return;
+        }
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -1200,7 +1215,7 @@ mod tests {
         crypto::{SigningPrivateKey, StaticPrivateKey},
         primitives::{
             Date, Destination, DestinationId, LeaseSet2Header, RouterAddress, RouterIdentity,
-            RouterInfo, TransportKind,
+            RouterInfo, Str, TransportKind,
         },
         runtime::mock::MockRuntime,
         subsystem::{InnerSubsystemEvent, SubsystemCommand},
@@ -1232,6 +1247,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, lease_set) = {
@@ -1317,6 +1333,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, lease_set) = {
@@ -1384,6 +1401,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -1407,6 +1425,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, lease_set) = {
@@ -1476,6 +1495,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -1499,6 +1519,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key1, expired_lease_set1) = {
@@ -1730,6 +1751,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, router_info) = {
@@ -1751,7 +1773,7 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::new(),
+                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
                         }
                         .serialize(&sgk),
                     )
@@ -1797,6 +1819,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -1820,6 +1843,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, router_info) = {
@@ -1841,7 +1865,7 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::new(),
+                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
                         }
                         .serialize(&sgk),
                     )
@@ -1893,6 +1917,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, lease_set, expires) = {
@@ -1994,6 +2019,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -2073,6 +2099,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key, router_info) = {
@@ -2094,7 +2121,7 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::new(),
+                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
                         }
                         .serialize(&sgk),
                     )
@@ -2170,6 +2197,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -2229,6 +2257,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         // set timer to a shorter timeout and poll netdb until it sends a router exploration
@@ -2287,6 +2316,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -2310,6 +2340,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key1, expired_lease_set1) = {
@@ -2512,6 +2543,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -2535,6 +2567,7 @@ mod tests {
             storage,
             MockRuntime::register_metrics(vec![]),
             tp_handle,
+            2u8,
         );
 
         let (key1, expiring_router_info) = {
@@ -2555,7 +2588,7 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::new(),
+                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
                         }
                         .serialize(&sgk),
                     )
@@ -2583,7 +2616,7 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::new(),
+                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
                         }
                         .serialize(&sgk),
                     )
@@ -2710,5 +2743,90 @@ mod tests {
                 _ => panic!("expected timeout"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn router_info_with_different_network_id_ignored() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let netdb = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+            2u8,
+        );
+
+        let (service, rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.insert(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![]),
+            tp_handle,
+            2u8,
+        );
+
+        let (key, router_info) = {
+            let (identity, _sk, sgk) = RouterIdentity::random();
+            let id = identity.id();
+
+            (
+                Bytes::from(id.to_vec()),
+                Bytes::from(
+                    MockRuntime::gzip_compress(
+                        RouterInfo {
+                            identity,
+                            published: Date::new(
+                                (MockRuntime::time_since_epoch() - Duration::from_secs(60))
+                                    .as_millis() as u64,
+                            ),
+                            addresses: HashMap::from_iter([(
+                                TransportKind::Ntcp2,
+                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                            )]),
+                            options: HashMap::from_iter([(Str::from("netId"), Str::from("99"))]),
+                        }
+                        .serialize(&sgk),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+
+        let message =
+            DatabaseStoreBuilder::new(key, DatabaseStoreKind::RouterInfo { router_info }).build();
+
+        assert!(netdb.router_infos.is_empty());
+        assert!(netdb
+            .on_message(Message {
+                payload: message.to_vec(),
+                message_type: MessageType::DatabaseStore,
+                ..Default::default()
+            })
+            .is_ok());
+        assert!(netdb.router_infos.is_empty());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(netdb.floodfills.len(), 3);
+        assert!(netdb
+            .floodfills
+            .values()
+            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
     }
 }
