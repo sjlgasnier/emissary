@@ -19,11 +19,12 @@
 import { command, run, string, option, subcommands, flag } from "cmd-ts";
 import { promises as fs } from "fs";
 
+import { buildEmissary, Emissary } from "./router/emissary";
+import { buildI2pd } from "./router/i2pd";
+import { buildI2p } from "./router/i2p";
 import { Network } from "./docker";
 import { parseConfig, Router, RouterInfo } from "./config";
-import { buildEmissary, Emissary } from "./router/emissary";
 import { waitForExit } from "./router/util";
-import { buildI2pd } from "./router/i2pd";
 
 const spawn = command({
   name: "spawn",
@@ -46,37 +47,39 @@ const spawn = command({
     let network = new Network();
     await network.create();
 
-    let { emissary, i2pd } = await parseConfig(path);
+    let { emissary, i2pd, i2p } = await parseConfig(path);
 
-    await fs.mkdir("/tmp/i2p-simnet", {
+    await fs.mkdir("/tmp/eepnet", {
       recursive: true,
     });
 
     if (!no_rebuild) {
       await buildI2pd();
+      await buildI2p();
       await buildEmissary();
     }
 
     // assign ip address for each router
-    [emissary, i2pd].flat().map((router: Router) => {
+    [emissary, i2pd, i2p].flat().map((router: Router) => {
       router.setHost(network.nextAddress());
     });
 
     // generate router infos for all routers
     console.log(
-      `generating router infos (emissary: ${emissary.length}, i2pd: ${i2pd.length})`,
+      `generating router infos (emissary: ${emissary.length}, i2pd: ${i2pd.length}, i2p: ${i2p.length})`,
     );
 
     let routerInfos = (
       await Promise.allSettled(
-        [emissary, i2pd].flat().map(async (router: Router) => {
-          await fs.mkdir(`/tmp/i2p-simnet/${router.getName()}`, {
-            recursive: true,
-          });
-          return await router.generateRouterInfo(
-            `/tmp/i2p-simnet/${router.getName()}`,
-          );
-        }),
+        [emissary, i2pd, i2p].flat().map((router: Router) =>
+          fs
+            .mkdir(`/tmp/eepnet/${router.getName()}`, {
+              recursive: true,
+            })
+            .then((_: any) =>
+              router.generateRouterInfo(`/tmp/eepnet/${router.getName()}`),
+            ),
+        ),
       )
     )
       .filter(
@@ -89,14 +92,13 @@ const spawn = command({
     console.log("populate network databases of routers with router infos");
 
     await Promise.allSettled(
-      [emissary, i2pd].flat().map(async (router: Router) => {
+      [emissary, i2pd, i2p].flat().map(async (router: Router) => {
         await router.populateNetDb(routerInfos);
       }),
     );
 
-    // start network
     await Promise.allSettled(
-      [emissary, i2pd].flat().map(async (router: Router) => {
+      [emissary, i2pd, i2p].flat().map(async (router: Router) => {
         await router.start();
       }),
     );
@@ -115,22 +117,22 @@ const spawn = command({
       .map((result: PromiseFulfilledResult<any>) => result.value);
 
     await fs.writeFile(
-      "/tmp/i2p-simnet/scrape_configs.json",
+      "/tmp/eepnet/scrape_configs.json",
       JSON.stringify(scrapeEndpoints),
       "utf8",
     );
 
+    // wait until user presses ctrl-c
     await waitForExit();
 
-    // start network
     await Promise.allSettled(
-      [emissary, i2pd].flat().map(async (router: Router) => {
+      [emissary, i2pd, i2p].flat().map(async (router: Router) => {
         await router.stop();
       }),
     );
 
     if (!no_purge)
-      await fs.rm("/tmp/i2p-simnet", {
+      await fs.rm("/tmp/eepnet", {
         force: true,
         recursive: true,
       });

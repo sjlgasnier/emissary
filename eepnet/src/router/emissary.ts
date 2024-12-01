@@ -28,6 +28,7 @@ export class Emissary implements Router {
   name: string;
   log: string;
   floodfill: boolean;
+  hash: null | string;
   host: null | string;
   path: null | string;
   container: null | Container;
@@ -37,6 +38,7 @@ export class Emissary implements Router {
     this.log = log;
     this.floodfill = floodfill;
 
+    this.hash = null;
     this.host = null;
     this.path = null;
     this.container = null;
@@ -59,6 +61,7 @@ export class Emissary implements Router {
 
     let config = toml.stringify({
       floodfill: this.floodfill,
+      caps: this.floodfill ? "XfR" : "LR",
       ntcp2: {
         enabled: true,
         host: this.host,
@@ -98,9 +101,9 @@ export class Emissary implements Router {
     let routerInfo = new Uint8Array(
       await fs.readFile(`${path}/routerInfo.dat`),
     );
-    let routerHash = getRouterHash(routerInfo.subarray(0, 391));
+    this.hash = getRouterHash(routerInfo.subarray(0, 391));
 
-    return { name: this.name, hash: routerHash, info: routerInfo };
+    return { name: this.name, hash: this.hash, info: routerInfo };
   }
 
   async populateNetDb(routerInfos: RouterInfo[]): Promise<void> {
@@ -120,7 +123,7 @@ export class Emissary implements Router {
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
-    console.log(`starting ${this.name}...`);
+    console.log(`starting ${this.name} (${this.hash})`);
 
     this.container = new Container("emissary", this.name, this.path, this.host);
     await this.container.create(
@@ -156,11 +159,11 @@ export async function buildEmissary() {
   await create(
     {
       gzip: true,
-      file: "/tmp/i2p-simnet/emissary.tar",
+      file: "/tmp/eepnet/emissary.tar",
       cwd: "..",
     },
     ["Dockerfile", "Cargo.toml", "Cargo.lock", "emissary-core", "emissary-cli"],
   );
 
-  await new Image("emissary", "/tmp/i2p-simnet/emissary.tar").build();
+  await new Image("emissary", "/tmp/eepnet/emissary.tar").build();
 }

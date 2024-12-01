@@ -18,15 +18,13 @@
 
 import { create } from "tar";
 import { promises as fs } from "fs";
-import * as toml from "@iarna/toml";
 
 import { Container, Image } from "../docker";
 import { Router, RouterInfo } from "../config";
 import { getRouterHash } from "./util";
 
-export class I2pd implements Router {
+export class I2p implements Router {
   name: string;
-  log: string;
   floodfill: boolean;
   hash: null | string;
   host: null | string;
@@ -34,9 +32,8 @@ export class I2pd implements Router {
   path: null | string;
   container: null | Container;
 
-  constructor(name: string, log: string, floodfill: boolean) {
+  constructor(name: string, floodfill: boolean) {
     this.name = name;
-    this.log = log;
     this.floodfill = floodfill;
 
     this.hash = null;
@@ -62,37 +59,67 @@ export class I2pd implements Router {
     if (!this.host)
       return Promise.reject(new Error(`host missing for ${this.name}`));
 
-    let config = toml
-      .stringify({
-        host: this.host,
-        reservedrange: false,
-        loglevel: this.log,
-        floodfill: this.floodfill,
-        ipv4: true,
-        ipv6: false,
-        ntcp2: {
-          enabled: true,
-          published: true,
-          port: 9999,
-        },
-        reseed: {
-          urls: "",
-        },
-      })
-      // the format isn't strictly toml so some modification have to be made
-      // so i2pd is able to parse the configuration correctly
-      .replace("9_999", "9999")
-      .replace(`\"${this.host}\"`, `${this.host}`);
+    // router config
+    {
+      let config = `
+i2np.allowLocal=true
+i2np.ipv4.firewalled=false
+i2np.ipv6.firewalled=false
+i2np.lastIPv6Firewalled=false
+i2np.upnp.enable=false
+i2p.insecureFiles=true
+i2p.reseedURL=https://localhost:3333/foo
+router.blocklist.enable=false
+router.floodfillParticipant=false
+router.networkID=2
+router.newsRefreshFrequency=0
+router.rebuildKeys=false
+router.rejectStartupTime=1000
+router.reseedDisable=true
+router.sharePercentage=80
+router.sybilFrequency=0
+routerconsole.advanced=true
+routerconsole.welcomeWizardComplete=true
+stat.full=true
+time.disabled=true
+time.sntpServerList=localhost
+router.updateDisabled=true
+i2np.ntcp.autoport=false
+i2np.ntcp.autoip=false
+i2np.ntcp.port=9999
+i2np.udp.internalPort=9999
+i2np.udp.port=9999
+port=9999
+i2np.ntcp.hostname=${this.host}
+      `;
+      await fs.writeFile(`${path}/router.config`, config);
+    }
 
-    await fs.writeFile(`${path}/i2pd.conf`, config);
+    // logger confiig
+    {
+      let config = `
+logger.consoleBufferSize=20
+logger.dateFormat=
+logger.defaultLevel=DEBUG
+logger.displayOnScreen=true
+logger.dropDuplicates=true
+logger.dropOnOverflow=false
+logger.flushInterval=29
+logger.format=d p [t] c: m
+logger.gzip=false
+logger.logBufferSize=1024
+logger.logFileName=logs/log-router-@.txt
+logger.logFileSize=10m
+logger.logRotationLimit=2
+logger.minGzipSize=0
+logger.minimumOnScreenLevel=CRIT
+      `;
+      await fs.writeFile(`${path}/logger.config`, config);
+    }
 
-    const container = new Container("i2pd", this.name, path, this.host);
-    await container.create([`${path}:/var/lib/i2pd`], {}, {}, [
-      "i2pd",
-      "--datadir",
-      "/var/lib/i2pd",
-    ]);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const container = new Container("i2p", this.name, path, this.host);
+    await container.create([`${path}:/i2p/.i2p`], {}, {}, []);
+    await new Promise((resolve) => setTimeout(resolve, 5000));
     await container.destroy();
 
     let routerInfo = new Uint8Array(await fs.readFile(`${path}/router.info`));
@@ -118,14 +145,8 @@ export class I2pd implements Router {
 
     console.log(`starting ${this.name} (${this.hash})`);
 
-    this.container = new Container("i2pd", this.name, this.path, this.host);
-    await this.container.create([`${this.path}:/var/lib/i2pd`], {}, {}, [
-      "i2pd",
-      "--loglevel",
-      this.log,
-      "--datadir",
-      "/var/lib/i2pd",
-    ]);
+    this.container = new Container("i2p", this.name, this.path, this.host);
+    await this.container.create([`${this.path}:/i2p/.i2p`], {}, {}, []);
   }
 
   async stop(): Promise<void> {
@@ -133,15 +154,15 @@ export class I2pd implements Router {
   }
 }
 
-export async function buildI2pd() {
+export async function buildI2p() {
   await create(
     {
       gzip: true,
-      file: "/tmp/eepnet/i2pd.tar",
+      file: "/tmp/eepnet/i2p.tar",
       cwd: "resources/",
     },
-    ["Dockerfile.i2pd", "i2pd.patch"],
+    ["Dockerfile.i2p", "i2p.patch"],
   );
 
-  await new Image("i2pd", "/tmp/eepnet/i2pd.tar").build("Dockerfile.i2pd");
+  await new Image("i2p", "/tmp/eepnet/i2p.tar").build("Dockerfile.i2p");
 }

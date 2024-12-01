@@ -34,12 +34,12 @@ export class Network {
     // check if the network already exists and if so,
     // parse start address of the subnet and create `AddressAssigner`
     let network = response.data.filter(
-      (config: any) => config.Name == "i2p-simnet",
+      (config: any) => config.Name == "eepnet",
     );
     if (network[0]) {
       let subnet = network[0]["IPAM"]["Config"][0]["Subnet"];
 
-      console.log(`i2p-simnet already exists (${subnet})`);
+      console.log(`eepnet already exists (${subnet})`);
 
       let octets = subnet.split("/")[0].split(".").map(Number);
       octets[3] += 2;
@@ -48,10 +48,10 @@ export class Network {
       return;
     }
 
-    console.log("create i2p-simnet bridge network");
+    console.log("create eepnet bridge network");
 
     let config = {
-      Name: "i2p-simnet",
+      Name: "eepnet",
       Internal: false,
       IPAM: {
         Config: [
@@ -62,8 +62,11 @@ export class Network {
         Options: {},
       },
       Options: {
-        "com.docker.network.bridge.enable_ip_masquerade": "false",
+        "com.docker.network.bridge.default_bridge": "true",
         "com.docker.network.bridge.enable_icc": "true",
+        "com.docker.network.bridge.enable_ip_masquerade": "false",
+        "com.docker.network.bridge.host_binding_ipv4": "0.0.0.0",
+        "com.docker.network.driver.mtu": "1500",
       },
     };
 
@@ -79,9 +82,9 @@ export class Network {
   }
 
   async destroy() {
-    console.log("destroy i2p-simnet bridge network");
+    console.log("destroy eepnet bridge network");
 
-    await axios.delete("http://localhost/networks/i2p-simnet", {
+    await axios.delete("http://localhost/networks/eepnet", {
       socketPath: "/var/run/docker.sock",
     });
   }
@@ -128,7 +131,7 @@ export class Image {
       },
     );
 
-    console.log(`docker image for ${"i2p-simnet"} ready`);
+    console.log(`docker image for ${this.name} ready`);
   }
 }
 
@@ -162,7 +165,7 @@ export class Container {
       HostConfig: {
         Binds: binds,
         AutoRemove: false,
-        NetworkMode: "i2p-simnet",
+        NetworkMode: "eepnet",
         PortBindings: ports,
         LogConfig: {
           Type: "json-file",
@@ -170,7 +173,7 @@ export class Container {
       },
       NetworkingConfig: {
         EndpointsConfig: {
-          "i2p-simnet": {
+          eepnet: {
             IPAMConfig: {
               IPv4Address: this.address,
             },

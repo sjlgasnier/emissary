@@ -21,6 +21,7 @@ import { promises as fs } from "fs";
 
 import { Emissary } from "./router/emissary";
 import { I2pd } from "./router/i2pd";
+import { I2p } from "./router/i2p";
 
 export interface RouterInfo {
   name: string;
@@ -40,13 +41,14 @@ export interface Router {
 export interface Config {
   emissary: Emissary[];
   i2pd: I2pd[];
+  i2p: I2p[];
 }
 
 // Parse TOML `config` into `Config`.
 export async function parseConfig(config: string): Promise<Config> {
   let data = await fs.readFile(config, "utf-8");
   const parsedData = toml.parse(data);
-  const grouped: Config = { emissary: [], i2pd: [] };
+  const grouped: Config = { emissary: [], i2pd: [], i2p: [] };
 
   parsedData.routers.forEach((router: any) => {
     switch (router.type) {
@@ -72,6 +74,19 @@ export async function parseConfig(config: string): Promise<Config> {
               new I2pd(
                 router.name ?? `${router.type}-${index}`,
                 router.log,
+                router.floodfill ?? false,
+              ),
+          ),
+        );
+        break;
+      }
+      case "i2p": {
+        grouped.i2p.push(
+          ...Array.from(
+            { length: router.count ?? 1 },
+            (_, index) =>
+              new I2p(
+                router.name ?? `${router.type}-${index}`,
                 router.floodfill ?? false,
               ),
           ),
