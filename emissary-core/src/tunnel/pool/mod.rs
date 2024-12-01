@@ -122,9 +122,9 @@ pub struct TunnelPoolConfig {
 impl Default for TunnelPoolConfig {
     fn default() -> Self {
         Self {
-            num_inbound: 1usize,
+            num_inbound: 3usize,
             num_inbound_hops: 2usize,
-            num_outbound: 1usize,
+            num_outbound: 3usize,
             num_outbound_hops: 2usize,
             name: Str::from("exploratory"),
         }
@@ -135,32 +135,31 @@ impl From<&HashMap<Str, Str>> for TunnelPoolConfig {
     fn from(options: &HashMap<Str, Str>) -> Self {
         let num_inbound = options
             .get(&Str::from("inbound.quantity"))
-            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+            .map_or(3usize, |value| value.parse::<usize>().unwrap_or(3usize));
 
         let num_inbound_hops = options
             .get(&Str::from("inbound.length"))
-            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+            .map_or(2usize, |value| value.parse::<usize>().unwrap_or(2usize));
 
         let num_outbound = options
             .get(&Str::from("outbound.quantity"))
-            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+            .map_or(3usize, |value| value.parse::<usize>().unwrap_or(3usize));
 
         let num_outbound_hops = options
             .get(&Str::from("outbound.length"))
-            .map_or(1usize, |value| value.parse::<usize>().unwrap_or(1usize));
+            .map_or(2usize, |value| value.parse::<usize>().unwrap_or(2usize));
 
         let name = options
             .get(&Str::from("inbound.nickname"))
             .cloned()
             .unwrap_or(Str::from("unspecified"));
 
-        // TODO: revert
         Self {
             name,
-            num_inbound: 1usize,
-            num_inbound_hops: 2usize,
-            num_outbound: 1usize,
-            num_outbound_hops: 2usize,
+            num_inbound,
+            num_inbound_hops,
+            num_outbound,
+            num_outbound_hops,
         }
     }
 }
