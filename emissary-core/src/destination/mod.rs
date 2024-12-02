@@ -956,7 +956,10 @@ mod tests {
     #[tokio::test]
     async fn create_lease_set_immediately() {
         let (netdb_handle, _rx) = NetDbHandle::create();
-        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::create();
+        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+            num_inbound: 1usize,
+            ..Default::default()
+        });
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
             StaticPrivateKey::new(MockRuntime::rng()),

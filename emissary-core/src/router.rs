@@ -173,10 +173,16 @@ impl<R: Runtime> Router<R> {
             R::spawn(i2cp_server);
         }
 
-        if let Some(SamConfig { tcp_port, udp_port }) = sam_config {
+        if let Some(SamConfig {
+            tcp_port,
+            udp_port,
+            host,
+        }) = sam_config
+        {
             let sam_server = SamServer::<R>::new(
                 tcp_port,
                 udp_port,
+                host,
                 netdb_handle.clone(),
                 tunnel_manager_handle.clone(),
                 metrics_handle,
