@@ -520,7 +520,11 @@ impl<R: Runtime> Destination<R> {
             // one of the destination's outbound tunnels
             let message =
                 DatabaseStoreBuilder::new(key.clone(), DatabaseStoreKind::LeaseSet2 { lease_set })
-                    .with_reply_type(ReplyType::None)
+                    .with_reply_type(ReplyType::Tunnel {
+                        reply_token: R::rng().next_u32(),
+                        tunnel_id: gateway_tunnel_id,
+                        router_id: gateway_router_id.clone(),
+                    })
                     .build();
 
             // TODO: garlic encrypt
