@@ -33,7 +33,7 @@ use crate::{
             ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters,
             TunnelPoolContext,
         },
-        routing_table::RoutingTable,
+        routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
 };
@@ -102,7 +102,7 @@ pub struct TunnelManager<R: Runtime> {
     garlic: GarlicHandler<R>,
 
     /// RX channel for receiving messages from other tunnel-related subsystems.
-    message_rx: Receiver<(RouterId, Vec<u8>)>,
+    message_rx: Receiver<RoutingKind>,
 
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
@@ -220,7 +220,7 @@ impl<R: Runtime> TunnelManager<R> {
         metrics::register_metrics(metrics)
     }
 
-    /// Send `message` to `router`.
+    /// Send `message` to router identified by `router_id`.
     ///
     /// If the router is not connected, its information is looked up from `RouterStorage` and if it
     /// exists, it will be dialed and if the connection is established successfully, any pending
@@ -233,13 +233,13 @@ impl<R: Runtime> TunnelManager<R> {
     /// [`TransportService::send()`] returns an error if the channel is closed, meaning the
     /// the connection has been closed or if the channel is full at which point the message
     /// will just be dropped.
-    fn send_message(&mut self, router: &RouterId, message: Vec<u8>) {
-        match self.routers.get_mut(router) {
+    fn send_message(&mut self, router_id: &RouterId, message: Vec<u8>) {
+        match self.routers.get_mut(router_id) {
             Some(RouterState::Connected) => {
-                if let Err(error) = self.service.send(&router, message) {
+                if let Err(error) = self.service.send(&router_id, message) {
                     tracing::error!(
                         target: LOG_TARGET,
-                        ?router,
+                        %router_id,
                         ?error,
                         "failed to send message to router",
                     );
@@ -250,12 +250,12 @@ impl<R: Runtime> TunnelManager<R> {
             }) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?router,
+                    %router_id,
                     "router is being dialed, buffer message",
                 );
                 pending_messages.push(message);
             }
-            None => match router == &self.router_info.identity.id() {
+            None => match router_id == &self.router_info.identity.id() {
                 true => {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -268,13 +268,13 @@ impl<R: Runtime> TunnelManager<R> {
                 false => {
                     tracing::debug!(
                         target: LOG_TARGET,
-                        ?router,
+                        %router_id,
                         "start dialing router",
                     );
 
-                    self.service.connect(&router);
+                    self.service.connect(&router_id);
                     self.routers.insert(
-                        router.clone(),
+                        router_id.clone(),
                         RouterState::Dialing {
                             pending_messages: vec![message],
                         },
@@ -418,7 +418,14 @@ impl<R: Runtime> TunnelManager<R> {
             | MessageType::VariableTunnelBuildReply => unimplemented!(),
             MessageType::DatabaseStore
             | MessageType::DatabaseLookup
-            | MessageType::DatabaseSearchReply => todo!("route to netdb"),
+            | MessageType::DatabaseSearchReply => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "routing to netdb not implemented",
+                );
+
+                todo!("route to netdb");
+            }
         }
     }
 }
@@ -430,7 +437,9 @@ impl<R: Runtime> Future for TunnelManager<R> {
         while let Poll::Ready(event) = self.message_rx.poll_recv(cx) {
             match event {
                 None => return Poll::Ready(()),
-                Some((router, message)) => self.send_message(&router, message),
+                Some(RoutingKind::External { router_id, message }) =>
+                    self.send_message(&router_id, message),
+                Some(RoutingKind::Internal { message }) => self.on_message(message),
             }
         }
 

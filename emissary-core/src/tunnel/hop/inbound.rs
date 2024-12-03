@@ -335,7 +335,7 @@ mod tests {
     use crate::{
         i2np::{tunnel::gateway::TunnelGateway, MessageBuilder, MessageType},
         runtime::{mock::MockRuntime, Runtime},
-        tunnel::tests::build_inbound_tunnel,
+        tunnel::{routing_table::RoutingKind, tests::build_inbound_tunnel},
     };
     use core::time::Duration;
     use rand_core::RngCore;
@@ -389,8 +389,10 @@ mod tests {
 
             let mut messages = vec![];
 
-            while let Ok((router, message)) = hops[0].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                hops[0].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages
@@ -409,8 +411,10 @@ mod tests {
 
             let mut messages = vec![];
 
-            while let Ok((router, message)) = hops[1].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                hops[1].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages
@@ -429,8 +433,10 @@ mod tests {
 
             let mut messages = vec![];
 
-            while let Ok((router, message)) = hops[2].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                hops[2].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages

@@ -381,6 +381,11 @@ impl<T: Tunnel> PendingTunnel<T> {
             )
             .map(|builder| builder.build::<R>())
     }
+
+    #[cfg(test)]
+    pub fn hops(&self) -> &VecDeque<TunnelHop> {
+        &self.hops
+    }
 }
 
 #[cfg(test)]

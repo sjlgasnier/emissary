@@ -34,7 +34,7 @@ use crate::{
         },
         noise::NoiseContext,
         pool::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle},
-        routing_table::RoutingTable,
+        routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
 };
@@ -80,7 +80,7 @@ pub struct TestTransitTunnelManager {
     manager: TransitTunnelManager<MockRuntime>,
 
     /// RX channel for receiving messages from local tunnels.
-    message_rx: Receiver<(RouterId, Vec<u8>)>,
+    message_rx: Receiver<RoutingKind>,
 
     /// Static public key.
     public_key: StaticPublicKey,
@@ -159,7 +159,7 @@ impl TestTransitTunnelManager {
     }
 
     /// Get mutable reference to the message RX channel.
-    pub fn message_rx(&mut self) -> &mut Receiver<(RouterId, Vec<u8>)> {
+    pub fn message_rx(&mut self) -> &mut Receiver<RoutingKind> {
         &mut self.message_rx
     }
 
