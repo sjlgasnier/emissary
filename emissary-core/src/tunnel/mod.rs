@@ -107,6 +107,9 @@ pub struct TunnelManager<R: Runtime> {
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
 
+    /// TX channel for forwarding messages to [`NetDb`].
+    netdb_tx: Sender<Message>,
+
     /// Noise context for tunnels.
     noise: NoiseContext,
 
@@ -144,7 +147,12 @@ impl<R: Runtime> TunnelManager<R> {
         metrics_handle: R::MetricsHandle,
         router_storage: RouterStorage,
         exploratory_config: TunnelPoolConfig,
-    ) -> (Self, TunnelManagerHandle, TunnelPoolHandle) {
+    ) -> (
+        Self,
+        TunnelManagerHandle,
+        TunnelPoolHandle,
+        Receiver<Message>,
+    ) {
         tracing::info!(
             target: LOG_TARGET,
             "starting tunnel manager",
@@ -194,6 +202,9 @@ impl<R: Runtime> TunnelManager<R> {
         // create handle which other subsystems can use to create new tunnel pools
         let (manager_handle, command_rx) = TunnelManagerHandle::new();
 
+        // create channel for forwarding netdb-related to netdb
+        let (netdb_tx, netdb_rx) = channel(32);
+
         (
             Self {
                 command_rx,
@@ -201,6 +212,7 @@ impl<R: Runtime> TunnelManager<R> {
                 garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
                 message_rx,
                 metrics_handle: metrics_handle.clone(),
+                netdb_tx,
                 noise,
                 pending_inbound: HashSet::new(),
                 pending_outbound: HashSet::new(),
@@ -212,6 +224,7 @@ impl<R: Runtime> TunnelManager<R> {
             },
             manager_handle,
             pool_handle,
+            netdb_rx,
         )
     }
 
@@ -419,12 +432,13 @@ impl<R: Runtime> TunnelManager<R> {
             MessageType::DatabaseStore
             | MessageType::DatabaseLookup
             | MessageType::DatabaseSearchReply => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "routing to netdb not implemented",
-                );
-
-                todo!("route to netdb");
+                if let Err(error) = self.netdb_tx.try_send(message) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to forward message to netdb",
+                    );
+                }
             }
         }
     }

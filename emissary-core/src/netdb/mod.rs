@@ -243,6 +243,9 @@ pub struct NetDb<R: Runtime> {
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
+    /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
+    netdb_msg_rx: mpsc::Receiver<Message>,
+
     // Network ID.
     net_id: u8,
 
@@ -274,6 +277,7 @@ impl<R: Runtime> NetDb<R> {
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
         net_id: u8,
+        netdb_msg_rx: mpsc::Receiver<Message>,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_storage
             .routers()
@@ -309,6 +313,7 @@ impl<R: Runtime> NetDb<R> {
                 local_router_id,
                 maintenance_timer: Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL)),
                 metrics,
+                netdb_msg_rx,
                 net_id,
                 outbound_tunnels: TunnelSelector::new(),
                 query_timers: R::join_set(),
@@ -1173,7 +1178,13 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Pending => break,
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| {
-                        let _ = self.on_message(message);
+                        if let Err(error) = self.on_message(message) {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "failed to handle message",
+                            );
+                        }
                     }),
                 Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router })) =>
                     self.on_connection_established(router),
@@ -1182,6 +1193,21 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
                     self.on_connection_failure(router),
                 _ => {}
+            }
+        }
+
+        loop {
+            match self.netdb_msg_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(message)) =>
+                    if let Err(error) = self.on_message(message) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to handle message",
+                        );
+                    },
             }
         }
 
@@ -1294,6 +1320,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1302,6 +1329,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, lease_set) = {
@@ -1385,6 +1413,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             false,
@@ -1393,6 +1422,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, lease_set) = {
@@ -1458,6 +1488,7 @@ mod tests {
     async fn expired_lease_set_store() {
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let (msg_tx, msg_rx) = channel(64);
         let netdb = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1466,6 +1497,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -1482,6 +1514,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1490,6 +1523,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, lease_set) = {
@@ -1557,6 +1591,7 @@ mod tests {
     async fn expired_lease_sets_are_pruned() {
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let (msg_tx, msg_rx) = channel(64);
         let netdb = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1565,6 +1600,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -1581,6 +1617,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1589,6 +1626,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key1, expired_lease_set1) = {
@@ -1828,6 +1866,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1836,6 +1875,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, router_info) = {
@@ -1900,6 +1940,7 @@ mod tests {
     async fn stale_router_info_not_stored_nor_flooded() {
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let (msg_tx, msg_rx) = channel(64);
         let netdb = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1908,6 +1949,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -1924,6 +1966,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1932,6 +1975,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, router_info) = {
@@ -1998,6 +2042,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2006,6 +2051,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, lease_set, expires) = {
@@ -2100,6 +2146,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2108,6 +2155,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -2180,6 +2228,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2188,6 +2237,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, router_info) = {
@@ -2278,6 +2328,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2286,6 +2337,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -2338,6 +2390,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             false,
@@ -2346,6 +2399,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         // set timer to a shorter timeout and poll netdb until it sends a router exploration
@@ -2397,6 +2451,7 @@ mod tests {
     async fn expired_pending_lease_sets_not_flooded() {
         let (service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let (msg_tx, msg_rx) = channel(64);
         let netdb = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2405,6 +2460,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -2421,6 +2477,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2429,6 +2486,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key1, expired_lease_set1) = {
@@ -2634,6 +2692,7 @@ mod tests {
     async fn expired_pending_router_infos_not_flooded() {
         let (service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let (msg_tx, msg_rx) = channel(64);
         let netdb = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2642,6 +2701,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -2658,6 +2718,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2666,6 +2727,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key1, expiring_router_info) = {
@@ -2855,6 +2917,7 @@ mod tests {
     async fn router_info_with_different_network_id_ignored() {
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let (msg_tx, msg_rx) = channel(64);
         let netdb = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2863,6 +2926,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (service, rx, _tx, storage) = TransportService::new();
@@ -2879,6 +2943,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2887,6 +2952,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, router_info) = {
@@ -2952,6 +3018,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2960,6 +3027,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, lease_set) = {
@@ -3032,6 +3100,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -3040,6 +3109,7 @@ mod tests {
             MockRuntime::register_metrics(vec![]),
             tp_handle,
             2u8,
+            msg_rx,
         );
 
         let (key, router_info) = {
