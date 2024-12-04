@@ -33,6 +33,7 @@ use crate::{
     runtime::Runtime,
 };
 
+use bytes::Bytes;
 use futures::StreamExt;
 use hashbrown::{HashMap, HashSet};
 
@@ -119,14 +120,19 @@ impl<R: Runtime> I2cpSession<R> {
             tracing::info!("{key}={value}");
         }
 
+        let mut destination = Destination::new(
+            destination_id.clone(),
+            private_keys[0].clone(),
+            leaseset.clone(),
+            netdb_handle.clone(),
+            tunnel_pool_handle,
+            outbound.clone().into_iter().collect(),
+            inbound.clone().into_values().collect(),
+        );
+        destination.publish_lease_set(Bytes::from(destination_id.to_vec()), leaseset);
+
         Self {
-            destination: Destination::new(
-                destination_id,
-                private_keys[0].clone(),
-                leaseset,
-                netdb_handle.clone(),
-                tunnel_pool_handle,
-            ),
+            destination,
             inbound,
             netdb_handle,
             next_message_id: 0u32,

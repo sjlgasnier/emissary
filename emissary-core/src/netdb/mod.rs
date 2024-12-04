@@ -344,6 +344,12 @@ impl<R: Runtime> NetDb<R> {
         {
             let now = R::time_since_epoch();
 
+            tracing::trace!(
+                target: LOG_TARGET,
+                floodfill = %router_id,
+                "floodfill with pending messages connected",
+            );
+
             pending_messages.into_iter().for_each(|message| {
                 let message = match message {
                     MessageKind::NonExpiring { message } => Some(message),
@@ -1047,59 +1053,6 @@ impl<R: Runtime> NetDb<R> {
         }
     }
 
-    /// Store `leaseset` under `key` in `NetDb`.
-    fn on_store_leaseset(&mut self, key: Bytes, lease_set: Bytes) {
-        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
-
-        tracing::debug!(
-            target: LOG_TARGET,
-            key = ?base32_encode(&key),
-            num_floodfills = ?floodfills.len(),
-            "store leaseset in netdb",
-        );
-
-        let message =
-            DatabaseStoreBuilder::new(key, DatabaseStoreKind::LeaseSet2 { lease_set }).build();
-
-        let message_id = R::rng().next_u32();
-        let message = MessageBuilder::short()
-            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-            .with_message_type(MessageType::DatabaseStore)
-            .with_message_id(message_id)
-            .with_payload(&message)
-            .build();
-
-        match floodfills.is_empty() {
-            true => tracing::warn!(
-                target: LOG_TARGET,
-                "cannot store leaseset, no floodfills",
-            ),
-            false => match self.floodfills.get_mut(&floodfills[0]) {
-                None | Some(FloodfillState::Disconnected) => {
-                    self.floodfills.insert(
-                        floodfills[0].clone(),
-                        FloodfillState::Dialing {
-                            pending_messages: vec![MessageKind::NonExpiring { message }],
-                        },
-                    );
-                }
-                Some(FloodfillState::Dialing {
-                    ref mut pending_messages,
-                }) => {
-                    pending_messages.push(MessageKind::NonExpiring { message });
-                }
-                Some(FloodfillState::Connected) =>
-                    if let Err(error) = self.service.send(&floodfills[0], message) {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "failed to store leaseset",
-                        );
-                    },
-            },
-        }
-    }
-
     /// Get `RouterId`'s of the floodfills closest to `key`.
     fn on_get_closest_floodfills(&mut self, key: Bytes, tx: oneshot::Sender<Vec<RouterId>>) {
         let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
@@ -1242,8 +1195,6 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(NetDbAction::QueryLeaseSet2 { key, tx })) =>
                     self.on_query_leaseset(key, tx),
-                Poll::Ready(Some(NetDbAction::StoreLeaseSet2 { key, leaseset })) =>
-                    self.on_store_leaseset(key, leaseset),
                 Poll::Ready(Some(NetDbAction::GetClosestFloodfills { key, tx })) =>
                     self.on_get_closest_floodfills(key, tx),
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
