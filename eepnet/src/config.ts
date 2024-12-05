@@ -59,8 +59,9 @@ export async function parseConfig(config: string): Promise<Config> {
             (_, index) =>
               new Emissary(
                 router.name ?? `${router.type}-${index}`,
-                router.log,
+                router.log ?? "-lemissary=trace",
                 router.floodfill ?? false,
+                router.sam ?? false,
               ),
           ),
         );
