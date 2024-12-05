@@ -50,9 +50,12 @@ export class I2pd implements Router {
     return this.name;
   }
 
-  setHost(host: string): void {
-    console.log(`assign ${host} for ${this.name}`);
+  getRouterHash(): string {
+    if (!this.hash) throw new Error("router hash not set");
+    return this.hash;
+  }
 
+  setHost(host: string): void {
     this.host = host;
   }
 
@@ -117,8 +120,6 @@ export class I2pd implements Router {
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
-    console.log(`starting ${this.name} (${this.hash})`);
-
     this.container = new Container("i2pd", this.name, this.path, this.host);
     await this.container.create([`${this.path}:/var/lib/i2pd`], {}, {}, [
       "i2pd",
@@ -133,6 +134,12 @@ export class I2pd implements Router {
 
   async stop(): Promise<void> {
     if (this.container) await this.container.destroy();
+  }
+
+  async getLogs(): Promise<any> {
+    if (!this.container) throw new Error("container doesn't exist");
+
+    return await this.container.logs();
   }
 }
 

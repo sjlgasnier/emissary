@@ -50,9 +50,12 @@ export class Emissary implements Router {
     return this.name;
   }
 
-  setHost(host: string): void {
-    console.log(`assign ${host} for ${this.name}`);
+  getRouterHash(): string {
+    if (!this.hash) throw new Error("router hash not set");
+    return this.hash;
+  }
 
+  setHost(host: string): void {
     this.host = host;
   }
 
@@ -123,9 +126,7 @@ export class Emissary implements Router {
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
-    console.log(`starting ${this.name} (${this.hash})`);
-
-    // // default port mappings for prometheus
+    // default port mappings for prometheus
     let ports: { [key: string]: any[] } = {
       ["12842/tcp"]: [{}],
     };
@@ -170,6 +171,12 @@ export class Emissary implements Router {
         router: info["Name"].substring(1),
       },
     };
+  }
+
+  async getLogs(): Promise<any> {
+    if (!this.container) throw new Error("container doesn't exist");
+
+    return await this.container.logs();
   }
 }
 

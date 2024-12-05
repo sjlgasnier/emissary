@@ -47,9 +47,12 @@ export class I2p implements Router {
     return this.name;
   }
 
-  setHost(host: string): void {
-    console.log(`assign ${host} for ${this.name}`);
+  getRouterHash(): string {
+    if (!this.hash) throw new Error("router hash not set");
+    return this.hash;
+  }
 
+  setHost(host: string): void {
     this.host = host;
   }
 
@@ -143,14 +146,16 @@ logger.minimumOnScreenLevel=CRIT
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
-    console.log(`starting ${this.name} (${this.hash})`);
-
     this.container = new Container("i2p", this.name, this.path, this.host);
     await this.container.create([`${this.path}:/i2p/.i2p`], {}, {}, []);
   }
 
   async stop(): Promise<void> {
     if (this.container) await this.container.destroy();
+  }
+
+  async getLogs(): Promise<string> {
+    return "";
   }
 }
 

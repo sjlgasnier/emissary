@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 import * as crypto from "crypto";
+import { promises as fs } from "fs";
 
 /// Calculate router hash from router identity.
 export function getRouterHash(identity: Uint8Array): string {
@@ -40,5 +41,18 @@ export async function waitForExit(): Promise<void> {
     process.on("SIGINT", handleSignal);
 
     while (true) await new Promise((resolve) => setTimeout(resolve, 10_000));
+  });
+}
+
+export async function mkdir(path: string) {
+  await fs.mkdir(path, {
+    recursive: true,
+  });
+}
+
+export async function rmdir(path: string) {
+  await fs.rm(path, {
+    force: true,
+    recursive: true,
   });
 }

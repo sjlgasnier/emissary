@@ -31,6 +31,8 @@ export interface RouterInfo {
 
 export interface Router {
   getName(): string;
+  getRouterHash(): string;
+  getLogs(): Promise<any>;
   setHost(host: string): void;
   generateRouterInfo(path: string): Promise<RouterInfo>;
   populateNetDb(routerInfos: RouterInfo[]): Promise<void>;

@@ -1,0 +1,30 @@
+[[routers]]
+type = "emissary"
+count = 3
+
+[[routers]]
+type = "emissary"
+name = "emissary-floodfill-1"
+floodfill = true
+
+[[routers]]
+type = "emissary"
+name = "emissary-floodfill-2"
+floodfill = true
+
+[[routers]]
+type = "emissary"
+name = "emissary-floodfill-3"
+floodfill = true
+
+[[routers]]
+type = "emissary"
+name = "sam-1"
+log = "-lemissary::destination,emissary::sam,emissary::netdb=trace"
+sam = true
+
+[[routers]]
+type = "emissary"
+name = "sam-2"
+log = "-lemissary::destination,emissary::sam,emissary::netdb=trace"
+sam = true
