@@ -679,6 +679,25 @@ impl<R: Runtime> Stream<R> {
             ..
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
+        if flags.synchronize() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
+                "received `SYN` to an active session",
+            );
+
+            let packet = PacketBuilder::new(self.send_stream_id)
+                .with_send_stream_id(self.recv_stream_id)
+                .with_seq_nro(0)
+                .with_synchronize()
+                .build();
+
+            self.event_tx.try_send((self.remote.clone(), packet.to_vec())).unwrap();
+        }
+
         if flags.reset() {
             tracing::warn!(
                 target: LOG_TARGET,
