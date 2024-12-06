@@ -248,6 +248,9 @@ const test = command({
         await router.stop();
         await rmdir(`/tmp/eepnet/${router.getName()}`);
       });
+
+      // sleep a bit to give docker a chance to remove containers
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
 
     if (numFailed == 0) await rmdir("/tmp/eepnet");

@@ -78,6 +78,7 @@ export async function parseConfig(config: string): Promise<Config> {
                 router.name ?? `${router.type}-${index}`,
                 router.log,
                 router.floodfill ?? false,
+                router.sam ?? false,
               ),
           ),
         );

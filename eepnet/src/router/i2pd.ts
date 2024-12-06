@@ -28,16 +28,18 @@ export class I2pd implements Router {
   name: string;
   log: string;
   floodfill: boolean;
+  sam: boolean;
   hash: null | string;
   host: null | string;
   config: null | string;
   path: null | string;
   container: null | Container;
 
-  constructor(name: string, log: string, floodfill: boolean) {
+  constructor(name: string, log: string, floodfill: boolean, sam: boolean) {
     this.name = name;
     this.log = log;
     this.floodfill = floodfill;
+    this.sam = sam;
 
     this.hash = null;
     this.host = null;
@@ -78,6 +80,12 @@ export class I2pd implements Router {
           published: true,
           port: 9999,
         },
+        sam: {
+          enabled: true,
+          address: "0.0.0.0",
+          port: 7656,
+          portudp: 7655,
+        },
         reseed: {
           urls: "",
           verify: false,
@@ -86,6 +94,9 @@ export class I2pd implements Router {
       // the format isn't strictly toml so some modification have to be made
       // so i2pd is able to parse the configuration correctly
       .replace("9_999", "9999")
+      .replace("7_656", "7656")
+      .replace("7_655", "7655")
+      .replace(`"0.0.0.0"`, `0.0.0.0`)
       .replace(`\"${this.host}\"`, `${this.host}`);
 
     await fs.writeFile(`${path}/i2pd.conf`, config);
@@ -120,16 +131,33 @@ export class I2pd implements Router {
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
+    let ports: { [key: string]: any[] } = {};
+    let exposedPorts: { [key: string]: any } = {};
+
+    // if sam was enabled, expose the ports and map them to random host ports
+    if (this.sam) {
+      ports["7656/tcp"] = [{}];
+      exposedPorts["7656/tcp"] = {};
+
+      ports["7655/udp"] = [{}];
+      exposedPorts["7655/udp"] = {};
+    }
+
     this.container = new Container("i2pd", this.name, this.path, this.host);
-    await this.container.create([`${this.path}:/var/lib/i2pd`], {}, {}, [
-      "i2pd",
-      "--loglevel",
-      this.log,
-      "--datadir",
-      "/var/lib/i2pd",
-      "--reseed.urls",
-      "",
-    ]);
+    await this.container.create(
+      [`${this.path}:/var/lib/i2pd`],
+      ports,
+      exposedPorts,
+      [
+        "i2pd",
+        "--loglevel",
+        this.log,
+        "--datadir",
+        "/var/lib/i2pd",
+        "--reseed.urls",
+        "",
+      ],
+    );
   }
 
   async stop(): Promise<void> {
