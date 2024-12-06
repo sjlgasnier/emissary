@@ -290,12 +290,13 @@ impl<R: Runtime> SessionManager<R> {
         )
         .build();
 
+        let hash = destination_id.to_vec();
         let builder = GarlicMessageBuilder::new()
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                GarlicDeliveryInstructions::Local,
+                GarlicDeliveryInstructions::Destination { hash: &hash },
                 &database_store,
             )
             .with_ack_request();
@@ -334,6 +335,7 @@ impl<R: Runtime> SessionManager<R> {
         match self.active.get_mut(destination_id) {
             Some(session) => {
                 // TODO: ugly
+                let hash = destination_id.to_vec();
                 let message = {
                     let mut out = BytesMut::with_capacity(message.len() + 4);
 
@@ -345,7 +347,7 @@ impl<R: Runtime> SessionManager<R> {
                     MessageType::Data,
                     MessageId::from(R::rng().next_u32()),
                     R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                    GarlicDeliveryInstructions::Local,
+                    GarlicDeliveryInstructions::Destination { hash: &hash },
                     &message,
                 );
 
@@ -382,12 +384,13 @@ impl<R: Runtime> SessionManager<R> {
                         )
                         .build();
 
+                        let hash = destination_id.to_vec();
                         let builder = builder
                             .with_garlic_clove(
                                 MessageType::DatabaseStore,
                                 MessageId::from(R::rng().next_u32()),
                                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                GarlicDeliveryInstructions::Local,
+                                GarlicDeliveryInstructions::Destination { hash: &hash },
                                 &database_store,
                             )
                             .with_ack_request();

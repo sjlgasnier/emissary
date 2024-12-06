@@ -282,12 +282,13 @@ impl<R: Runtime> PendingSession<R> {
                     "send NSR",
                 );
 
+                let hash = self.remote.to_vec();
                 let message = GarlicMessageBuilder::new()
                     .with_garlic_clove(
                         MessageType::Data,
                         MessageId::from(R::rng().next_u32()),
                         R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                        GarlicDeliveryInstructions::Local,
+                        GarlicDeliveryInstructions::Destination { hash: &hash },
                         &{
                             let mut out = BytesMut::with_capacity(message.len() + 4);
 
@@ -404,11 +405,12 @@ impl<R: Runtime> PendingSession<R> {
                     out.put_slice(&message);
                     out
                 };
+                let hash = self.remote.to_vec();
                 let builder = GarlicMessageBuilder::new().with_garlic_clove(
                     MessageType::Data,
                     MessageId::from(R::rng().next_u32()),
                     R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                    GarlicDeliveryInstructions::Local,
+                    GarlicDeliveryInstructions::Destination { hash: &hash },
                     &message,
                 );
 
