@@ -27,10 +27,10 @@ export async function setup(path: string): Promise<void> {
 
 export async function run(path: string): Promise<void> {
   // give network some time to start
-  await new Promise((resolve) => setTimeout(resolve, 10_000));
+  await new Promise((resolve) => setTimeout(resolve, 30_000));
 
   return new Promise((resolve, reject) => {
-    const cargo = spawn(`target/debug/test-runner`, ["sam-1", "sam-2"], {
+    const cargo = spawn("cargo", ["run", "--", "sam-1", "sam-2"], {
       cwd: `${path}/test-runner`,
     });
 

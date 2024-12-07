@@ -18,7 +18,7 @@
 
 use crate::runtime::MetricType;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 // general
 pub const NUM_TUNNEL_MESSAGES: &str = "tunnel_message_count";

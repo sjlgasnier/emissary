@@ -21,20 +21,22 @@ import { promises as fs } from "fs";
 
 import { Container, Image } from "../docker";
 import { Router, RouterInfo } from "../config";
-import { getRouterHash } from "./util";
+import { getRouterHash, mkdir } from "./util";
 
 export class I2p implements Router {
   name: string;
   floodfill: boolean;
+  sam: boolean;
   hash: null | string;
   host: null | string;
   config: null | string;
   path: null | string;
   container: null | Container;
 
-  constructor(name: string, floodfill: boolean) {
+  constructor(name: string, floodfill: boolean, sam: boolean) {
     this.name = name;
     this.floodfill = floodfill;
+    this.sam = sam;
 
     this.hash = null;
     this.host = null;
@@ -72,8 +74,18 @@ i2np.lastIPv6Firewalled=false
 i2np.upnp.enable=false
 i2p.insecureFiles=true
 i2p.reseedURL=https://localhost:3333/foo
+i2cp.SSL=false
+i2cp.auth=false
+i2cp.disableInterface=false
+i2cp.hostname=0.0.0.0
+i2cp.port=7654
+i2cp.tcp.bindAllInterfaces=true
+sam.tcp.host=0.0.0.0
+sam.udp.host=0.0.0.0
+sam.tcp.port=7656
+sam.udp.port=7655
 router.blocklist.enable=false
-router.floodfillParticipant=false
+router.floodfillParticipant=${this.floodfill}
 router.networkID=2
 router.newsRefreshFrequency=0
 router.rebuildKeys=false
@@ -120,10 +132,29 @@ logger.minimumOnScreenLevel=CRIT
       await fs.writeFile(`${path}/logger.config`, config);
     }
 
+    // sam configuration
+    {
+      await mkdir(`${path}/clients.config.d`);
+
+      let config = `
+clientApp.0.args=sam.keys 0.0.0.0 7656 i2cp.tcp.host=0.0.0.0 i2cp.tcp.port=7654
+clientApp.0.delay=10
+clientApp.0.main=net.i2p.sam.SAMBridge
+clientApp.0.name=SAM application bridge
+clientApp.0.startOnLoad=true
+      `;
+      await fs.writeFile(`${path}/clients.config.d/01-net.i2p.sam.SAMBridge-clients.config`, config);
+    }
+
+    // start the router with an empty base directory which causes it to generate keys
+    // and router info for itself, wait for 5s for the boot to finish and shut down the router
     const container = new Container("i2p", this.name, path, this.host);
     await container.create([`${path}:/i2p/.i2p`], {}, {}, []);
     await new Promise((resolve) => setTimeout(resolve, 5000));
     await container.destroy();
+
+    // remove ping file so the start up is not delayed
+    await fs.rm(`${this.path}/router.ping`, { force: true });
 
     let routerInfo = new Uint8Array(await fs.readFile(`${path}/router.info`));
     this.hash = getRouterHash(routerInfo.subarray(0, 391));
@@ -146,8 +177,25 @@ logger.minimumOnScreenLevel=CRIT
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
+    let ports: { [key: string]: any[] } = {};
+    let exposedPorts: { [key: string]: any } = {};
+
+    // if sam was enabled, expose the ports and map them to random host ports
+    if (this.sam) {
+      ports["7656/tcp"] = [{}];
+      exposedPorts["7656/tcp"] = {};
+
+      ports["7655/udp"] = [{}];
+      exposedPorts["7655/udp"] = {};
+    }
+
     this.container = new Container("i2p", this.name, this.path, this.host);
-    await this.container.create([`${this.path}:/i2p/.i2p`], {}, {}, []);
+    await this.container.create(
+      [`${this.path}:/i2p/.i2p`],
+      ports,
+      exposedPorts,
+      []
+    );
   }
 
   async stop(): Promise<void> {

@@ -58,7 +58,7 @@ export class Network {
       IPAM: {
         Config: [
           {
-            Subnet: "172.19.0.0/16",
+            Subnet: "172.20.0.0/16",
           },
         ],
         Options: {},
@@ -77,7 +77,7 @@ export class Network {
         socketPath: "/var/run/docker.sock",
       });
 
-      this.address = "172.19.0.2";
+      this.address = "172.20.0.2";
     } catch (error) {
       console.log(error);
     }

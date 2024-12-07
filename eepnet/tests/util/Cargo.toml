@@ -3,8 +3,8 @@ edition = "2021"
 name = "util"
 version = "0.1.0"
 
-[workspace]
-
 [dependencies]
 bollard = "0.18.1"
-tokio = { version = "1.38.0", features = ["full"] }
+
+# workspace dependencies
+tokio = { workspace = true, features = ["full"] }

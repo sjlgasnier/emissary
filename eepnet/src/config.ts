@@ -92,6 +92,7 @@ export async function parseConfig(config: string): Promise<Config> {
               new I2p(
                 router.name ?? `${router.type}-${index}`,
                 router.floodfill ?? false,
+                router.sam ?? false,
               ),
           ),
         );

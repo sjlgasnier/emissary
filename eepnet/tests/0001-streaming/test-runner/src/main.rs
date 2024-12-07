@@ -54,10 +54,16 @@ async fn main() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    let mut stream = session1.accept().await.unwrap();
+    let mut stream = tokio::time::timeout(Duration::from_secs(5 * 60), session1.accept())
+        .await
+        .expect("no timeout")
+        .expect("to succeed");
 
     let mut data_in = [0u8; 8192];
-    stream.read_exact(&mut data_in).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3 * 60), stream.read_exact(&mut data_in))
+        .await
+        .expect("no timeout")
+        .expect("to succeed");
 
     let mut hasher = Sha256::new();
     hasher.update(&data_in);

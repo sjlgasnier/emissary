@@ -18,7 +18,10 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
-    primitives::{Date, Mapping, RouterAddress, RouterIdentity, Str, LOG_TARGET},
+    primitives::{
+        router_address::TransportKind, Date, Mapping, RouterAddress, RouterIdentity, Str,
+        LOG_TARGET,
+    },
     runtime::Runtime,
     Config,
 };
@@ -31,10 +34,8 @@ use nom::{
 };
 use rand_core::RngCore;
 
-use alloc::{vec, vec::Vec};
+use alloc::{string::ToString, vec, vec::Vec};
 use core::str::FromStr;
-
-use super::router_address::TransportKind;
 
 /// Router information
 //
