@@ -292,6 +292,7 @@ impl<R: Runtime> SamSession<R> {
             };
 
             // create leaseset for the destination and store it in `NetDb`
+            let public_key = encryption_key.public();
             let local_leaseset = Bytes::from(
                 LeaseSet2 {
                     header: LeaseSet2Header {
@@ -299,23 +300,23 @@ impl<R: Runtime> SamSession<R> {
                         published: R::time_since_epoch().as_secs() as u32,
                         expires: Duration::from_secs(10 * 60).as_secs() as u32,
                     },
-                    public_keys: vec![encryption_key.public()],
+                    public_keys: vec![public_key],
                     leases: inbound.values().cloned().collect(),
                 }
                 .serialize(&signing_key),
             );
 
-            if let Err(error) = netdb_handle
-                .store_leaseset(Bytes::from(destination_id.to_vec()), local_leaseset.clone())
-            {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    %destination_id,
-                    ?error,
-                    "failed to publish lease set"
-                );
-                todo!();
-            }
+            let mut session_destination = Destination::new(
+                destination_id.clone(),
+                encryption_key.clone(),
+                local_leaseset.clone(),
+                netdb_handle,
+                tunnel_pool_handle,
+                outbound.into_iter().collect(),
+                inbound.into_values().collect(),
+            );
+            session_destination
+                .publish_lease_set(Bytes::from(destination_id.to_vec()), local_leaseset.clone());
 
             tracing::info!(
                 target: LOG_TARGET,
@@ -325,13 +326,7 @@ impl<R: Runtime> SamSession<R> {
             );
 
             (
-                Destination::new(
-                    destination_id.clone(),
-                    encryption_key.clone(),
-                    local_leaseset,
-                    netdb_handle,
-                    tunnel_pool_handle,
-                ),
+                session_destination,
                 destination,
                 privkey,
                 encryption_key,

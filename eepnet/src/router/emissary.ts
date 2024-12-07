@@ -28,15 +28,17 @@ export class Emissary implements Router {
   name: string;
   log: string;
   floodfill: boolean;
+  sam: boolean;
   hash: null | string;
   host: null | string;
   path: null | string;
   container: null | Container;
 
-  constructor(name: string, log: string, floodfill: boolean) {
+  constructor(name: string, log: string, floodfill: boolean, sam: boolean) {
     this.name = name;
     this.log = log;
     this.floodfill = floodfill;
+    this.sam = sam;
 
     this.hash = null;
     this.host = null;
@@ -48,9 +50,12 @@ export class Emissary implements Router {
     return this.name;
   }
 
-  setHost(host: string): void {
-    console.log(`assign ${host} for ${this.name}`);
+  getRouterHash(): string {
+    if (!this.hash) throw new Error("router hash not set");
+    return this.hash;
+  }
 
+  setHost(host: string): void {
     this.host = host;
   }
 
@@ -63,18 +68,16 @@ export class Emissary implements Router {
       floodfill: this.floodfill,
       caps: this.floodfill ? "XfR" : "LR",
       ntcp2: {
-        enabled: true,
         host: this.host,
         port: 9999,
       },
       i2cp: {
-        enabled: true,
         port: 7654,
       },
       sam: {
-        enabled: true,
         udp_port: 7655,
         tcp_port: 7656,
+        host: "0.0.0.0",
       },
     });
 
@@ -91,7 +94,7 @@ export class Emissary implements Router {
     const container = new Container("emissary", this.name, path, this.host);
     await container.create([`${path}:/var/lib/emissary`], {}, {}, [
       "emissary-cli",
-      "-lemissary=trace",
+      this.log,
       "--base-path",
       "/var/lib/emissary",
     ]);
@@ -123,14 +126,30 @@ export class Emissary implements Router {
   async start(): Promise<void> {
     if (!this.path || !this.host) throw new Error("path or host not set");
 
-    console.log(`starting ${this.name} (${this.hash})`);
+    // default port mappings for prometheus
+    let ports: { [key: string]: any[] } = {
+      ["12842/tcp"]: [{}],
+    };
+    let exposedPorts: { [key: string]: any } = {
+      ["12842/tcp"]: {},
+    };
+
+    // if sam was enabled, expose the ports and map them to random host ports
+    if (this.sam) {
+      ports["7656/tcp"] = [{}];
+      exposedPorts["7656/tcp"] = {};
+
+      ports["7655/udp"] = [{}];
+      exposedPorts["7655/udp"] = {};
+    }
 
     this.container = new Container("emissary", this.name, this.path, this.host);
+
     await this.container.create(
       [`${this.path}:/var/lib/emissary`],
-      { ["12842/tcp"]: [{}] },
-      { ["12842/tcp"]: {} },
-      ["emissary-cli", "-lemissary=trace", "--base-path", "/var/lib/emissary"],
+      ports,
+      exposedPorts,
+      ["emissary-cli", this.log, "--base-path", "/var/lib/emissary"],
     );
   }
 
@@ -152,6 +171,12 @@ export class Emissary implements Router {
         router: info["Name"].substring(1),
       },
     };
+  }
+
+  async getLogs(): Promise<any> {
+    if (!this.container) throw new Error("container doesn't exist");
+
+    return await this.container.logs();
   }
 }
 

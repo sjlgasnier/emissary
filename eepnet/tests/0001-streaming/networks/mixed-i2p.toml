@@ -1,0 +1,38 @@
+# [[routers]]
+# type = "emissary"
+# count = 3
+
+[[routers]]
+type = "i2p"
+count = 5
+
+[[routers]]
+type = "i2p"
+name = "i2p-floodfill-1"
+floodfill = true
+
+[[routers]]
+type = "i2p"
+name = "i2p-floodfill-2"
+floodfill = true
+
+[[routers]]
+type = "i2p"
+name = "i2p-floodfill-3"
+floodfill = true
+
+# [[routers]]
+# type = "emissary"
+# name = "emissary-floodfill"
+# floodfill = true
+
+[[routers]]
+type = "emissary"
+name = "sam-1"
+log = "-lemissary::destination,emissary::sam,emissary::netdb,emissary::streaming=trace"
+sam = true
+
+[[routers]]
+type = "i2p"
+name = "sam-2"
+sam = true

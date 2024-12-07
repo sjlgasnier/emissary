@@ -250,7 +250,10 @@ mod tests {
     use crate::{
         i2np::tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         runtime::mock::MockRuntime,
-        tunnel::tests::{build_inbound_tunnel, build_outbound_tunnel},
+        tunnel::{
+            routing_table::RoutingKind,
+            tests::{build_inbound_tunnel, build_outbound_tunnel},
+        },
     };
 
     #[test]
@@ -299,7 +302,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        let (next_router, message) = outbound_transit[0].message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: next_router,
+            message,
+        } = outbound_transit[0].message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
         assert_eq!(outbound_transit[1].router(), next_router);
 
         // second outbound hop (obep)
@@ -310,7 +319,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        let (next_router, message) = outbound_transit[1].message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: next_router,
+            message,
+        } = outbound_transit[1].message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
         assert_eq!(inbound_transit[0].router(), next_router);
 
         // first inbound hop (ibgw)
@@ -321,7 +336,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        let (next_router, message) = inbound_transit[0].message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: next_router,
+            message,
+        } = inbound_transit[0].message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
         assert_eq!(inbound_transit[1].router(), next_router);
 
         // second inbound hop (participant)
@@ -332,7 +353,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        let (next_router, message) = inbound_transit[1].message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: next_router,
+            message,
+        } = inbound_transit[1].message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
         assert_eq!(RouterId::from(local_inbound_hash), next_router);
 
         // inbound endpoint
@@ -374,9 +401,11 @@ mod tests {
         let messages = {
             let mut messages = vec![];
 
-            while let Ok((router, message)) = outbound_transit[0].message_rx().try_recv() {
-                assert_eq!(outbound_transit[1].router(), router);
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                outbound_transit[0].message_rx().try_recv()
+            {
+                assert_eq!(outbound_transit[1].router(), router_id);
+                messages.push((router_id, message));
             }
 
             messages
@@ -396,9 +425,11 @@ mod tests {
         let messages = {
             let mut messages = vec![];
 
-            while let Ok((router, message)) = outbound_transit[1].message_rx().try_recv() {
-                assert_eq!(outbound_transit[2].router(), router);
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                outbound_transit[1].message_rx().try_recv()
+            {
+                assert_eq!(outbound_transit[2].router(), router_id);
+                messages.push((router_id, message));
             }
 
             messages
@@ -418,8 +449,10 @@ mod tests {
         let messages = {
             let mut messages = vec![];
 
-            while let Ok((router, message)) = outbound_transit[2].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                outbound_transit[2].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages
@@ -443,8 +476,10 @@ mod tests {
         let messages = {
             let mut messages = vec![];
 
-            while let Ok((router, message)) = inbound_transit[0].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                inbound_transit[0].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages
@@ -464,8 +499,10 @@ mod tests {
         let messages = {
             let mut messages = vec![];
 
-            while let Ok((router, message)) = inbound_transit[1].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                inbound_transit[1].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages
@@ -485,8 +522,10 @@ mod tests {
         let messages = {
             let mut messages = vec![];
 
-            while let Ok((router, message)) = inbound_transit[2].message_rx().try_recv() {
-                messages.push((router, message));
+            while let Ok(RoutingKind::External { router_id, message }) =
+                inbound_transit[2].message_rx().try_recv()
+            {
+                messages.push((router_id, message));
             }
 
             messages

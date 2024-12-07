@@ -52,15 +52,6 @@ pub enum NetDbAction {
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
     },
 
-    /// Store `LeaseSet2` into `NetDb`.
-    StoreLeaseSet2 {
-        /// SHA256 of the `Destination` in `leaseset`.
-        key: Bytes,
-
-        /// Serialized `LeaseSet2`.
-        leaseset: Bytes,
-    },
-
     /// Get `RouterId`'s of the floodfills closest to `key`.
     GetClosestFloodfills {
         /// Key.
@@ -109,14 +100,6 @@ impl NetDbHandle {
         self.tx
             .try_send(NetDbAction::QueryLeaseSet2 { key, tx })
             .map(|_| rx)
-            .map_err(From::from)
-    }
-
-    /// Store `leaseset` under `key` in `NetDb`.
-    pub fn store_leaseset(&self, key: Bytes, leaseset: Bytes) -> Result<(), ChannelError> {
-        self.tx
-            .try_send(NetDbAction::StoreLeaseSet2 { key, leaseset })
-            .map(|_| ())
             .map_err(From::from)
     }
 

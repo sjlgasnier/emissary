@@ -40,6 +40,33 @@ use alloc::{sync::Arc, vec::Vec};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::routing-table";
 
+/// Routing kind.
+#[derive(Debug, Clone)]
+pub enum RoutingKind {
+    /// Message needs to be send to an external router.
+    External {
+        ///
+        router_id: RouterId,
+
+        /// Serialize I2NP essage.
+        message: Vec<u8>,
+    },
+
+    /// Message needs to be routed internally either back to the tunnel subsystem or to [`NetDb`].
+    Internal {
+        /// I2NP message.
+        message: Message,
+    },
+}
+
+impl Default for RoutingKind {
+    fn default() -> Self {
+        Self::Internal {
+            message: Message::default(),
+        }
+    }
+}
+
 /// Routing table.
 #[derive(Debug, Clone)]
 pub struct RoutingTable {
@@ -47,7 +74,10 @@ pub struct RoutingTable {
     listeners: Arc<RwLock<HashMap<MessageId, oneshot::Sender<Message>>>>,
 
     /// TX channel for sending outbound messages to `TunnelManager`.
-    manager: mpsc::Sender<(RouterId, Vec<u8>)>,
+    /// TX channel for sending message routing instructions.
+    ///
+    /// See [`RoutingKind`] for more details.
+    manager: mpsc::Sender<RoutingKind>,
 
     /// Local router ID.
     router_hash: RouterId,
@@ -63,7 +93,7 @@ impl RoutingTable {
     /// Create new [`RoutingTable`].
     pub fn new(
         router_hash: RouterId,
-        manager: mpsc::Sender<(RouterId, Vec<u8>)>,
+        manager: mpsc::Sender<RoutingKind>,
         transit: mpsc::Sender<Message>,
     ) -> Self {
         Self {
@@ -225,23 +255,54 @@ impl RoutingTable {
         }
     }
 
-    /// Send `message` to `router`.
+    /// Send `message` to router identified by `router_id`.
     ///
     /// `router` could point to local router which causes `message` to be routed locally.
     //
     // TODO(optimization): take deserialized message and serialize it only if it's for remote
-    pub fn send_message(&self, router: RouterId, message: Vec<u8>) -> Result<(), RoutingError> {
-        match router == self.router_hash {
-            true => self.route_message(Message::parse_short(&message).expect("valid message")),
-            false => self.manager.try_send((router, message)).map_err(|error| match error {
-                TrySendError::Full((router, message)) => RoutingError::ChannelFull(
-                    Message::parse_short(&message).expect("valid message"),
-                ),
-                TrySendError::Closed((router, message)) => RoutingError::ChannelClosed(
-                    Message::parse_short(&message).expect("valid message"),
-                ),
-                _ => unreachable!(),
-            }),
+    pub fn send_message(&self, router_id: RouterId, message: Vec<u8>) -> Result<(), RoutingError> {
+        match router_id == self.router_hash {
+            true => {
+                // parsing must succeed since this message was created by us
+                let message = Message::parse_short(&message).expect("valid message");
+
+                match message.message_type {
+                    MessageType::TunnelData
+                    | MessageType::TunnelGateway
+                    | MessageType::ShortTunnelBuild
+                    | MessageType::VariableTunnelBuild => self.route_message(message),
+                    message_type => {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            ?message_type,
+                            "received non-tunnel message, route to `TunnelManager`",
+                        );
+
+                        self.manager.try_send(RoutingKind::Internal { message }).map_err(|error| {
+                            match error {
+                                TrySendError::Full(RoutingKind::Internal { message }) =>
+                                    RoutingError::ChannelFull(message),
+                                TrySendError::Closed(RoutingKind::Internal { message }) =>
+                                    RoutingError::ChannelClosed(message),
+                                _ => unreachable!(),
+                            }
+                        })
+                    }
+                }
+            }
+            false => self.manager.try_send(RoutingKind::External { router_id, message }).map_err(
+                |error| match error {
+                    TrySendError::Full(RoutingKind::External { router_id, message }) =>
+                        RoutingError::ChannelFull(
+                            Message::parse_short(&message).expect("valid message"),
+                        ),
+                    TrySendError::Closed(RoutingKind::External { router_id, message }) =>
+                        RoutingError::ChannelClosed(
+                            Message::parse_short(&message).expect("valid message"),
+                        ),
+                    _ => unreachable!(),
+                },
+            ),
         }
     }
 }
@@ -515,6 +576,32 @@ mod tests {
                 assert_eq!(duplicate_tunnel, tunnel_id);
             }
             error => panic!("invalid error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_internal() {
+        let (transit_tx, transit_rx) = channel(64);
+        let (manager_tx, manager_rx) = channel(64);
+        let router_id = RouterId::from(vec![1, 2, 3, 4]);
+        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+
+        let message_id = MockRuntime::rng().next_u32();
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(message_id)
+            .with_expiration(MockRuntime::time_since_epoch())
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        routing_table.send_message(router_id, message).unwrap();
+
+        match manager_rx.try_recv().unwrap() {
+            RoutingKind::Internal { message } => {
+                assert_eq!(message.message_id, message_id);
+                assert_eq!(message.message_type, MessageType::DatabaseLookup);
+            }
+            _ => panic!("invalid routing kind"),
         }
     }
 }

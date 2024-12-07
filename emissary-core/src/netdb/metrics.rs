@@ -27,6 +27,7 @@ pub const NUM_SUCCEEDED_QUERIES: &str = "num_succeeded_queries";
 pub const NUM_FAILED_QUERIES: &str = "num_failed_queries";
 pub const NUM_ACTIVE_QUERIES: &str = "num_active_queries";
 pub const QUERY_DURATION_BUCKET: &str = "query_duration_bucket";
+pub const NUM_NETDB_MESSAGES: &str = "netdb_message_count";
 
 /// Register NetDB metrics.
 pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
@@ -46,6 +47,10 @@ pub fn register_metrics(mut metrics: Vec<MetricType>) -> Vec<MetricType> {
     metrics.push(MetricType::Counter {
         name: NUM_FAILED_QUERIES,
         description: "total number of failed queries",
+    });
+    metrics.push(MetricType::Counter {
+        name: NUM_NETDB_MESSAGES,
+        description: "number of i2np messaged received to netdb subsystem",
     });
 
     // gauges

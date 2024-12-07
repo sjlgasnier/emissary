@@ -1071,7 +1071,10 @@ mod tests {
         primitives::{RouterId, RouterInfo},
         router_storage::RouterStorage,
         runtime::mock::MockRuntime,
-        tunnel::{pool::selector::ClientSelector, tests::TestTransitTunnelManager},
+        tunnel::{
+            pool::selector::ClientSelector, routing_table::RoutingKind,
+            tests::TestTransitTunnelManager,
+        },
     };
     use futures::StreamExt;
     use thingbuf::mpsc;
@@ -1128,7 +1131,13 @@ mod tests {
         assert_eq!(tunnel_pool.pending_outbound.len(), 1);
 
         // 1st outbound hop (participant)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1206,7 +1215,13 @@ mod tests {
         assert_eq!(tunnel_pool.pending_outbound.len(), 1);
 
         // 1st outbound hop (participant)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1279,7 +1294,13 @@ mod tests {
         assert_eq!(tunnel_pool.pending_inbound.len(), 1);
 
         // 1st outbound hop (ibgw)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1357,7 +1378,13 @@ mod tests {
         assert_eq!(tunnel_pool.pending_inbound.len(), 1);
 
         // 1st outbound hop (ibgw)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1438,7 +1465,13 @@ mod tests {
         assert_eq!(exploratory_pool.pending_outbound.len(), 1);
 
         // 1st outbound hop (participant)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1496,7 +1529,9 @@ mod tests {
 
             assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
 
-            let (router_id, message) = manager_rx.try_recv().unwrap();
+            let Ok(RoutingKind::External { router_id, message }) = manager_rx.try_recv() else {
+                panic!("invalid routing kind")
+            };
 
             // 1st hop (participant)
             let (router_id, message) = {
@@ -1505,7 +1540,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // 2nd hop (participant)
@@ -1515,7 +1556,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // 3rd hop (obep)
@@ -1525,7 +1572,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // inbound build 1st hop (ibgw)
@@ -1535,7 +1588,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // inbound build 2nd hop (participant)
@@ -1545,7 +1604,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // inbound build 3rd hop (participant)
@@ -1555,7 +1620,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             assert_eq!(router_id, RouterId::from(our_hash));
@@ -1637,7 +1708,13 @@ mod tests {
         assert_eq!(exploratory_pool.pending_inbound.len(), 1);
 
         // 1st outbound hop (ibgw)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1694,7 +1771,9 @@ mod tests {
 
             assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
 
-            let (router_id, message) = manager_rx.try_recv().unwrap();
+            let Ok(RoutingKind::External { router_id, message }) = manager_rx.try_recv() else {
+                panic!("invalid routing kind")
+            };
 
             // outbound build 1st hop (participant)
             let (router_id, message) = {
@@ -1703,7 +1782,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // outbound build 2nd hop (participant)
@@ -1713,7 +1798,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // outbound build 3rd hop (obep)
@@ -1723,7 +1814,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // build reply 1st hop (ibgw)
@@ -1733,7 +1830,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // build reply 2nd hop (participant)
@@ -1743,7 +1846,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
 
             // build reply 3rd hop (participant)
@@ -1753,7 +1862,13 @@ mod tests {
 
                 router.routing_table().route_message(message).unwrap();
                 assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-                router.message_rx().try_recv().unwrap()
+
+                let RoutingKind::External { router_id, message } =
+                    router.message_rx().try_recv().unwrap()
+                else {
+                    panic!("invalid routing kind");
+                };
+                (router_id, message)
             };
             assert_eq!(router_id, RouterId::from(our_hash));
 
@@ -1827,7 +1942,13 @@ mod tests {
         assert_eq!(tunnel_pool.pending_outbound.len(), 1);
 
         // 1st outbound hop (participant)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1910,7 +2031,13 @@ mod tests {
         assert_eq!(tunnel_pool.pending_inbound.len(), 1);
 
         // 1st outbound hop (ibgw)
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
         let message = Message::parse_short(&message).unwrap();
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
@@ -1992,7 +2119,13 @@ mod tests {
 
         // build one inbound and one outbound tunnel
         for _ in 0..2 {
-            let (router, message) = manager_rx.try_recv().unwrap();
+            let Ok(RoutingKind::External {
+                router_id: router,
+                message,
+            }) = manager_rx.try_recv()
+            else {
+                panic!("invalid routing kind")
+            };
 
             // 1st outbound hop
             let message = Message::parse_short(&message).unwrap();
@@ -2022,7 +2155,13 @@ mod tests {
         assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
 
         assert!(tokio::time::timeout(Duration::from_secs(8), &mut tunnel_pool).await.is_err());
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
 
         // 1st outbound hop (participant)
         let message = Message::parse_short(&message).unwrap();
@@ -2039,7 +2178,13 @@ mod tests {
         .await
         .is_err());
 
-        let (router, message) = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: router,
+            message,
+        } = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
         assert!(routers.get_mut(&router).unwrap().message_rx().try_recv().is_err());
 
         // 2nd outbound hop (obep)
@@ -2056,7 +2201,13 @@ mod tests {
         )
         .await
         .is_err());
-        let (router, message) = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: router,
+            message,
+        } = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
 
         // 1st inbound hop (ibgw)
         let message = Message::parse_short(&message).unwrap();
@@ -2072,7 +2223,13 @@ mod tests {
         )
         .await
         .is_err());
-        let (router, message) = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: router,
+            message,
+        } = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
 
         // 2nd inbound hop (participant)
         let message = Message::parse_short(&message).unwrap();
@@ -2088,7 +2245,13 @@ mod tests {
         )
         .await
         .is_err());
-        let (router, message) = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: router,
+            message,
+        } = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind");
+        };
 
         // route response to local router and verify that tunnel test is considered succeeded
         assert_eq!(router, RouterId::from(our_hash));
@@ -2160,7 +2323,13 @@ mod tests {
 
         // build one inbound and one outbound tunnel
         for _ in 0..2 {
-            let (router, message) = manager_rx.try_recv().unwrap();
+            let Ok(RoutingKind::External {
+                router_id: router,
+                message,
+            }) = manager_rx.try_recv()
+            else {
+                panic!("invalid routing kind")
+            };
 
             // 1st outbound hop
             let message = Message::parse_short(&message).unwrap();
@@ -2190,7 +2359,13 @@ mod tests {
         assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
 
         assert!(tokio::time::timeout(Duration::from_secs(8), &mut tunnel_pool).await.is_err());
-        let (router, message) = manager_rx.try_recv().unwrap();
+        let Ok(RoutingKind::External {
+            router_id: router,
+            message,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
 
         // 1st outbound hop (participant)
         let message = Message::parse_short(&message).unwrap();
@@ -2207,7 +2382,13 @@ mod tests {
         .await
         .is_err());
 
-        let (router, message) = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap();
+        let RoutingKind::External {
+            router_id: router,
+            message,
+        } = routers.get_mut(&router).unwrap().message_rx().try_recv().unwrap()
+        else {
+            panic!("invalid routing kind")
+        };
         assert!(routers.get_mut(&router).unwrap().message_rx().try_recv().is_err());
 
         // 2nd outbound hop (obep)

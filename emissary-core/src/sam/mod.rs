@@ -192,26 +192,28 @@ impl<R: Runtime> SamServer<R> {
     pub async fn new(
         tcp_port: u16,
         udp_port: u16,
+        host: String,
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
     ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
+            ?host,
             ?tcp_port,
             ?udp_port,
             "starting sam server",
         );
 
         let listener = R::TcpListener::bind(SocketAddr::new(
-            "127.0.0.1".parse::<IpAddr>().expect("valid address"),
+            host.parse::<IpAddr>().expect("valid address"),
             tcp_port,
         ))
         .await
         .ok_or(Error::Connection(ConnectionError::BindFailure))?;
 
         let socket = R::UdpSocket::bind(SocketAddr::new(
-            "127.0.0.1".parse::<IpAddr>().expect("valid address"),
+            host.parse::<IpAddr>().expect("valid address"),
             udp_port,
         ))
         .await

@@ -31,6 +31,8 @@ export interface RouterInfo {
 
 export interface Router {
   getName(): string;
+  getRouterHash(): string;
+  getLogs(): Promise<any>;
   setHost(host: string): void;
   generateRouterInfo(path: string): Promise<RouterInfo>;
   populateNetDb(routerInfos: RouterInfo[]): Promise<void>;
@@ -59,8 +61,9 @@ export async function parseConfig(config: string): Promise<Config> {
             (_, index) =>
               new Emissary(
                 router.name ?? `${router.type}-${index}`,
-                router.log,
+                router.log ?? "-lemissary=trace",
                 router.floodfill ?? false,
+                router.sam ?? false,
               ),
           ),
         );
@@ -75,6 +78,7 @@ export async function parseConfig(config: string): Promise<Config> {
                 router.name ?? `${router.type}-${index}`,
                 router.log,
                 router.floodfill ?? false,
+                router.sam ?? false,
               ),
           ),
         );
@@ -88,6 +92,7 @@ export async function parseConfig(config: string): Promise<Config> {
               new I2p(
                 router.name ?? `${router.type}-${index}`,
                 router.floodfill ?? false,
+                router.sam ?? false,
               ),
           ),
         );

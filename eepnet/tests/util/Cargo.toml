@@ -1,0 +1,10 @@
+[package]
+edition = "2021"
+name = "util"
+version = "0.1.0"
+
+[dependencies]
+bollard = "0.18.1"
+
+# workspace dependencies
+tokio = { workspace = true, features = ["full"] }

@@ -149,20 +149,21 @@ impl<R: Runtime> KeyContext<R> {
         )
         .build();
 
+        let hash = destination_id.to_vec();
         let payload = GarlicMessageBuilder::new()
             .with_date_time(R::time_since_epoch().as_secs() as u32)
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                GarlicDeliveryInstructions::Local,
+                GarlicDeliveryInstructions::Destination { hash: &hash },
                 &database_store,
             )
             .with_garlic_clove(
                 MessageType::Data,
                 MessageId::from(R::rng().next_u32()),
                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                GarlicDeliveryInstructions::Local,
+                GarlicDeliveryInstructions::Destination { hash: &hash },
                 &{
                     let mut out = BytesMut::with_capacity(payload.len() + 4);
 

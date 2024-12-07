@@ -392,29 +392,8 @@ impl<R: Runtime> PendingI2cpSession<R> {
                     inbound,
                     outbound,
                 } => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        ?session_id,
-                        num_private_keys = ?private_keys.len(),
-                        "store leaseset to netdb",
-                    );
-
-                    // store the leaseset received from the client into `NetDb` and return i2cp
-                    // session context parameters, destroying the pending session and creating an
-                    // active i2cp session
-                    //
-                    // TODO: retry if `store_leaseset` fails
-                    if let Err(error) =
-                        self.netdb_handle.store_leaseset(key.clone(), leaseset.clone())
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?session_id,
-                            ?error,
-                            "failed to store leaseset to netdb",
-                        );
-                    }
-
+                    // the lease set is returned to the active session constructor which publishes
+                    // it to netdb
                     return Some(I2cpSessionContext {
                         inbound,
                         options,

@@ -21,9 +21,11 @@ import { promises as fs } from "fs";
 
 export class Network {
   address: null | string;
+  log?: boolean;
 
-  constructor() {
+  constructor(log?: boolean) {
     this.address = null;
+    this.log = log;
   }
 
   async create() {
@@ -39,7 +41,7 @@ export class Network {
     if (network[0]) {
       let subnet = network[0]["IPAM"]["Config"][0]["Subnet"];
 
-      console.log(`eepnet already exists (${subnet})`);
+      if (this.log) console.log(`eepnet already exists (${subnet})`);
 
       let octets = subnet.split("/")[0].split(".").map(Number);
       octets[3] += 2;
@@ -48,7 +50,7 @@ export class Network {
       return;
     }
 
-    console.log("create eepnet bridge network");
+    if (this.log) console.log("create eepnet bridge network");
 
     let config = {
       Name: "eepnet",
@@ -56,7 +58,7 @@ export class Network {
       IPAM: {
         Config: [
           {
-            Subnet: "172.19.0.0/16",
+            Subnet: "172.20.0.0/16",
           },
         ],
         Options: {},
@@ -75,14 +77,14 @@ export class Network {
         socketPath: "/var/run/docker.sock",
       });
 
-      this.address = "172.19.0.2";
+      this.address = "172.20.0.2";
     } catch (error) {
       console.log(error);
     }
   }
 
   async destroy() {
-    console.log("destroy eepnet bridge network");
+    if (this.log) console.log("destroy eepnet bridge network");
 
     await axios.delete("http://localhost/networks/eepnet", {
       socketPath: "/var/run/docker.sock",
@@ -217,6 +219,17 @@ export class Container {
       await axios.get(`http://localhost/containers/${this.name}/json`, {
         socketPath: "/var/run/docker.sock",
       })
+    ).data;
+  }
+
+  async logs(): Promise<any> {
+    return (
+      await axios.get(
+        `http://localhost/containers/${this.name}/logs?stdout=true&stderr=true`,
+        {
+          socketPath: "/var/run/docker.sock",
+        },
+      )
     ).data;
   }
 }

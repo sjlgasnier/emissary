@@ -40,6 +40,9 @@ pub mod pending;
 /// Tunnel hop.
 #[derive(Debug)]
 pub struct TunnelHop {
+    /// Key context.
+    key_context: OutboundSession,
+
     /// Hop role
     role: HopRole,
 
@@ -48,9 +51,30 @@ pub struct TunnelHop {
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
+}
 
-    /// Key context.
-    key_context: OutboundSession,
+impl TunnelHop {
+    /// Create new [`TunnelHop`].
+    #[cfg(test)]
+    pub fn new(
+        key_context: OutboundSession,
+        role: HopRole,
+        router: RouterId,
+        tunnel_id: TunnelId,
+    ) -> Self {
+        Self {
+            key_context,
+            role,
+            router,
+            tunnel_id,
+        }
+    }
+
+    /// Get reference to hop's `OutboundSession`.
+    #[cfg(test)]
+    pub fn outbound_session(&self) -> &OutboundSession {
+        &self.key_context
+    }
 }
 
 /// Tunnel direction.

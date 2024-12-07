@@ -89,6 +89,9 @@ pub struct SamConfig {
 
     /// SAMv3 UDP server listen port.
     pub udp_port: u16,
+
+    /// Host where the sockets shoud be bound to.
+    pub host: String,
 }
 
 /// Router configuration.

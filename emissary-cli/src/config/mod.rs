@@ -56,6 +56,7 @@ struct I2cpConfig {
 pub struct SamConfig {
     tcp_port: u16,
     udp_port: u16,
+    host: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -346,6 +347,7 @@ impl Config {
             sam: Some(SamConfig {
                 tcp_port: 7656,
                 udp_port: 7655,
+                host: None,
             }),
             floodfill: false,
             caps: None,
@@ -375,6 +377,7 @@ impl Config {
             sam_config: Some(emissary::SamConfig {
                 tcp_port: 7656u16,
                 udp_port: 7655u16,
+                host: String::from("127.0.0.1"),
             }),
             static_key,
             signing_key,
@@ -406,6 +409,7 @@ impl Config {
                     sam: Some(SamConfig {
                         tcp_port: 7656,
                         udp_port: 7655,
+                        host: None,
                     }),
                     floodfill: false,
                     caps: None,
@@ -439,6 +443,7 @@ impl Config {
             sam_config: config.sam.map(|config| emissary::SamConfig {
                 tcp_port: config.tcp_port,
                 udp_port: config.udp_port,
+                host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
             static_key,
             signing_key,

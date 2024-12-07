@@ -367,3 +367,136 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
         Poll::Pending
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::{EphemeralPublicKey, StaticPrivateKey},
+        runtime::mock::MockRuntime,
+        tunnel::{
+            hop::{
+                outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind, Tunnel,
+                TunnelBuildParameters, TunnelHop, TunnelInfo,
+            },
+            noise::NoiseContext,
+        },
+    };
+    use bytes::Bytes;
+    use thingbuf::mpsc::channel;
+
+    // outbound endpoint and the target router are the same router
+    //
+    // verify that the payload inside the `TunnelData` message gets routed correctly TunnelManager
+    #[tokio::test]
+    async fn obep_routes_message_to_self() {
+        let (tx, rx) = channel(64);
+        let (transit_tx, transit_rx) = channel(64);
+        let (manager_tx, manager_rx) = channel(64);
+        let router_id = RouterId::from(vec![1, 2, 3, 4]);
+        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+
+        let obep_key = StaticPrivateKey::new(MockRuntime::rng());
+        let obep_router_id = RouterId::random();
+
+        let obgw_key = StaticPrivateKey::new(MockRuntime::rng());
+        let obgw_router_id = RouterId::random();
+
+        let (pending, router_id, mut message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: vec![(
+                        Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+                        obep_key.public(),
+                    )],
+                    noise: NoiseContext::new(
+                        obgw_key,
+                        Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                    ),
+                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway: TunnelId::random(),
+                        tunnel_id: TunnelId::random(),
+                        router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(router_id, obep_router_id);
+
+        // build 1-hop tunnel
+        let (obep_keys, obgw) = {
+            let obep_noise = NoiseContext::new(
+                obep_key.clone(),
+                Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+            );
+
+            // create tunnel session
+            let mut obep_session = obep_noise.create_short_inbound_session(
+                EphemeralPublicKey::try_from(pending.hops()[0].outbound_session().ephemeral_key())
+                    .unwrap(),
+            );
+
+            let router_id = Into::<Vec<u8>>::into(obep_router_id.clone());
+            let (idx, mut record) = message.payload[1..]
+                .chunks_mut(218)
+                .enumerate()
+                .find(|(i, chunk)| &chunk[..16] == &router_id[..16])
+                .unwrap();
+            let decrypted_record = obep_session.decrypt_build_record(record[48..].to_vec());
+            obep_session.create_tunnel_keys(HopRole::OutboundEndpoint).unwrap();
+
+            record[48] = 0x00;
+            record[49] = 0x00;
+            record[201] = 0x00;
+
+            obep_session.encrypt_build_records(&mut message.payload, idx).unwrap();
+            let keys = obep_session.finalize().unwrap();
+
+            let msg = MessageBuilder::standard()
+                .with_message_type(MessageType::OutboundTunnelBuildReply)
+                .with_message_id(MockRuntime::rng().next_u32())
+                .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(5))
+                .with_payload(&message.payload)
+                .build();
+            let message = Message::parse_standard(&msg).unwrap();
+
+            (
+                keys,
+                pending.try_build_tunnel::<MockRuntime>(message).unwrap(),
+            )
+        };
+
+        let message = MessageBuilder::standard()
+            .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(5))
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(MockRuntime::rng().next_u32())
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        let (to_router, mut messages) = obgw.send_to_router(obep_router_id.clone(), message);
+        let message = messages.next().expect("to exist");
+
+        let message = Message::parse_short(&message).unwrap();
+        let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
+
+        let mut tunnel = OutboundEndpoint::<MockRuntime>::new(
+            TunnelId::random(),
+            TunnelId::random(),
+            RouterId::random(),
+            obep_keys,
+            routing_table,
+            MockRuntime::register_metrics(vec![]),
+            rx,
+        );
+
+        let (router_id, message) = tunnel.handle_tunnel_data(&parsed).unwrap().next().unwrap();
+        assert_eq!(router_id, obep_router_id);
+
+        tunnel.routing_table.send_message(router_id, message).unwrap();
+        assert!(manager_rx.try_recv().is_ok());
+        assert!(transit_rx.try_recv().is_err());
+    }
+}
