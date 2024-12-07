@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
                 Router::new(TokioRuntime::new(), config).await.unwrap();
 
             // TODO: ugly
-            let mut file = File::create(path.join("routerInfo.dat"))?;
+            let mut file = File::create(path.join("router.info"))?;
             file.write_all(&local_router_info)?;
 
             let _ = router.await;

@@ -21,7 +21,7 @@
 use crate::{
     crypto::StaticPublicKey,
     primitives::{RouterId, TunnelId},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::JoinSet,
     tunnel::pool::TunnelPoolContextHandle,
 };
@@ -96,23 +96,23 @@ pub struct ExploratorySelector {
     outbound: Arc<RwLock<HashSet<TunnelId>>>,
 
     /// Router storage for selecting hops.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage,
 }
 
 impl ExploratorySelector {
     /// Create new [`ExploratorySelector`].
-    pub fn new(router_storage: RouterStorage, handle: TunnelPoolContextHandle) -> Self {
+    pub fn new(profile_storage: ProfileStorage, handle: TunnelPoolContextHandle) -> Self {
         Self {
             handle,
             inbound: Default::default(),
             outbound: Default::default(),
-            router_storage,
+            profile_storage,
         }
     }
 
-    /// Get reference to [`RouterStorage`].
-    pub fn router_storage(&self) -> &RouterStorage {
-        &self.router_storage
+    /// Get reference to [`ProfileStorage`].
+    pub fn profile_storage(&self) -> &ProfileStorage {
+        &self.profile_storage
     }
 
     /// Get reference to exploratory tunnel pool's [`TunnePoolHandle`].
@@ -153,7 +153,7 @@ impl TunnelSelector for ExploratorySelector {
 
 impl HopSelector for ExploratorySelector {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        let routers = self.router_storage.get_routers(num_hops, |_, _| true);
+        let routers = self.profile_storage.get_routers(num_hops, |_, _| true);
 
         if routers.len() != num_hops {
             return None;
@@ -244,7 +244,7 @@ impl TunnelSelector for ClientSelector {
 
 impl HopSelector for ClientSelector {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        let routers = self.exploratory.router_storage().get_routers(num_hops, |_, _| true);
+        let routers = self.exploratory.profile_storage().get_routers(num_hops, |_, _| true);
 
         if routers.len() != num_hops {
             return None;

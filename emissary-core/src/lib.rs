@@ -26,6 +26,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 pub use config::{Config, ExploratoryConfig, I2cpConfig, Ntcp2Config, SamConfig};
 pub use error::Error;
+pub use profile::Profile;
 
 mod config;
 mod crypto;
@@ -33,7 +34,7 @@ mod destination;
 mod error;
 mod i2cp;
 mod netdb;
-mod router_storage;
+mod profile;
 mod sam;
 mod subsystem;
 mod transports;

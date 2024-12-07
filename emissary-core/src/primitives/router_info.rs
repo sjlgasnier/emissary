@@ -245,6 +245,31 @@ impl RouterInfo {
         Self::from_keys::<R>(static_key, signing_key)
     }
 
+    /// Create new random [`RouterInfo`] and serialize it.
+    pub fn random_with_keys<R: Runtime>() -> (Self, StaticPrivateKey, SigningPrivateKey) {
+        let raw_static_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+        let static_key = StaticPrivateKey::from(raw_static_key.clone());
+
+        let raw_signing_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+        let signing_key = SigningPrivateKey::new(&raw_signing_key).unwrap();
+
+        (
+            Self::from_keys::<R>(raw_static_key, raw_signing_key),
+            static_key,
+            signing_key,
+        )
+    }
+
     /// Create new random [`RouterInfo`] for a floodfill router.
     pub fn floodfill<R: Runtime>() -> Self {
         let static_key = {

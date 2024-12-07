@@ -32,7 +32,7 @@ use crate::{
     },
     netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
     primitives::{Lease, LeaseSet2, RouterId, RouterInfo, TunnelId},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
@@ -260,8 +260,8 @@ pub struct NetDb<R: Runtime> {
     /// This contains entries only if `floodfill` is true.
     router_infos: HashMap<Bytes, (Bytes, Duration)>,
 
-    /// Router storage.
-    router_storage: RouterStorage,
+    /// Profile storage.
+    profile_storage: ProfileStorage,
 
     /// Transport service.
     service: TransportService,
@@ -273,13 +273,13 @@ impl<R: Runtime> NetDb<R> {
         local_router_id: RouterId,
         floodfill: bool,
         service: TransportService,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage,
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
         net_id: u8,
         netdb_msg_rx: mpsc::Receiver<Message>,
     ) -> (Self, NetDbHandle) {
-        let floodfills = router_storage
+        let floodfills = profile_storage
             .routers()
             .iter()
             .filter_map(|(id, router)| router.is_floodfill().then_some(id.clone()))
@@ -318,7 +318,7 @@ impl<R: Runtime> NetDb<R> {
                 outbound_tunnels: TunnelSelector::new(),
                 query_timers: R::join_set(),
                 router_infos: HashMap::new(),
-                router_storage,
+                profile_storage,
                 service,
             },
             NetDbHandle::new(handle_tx),
@@ -379,8 +379,8 @@ impl<R: Runtime> NetDb<R> {
 
         // non-floodfills must not be stored into `floodfills`
         //
-        // the router must exist in `router_storage` as connection was established to them
-        if !self.router_storage.get(&router_id).expect("router to exist").is_floodfill() {
+        // the router must exist in `profile_storage` as connection was established to them
+        if !self.profile_storage.is_floodfill(&router_id) {
             return;
         }
 

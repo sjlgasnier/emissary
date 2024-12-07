@@ -20,7 +20,7 @@ use crate::{
     crypto::StaticPrivateKey,
     i2np::{Message, MessageType},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
@@ -123,7 +123,7 @@ pub struct TunnelManager<R: Runtime> {
     router_info: RouterInfo,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -145,7 +145,7 @@ impl<R: Runtime> TunnelManager<R> {
         router_info: RouterInfo,
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage,
         exploratory_config: TunnelPoolConfig,
     ) -> (
         Self,
@@ -184,7 +184,7 @@ impl<R: Runtime> TunnelManager<R> {
         let (pool_handle, exploratory_selector) = {
             let build_parameters = TunnelPoolBuildParameters::new(exploratory_config);
             let selector = ExploratorySelector::new(
-                router_storage.clone(),
+                profile_storage.clone(),
                 build_parameters.context_handle.clone(),
             );
             let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
@@ -218,7 +218,7 @@ impl<R: Runtime> TunnelManager<R> {
                 pending_outbound: HashSet::new(),
                 router_info,
                 routers: HashMap::new(),
-                router_storage,
+                profile_storage,
                 routing_table,
                 service,
             },
@@ -235,7 +235,7 @@ impl<R: Runtime> TunnelManager<R> {
 
     /// Send `message` to router identified by `router_id`.
     ///
-    /// If the router is not connected, its information is looked up from `RouterStorage` and if it
+    /// If the router is not connected, its information is looked up from `ProfileStorage` and if it
     /// exists, it will be dialed and if the connection is established successfully, any pending
     /// messages will be sent to the router once the connection has been registered to
     /// [`TunnelManager`].

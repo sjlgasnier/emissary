@@ -21,7 +21,7 @@ use crate::{
     error::ChannelError,
     i2np::Message,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
@@ -134,7 +134,7 @@ pub struct TransportService {
     pending_events: VecDeque<InnerSubsystemEvent>,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage,
 
     /// Connected routers.
     routers: HashMap<RouterId, Sender<SubsystemCommand>>,
@@ -166,7 +166,7 @@ impl TransportService {
             return Ok(());
         }
 
-        match self.router_storage.get(router) {
+        match self.profile_storage.get(router) {
             Some(router_info) => self
                 .cmd_tx
                 .try_send(ProtocolCommand::Connect {
@@ -225,11 +225,11 @@ impl TransportService {
         Self,
         Receiver<ProtocolCommand>,
         Sender<InnerSubsystemEvent>,
-        RouterStorage,
+        ProfileStorage,
     ) {
         let (event_tx, event_rx) = channel(64);
         let (cmd_tx, cmd_rx) = channel(64);
-        let router_storage = RouterStorage::new(&Vec::new());
+        let profile_storage = ProfileStorage::new(&Vec::new(), &Vec::new());
 
         (
             TransportService {
@@ -237,11 +237,11 @@ impl TransportService {
                 event_rx,
                 pending_events: VecDeque::new(),
                 routers: HashMap::new(),
-                router_storage: router_storage.clone(),
+                profile_storage: profile_storage.clone(),
             },
             cmd_rx,
             event_tx,
-            router_storage,
+            profile_storage,
         )
     }
 }
@@ -301,7 +301,7 @@ pub struct TransportManager<R: Runtime> {
     poll_index: usize,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage,
 
     /// Connected routers.
     routers: HashSet<RouterId>,
@@ -323,7 +323,7 @@ impl<R: Runtime> TransportManager<R> {
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage,
         metrics_handle: R::MetricsHandle,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
@@ -337,7 +337,7 @@ impl<R: Runtime> TransportManager<R> {
             metrics_handle,
             poll_index: 0usize,
             routers: HashSet::new(),
-            router_storage,
+            profile_storage,
             runtime,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
@@ -371,7 +371,7 @@ impl<R: Runtime> TransportManager<R> {
             event_rx,
             pending_events: VecDeque::new(),
             routers: HashMap::new(),
-            router_storage: self.router_storage.clone(),
+            profile_storage: self.profile_storage.clone(),
         }
     }
 
@@ -396,7 +396,7 @@ impl<R: Runtime> TransportManager<R> {
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),
-                self.router_storage.clone(),
+                self.profile_storage.clone(),
                 self.metrics_handle.clone(),
             )
             .await?,

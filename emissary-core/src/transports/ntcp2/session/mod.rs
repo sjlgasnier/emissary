@@ -36,7 +36,7 @@ use crate::{
         StaticPublicKey,
     },
     primitives::{RouterInfo, Str, TransportKind},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
     transports::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
@@ -148,7 +148,7 @@ pub struct SessionManager<R: Runtime> {
     outbound_initial_state: Vec<u8>,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage,
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
 
@@ -171,7 +171,7 @@ impl<R: Runtime> SessionManager<R> {
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage,
     ) -> crate::Result<Self> {
         let local_key = StaticPrivateKey::from(local_key);
 
@@ -198,7 +198,7 @@ impl<R: Runtime> SessionManager<R> {
             local_router_info,
             local_signing_key,
             outbound_initial_state,
-            router_storage,
+            profile_storage,
             subsystem_handle,
             _runtime: Default::default(),
         })
@@ -346,7 +346,7 @@ impl<R: Runtime> SessionManager<R> {
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
         let iv = self.local_iv.clone();
-        let router_storage = self.router_storage.clone();
+        let profile_storage = self.profile_storage.clone();
 
         async move {
             tracing::trace!(
@@ -392,7 +392,7 @@ impl<R: Runtime> SessionManager<R> {
                         return Err(Error::NetworkMismatch);
                     }
 
-                    router_storage.insert(router.clone());
+                    profile_storage.insert(router.clone());
 
                     Ok(Ntcp2Session::new(
                         Role::Responder,
