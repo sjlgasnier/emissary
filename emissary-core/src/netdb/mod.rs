@@ -488,7 +488,7 @@ impl<R: Runtime> NetDb<R> {
     ) {
         let router_id = router_info.identity.id();
 
-        if router_info.net_id() != Some(self.net_id) {
+        if router_info.net_id() != self.net_id {
             tracing::warn!(
                 target: LOG_TARGET,
                 local_net_id = ?self.net_id,
@@ -1245,8 +1245,8 @@ mod tests {
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
         primitives::{
-            Date, Destination, DestinationId, LeaseSet2Header, RouterAddress, RouterIdentity,
-            RouterInfo, Str, TransportKind,
+            Capabilities, Date, Destination, DestinationId, LeaseSet2Header, RouterAddress,
+            RouterIdentity, RouterInfo, Str, TransportKind,
         },
         runtime::mock::MockRuntime,
         subsystem::{InnerSubsystemEvent, SubsystemCommand},
@@ -1848,7 +1848,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("2")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 2,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
@@ -1948,7 +1953,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("2")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 2,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
@@ -2210,7 +2220,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("2")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 2,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
@@ -2699,7 +2714,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("2")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 2,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
@@ -2727,7 +2747,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("2")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 2,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
@@ -2924,7 +2949,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("99"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("99")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 99,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
@@ -3082,7 +3112,12 @@ mod tests {
                                 TransportKind::Ntcp2,
                                 RouterAddress::new_unpublished(vec![1u8; 32]),
                             )]),
-                            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+                            options: HashMap::from_iter([
+                                (Str::from("netId"), Str::from("2")),
+                                (Str::from("caps"), Str::from("L")),
+                            ]),
+                            net_id: 2,
+                            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
                         }
                         .serialize(&sgk),
                     )
