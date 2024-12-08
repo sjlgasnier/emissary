@@ -87,6 +87,7 @@ impl<R: Runtime> Router<R> {
         let exploratory_config = config.exploratory.clone();
         let floodfill = config.floodfill;
         let net_id = config.net_id.unwrap_or(NET_ID);
+        let insecure_tunnels = config.insecure_tunnels;
         let profile_storage = ProfileStorage::<R>::new(&config.routers, &config.profiles);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -136,6 +137,7 @@ impl<R: Runtime> Router<R> {
                     metrics_handle.clone(),
                     profile_storage.clone(),
                     exploratory_config.into(),
+                    insecure_tunnels,
                 );
 
             R::spawn(tunnel_manager);

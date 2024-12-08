@@ -45,32 +45,48 @@ pub struct TunnelConfig {
 pub struct Arguments {
     /// Base path where all i2p-related files are stored
     ///   
-    /// Defaults to `$HOME/.emissary/router.toml` and if it doesn't exist,
+    /// Defaults to $HOME/.emissary/ and if it doesn't exist,
     /// new directory is created
     #[arg(short, long, value_name = "PATH")]
     pub base_path: Option<PathBuf>,
 
-    /// Logging targets.
+    /// Logging targets
+    ///
+    /// By default, INFO is enabled for all logging targets
+    ///
+    /// Example:
+    ///   -lemissary::tunnel=debug,emissary::sam,emissary::streaming=trace,emissary::ntcp2=off
+    ///
+    /// Enables debug logging for tunnels, trace logging for SAM and streaming and turns off
+    /// logging for NTCP2
     #[arg(short, long)]
     pub log: Option<String>,
 
-    /// Should the node be run as floodfill router.
-    #[arg(long, action=clap::ArgAction::SetTrue)]
+    /// Run the router as a floodfill.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
     pub floodfill: Option<bool>,
 
-    /// Router capabilities.
+    /// Allow emissary to build insecure tunnels.
+    ///
+    /// Disables /16 subnet and maximum tunnel participation checks
+    ///
+    /// Should only be used for testing
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub insecure_tunnels: Option<bool>,
+
+    /// Router capabilities
     #[arg(long)]
     pub caps: Option<String>,
 
-    /// Network ID.
+    /// Network ID
     #[arg(long)]
     pub net_id: Option<u8>,
 
-    /// Exploratory tunnel configuration.
+    /// Exploratory tunnel configuration
     #[clap(flatten)]
     pub exploratory: TunnelConfig,
 
-    /// Command.
+    /// Command
     ///
     /// If no command is provided, `emissary` starts as an i2p router
     #[command(subcommand)]

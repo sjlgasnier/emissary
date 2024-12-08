@@ -20,7 +20,7 @@
 
 use crate::{
     crypto::StaticPublicKey,
-    primitives::{RouterId, TunnelId},
+    primitives::{RouterId, TransportKind, TunnelId},
     profile::{Bucket, ProfileStorage},
     runtime::Runtime,
     tunnel::pool::TunnelPoolContextHandle,
@@ -30,6 +30,7 @@ use crate::{
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use rand_core::RngCore;
 
 #[cfg(feature = "std")]
 use parking_lot::RwLock;
@@ -37,6 +38,7 @@ use parking_lot::RwLock;
 use spin::rwlock::RwLock;
 
 use alloc::{sync::Arc, vec::Vec};
+use core::net::{Ipv4Addr, SocketAddr};
 
 /// Tunnel selector for a tunnel pool.
 ///
@@ -93,6 +95,9 @@ pub struct ExploratorySelector<R: Runtime> {
     /// Active inbound tunnels.
     inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
 
+    /// Are tunnels insecure.
+    insecure: bool,
+
     /// Active outbound tunnels.
     outbound: Arc<RwLock<HashSet<TunnelId>>>,
 
@@ -102,10 +107,15 @@ pub struct ExploratorySelector<R: Runtime> {
 
 impl<R: Runtime> ExploratorySelector<R> {
     /// Create new [`ExploratorySelector`].
-    pub fn new(profile_storage: ProfileStorage<R>, handle: TunnelPoolContextHandle) -> Self {
+    pub fn new(
+        profile_storage: ProfileStorage<R>,
+        handle: TunnelPoolContextHandle,
+        insecure: bool,
+    ) -> Self {
         Self {
             handle,
             inbound: Default::default(),
+            insecure,
             outbound: Default::default(),
             profile_storage,
         }
@@ -119,6 +129,48 @@ impl<R: Runtime> ExploratorySelector<R> {
     /// Get reference to exploratory tunnel pool's [`TunnePoolHandle`].
     pub fn handle(&self) -> &TunnelPoolContextHandle {
         &self.handle
+    }
+
+    /// Group router addresses of `router_ids` by /16 subnet.
+    pub fn group_by_subnet(&self, router_ids: Vec<RouterId>) -> HashMap<(u8, u8), Vec<RouterId>> {
+        // fetch ipv4 addresses of all routers
+        let addresses = {
+            let reader = self.profile_storage.reader();
+
+            router_ids
+                .into_iter()
+                .filter_map(|router_id| {
+                    // address must exist since the `router_info.is_reachable()` check
+                    // above has ensured the router has at least one published address
+                    //
+                    // TODO: add support for SSU
+                    let address = reader
+                        .router_info(&router_id)
+                        .addresses
+                        .get(&TransportKind::Ntcp2)
+                        .expect("to exist")
+                        .socket_address()
+                        .expect("to exist");
+
+                    // TODO: add support for ipv6
+                    match address {
+                        SocketAddr::V4(address) => Some((router_id, *address.ip())),
+                        SocketAddr::V6(_) => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // group addresses by /16 subnet
+        addresses.into_iter().fold(
+            HashMap::<(u8, u8), Vec<RouterId>>::new(),
+            |mut grouped, (router_id, address)| {
+                let octets = address.octets();
+                grouped.entry((octets[0], octets[1])).or_default().push(router_id);
+
+                grouped
+            },
+        )
     }
 }
 
@@ -160,24 +212,94 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 !profile.is_failing() && router_info.is_reachable()
             });
 
-        // use fast routers if there aren't enough fast routers
-        let router_ids = if router_ids.len() < num_hops {
-            router_ids.extend(
-                self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
-                    !profile.is_failing() && router_info.is_reachable()
-                }),
-            );
+        // insecure tunnels are allowed, don't do safety checks
+        if self.insecure {
+            shuffle(&mut router_ids, &mut R::rng());
 
             if router_ids.len() < num_hops {
+                let mut fast_router_ids =
+                    self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
+                        !profile.is_failing() && router_info.is_reachable()
+                    });
+
+                let num_needed = num_hops - router_ids.len();
+                if num_needed > fast_router_ids.len() {
+                    return None;
+                }
+
+                shuffle(&mut fast_router_ids, &mut R::rng());
+                router_ids.extend(fast_router_ids.into_iter().take(num_needed));
+            }
+
+            let reader = self.profile_storage.reader();
+            return Some(
+                (0..num_hops)
+                    .map(|i| {
+                        let router_info = reader.router_info(&router_ids[i]);
+
+                        (
+                            router_info.identity.hash().clone(),
+                            router_info.identity.static_key().clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        // group addresses by /16 subnet to prevent having two routers
+        // from the same subnet in the same tunnel
+        let mut addresses = self.group_by_subnet(router_ids);
+
+        // attempt to get `num_hops` mayb routers from addresses
+        let mut routers = addresses
+            .iter_mut()
+            .take(num_hops)
+            .map(|(subnet, addresses)| {
+                shuffle(addresses, &mut R::rng());
+
+                (subnet, addresses[0].clone())
+            })
+            .collect::<HashMap<_, _>>();
+
+        let router_ids = if routers.len() < num_hops {
+            let fast_router_ids =
+                self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
+                    !profile.is_failing() && router_info.is_reachable()
+                });
+
+            // group fast routers by subnet and filter out subnets which the already-selected
+            // routers are part of
+            let mut fast_router_addresses = self
+                .group_by_subnet(fast_router_ids)
+                .into_iter()
+                .filter_map(|(subnet, fast_routers)| {
+                    (!routers.contains_key(&subnet)).then_some(fast_routers)
+                })
+                .collect::<Vec<_>>();
+
+            if routers.len() + fast_router_addresses.len() < num_hops {
                 return None;
             }
 
-            router_ids
-        } else {
-            // shuffle routers so we don't end up choosing the same routers always
-            shuffle(&mut router_ids, &mut R::rng());
+            let num_needed = num_hops - routers.len();
+            let mut fast_router_addresses: Vec<RouterId> = fast_router_addresses
+                .into_iter()
+                .map(|mut routers| routers.pop().expect("to exist"))
+                .collect::<Vec<_>>();
 
-            router_ids
+            shuffle(&mut fast_router_addresses, &mut R::rng());
+
+            routers
+                .into_iter()
+                .map(|(subnet, router)| router)
+                .chain(fast_router_addresses.into_iter().take(num_needed))
+                .collect::<Vec<RouterId>>()
+        } else {
+            let mut routers =
+                routers.into_iter().map(|(subnet, router)| router).collect::<Vec<RouterId>>();
+            shuffle(&mut routers, &mut R::rng());
+
+            routers
         };
 
         let reader = self.profile_storage.reader();
@@ -274,26 +396,99 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 !profile.is_failing() && router_info.is_reachable()
             });
 
-        // use standard routers if there aren't enough fast routers
-        let router_ids = if router_ids.len() < num_hops {
-            router_ids.extend(
-                self.exploratory
+        // insecure tunnels are allowed, don't do safety checks
+        if self.exploratory.insecure {
+            shuffle(&mut router_ids, &mut R::rng());
+
+            if router_ids.len() < num_hops {
+                let mut standard_router_ids = self
+                    .exploratory
                     .profile_storage()
                     .get_router_ids(Bucket::Standard, |_, router_info, profile| {
                         !profile.is_failing() && router_info.is_reachable()
-                    }),
-            );
+                    });
 
-            if router_ids.len() < num_hops {
+                let num_needed = num_hops - router_ids.len();
+                if num_needed > standard_router_ids.len() {
+                    return None;
+                }
+
+                shuffle(&mut standard_router_ids, &mut R::rng());
+                router_ids.extend(standard_router_ids.into_iter().take(num_needed));
+            }
+
+            let reader = self.exploratory.profile_storage().reader();
+            return Some(
+                (0..num_hops)
+                    .map(|i| {
+                        let router_info = reader.router_info(&router_ids[i]);
+
+                        (
+                            router_info.identity.hash().clone(),
+                            router_info.identity.static_key().clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        // group addresses by /16 subnet to prevent having two routers
+        // from the same subnet in the same tunnel
+        let mut addresses = self.exploratory.group_by_subnet(router_ids);
+
+        // attempt to get `num_hops` mayb routers from addresses
+        let mut routers = addresses
+            .iter_mut()
+            .take(num_hops)
+            .map(|(subnet, addresses)| {
+                shuffle(addresses, &mut R::rng());
+
+                (subnet, addresses[0].clone())
+            })
+            .collect::<HashMap<_, _>>();
+
+        let router_ids = if routers.len() < num_hops {
+            let standard_router_ids = self
+                .exploratory
+                .profile_storage()
+                .get_router_ids(Bucket::Standard, |_, router_info, profile| {
+                    !profile.is_failing() && router_info.is_reachable()
+                });
+
+            // group standard routers by subnet and filter out subnets which the already-selected
+            // routers are part of
+            let mut standard_router_addresses = self
+                .exploratory
+                .group_by_subnet(standard_router_ids)
+                .into_iter()
+                .filter_map(|(subnet, standard_routers)| {
+                    (!routers.contains_key(&subnet)).then_some(standard_routers)
+                })
+                .collect::<Vec<_>>();
+
+            if routers.len() + standard_router_addresses.len() < num_hops {
                 return None;
             }
 
-            router_ids
-        } else {
-            // shuffle routers so we don't end up choosing the same routers always
-            shuffle(&mut router_ids, &mut R::rng());
+            let num_needed = num_hops - routers.len();
+            let mut standard_router_addresses: Vec<RouterId> = standard_router_addresses
+                .into_iter()
+                .map(|mut routers| routers.pop().expect("to exist"))
+                .collect::<Vec<_>>();
 
-            router_ids
+            shuffle(&mut standard_router_addresses, &mut R::rng());
+
+            routers
+                .into_iter()
+                .map(|(subnet, router)| router)
+                .chain(standard_router_addresses.into_iter().take(num_needed))
+                .collect::<Vec<RouterId>>()
+        } else {
+            let mut routers =
+                routers.into_iter().map(|(subnet, router)| router).collect::<Vec<RouterId>>();
+            shuffle(&mut routers, &mut R::rng());
+
+            routers
         };
 
         let reader = self.exploratory.profile_storage().reader();
@@ -316,7 +511,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
 mod tests {
     use super::*;
     use crate::{
-        primitives::{Capabilities, RouterInfo, Str},
+        primitives::{Capabilities, RouterAddress, RouterInfo, Str},
         runtime::mock::MockRuntime,
         tunnel::pool::TunnelPoolBuildParameters,
     };
@@ -337,6 +532,7 @@ mod tests {
         let selector = ExploratorySelector::new(
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
+            false,
         );
         assert!(selector.select_hops(5).is_none());
     }
@@ -357,6 +553,7 @@ mod tests {
         let selector = ExploratorySelector::new(
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
+            false,
         );
 
         // select hops 5 times and verify that the same set of hops is not selected every time
@@ -382,18 +579,36 @@ mod tests {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
-        for _ in 0..3 {
+        for i in 0..3 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.16{i}.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
                 info
             });
         }
 
-        for _ in 0..5 {
+        for i in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
-                info.capabilities = Capabilities::parse(&Str::from("XRf")).unwrap();
+                info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.17{i}.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
                 info
             });
         }
@@ -401,6 +616,7 @@ mod tests {
         let selector = ExploratorySelector::new(
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
+            false,
         );
 
         // there are only 3 standard routers so 2 routers must be fast
@@ -439,6 +655,7 @@ mod tests {
         let exploratory = ExploratorySelector::new(
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
+            false,
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -462,6 +679,7 @@ mod tests {
         let exploratory = ExploratorySelector::new(
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
+            false,
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -509,6 +727,7 @@ mod tests {
         let exploratory = ExploratorySelector::new(
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
+            false,
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -530,5 +749,465 @@ mod tests {
 
         assert_eq!(standard, 2);
         assert_eq!(fast, 3);
+    }
+
+    #[test]
+    fn exploratory_not_enough_routers_in_distinct_subnets() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 addresses from 192.168.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.168.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        // 5 addresses from 172.20.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("172.10.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            false,
+        );
+
+        // since three hops were requested but there were only two subnets,
+        // the request cannot be fulfilled
+        assert!(selector.select_hops(3).is_none());
+    }
+
+    #[test]
+    fn client_not_enough_routers_in_distinct_subnets() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 addresses from 192.168.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.168.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        // 5 addresses from 172.20.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("172.10.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            false,
+        );
+        let selector = ClientSelector::new(
+            exploratory,
+            exploratory_build_parameters.context_handle.clone(),
+        );
+
+        // since three hops were requested but there were only two subnets,
+        // the request cannot be fulfilled
+        assert!(selector.select_hops(3).is_none());
+    }
+
+    #[test]
+    fn exploratory_not_enough_reachable_routers() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 unreachable standard routers
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LU")).unwrap();
+                info
+            });
+        }
+
+        // 3 reachable fast routers
+        for i in 0..3 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("OR")).unwrap();
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            false,
+        );
+
+        // 5 hops requested but only 3 routers in the standard category
+        assert!(selector.select_hops(5).is_none());
+    }
+
+    #[test]
+    fn client_not_enough_standard_or_fast_routers() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 3 reachable standard routers
+        for i in 0..3 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info
+            });
+        }
+
+        // 5 unreachable fast routers
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("OU")).unwrap();
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            false,
+        );
+        let selector = ClientSelector::new(
+            exploratory,
+            exploratory_build_parameters.context_handle.clone(),
+        );
+
+        // 5 hops requested but only 3 routers in the standard category
+        assert!(selector.select_hops(5).is_none());
+    }
+
+    #[test]
+    fn exploratory_insecure_tunnels_not_enough_distinct_subnets() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 addresses from 192.168.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.168.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        // 5 addresses from 172.20.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("172.10.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            true,
+        );
+
+        let reader = profile_storage.reader();
+        assert!(selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .all(|(hash, _)| reader.router_info(&RouterId::from(hash)).capabilities.is_standard()));
+    }
+
+    #[test]
+    fn client_insecure_tunnels_not_enough_distinct_subnets() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 addresses from 192.168.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.168.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        // 5 addresses from 172.20.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("172.10.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            true,
+        );
+        let selector = ClientSelector::new(
+            exploratory,
+            exploratory_build_parameters.context_handle.clone(),
+        );
+
+        let reader = profile_storage.reader();
+        assert!(selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .all(|(hash, _)| reader.router_info(&RouterId::from(hash)).capabilities.is_fast()));
+    }
+
+    #[test]
+    fn exploratory_insecure_tunnels_not_enough_distinct_subnets_or_standard_peers() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 addresses from 192.168.x.x subnet
+        for i in 0..3 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.168.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        // 5 addresses from 172.20.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("172.10.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            true,
+        );
+
+        let hops = selector.select_hops(5usize).unwrap();
+        let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
+            let mut standard = 0usize;
+            let mut fast = 0usize;
+            let reader = profile_storage.reader();
+            let hops = selector.select_hops(5).unwrap();
+
+            for (hash, _) in &hops {
+                let router_info = reader.router_info(&RouterId::from(hash));
+
+                if router_info.capabilities.is_fast() {
+                    fast += 1;
+                } else {
+                    standard += 1;
+                }
+            }
+
+            assert_eq!(standard, 3);
+            assert_eq!(fast, 2);
+
+            if prev
+                .iter()
+                .zip(hops.iter())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+            {
+                (count + 1, hops)
+            } else {
+                (count, hops)
+            }
+        });
+        assert_ne!(num_same, 5);
+    }
+
+    #[test]
+    fn client_insecure_tunnels_not_enough_distinct_subnets_or_fast_peers() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        // 5 addresses from 192.168.x.x subnet
+        for i in 0..5 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("192.168.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        // 5 addresses from 172.20.x.x subnet
+        for i in 0..3 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
+                info.addresses = HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published(
+                        vec![1u8; 32],
+                        [1u8; 16],
+                        8888,
+                        format!("172.10.{}.{}", i + 5, i + 10),
+                    ),
+                )]);
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            true,
+        );
+        let selector = ClientSelector::new(
+            exploratory,
+            exploratory_build_parameters.context_handle.clone(),
+        );
+
+        let hops = selector.select_hops(5usize).unwrap();
+        let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
+            let mut standard = 0usize;
+            let mut fast = 0usize;
+            let reader = profile_storage.reader();
+            let hops = selector.select_hops(5).unwrap();
+
+            for (hash, _) in &hops {
+                let router_info = reader.router_info(&RouterId::from(hash));
+
+                if router_info.capabilities.is_fast() {
+                    fast += 1;
+                } else {
+                    standard += 1;
+                }
+            }
+
+            assert_eq!(fast, 3);
+            assert_eq!(standard, 2);
+
+            if prev
+                .iter()
+                .zip(hops.iter())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+            {
+                (count + 1, hops)
+            } else {
+                (count, hops)
+            }
+        });
+        assert_ne!(num_same, 5);
     }
 }

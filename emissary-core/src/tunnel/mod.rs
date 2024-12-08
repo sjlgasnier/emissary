@@ -147,6 +147,7 @@ impl<R: Runtime> TunnelManager<R> {
         metrics_handle: R::MetricsHandle,
         profile_storage: ProfileStorage<R>,
         exploratory_config: TunnelPoolConfig,
+        insecure_tunnels: bool,
     ) -> (
         Self,
         TunnelManagerHandle,
@@ -155,6 +156,7 @@ impl<R: Runtime> TunnelManager<R> {
     ) {
         tracing::info!(
             target: LOG_TARGET,
+            ?insecure_tunnels,
             "starting tunnel manager",
         );
 
@@ -186,6 +188,7 @@ impl<R: Runtime> TunnelManager<R> {
             let selector = ExploratorySelector::new(
                 profile_storage.clone(),
                 build_parameters.context_handle.clone(),
+                insecure_tunnels,
             );
             let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
                 build_parameters,

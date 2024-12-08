@@ -97,6 +97,8 @@ struct EmissaryConfig {
     i2cp: Option<I2cpConfig>,
     sam: Option<SamConfig>,
     exploratory: Option<ExploratoryConfig>,
+    #[serde(default)]
+    insecure_tunnels: bool,
 }
 
 /// Router configuration.
@@ -136,6 +138,9 @@ pub struct Config {
 
     /// Network ID.
     pub net_id: Option<u8>,
+
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
 }
 
 impl Into<emissary::Config> for Config {
@@ -152,6 +157,7 @@ impl Into<emissary::Config> for Config {
             caps: self.caps,
             net_id: self.net_id,
             exploratory: self.exploratory,
+            insecure_tunnels: self.insecure_tunnels,
         }
     }
 }
@@ -356,6 +362,7 @@ impl Config {
             floodfill: false,
             caps: None,
             net_id: None,
+            insecure_tunnels: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -389,6 +396,7 @@ impl Config {
             floodfill: false,
             caps: None,
             net_id: None,
+            insecure_tunnels: false,
         })
     }
 
@@ -419,6 +427,7 @@ impl Config {
                     floodfill: false,
                     caps: None,
                     net_id: None,
+                    insecure_tunnels: false,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -456,6 +465,7 @@ impl Config {
             floodfill: config.floodfill,
             caps: config.caps,
             net_id: config.net_id,
+            insecure_tunnels: config.insecure_tunnels,
         })
     }
 
@@ -624,6 +634,12 @@ impl Config {
             }
         }
 
+        if let Some(true) = arguments.insecure_tunnels {
+            if !self.insecure_tunnels {
+                self.insecure_tunnels = true;
+            }
+        }
+
         if let Some(ref caps) = arguments.caps {
             self.caps = Some(caps.clone());
         }
@@ -754,6 +770,7 @@ mod tests {
             floodfill: false,
             caps: None,
             net_id: None,
+            insecure_tunnels: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

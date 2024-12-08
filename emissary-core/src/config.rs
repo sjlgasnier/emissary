@@ -132,4 +132,7 @@ pub struct Config {
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<ExploratoryConfig>,
+
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
 }

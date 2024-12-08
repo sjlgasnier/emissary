@@ -1121,7 +1121,7 @@ mod tests {
         let pool_handle = parameters.context_handle.clone();
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1205,7 +1205,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1284,7 +1284,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1368,7 +1368,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -1447,7 +1447,8 @@ mod tests {
 
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
-        let exploratory_selector = ExploratorySelector::new(profile_storage.clone(), pool_handle);
+        let exploratory_selector =
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false);
 
         let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1690,7 +1691,8 @@ mod tests {
 
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
-        let exploratory_selector = ExploratorySelector::new(profile_storage.clone(), pool_handle);
+        let exploratory_selector =
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false);
 
         let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1932,7 +1934,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -2021,7 +2023,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -2108,7 +2110,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),
@@ -2312,7 +2314,7 @@ mod tests {
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
-            ExploratorySelector::new(profile_storage.clone(), pool_handle),
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
             noise,
             handle.clone(),

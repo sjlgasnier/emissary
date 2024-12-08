@@ -333,9 +333,22 @@ impl RouterInfo {
     pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> Self {
         let identity = RouterIdentity::from_keys(static_key, signing_key).expect("to succeed");
 
-        // let ntcp2_config = ntcp2_config.unwrap();
         let ntcp2_port = R::rng().next_u32() as u16;
-        let ntcp2_host = String::from("127.0.0.1");
+        let ntcp2_host = format!(
+            "{}.{}.{}.{}",
+            {
+                loop {
+                    let address = R::rng().next_u32() % 256;
+
+                    if address != 0 {
+                        break address;
+                    }
+                }
+            },
+            R::rng().next_u32() % 256,
+            R::rng().next_u32() % 256,
+            R::rng().next_u32() % 256,
+        );
         let ntcp2_key = {
             let mut key_bytes = vec![0u8; 32];
             R::rng().fill_bytes(&mut key_bytes);
