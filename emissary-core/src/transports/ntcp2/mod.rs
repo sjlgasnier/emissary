@@ -90,7 +90,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
-        profile_storage: ProfileStorage,
+        profile_storage: ProfileStorage<R>,
         metrics: R::MetricsHandle,
     ) -> crate::Result<Self> {
         // TODO: handle the case when user doesn't want to enable ntcp2 listener

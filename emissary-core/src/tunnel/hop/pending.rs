@@ -415,14 +415,14 @@ mod test {
             Vec<(Bytes, StaticPublicKey)>,
             Vec<TestTransitTunnelManager>,
         ) = (0..3)
-            .map(|manager| {
-                let manager = TestTransitTunnelManager::new();
+            .map(|i| {
+                let manager = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
 
                 ((manager.router_hash(), manager.public_key()), manager)
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -476,7 +476,7 @@ mod test {
             Vec<(Bytes, StaticPublicKey)>,
             Vec<TransitTunnelManager<MockRuntime>>,
         ) = (0..3)
-            .map(|_| make_router())
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
@@ -496,7 +496,7 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -543,12 +543,12 @@ mod test {
     #[test]
     fn tunnel_rejected() {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
-            .map(|_| make_router())
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -635,12 +635,12 @@ mod test {
     #[test]
     fn invalid_ciphertext() {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
-            .map(|_| make_router())
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router();
+        let (local_hash, local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());

@@ -22,6 +22,8 @@ use crate::{
     Error,
 };
 
+use rand_core::RngCore;
+
 use alloc::string::String;
 use core::{
     future::Future,
@@ -144,6 +146,16 @@ impl<T: AsyncWrite + Unpin> AsyncWriteExt for T {
 
     fn close(&mut self) -> impl Future<Output = crate::Result<()>> {
         Close::new(self)
+    }
+}
+
+/// Fisher-Yates shuffle.
+pub fn shuffle<T>(array: &mut Vec<T>, rng: &mut impl RngCore) {
+    let len = array.len();
+
+    for i in (1..len).rev() {
+        let j = (rng.next_u32() as usize) % (i + 1);
+        array.swap(i, j);
     }
 }
 

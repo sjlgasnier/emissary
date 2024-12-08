@@ -19,9 +19,10 @@
 use crate::{
     crypto::base64_decode,
     primitives::{RouterId, RouterInfo},
+    runtime::Runtime,
 };
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 #[cfg(feature = "std")]
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -29,10 +30,22 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use spin::rwlock::{RwLock, RwLockReadGuard};
 
 use alloc::sync::Arc;
-use core::time::Duration;
+use core::{marker::PhantomData, time::Duration};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::profile";
+
+/// Router bucket.
+pub enum Bucket {
+    /// Any bucket.
+    Any,
+
+    /// Fast bucket.
+    Fast,
+
+    /// Standard bucket.
+    Standard,
+}
 
 /// Router profile.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -63,7 +76,8 @@ pub struct Profile {
 }
 
 impl Profile {
-    pub fn new() -> Self {
+    /// Create new [`Profile`].
+    fn new() -> Self {
         Self {
             last_activity: Duration::from_secs(0),
             num_accepted: 0usize,
@@ -75,19 +89,50 @@ impl Profile {
             num_unaswered: 0usize,
         }
     }
+
+    /// Is the router considered failing.
+    pub fn is_failing(&self) -> bool {
+        false
+    }
+}
+
+/// Router info/profile reader.
+pub struct Reader<'a> {
+    /// Read access to router infos.
+    router_infos: RwLockReadGuard<'a, HashMap<RouterId, RouterInfo>>,
+
+    /// Read access to profiles.
+    profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
+}
+
+impl<'a> Reader<'a> {
+    /// Get reference to [`RouterInfo`].
+    pub fn router_info(&self, router_id: &RouterId) -> &RouterInfo {
+        // router info must exist since they're managed by us
+        self.router_infos.get(router_id).expect("to succeed")
+    }
 }
 
 /// Profile storage.
 #[derive(Clone)]
-pub struct ProfileStorage {
+pub struct ProfileStorage<R: Runtime> {
+    /// Fast routers.
+    fast: Arc<RwLock<HashSet<RouterId>>>,
+
     /// Router profiles.
     profiles: Arc<RwLock<HashMap<RouterId, Profile>>>,
 
     /// Router infos.
     routers: Arc<RwLock<HashMap<RouterId, RouterInfo>>>,
+
+    /// Standard routers.
+    standard: Arc<RwLock<HashSet<RouterId>>>,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
 }
 
-impl ProfileStorage {
+impl<R: Runtime> ProfileStorage<R> {
     /// Create new [`ProfileStorage`].
     pub fn new(routers: &Vec<Vec<u8>>, profiles: &Vec<(String, Profile)>) -> Self {
         tracing::info!(
@@ -121,18 +166,28 @@ impl ProfileStorage {
             }
         });
 
+        // split router infos into fast and standard buckets and filter out unusable routers
+        let (fast, standard): (Vec<_>, Vec<_>) = routers
+            .iter()
+            .filter_map(|(router_id, router_info)| {
+                if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
+                    return None;
+                }
+
+                match router_info.capabilities.is_fast() {
+                    true => Some((Some(router_id.clone()), None)),
+                    false => Some((None, Some(router_id.clone()))),
+                }
+            })
+            .unzip();
+
         Self {
-            routers: Arc::new(RwLock::new(routers)),
+            fast: Arc::new(RwLock::new(fast.into_iter().flatten().collect())),
             profiles: Arc::new(RwLock::new(profiles)),
+            routers: Arc::new(RwLock::new(routers)),
+            standard: Arc::new(RwLock::new(standard.into_iter().flatten().collect())),
+            _runtime: Default::default(),
         }
-    }
-
-    /// Insert `router` into [`ProfileStorage`].
-    pub fn insert(&self, router: RouterInfo) {
-        let router_id = router.identity.id();
-        let mut inner = self.routers.write();
-
-        inner.insert(router_id, router);
     }
 
     /// Return the number of routers in [`ProfileStorage`].
@@ -141,10 +196,33 @@ impl ProfileStorage {
     }
 
     /// Insert `router` into [`ProfileStorage`].
-    pub fn add_router(&self, router: RouterInfo) {
-        let router_id = router.identity.id();
+    pub fn add_router(&self, router_info: RouterInfo) {
+        let router_id = router_info.identity.id();
 
-        if self.routers.write().insert(router_id.clone(), router).is_none() {
+        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                caps = %router_info.capabilities,
+                "tried to add unreachable/unusable router",
+            );
+            return;
+        }
+
+        {
+            let mut fast = self.fast.write();
+            let mut standard = self.standard.write();
+
+            if router_info.capabilities.is_fast() {
+                fast.insert(router_id.clone());
+                standard.remove(&router_id);
+            } else {
+                standard.insert(router_id.clone());
+                fast.remove(&router_id);
+            }
+        }
+        let fast = router_info.capabilities.is_fast();
+
+        if self.routers.write().insert(router_id.clone(), router_info).is_none() {
             self.profiles.write().insert(router_id, Profile::new());
         }
     }
@@ -169,9 +247,67 @@ impl ProfileStorage {
             .collect()
     }
 
-    // TODO: remove
-    pub fn routers<'a>(&'a self) -> RwLockReadGuard<'a, HashMap<RouterId, RouterInfo>> {
-        self.routers.read()
+    /// Get `RouterId`s of those routers that pass `filter`.
+    pub fn get_router_ids(
+        &self,
+        bucket: Bucket,
+        filter: impl Fn(&RouterId, &RouterInfo, &Profile) -> bool,
+    ) -> Vec<RouterId> {
+        let routers = self.routers.read();
+        let profiles = self.profiles.read();
+
+        match bucket {
+            Bucket::Any => {
+                let fast = self.fast.read();
+                let standard = self.standard.read();
+
+                fast.iter()
+                    .chain(standard.iter())
+                    .filter_map(|router_id| {
+                        // profile & router info must exist since they're managed by us
+                        let profile = profiles.get(router_id).expect("to exist");
+                        let router_info = routers.get(router_id).expect("to exist");
+
+                        filter(router_id, router_info, profile).then_some(router_id.clone())
+                    })
+                    .collect()
+            }
+            Bucket::Fast => {
+                let fast = self.fast.read();
+
+                fast.iter()
+                    .filter_map(|router_id| {
+                        // profile & router info must exist since they're managed by us
+                        let profile = profiles.get(router_id).expect("to exist");
+                        let router_info = routers.get(router_id).expect("to exist");
+
+                        filter(router_id, router_info, profile).then_some(router_id.clone())
+                    })
+                    .collect()
+            }
+            Bucket::Standard => {
+                let standard = self.standard.read();
+
+                standard
+                    .iter()
+                    .filter_map(|router_id| {
+                        // profile & router info must exist since they're managed by us
+                        let profile = profiles.get(router_id).expect("to exist");
+                        let router_info = routers.get(router_id).expect("to exist");
+
+                        filter(router_id, router_info, profile).then_some(router_id.clone())
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Get [`Reader`].
+    pub fn reader(&self) -> Reader {
+        Reader {
+            router_infos: self.routers.read(),
+            profiles: self.profiles.read(),
+        }
     }
 
     /// Returns `true` if router identified by `RouterId` is a floodfill router.
@@ -184,15 +320,60 @@ impl ProfileStorage {
             .map_or(false, |router_info| router_info.is_floodfill())
     }
 
-    pub fn tunnel_build_accepted(&self, router_id: &RouterId) {}
-    pub fn tunnel_build_rejected(&self, router_id: &RouterId) {}
-    pub fn tunnel_build_not_answered(&self, router_id: &RouterId) {}
-    pub fn tunnel_test_succeeded(&self) {}
-    pub fn tunnel_test_failed(&self) {}
+    /// Record that `router_id` accepted a tunnel build request.
+    pub fn tunnel_build_accepted(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_accepted += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
+
+    /// Record that `router_id` rejected a tunnel build request.
+    pub fn tunnel_build_rejected(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_rejected += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
+
+    // profile must exist since it's controlled by us
+    /// Record that `router_id` failed to answer a tunnel build request.
+    pub fn tunnel_build_not_answered(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_unaswered += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
+
+    /// Record test success for a tunnel that `router_id` was a participant of.
+    pub fn tunnel_test_succeeded(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_test_successes += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
+
+    /// Record test failure for a tunnel that `router_id` was a participant of.
+    pub fn tunnel_test_failed(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_test_failures += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
 }
 
 #[cfg(test)]
-impl ProfileStorage {
+impl<R: Runtime> ProfileStorage<R> {
     /// Create new [`ProfileStorage`] from random `routers`.
     ///
     /// Only used in tests.
@@ -205,9 +386,27 @@ impl ProfileStorage {
         let profiles =
             routers.keys().map(|router_id| (router_id.clone(), Profile::new())).collect();
 
+        // split router infos into fast and standard buckets and filter out unusable routers
+        let (fast, standard): (Vec<_>, Vec<_>) = routers
+            .iter()
+            .filter_map(|(router_id, router_info)| {
+                if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
+                    return None;
+                }
+
+                match router_info.capabilities.is_fast() {
+                    true => Some((Some(router_id.clone()), None)),
+                    false => Some((None, Some(router_id.clone()))),
+                }
+            })
+            .unzip();
+
         Self {
-            routers: Arc::new(RwLock::new(routers)),
+            fast: Arc::new(RwLock::new(fast.into_iter().flatten().collect())),
             profiles: Arc::new(RwLock::new(profiles)),
+            routers: Arc::new(RwLock::new(routers)),
+            standard: Arc::new(RwLock::new(standard.into_iter().flatten().collect())),
+            _runtime: Default::default(),
         }
     }
 }
@@ -228,7 +427,7 @@ mod tests {
             })
             .unzip();
 
-        let profiles = ProfileStorage::new(&infos, &Vec::new());
+        let profiles = ProfileStorage::<MockRuntime>::new(&infos, &Vec::new());
 
         assert_eq!(profiles.routers.read().len(), 5);
         assert_eq!(profiles.profiles.read().len(), 5);
@@ -271,7 +470,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let profiles = ProfileStorage::new(&infos, &profiles);
+        let profiles = ProfileStorage::<MockRuntime>::new(&infos, &profiles);
 
         assert_eq!(profiles.routers.read().len(), 5);
         assert_eq!(profiles.profiles.read().len(), 5);
@@ -318,7 +517,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let profiles = ProfileStorage::new(&Vec::new(), &profiles);
+        let profiles = ProfileStorage::<MockRuntime>::new(&Vec::new(), &profiles);
 
         assert!(profiles.routers.read().is_empty());
         assert!(profiles.profiles.read().is_empty());

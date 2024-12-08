@@ -278,8 +278,9 @@ mod tests {
     #[tokio::test]
     async fn send_tunnel_message() {
         let (local_outbound_hash, mut outbound, mut outbound_transit) =
-            build_outbound_tunnel(2usize);
-        let (local_inbound_hash, mut inbound, mut inbound_transit) = build_inbound_tunnel(2usize);
+            build_outbound_tunnel(true, 2usize);
+        let (local_inbound_hash, mut inbound, mut inbound_transit) =
+            build_inbound_tunnel(true, 2usize);
 
         let (gateway_router, gateway_tunnel) = inbound.gateway();
 
@@ -372,8 +373,9 @@ mod tests {
     async fn send_tunnel_message_fragmented() {
         let original = (0..4 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
         let (local_outbound_hash, mut outbound, mut outbound_transit) =
-            build_outbound_tunnel(3usize);
-        let (local_inbound_hash, mut inbound, mut inbound_transit) = build_inbound_tunnel(3usize);
+            build_outbound_tunnel(true, 3usize);
+        let (local_inbound_hash, mut inbound, mut inbound_transit) =
+            build_inbound_tunnel(true, 3usize);
 
         let (gateway_router, gateway_tunnel) = inbound.gateway();
 

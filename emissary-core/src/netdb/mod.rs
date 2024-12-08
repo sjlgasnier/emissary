@@ -32,7 +32,7 @@ use crate::{
     },
     netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
     primitives::{Lease, LeaseSet2, RouterId, RouterInfo, TunnelId},
-    profile::ProfileStorage,
+    profile::{Bucket, ProfileStorage},
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
@@ -261,10 +261,10 @@ pub struct NetDb<R: Runtime> {
     router_infos: HashMap<Bytes, (Bytes, Duration)>,
 
     /// Profile storage.
-    profile_storage: ProfileStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Transport service.
-    service: TransportService,
+    service: TransportService<R>,
 }
 
 impl<R: Runtime> NetDb<R> {
@@ -272,17 +272,16 @@ impl<R: Runtime> NetDb<R> {
     pub fn new(
         local_router_id: RouterId,
         floodfill: bool,
-        service: TransportService,
-        profile_storage: ProfileStorage,
+        service: TransportService<R>,
+        profile_storage: ProfileStorage<R>,
         metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
         net_id: u8,
         netdb_msg_rx: mpsc::Receiver<Message>,
     ) -> (Self, NetDbHandle) {
         let floodfills = profile_storage
-            .routers()
-            .iter()
-            .filter_map(|(id, router)| router.is_floodfill().then_some(id.clone()))
+            .get_router_ids(Bucket::Any, |_, info, _| info.is_floodfill())
+            .into_iter()
             .collect::<HashSet<_>>();
 
         metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
@@ -1265,7 +1264,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -1358,7 +1357,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -1459,7 +1458,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -1562,7 +1561,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -1811,7 +1810,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -1916,7 +1915,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -1997,7 +1996,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2101,7 +2100,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2183,7 +2182,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2288,7 +2287,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2350,7 +2349,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2437,7 +2436,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2678,7 +2677,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2913,7 +2912,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -2993,7 +2992,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })
@@ -3075,7 +3074,7 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
-                storage.insert(info);
+                storage.add_router(info);
 
                 id
             })

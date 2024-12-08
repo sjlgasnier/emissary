@@ -18,6 +18,8 @@
 
 use crate::primitives::Str;
 
+use core::fmt;
+
 /// Specified bandwidth of the router.
 #[derive(Debug, Clone, Copy)]
 pub enum Bandwidth {
@@ -79,8 +81,11 @@ impl Bandwidth {
 }
 
 /// Router capabilities
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Capabilities {
+    /// Serialized capabilities.
+    capabilities: Str,
+
     /// Is the router a floodfill router.
     floodfill: bool,
 
@@ -96,6 +101,12 @@ pub struct Capabilities {
     usable: bool,
 }
 
+impl fmt::Display for Capabilities {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.capabilities)
+    }
+}
+
 impl Capabilities {
     /// Attempt to parse [`Capabilities`] from `caps`.
     pub fn parse(caps: &Str) -> Option<Self> {
@@ -105,6 +116,7 @@ impl Capabilities {
         let reachable = !(caps.contains("U") || caps.contains("H"));
 
         Some(Self {
+            capabilities: caps.clone(),
             floodfill,
             bandwidth,
             usable,

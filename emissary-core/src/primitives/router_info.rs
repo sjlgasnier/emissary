@@ -231,13 +231,26 @@ impl RouterInfo {
     }
 
     /// Try to parse router information from `bytes`.
-    pub fn parse<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Self> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
     /// Returns `true` if the router is a floodfill router.
     pub fn is_floodfill(&self) -> bool {
         self.capabilities.is_floodfill()
+    }
+
+    /// Returns `true` if the router is considered reachable.
+    ///
+    /// Router is considered reachable if its caps don't specify otherwise and it has at least one
+    /// published address.
+    pub fn is_reachable(&self) -> bool {
+        // TODO: add ssu2 support
+        self.capabilities.is_reachable()
+            && self.addresses.get(&TransportKind::Ntcp2).map_or(false, |address| {
+                address.options().get(&Str::from("host")).is_some()
+                    && address.options().get(&Str::from("port")).is_some()
+            })
     }
 
     /// Get network ID of the [`RouterInfo`].
@@ -570,5 +583,151 @@ mod tests {
         .serialize(&sgk);
 
         assert!(RouterInfo::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn hidden_router_not_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("HL")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("HL")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn unreachable_router_not_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("UL")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("UL")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn reachable_but_no_published_address() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_unpublished(vec![1u8; 32]),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LR")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn reachable_explicitly_specified() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LR")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    // router doesn't explicitly specify the `R` flag
+    #[test]
+    fn maybe_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("Xf")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("Xf")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
     }
 }

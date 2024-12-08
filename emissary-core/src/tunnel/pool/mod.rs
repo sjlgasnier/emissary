@@ -1083,14 +1083,14 @@ mod tests {
     async fn build_outbound_exploratory_tunnel() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1166,14 +1166,14 @@ mod tests {
     async fn outbound_exploratory_build_request_expires() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1245,14 +1245,14 @@ mod tests {
     async fn build_inbound_exploratory_tunnel() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1329,14 +1329,14 @@ mod tests {
     async fn inbound_exploratory_build_request_expires() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1409,14 +1409,14 @@ mod tests {
     async fn build_inbound_client_tunnel() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1652,14 +1652,14 @@ mod tests {
     async fn build_outbound_client_tunnel() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1893,14 +1893,14 @@ mod tests {
     async fn exploratory_outbound_build_reply_received_late() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -1982,14 +1982,14 @@ mod tests {
     async fn exploratory_inbound_build_reply_received_late() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -2068,14 +2068,14 @@ mod tests {
     async fn exploratory_tunnel_test() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 
@@ -2272,14 +2272,14 @@ mod tests {
     async fn exploratory_tunnel_test_expires() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
-            .map(|_| {
-                let transit = TestTransitTunnelManager::new();
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
                 let router_id = transit.router();
 
                 (transit.router(), transit)
             })
             .collect::<HashMap<_, _>>();
-        let profile_storage = ProfileStorage::from_random(
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
             routers.iter().map(|(_, transit)| transit.router_info()).collect(),
         );
 

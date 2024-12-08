@@ -87,8 +87,7 @@ impl<R: Runtime> Router<R> {
         let exploratory_config = config.exploratory.clone();
         let floodfill = config.floodfill;
         let net_id = config.net_id.unwrap_or(NET_ID);
-        let profiles = ProfileStorage::new(&config.routers, &config.profiles);
-        let profile_storage = ProfileStorage::new(&config.routers, &config.profiles);
+        let profile_storage = ProfileStorage::<R>::new(&config.routers, &config.profiles);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();

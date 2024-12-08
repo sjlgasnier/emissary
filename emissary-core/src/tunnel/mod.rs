@@ -96,7 +96,7 @@ pub struct TunnelManager<R: Runtime> {
     command_rx: Receiver<TunnelManagerCommand, CommandRecycle>,
 
     /// Exploratory tunnel/hop selector.
-    exploratory_selector: ExploratorySelector,
+    exploratory_selector: ExploratorySelector<R>,
 
     /// Garlic message handler.
     garlic: GarlicHandler<R>,
@@ -123,7 +123,7 @@ pub struct TunnelManager<R: Runtime> {
     router_info: RouterInfo,
 
     /// Router storage.
-    profile_storage: ProfileStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -132,7 +132,7 @@ pub struct TunnelManager<R: Runtime> {
     routing_table: RoutingTable,
 
     /// Transport service.
-    service: TransportService,
+    service: TransportService<R>,
 }
 
 impl<R: Runtime> TunnelManager<R> {
@@ -141,11 +141,11 @@ impl<R: Runtime> TunnelManager<R> {
     /// Returns a [`TunnelManager`] object, a [`TunnelManagerHandle`] which can be used to create
     /// new tunnel pools and a [`TunnelPoolHandle`] for the exploratory tunnel pool.
     pub fn new(
-        service: TransportService,
+        service: TransportService<R>,
         router_info: RouterInfo,
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
-        profile_storage: ProfileStorage,
+        profile_storage: ProfileStorage<R>,
         exploratory_config: TunnelPoolConfig,
     ) -> (
         Self,

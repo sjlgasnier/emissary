@@ -148,7 +148,8 @@ pub struct SessionManager<R: Runtime> {
     outbound_initial_state: Vec<u8>,
 
     /// Router storage.
-    profile_storage: ProfileStorage,
+    profile_storage: ProfileStorage<R>,
+
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
 
@@ -171,7 +172,7 @@ impl<R: Runtime> SessionManager<R> {
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
-        profile_storage: ProfileStorage,
+        profile_storage: ProfileStorage<R>,
     ) -> crate::Result<Self> {
         let local_key = StaticPrivateKey::from(local_key);
 
@@ -392,7 +393,7 @@ impl<R: Runtime> SessionManager<R> {
                         return Err(Error::NetworkMismatch);
                     }
 
-                    profile_storage.insert(router.clone());
+                    profile_storage.add_router(router.clone());
 
                     Ok(Ntcp2Session::new(
                         Role::Responder,

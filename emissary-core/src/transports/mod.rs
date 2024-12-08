@@ -123,7 +123,7 @@ impl Default for ProtocolCommand {
 /// but interact with them, namely `NetDb` and `TunnelManager`. [`TransportService`] allows
 /// the subsystem to establish new connections, close existing connections, send and receive
 /// messages to and from the network.
-pub struct TransportService {
+pub struct TransportService<R: Runtime> {
     /// TX channel for sending commands to [`TransportManager`].
     cmd_tx: Sender<ProtocolCommand>,
 
@@ -134,13 +134,13 @@ pub struct TransportService {
     pending_events: VecDeque<InnerSubsystemEvent>,
 
     /// Router storage.
-    profile_storage: ProfileStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, Sender<SubsystemCommand>>,
 }
 
-impl TransportService {
+impl<R: Runtime> TransportService<R> {
     /// Attempt to establish connection to `router`.
     ///
     /// The connection is established in the background and the result
@@ -225,7 +225,7 @@ impl TransportService {
         Self,
         Receiver<ProtocolCommand>,
         Sender<InnerSubsystemEvent>,
-        ProfileStorage,
+        ProfileStorage<R>,
     ) {
         let (event_tx, event_rx) = channel(64);
         let (cmd_tx, cmd_rx) = channel(64);
@@ -246,7 +246,7 @@ impl TransportService {
     }
 }
 
-impl Stream for TransportService {
+impl<R: Runtime> Stream for TransportService<R> {
     type Item = SubsystemEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -301,7 +301,7 @@ pub struct TransportManager<R: Runtime> {
     poll_index: usize,
 
     /// Router storage.
-    profile_storage: ProfileStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashSet<RouterId>,
@@ -323,7 +323,7 @@ impl<R: Runtime> TransportManager<R> {
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
-        profile_storage: ProfileStorage,
+        profile_storage: ProfileStorage<R>,
         metrics_handle: R::MetricsHandle,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
@@ -355,7 +355,7 @@ impl<R: Runtime> TransportManager<R> {
     /// Register new subsystem to [`TransportManager`].
     ///
     /// The number of subsystems is fixed and the initialization order is important.
-    pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService {
+    pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService<R> {
         let (event_tx, event_rx) = channel(64);
 
         tracing::debug!(
