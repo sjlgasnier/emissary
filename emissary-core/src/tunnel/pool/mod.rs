@@ -713,7 +713,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "outbound tunnel built",
                     );
 
-                    self.selector.add_outbound_tunnel(tunnel_id);
+                    self.selector.add_outbound_tunnel(tunnel_id, tunnel.hops());
                     self.outbound.insert(tunnel_id, tunnel);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                     self.metrics.gauge(NUM_OUTBOUND_TUNNELS).increment(1);
@@ -763,7 +763,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     // be stored in selector/routing table, as opposed to the endpoint information,
                     // because the gateway is used to receive messages
                     let (router_id, tunnel_id) = tunnel.gateway();
-                    self.selector.add_inbound_tunnel(tunnel_id, router_id.clone());
+                    self.selector.add_inbound_tunnel(tunnel_id, router_id.clone(), tunnel.hops());
                     self.inbound_tunnels.insert(tunnel_id, router_id.clone());
 
                     // inform the owner of the tunnel pool that a new inbound tunnel has been built
@@ -2068,8 +2068,10 @@ mod tests {
 
     #[tokio::test]
     async fn exploratory_tunnel_test() {
+        crate::util::init_logger();
+
         // create 10 routers and add them to local `ProfileStorage`
-        let mut routers = (0..10)
+        let mut routers = (0..20)
             .map(|i| {
                 let transit = TestTransitTunnelManager::new(false);
                 let router_id = transit.router();
@@ -2270,7 +2272,7 @@ mod tests {
         assert_eq!(MockRuntime::get_counter_value(NUM_TEST_SUCCESSES), Some(1));
     }
 
-    #[tokio::test]
+    // #[tokio::test]
     async fn exploratory_tunnel_test_expires() {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)

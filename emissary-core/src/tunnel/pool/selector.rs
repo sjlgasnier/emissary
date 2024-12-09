@@ -38,7 +38,16 @@ use parking_lot::RwLock;
 use spin::rwlock::RwLock;
 
 use alloc::{sync::Arc, vec::Vec};
-use core::net::{Ipv4Addr, SocketAddr};
+use core::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::selector";
+
+/// Maximum router participation.
+const MAX_PARTICIPATION: f64 = 0.33f64;
 
 /// Tunnel selector for a tunnel pool.
 ///
@@ -59,16 +68,21 @@ pub trait TunnelSelector: Send + Unpin {
     fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolContextHandle)>;
 
     /// Add a new tunnel into the set of active outbound tunnels.
-    fn add_outbound_tunnel(&self, tunnel_id: TunnelId);
+    fn add_outbound_tunnel(&mut self, tunnel_id: TunnelId, hops: HashSet<RouterId>);
 
     /// Add a new tunnel into the set of active inbound tunnels.
-    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId);
+    fn add_inbound_tunnel(
+        &mut self,
+        tunnel_id: TunnelId,
+        router_id: RouterId,
+        hops: HashSet<RouterId>,
+    );
 
     /// Remove tunnel from the set of active outbound tunnels.
-    fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId);
+    fn remove_outbound_tunnel(&mut self, tunnel_id: &TunnelId);
 
     /// Remove tunnel from the set of active inbound tunnels.
-    fn remove_inbound_tunnel(&self, tunnel_id: &TunnelId);
+    fn remove_inbound_tunnel(&mut self, tunnel_id: &TunnelId);
 }
 
 /// Hop selector for a tunnel pool.
@@ -93,16 +107,25 @@ pub struct ExploratorySelector<R: Runtime> {
     handle: TunnelPoolContextHandle,
 
     /// Active inbound tunnels.
-    inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
+    inbound: Arc<RwLock<HashMap<TunnelId, (RouterId, HashSet<RouterId>)>>>,
 
     /// Are tunnels insecure.
     insecure: bool,
 
+    /// Total number of inbound and outbound tunnels, both exploratory and client tunnels.
+    num_tunnels: Arc<AtomicUsize>,
+
     /// Active outbound tunnels.
-    outbound: Arc<RwLock<HashSet<TunnelId>>>,
+    outbound: Arc<RwLock<HashMap<TunnelId, HashSet<RouterId>>>>,
 
     /// Router storage for selecting hops.
     profile_storage: ProfileStorage<R>,
+
+    /// Router participation.
+    router_participation: Arc<RwLock<HashMap<RouterId, usize>>>,
+
+    /// Tunnel hops.
+    tunnel_hops: Arc<RwLock<HashMap<TunnelId, HashSet<RouterId>>>>,
 }
 
 impl<R: Runtime> ExploratorySelector<R> {
@@ -116,14 +139,12 @@ impl<R: Runtime> ExploratorySelector<R> {
             handle,
             inbound: Default::default(),
             insecure,
+            num_tunnels: Default::default(),
             outbound: Default::default(),
             profile_storage,
+            router_participation: Default::default(),
+            tunnel_hops: Default::default(),
         }
-    }
-
-    /// Get reference to [`ProfileStorage`].
-    pub fn profile_storage(&self) -> &ProfileStorage<R> {
-        &self.profile_storage
     }
 
     /// Get reference to exploratory tunnel pool's [`TunnePoolHandle`].
@@ -132,7 +153,7 @@ impl<R: Runtime> ExploratorySelector<R> {
     }
 
     /// Group router addresses of `router_ids` by /16 subnet.
-    pub fn group_by_subnet(&self, router_ids: Vec<RouterId>) -> HashMap<(u8, u8), Vec<RouterId>> {
+    fn group_by_subnet(&self, router_ids: Vec<RouterId>) -> HashMap<(u8, u8), Vec<RouterId>> {
         // fetch ipv4 addresses of all routers
         let addresses = {
             let reader = self.profile_storage.reader();
@@ -172,11 +193,66 @@ impl<R: Runtime> ExploratorySelector<R> {
             },
         )
     }
+
+    fn add_tunnel(&self, hops: &HashSet<RouterId>) {
+        self.num_tunnels.fetch_add(1usize, Ordering::SeqCst);
+
+        let mut inner = self.router_participation.write();
+
+        hops.iter().for_each(|router_id| {
+            *inner.entry(router_id.clone()).or_default() += 1usize;
+        });
+    }
+
+    fn remove_tunnel(&self, hops: &HashSet<RouterId>) {
+        if self.num_tunnels.fetch_sub(1usize, Ordering::SeqCst) == 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?hops,
+                "tried to remove tunnel but no tunnels available",
+            );
+            debug_assert!(false);
+        }
+
+        let mut inner = self.router_participation.write();
+
+        hops.iter().for_each(|router_id| match inner.get_mut(router_id) {
+            Some(value) if value == &1 => {
+                inner.remove(router_id);
+            }
+            Some(value) => {
+                *value -= 1;
+            }
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "router doesn't exist in tunenl selector",
+                );
+                debug_assert!(false);
+            }
+        });
+    }
+
+    fn can_participate(&self, router_id: &RouterId) -> bool {
+        let total_tunnels = self.num_tunnels.load(Ordering::SeqCst) as f64;
+        if total_tunnels == 0f64 {
+            return true;
+        }
+
+        let participation = {
+            let inner = self.router_participation.read();
+
+            inner.get(router_id).map_or(0f64, |participation| *participation as f64)
+        };
+
+        (participation / total_tunnels) < MAX_PARTICIPATION
+    }
 }
 
 impl<R: Runtime> TunnelSelector for ExploratorySelector<R> {
     fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolContextHandle)> {
-        self.outbound.read().iter().next().map(|tunnel_id| (*tunnel_id, &self.handle))
+        self.outbound.read().keys().next().map(|tunnel_id| (*tunnel_id, &self.handle))
     }
 
     fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolContextHandle)> {
@@ -184,33 +260,47 @@ impl<R: Runtime> TunnelSelector for ExploratorySelector<R> {
             .read()
             .iter()
             .next()
-            .map(|(tunnel_id, router_id)| (*tunnel_id, router_id.clone(), &self.handle))
+            .map(|(tunnel_id, (router_id, _))| (*tunnel_id, router_id.clone(), &self.handle))
     }
 
-    fn add_outbound_tunnel(&self, tunnel_id: TunnelId) {
-        self.outbound.write().insert(tunnel_id);
+    fn add_outbound_tunnel(&mut self, tunnel_id: TunnelId, hops: HashSet<RouterId>) {
+        self.add_tunnel(&hops);
+        self.outbound.write().insert(tunnel_id, hops);
     }
 
-    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId) {
-        self.inbound.write().insert(tunnel_id, router_id);
+    fn add_inbound_tunnel(
+        &mut self,
+        tunnel_id: TunnelId,
+        router_id: RouterId,
+        hops: HashSet<RouterId>,
+    ) {
+        self.add_tunnel(&hops);
+        self.inbound.write().insert(tunnel_id, (router_id, hops));
     }
 
-    fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId) {
-        self.outbound.write().remove(tunnel_id);
+    fn remove_outbound_tunnel(&mut self, tunnel_id: &TunnelId) {
+        if let Some(hops) = self.outbound.write().remove(tunnel_id) {
+            self.remove_tunnel(&hops);
+        }
     }
 
-    fn remove_inbound_tunnel(&self, tunnel_id: &TunnelId) {
-        self.inbound.write().remove(tunnel_id);
+    fn remove_inbound_tunnel(&mut self, tunnel_id: &TunnelId) {
+        if let Some((_, hops)) = self.inbound.write().remove(tunnel_id) {
+            self.remove_tunnel(&hops);
+        }
     }
 }
 
 impl<R: Runtime> HopSelector for ExploratorySelector<R> {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        let mut router_ids = self
-            .profile_storage
-            .get_router_ids(Bucket::Standard, |_, router_info, profile| {
-                !profile.is_failing() && router_info.is_reachable()
-            });
+        let mut router_ids = self.profile_storage.get_router_ids(
+            Bucket::Standard,
+            |router_id, router_info, profile| {
+                !profile.is_failing()
+                    && router_info.is_reachable()
+                    && (self.insecure || self.can_participate(router_id))
+            },
+        );
 
         // insecure tunnels are allowed, don't do safety checks
         if self.insecure {
@@ -263,10 +353,14 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 })
                 .collect::<HashMap<_, _>>();
 
-            let fast_router_ids =
-                self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
-                    !profile.is_failing() && router_info.is_reachable()
-                });
+            let fast_router_ids = self.profile_storage.get_router_ids(
+                Bucket::Fast,
+                |router_id, router_info, profile| {
+                    !profile.is_failing()
+                        && router_info.is_reachable()
+                        && (self.insecure || self.can_participate(router_id))
+                },
+            );
 
             // group fast routers by subnet and filter out subnets which the already-selected
             // routers are part of
@@ -342,10 +436,10 @@ pub struct ClientSelector<R: Runtime> {
     handle: TunnelPoolContextHandle,
 
     /// Active inbound tunnels.
-    inbound: Arc<RwLock<HashMap<TunnelId, RouterId>>>,
+    inbound: HashMap<TunnelId, (RouterId, HashSet<RouterId>)>,
 
     /// Active outbound tunnels.
-    outbound: Arc<RwLock<HashSet<TunnelId>>>,
+    outbound: HashMap<TunnelId, HashSet<RouterId>>,
 }
 
 impl<R: Runtime> ClientSelector<R> {
@@ -362,44 +456,57 @@ impl<R: Runtime> ClientSelector<R> {
 
 impl<R: Runtime> TunnelSelector for ClientSelector<R> {
     fn select_outbound_tunnel(&self) -> Option<(TunnelId, &TunnelPoolContextHandle)> {
-        self.outbound.read().iter().next().map_or_else(
+        self.outbound.keys().next().map_or_else(
             || self.exploratory.select_outbound_tunnel(),
             |tunnel_id| Some((*tunnel_id, &self.handle)),
         )
     }
 
     fn select_inbound_tunnel(&self) -> Option<(TunnelId, RouterId, &TunnelPoolContextHandle)> {
-        self.inbound.read().iter().next().map_or_else(
+        self.inbound.iter().next().map_or_else(
             || self.exploratory.select_inbound_tunnel(),
-            |(tunnel_id, router_id)| Some((*tunnel_id, router_id.clone(), &self.handle)),
+            |(tunnel_id, (router_id, _))| Some((*tunnel_id, router_id.clone(), &self.handle)),
         )
     }
 
-    fn add_outbound_tunnel(&self, tunnel_id: TunnelId) {
-        self.outbound.write().insert(tunnel_id);
+    fn add_outbound_tunnel(&mut self, tunnel_id: TunnelId, hops: HashSet<RouterId>) {
+        self.exploratory.add_tunnel(&hops);
+        self.outbound.insert(tunnel_id, hops);
     }
 
-    fn add_inbound_tunnel(&self, tunnel_id: TunnelId, router_id: RouterId) {
-        self.inbound.write().insert(tunnel_id, router_id);
+    fn add_inbound_tunnel(
+        &mut self,
+        tunnel_id: TunnelId,
+        router_id: RouterId,
+        hops: HashSet<RouterId>,
+    ) {
+        self.exploratory.add_tunnel(&hops);
+        self.inbound.insert(tunnel_id, (router_id, hops));
     }
 
-    fn remove_outbound_tunnel(&self, tunnel_id: &TunnelId) {
-        self.outbound.write().remove(tunnel_id);
+    fn remove_outbound_tunnel(&mut self, tunnel_id: &TunnelId) {
+        if let Some(hops) = self.outbound.remove(tunnel_id) {
+            self.exploratory.remove_tunnel(&hops);
+        }
     }
 
-    fn remove_inbound_tunnel(&self, tunnel_id: &TunnelId) {
-        self.inbound.write().remove(tunnel_id);
+    fn remove_inbound_tunnel(&mut self, tunnel_id: &TunnelId) {
+        if let Some((_, hops)) = self.inbound.remove(tunnel_id) {
+            self.exploratory.remove_tunnel(&hops);
+        }
     }
 }
 
 impl<R: Runtime> HopSelector for ClientSelector<R> {
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        let mut router_ids = self
-            .exploratory
-            .profile_storage()
-            .get_router_ids(Bucket::Fast, |_, router_info, profile| {
-                !profile.is_failing() && router_info.is_reachable()
-            });
+        let mut router_ids = self.exploratory.profile_storage.get_router_ids(
+            Bucket::Fast,
+            |router_id, router_info, profile| {
+                !profile.is_failing()
+                    && router_info.is_reachable()
+                    && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
+            },
+        );
 
         // insecure tunnels are allowed, don't do safety checks
         if self.exploratory.insecure {
@@ -408,7 +515,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             if router_ids.len() < num_hops {
                 let mut standard_router_ids = self
                     .exploratory
-                    .profile_storage()
+                    .profile_storage
                     .get_router_ids(Bucket::Standard, |_, router_info, profile| {
                         !profile.is_failing() && router_info.is_reachable()
                     });
@@ -422,7 +529,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 router_ids.extend(standard_router_ids.into_iter().take(num_needed));
             }
 
-            let reader = self.exploratory.profile_storage().reader();
+            let reader = self.exploratory.profile_storage.reader();
             return Some(
                 (0..num_hops)
                     .map(|i| {
@@ -454,12 +561,15 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 })
                 .collect::<HashMap<_, _>>();
 
-            let standard_router_ids = self
-                .exploratory
-                .profile_storage()
-                .get_router_ids(Bucket::Standard, |_, router_info, profile| {
-                    !profile.is_failing() && router_info.is_reachable()
-                });
+            let standard_router_ids = self.exploratory.profile_storage.get_router_ids(
+                Bucket::Standard,
+                |router_id, router_info, profile| {
+                    !profile.is_failing()
+                        && router_info.is_reachable()
+                        && (self.exploratory.insecure
+                            || self.exploratory.can_participate(router_id))
+                },
+            );
 
             // group standard routers by subnet and filter out subnets which the already-selected
             // routers are part of
@@ -501,7 +611,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             routers
         };
 
-        let reader = self.exploratory.profile_storage().reader();
+        let reader = self.exploratory.profile_storage.reader();
         Some(
             (0..num_hops)
                 .map(|i| {
@@ -1219,5 +1329,400 @@ mod tests {
             }
         });
         assert_ne!(num_same, 5);
+    }
+
+    #[test]
+    fn router_participation() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+        let routers = (0..11).map(|_| RouterId::random()).collect::<Vec<_>>();
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            false,
+        );
+        assert!(routers.iter().all(|router_id| selector.can_participate(router_id)));
+
+        selector.add_tunnel(&HashSet::from_iter([
+            routers[0].clone(),
+            routers[1].clone(),
+            routers[2].clone(),
+        ]));
+        for (i, router_id) in routers.iter().enumerate() {
+            if i < 3 {
+                assert!(!selector.can_participate(router_id));
+            } else {
+                assert!(selector.can_participate(router_id));
+            }
+        }
+
+        selector.add_tunnel(&HashSet::from_iter([
+            routers[3].clone(),
+            routers[4].clone(),
+            routers[5].clone(),
+        ]));
+        for (i, router_id) in routers.iter().enumerate() {
+            if i < 6 {
+                assert!(!selector.can_participate(router_id));
+            } else {
+                assert!(selector.can_participate(router_id));
+            }
+        }
+
+        selector.add_tunnel(&HashSet::from_iter([
+            routers[6].clone(),
+            routers[7].clone(),
+            routers[8].clone(),
+        ]));
+        for (i, router_id) in routers.iter().enumerate() {
+            if i < 9 {
+                assert!(!selector.can_participate(router_id));
+            } else {
+                assert!(selector.can_participate(router_id));
+            }
+        }
+
+        // add shorter tunnel with the remaining two routers
+        // and verify that after it, routers can participate again
+
+        selector.add_tunnel(&HashSet::from_iter([
+            routers[9].clone(),
+            routers[10].clone(),
+        ]));
+        for (i, router_id) in routers.iter().enumerate() {
+            assert!(selector.can_participate(router_id));
+        }
+
+        // remove the first tunnel, verify those hops can participate
+        // whereas other routers cannot
+        selector.remove_tunnel(&HashSet::from_iter([
+            routers[0].clone(),
+            routers[1].clone(),
+            routers[2].clone(),
+        ]));
+        for (i, router_id) in routers.iter().enumerate() {
+            if i < 3 {
+                assert!(selector.can_participate(router_id));
+            } else {
+                assert!(!selector.can_participate(router_id));
+            }
+        }
+    }
+
+    #[test]
+    fn exploratory_enforce_max_participation() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        for _ in 0..6 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            false,
+        );
+
+        let hops1 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops1);
+
+        let hops2 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops2);
+
+        assert!(hops1.iter().all(|key| !hops2.contains(key)));
+        assert!(selector.select_hops(3).is_none());
+    }
+
+    #[test]
+    fn exploratory_ignore_max_participation_for_insecure_tunnels() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        for _ in 0..6 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            true,
+        );
+
+        let hops1 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops1);
+
+        let hops2 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops2);
+
+        assert!(!hops1.iter().all(|key| hops2.contains(key)));
+        assert!(selector.select_hops(3).is_some());
+    }
+
+    #[test]
+    fn exploratory_enforce_max_participation_with_fast_fallbacks() {
+        let build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        for _ in 0..6 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info
+            });
+        }
+
+        for _ in 0..3 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
+                info
+            });
+        }
+
+        let selector = ExploratorySelector::new(
+            profile_storage.clone(),
+            build_parameters.context_handle.clone(),
+            false,
+        );
+
+        let hops1 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops1);
+        let hops2 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops2);
+        let hops3 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.add_tunnel(&hops3);
+
+        assert!(hops1.iter().all(|router_id| selector
+            .profile_storage
+            .get(router_id)
+            .unwrap()
+            .capabilities
+            .is_standard()));
+        assert!(hops2.iter().all(|router_id| selector
+            .profile_storage
+            .get(router_id)
+            .unwrap()
+            .capabilities
+            .is_standard()));
+        assert!(hops3.iter().all(|router_id| selector
+            .profile_storage
+            .get(router_id)
+            .unwrap()
+            .capabilities
+            .is_fast()));
+
+        assert!(hops1.iter().all(|key| !hops2.contains(key)));
+        assert!(hops1.iter().all(|key| !hops3.contains(key)));
+        assert!(hops2.iter().all(|key| !hops3.contains(key)));
+        assert!(selector.select_hops(3).is_none());
+    }
+
+    #[test]
+    fn client_enforce_max_participation() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        for _ in 0..6 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            false,
+        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
+
+        let hops1 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops1);
+
+        let hops2 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops2);
+
+        assert!(hops1.iter().all(|key| !hops2.contains(key)));
+        assert!(selector.select_hops(3).is_none());
+    }
+
+    #[test]
+    fn client_ignore_max_participation_for_insecure_tunnels() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        for _ in 0..6 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            true,
+        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
+
+        let hops1 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops1);
+
+        let hops2 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops2);
+
+        assert!(!hops1.iter().all(|key| hops2.contains(key)));
+        assert!(selector.select_hops(3).is_some());
+    }
+
+    #[test]
+    fn client_enforce_max_participation_with_fast_fallbacks() {
+        let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+
+        for _ in 0..3 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
+                info
+            });
+        }
+
+        for _ in 0..6 {
+            profile_storage.add_router({
+                let mut info = RouterInfo::random::<MockRuntime>();
+                info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
+                info
+            });
+        }
+
+        let exploratory = ExploratorySelector::new(
+            profile_storage.clone(),
+            exploratory_build_parameters.context_handle.clone(),
+            false,
+        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
+
+        let hops1 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops1);
+        let hops2 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops2);
+        let hops3 = selector
+            .select_hops(3)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| RouterId::from(key))
+            .collect::<HashSet<_>>();
+        selector.exploratory.add_tunnel(&hops3);
+
+        assert!(hops1.iter().all(|router_id| selector
+            .exploratory
+            .profile_storage
+            .get(router_id)
+            .unwrap()
+            .capabilities
+            .is_fast()));
+        assert!(hops2.iter().all(|router_id| selector
+            .exploratory
+            .profile_storage
+            .get(router_id)
+            .unwrap()
+            .capabilities
+            .is_fast()));
+        assert!(hops3.iter().all(|router_id| selector
+            .exploratory
+            .profile_storage
+            .get(router_id)
+            .unwrap()
+            .capabilities
+            .is_standard()));
+
+        assert!(hops1.iter().all(|key| !hops2.contains(key)));
+        assert!(hops1.iter().all(|key| !hops3.contains(key)));
+        assert!(hops2.iter().all(|key| !hops3.contains(key)));
+        assert!(selector.select_hops(3).is_none());
     }
 }

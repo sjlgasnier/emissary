@@ -24,6 +24,7 @@ use crate::{
     tunnel::hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
 };
 
+use hashbrown::HashSet;
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
@@ -241,6 +242,10 @@ impl<R: Runtime> Tunnel for OutboundTunnel<R> {
 
     fn direction() -> TunnelDirection {
         TunnelDirection::Outbound
+    }
+
+    fn hops(&self) -> HashSet<RouterId> {
+        self.hops.iter().map(|hop| hop.router.clone()).collect()
     }
 }
 

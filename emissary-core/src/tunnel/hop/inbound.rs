@@ -38,6 +38,7 @@ use crate::{
 };
 
 use futures::{future::BoxFuture, FutureExt};
+use hashbrown::HashSet;
 use thingbuf::mpsc::Receiver;
 
 use alloc::{boxed::Box, vec::Vec};
@@ -287,6 +288,10 @@ impl Tunnel for InboundTunnel {
 
     fn tunnel_id(&self) -> &TunnelId {
         &self.tunnel_id
+    }
+
+    fn hops(&self) -> HashSet<RouterId> {
+        self.hops.iter().map(|hop| hop.router.clone()).collect()
     }
 }
 
