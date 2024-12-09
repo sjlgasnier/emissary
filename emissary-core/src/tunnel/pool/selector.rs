@@ -246,22 +246,23 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             );
         }
 
+        // TODO: filter out routers which are already a participant >33% of tunnels
+
         // group addresses by /16 subnet to prevent having two routers
         // from the same subnet in the same tunnel
         let mut addresses = self.group_by_subnet(router_ids);
 
-        // attempt to get `num_hops` mayb routers from addresses
-        let mut routers = addresses
-            .iter_mut()
-            .take(num_hops)
-            .map(|(subnet, addresses)| {
-                shuffle(addresses, &mut R::rng());
+        let router_ids = if addresses.len() < num_hops {
+            let mut routers = addresses
+                .iter_mut()
+                .map(|(subnet, addresses)| {
+                    (
+                        subnet,
+                        addresses[R::rng().next_u32() as usize % addresses.len()].clone(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
 
-                (subnet, addresses[0].clone())
-            })
-            .collect::<HashMap<_, _>>();
-
-        let router_ids = if routers.len() < num_hops {
             let fast_router_ids =
                 self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
                     !profile.is_failing() && router_info.is_reachable()
@@ -286,19 +287,23 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 .into_iter()
                 .map(|mut routers| routers.pop().expect("to exist"))
                 .collect::<Vec<_>>();
+            let mut routers = routers.into_iter().map(|(_, router)| router).collect::<Vec<_>>();
 
+            shuffle(&mut routers, &mut R::rng());
             shuffle(&mut fast_router_addresses, &mut R::rng());
 
+            routers.extend(fast_router_addresses);
             routers
-                .into_iter()
-                .map(|(subnet, router)| router)
-                .chain(fast_router_addresses.into_iter().take(num_needed))
-                .collect::<Vec<RouterId>>()
         } else {
-            let mut routers =
-                routers.into_iter().map(|(subnet, router)| router).collect::<Vec<RouterId>>();
-            shuffle(&mut routers, &mut R::rng());
+            // select random router from each subnet and shuffle selected routers
+            let mut routers = addresses
+                .into_iter()
+                .map(|(subnet, addresses)| {
+                    addresses[R::rng().next_u32() as usize % addresses.len()].clone()
+                })
+                .collect::<Vec<_>>();
 
+            shuffle(&mut routers, &mut R::rng());
             routers
         };
 
@@ -432,22 +437,23 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             );
         }
 
+        // TODO: filter out routers which are already a participant >33% of tunnels
+
         // group addresses by /16 subnet to prevent having two routers
         // from the same subnet in the same tunnel
         let mut addresses = self.exploratory.group_by_subnet(router_ids);
 
-        // attempt to get `num_hops` mayb routers from addresses
-        let mut routers = addresses
-            .iter_mut()
-            .take(num_hops)
-            .map(|(subnet, addresses)| {
-                shuffle(addresses, &mut R::rng());
+        let router_ids = if addresses.len() < num_hops {
+            let mut routers = addresses
+                .iter_mut()
+                .map(|(subnet, addresses)| {
+                    (
+                        subnet,
+                        addresses[R::rng().next_u32() as usize % addresses.len()].clone(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
 
-                (subnet, addresses[0].clone())
-            })
-            .collect::<HashMap<_, _>>();
-
-        let router_ids = if routers.len() < num_hops {
             let standard_router_ids = self
                 .exploratory
                 .profile_storage()
@@ -475,19 +481,23 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 .into_iter()
                 .map(|mut routers| routers.pop().expect("to exist"))
                 .collect::<Vec<_>>();
+            let mut routers = routers.into_iter().map(|(_, router)| router).collect::<Vec<_>>();
 
+            shuffle(&mut routers, &mut R::rng());
             shuffle(&mut standard_router_addresses, &mut R::rng());
 
+            routers.extend(standard_router_addresses);
             routers
-                .into_iter()
-                .map(|(subnet, router)| router)
-                .chain(standard_router_addresses.into_iter().take(num_needed))
-                .collect::<Vec<RouterId>>()
         } else {
-            let mut routers =
-                routers.into_iter().map(|(subnet, router)| router).collect::<Vec<RouterId>>();
-            shuffle(&mut routers, &mut R::rng());
+            // select random router from each subnet and shuffle selected routers
+            let mut routers = addresses
+                .into_iter()
+                .map(|(subnet, addresses)| {
+                    addresses[R::rng().next_u32() as usize % addresses.len()].clone()
+                })
+                .collect::<Vec<_>>();
 
+            shuffle(&mut routers, &mut R::rng());
             routers
         };
 

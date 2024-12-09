@@ -2071,7 +2071,7 @@ mod tests {
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
             .map(|i| {
-                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
+                let transit = TestTransitTunnelManager::new(false);
                 let router_id = transit.router();
 
                 (transit.router(), transit)
