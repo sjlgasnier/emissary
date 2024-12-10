@@ -708,6 +708,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "emissary-core",
+ "emissary-util",
  "flate2",
  "futures",
  "home",
@@ -766,6 +767,23 @@ dependencies = [
  "x25519-dalek",
  "zerocopy",
  "zeroize",
+]
+
+[[package]]
+name = "emissary-util"
+version = "0.1.0"
+dependencies = [
+ "emissary-core",
+ "flate2",
+ "futures",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "rand",
+ "rand_core",
+ "thingbuf",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2331,6 +2349,7 @@ version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "662b54ef6f7b4e71f683dadc787bbb2d8e8ef2f91b682ebed3164a5a7abca905"
 dependencies = [
+ "parking_lot",
  "pin-project",
 ]
 

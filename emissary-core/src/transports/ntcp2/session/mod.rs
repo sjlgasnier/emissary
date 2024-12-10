@@ -166,7 +166,6 @@ impl<R: Runtime> SessionManager<R> {
     ///
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
     pub fn new(
-        runtime: R,
         local_key: Vec<u8>,
         local_iv: Vec<u8>,
         local_signing_key: SigningPrivateKey,

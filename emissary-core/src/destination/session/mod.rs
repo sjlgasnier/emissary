@@ -2149,8 +2149,6 @@ mod tests {
 
     #[tokio::test]
     async fn local_lease_set_publish_timer_expires() {
-        crate::util::init_logger();
-
         // create inbound `SessionManager`
         let inbound_private_key = StaticPrivateKey::new(thread_rng());
         let inbound_public_key = inbound_private_key.public();
@@ -2700,8 +2698,6 @@ mod tests {
 
     #[tokio::test]
     async fn new_session_reply_retried() {
-        crate::util::init_logger();
-
         // create inbound `SessionManager`
         let inbound_private_key = StaticPrivateKey::new(thread_rng());
         let inbound_public_key = inbound_private_key.public();

@@ -107,22 +107,22 @@ pub struct Config {
     pub base_path: PathBuf,
 
     /// I2CP config.
-    i2cp_config: Option<emissary::I2cpConfig>,
+    i2cp_config: Option<emissary_core::I2cpConfig>,
 
     /// NTCP2 config.
-    ntcp2_config: Option<emissary::Ntcp2Config>,
+    ntcp2_config: Option<emissary_core::Ntcp2Config>,
 
     /// Exploratory tunnel pool config.
-    pub exploratory: Option<emissary::ExploratoryConfig>,
+    pub exploratory: Option<emissary_core::ExploratoryConfig>,
 
     /// Router info.
     routers: Vec<Vec<u8>>,
 
     /// Profiles.
-    profiles: Vec<(String, emissary::Profile)>,
+    profiles: Vec<(String, emissary_core::Profile)>,
 
     /// SAMv3 config.
-    sam_config: Option<emissary::SamConfig>,
+    sam_config: Option<emissary_core::SamConfig>,
 
     /// Signing key.
     signing_key: Vec<u8>,
@@ -143,9 +143,9 @@ pub struct Config {
     pub insecure_tunnels: bool,
 }
 
-impl Into<emissary::Config> for Config {
-    fn into(self) -> emissary::Config {
-        emissary::Config {
+impl Into<emissary_core::Config> for Config {
+    fn into(self) -> emissary_core::Config {
+        emissary_core::Config {
             static_key: self.static_key,
             signing_key: self.signing_key,
             ntcp2_config: self.ntcp2_config,
@@ -379,14 +379,14 @@ impl Config {
             routers: Vec::new(),
             profiles: Vec::new(),
             exploratory: None,
-            ntcp2_config: Some(emissary::Ntcp2Config {
+            ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
                 host: String::from("127.0.0.1"),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: Some(emissary::I2cpConfig { port: 7654u16 }),
-            sam_config: Some(emissary::SamConfig {
+            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            sam_config: Some(emissary_core::SamConfig {
                 tcp_port: 7656u16,
                 udp_port: 7655u16,
                 host: String::from("127.0.0.1"),
@@ -442,20 +442,20 @@ impl Config {
             base_path,
             routers: Vec::new(),
             profiles: Vec::new(),
-            exploratory: config.exploratory.map(|config| emissary::ExploratoryConfig {
+            exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
                 inbound_len: config.inbound_len,
                 inbound_count: config.inbound_count,
                 outbound_len: config.outbound_len,
                 outbound_count: config.outbound_count,
             }),
-            ntcp2_config: config.ntcp2.map(|config| emissary::Ntcp2Config {
+            ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: config.i2cp.map(|config| emissary::I2cpConfig { port: config.port }),
-            sam_config: config.sam.map(|config| emissary::SamConfig {
+            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            sam_config: config.sam.map(|config| emissary_core::SamConfig {
                 tcp_port: config.tcp_port,
                 udp_port: config.udp_port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
@@ -490,7 +490,7 @@ impl Config {
     }
 
     /// Attempt to load router profiles.
-    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary::Profile)> {
+    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary_core::Profile)> {
         let Ok(profile_dir) = fs::read_dir(&path.join("profiles")) else {
             tracing::error!("not found");
             return Vec::new();
@@ -519,7 +519,7 @@ impl Config {
 
                 Some((
                     name,
-                    emissary::Profile {
+                    emissary_core::Profile {
                         last_activity: Duration::from_secs(profile.last_activity.unwrap_or(0)),
                         num_accepted: profile.num_accepted.unwrap_or(0),
                         num_connection: profile.num_connection.unwrap_or(0),
@@ -649,13 +649,13 @@ impl Config {
         }
 
         self.exploratory = match &mut self.exploratory {
-            None => Some(emissary::ExploratoryConfig {
+            None => Some(emissary_core::ExploratoryConfig {
                 inbound_len: arguments.exploratory.exploratory_inbound_len,
                 inbound_count: arguments.exploratory.exploratory_inbound_count,
                 outbound_len: arguments.exploratory.exploratory_outbound_len,
                 outbound_count: arguments.exploratory.exploratory_outbound_count,
             }),
-            Some(config) => Some(emissary::ExploratoryConfig {
+            Some(config) => Some(emissary_core::ExploratoryConfig {
                 inbound_len: arguments.exploratory.exploratory_inbound_len.or(config.inbound_len),
                 inbound_count: arguments
                     .exploratory

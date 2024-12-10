@@ -306,9 +306,6 @@ pub struct TransportManager<R: Runtime> {
     /// Connected routers.
     routers: HashSet<RouterId>,
 
-    // Runtime.
-    runtime: R,
-
     /// Subsystem handle passed onto enabled transports.
     subsystem_handle: SubsystemHandle,
 
@@ -319,7 +316,6 @@ pub struct TransportManager<R: Runtime> {
 impl<R: Runtime> TransportManager<R> {
     /// Create new [`TransportManager`].
     pub fn new(
-        runtime: R,
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
@@ -338,7 +334,6 @@ impl<R: Runtime> TransportManager<R> {
             poll_index: 0usize,
             routers: HashSet::new(),
             profile_storage,
-            runtime,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
         }
@@ -392,7 +387,6 @@ impl<R: Runtime> TransportManager<R> {
         self.transports.push(Box::new(
             Ntcp2Transport::new(
                 config,
-                self.runtime.clone(),
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),

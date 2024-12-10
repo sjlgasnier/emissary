@@ -67,7 +67,7 @@ pub struct Router<R: Runtime> {
 
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
-    pub async fn new(runtime: R, config: Config) -> crate::Result<(Self, Vec<u8>)> {
+    pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
         let now = R::time_since_epoch().as_millis() as u64;
         let local_key = StaticPrivateKey::from(config.static_key.clone());
         let test = config.signing_key.clone();
@@ -116,7 +116,6 @@ impl<R: Runtime> Router<R> {
         //
         // note: order of initialization is important
         let mut transport_manager = TransportManager::new(
-            runtime.clone(),
             local_key.clone(),
             local_signing_key,
             local_router_info.clone(), // TODO: zzz

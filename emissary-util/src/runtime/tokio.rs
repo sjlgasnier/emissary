@@ -16,9 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use emissary::runtime::{
+#![cfg(feature = "tokio")]
+
+use emissary_core::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
-    MetricsHandle, Runtime, TcpListener, TcpStream, UdpSocket,
+    MetricsHandle, Runtime as RuntimeT, TcpListener, TcpStream, UdpSocket,
 };
 use flate2::{
     write::{GzDecoder, GzEncoder},
@@ -40,13 +42,13 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-/// Logging target for the file.
+/// Logging targer for the file.
 const LOG_TARGET: &str = "emissary::runtime::tokio";
 
 #[derive(Clone)]
-pub struct TokioRuntime {}
+pub struct Runtime {}
 
-impl TokioRuntime {
+impl Runtime {
     pub fn new() -> Self {
         Self {}
     }
@@ -68,12 +70,12 @@ impl AsyncRead for TokioTcpStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<emissary::Result<usize>> {
+    ) -> Poll<emissary_core::Result<usize>> {
         let pinned = pin!(&mut self.0);
 
         match futures::ready!(pinned.poll_read(cx, buf)) {
             Ok(nread) => Poll::Ready(Ok(nread)),
-            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary_core::Error::Custom(error.to_string()))),
         }
     }
 }
@@ -83,58 +85,54 @@ impl AsyncWrite for TokioTcpStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<emissary::Result<usize>> {
+    ) -> Poll<emissary_core::Result<usize>> {
         let pinned = pin!(&mut self.0);
 
         match futures::ready!(pinned.poll_write(cx, buf)) {
             Ok(nwritten) => Poll::Ready(Ok(nwritten)),
-            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary_core::Error::Custom(error.to_string()))),
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<emissary::Result<()>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<emissary_core::Result<()>> {
         let pinned = pin!(&mut self.0);
 
         match futures::ready!(pinned.poll_flush(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary_core::Error::Custom(error.to_string()))),
         }
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<emissary::Result<()>> {
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<emissary_core::Result<()>> {
         let pinned = pin!(&mut self.0);
 
         match futures::ready!(pinned.poll_close(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(emissary::Error::Custom(error.to_string()))),
+            Err(error) => Poll::Ready(Err(emissary_core::Error::Custom(error.to_string()))),
         }
     }
 }
 
 impl TcpStream for TokioTcpStream {
     async fn connect(address: SocketAddr) -> Option<Self> {
-        match tokio::time::timeout(Duration::from_secs(10), net::TcpStream::connect(address)).await
-        {
-            Err(error) => {
-                tracing::debug!(target: LOG_TARGET, ?address, ?error, "failed to connect");
-                None
-            }
-            Ok(Err(error)) => {
-                tracing::debug!(target: LOG_TARGET, ?address, ?error, "failed to connect");
-                None
-            }
-            Ok(Ok(stream)) => stream
-                .set_nodelay(true)
-                .map(|()| Self::new(stream))
-                .map_err(|error| {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        ?error,
-                        "failed to configure `TCP_NODELAY`",
-                    )
-                })
-                .ok(),
-        }
+        net::TcpStream::connect(address)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?address,
+                    ?error,
+                    "failed to connect"
+                );
+            })
+            .ok()
+            .map(|stream| Self::new(stream))
     }
 }
 
@@ -143,35 +141,24 @@ pub struct TokioTcpListener(net::TcpListener);
 impl TcpListener<TokioTcpStream> for TokioTcpListener {
     // TODO: can be made sync with `socket2`
     async fn bind(address: SocketAddr) -> Option<Self> {
-        tracing::debug!(
-            target: LOG_TARGET,
-            ?address,
-            "create tcp socket",
-        );
-
         net::TcpListener::bind(&address)
             .await
+            .map_err(|error| {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?address,
+                    ?error,
+                    "failed to bind"
+                );
+            })
             .ok()
             .map(|listener| TokioTcpListener(listener))
     }
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
         match futures::ready!(self.0.poll_accept(cx)) {
-            Err(_) => Poll::Ready(None),
-            Ok((stream, _)) =>
-                return Poll::Ready(
-                    stream
-                        .set_nodelay(true)
-                        .map(|()| TokioTcpStream::new(stream))
-                        .map_err(|error| {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "failed to configure `TCP_NODELAY`",
-                            )
-                        })
-                        .ok(),
-                ),
+            Err(_) => return Poll::Ready(None),
+            Ok((stream, _)) => return Poll::Ready(Some(TokioTcpStream::new(stream))),
         }
     }
 }
@@ -302,7 +289,7 @@ impl MetricsHandle for TokioMetricsHandle {
     }
 }
 
-impl Runtime for TokioRuntime {
+impl RuntimeT for Runtime {
     type TcpStream = TokioTcpStream;
     type UdpSocket = TokioUdpSocket;
     type TcpListener = TokioTcpListener;
@@ -337,12 +324,6 @@ impl Runtime for TokioRuntime {
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
         let builder = PrometheusBuilder::new()
             .with_http_listener("0.0.0.0:12842".parse::<SocketAddr>().expect(""));
-
-        tracing::debug!(
-            target: LOG_TARGET,
-            port = 12842,
-            "starting prometheus server",
-        );
 
         metrics
             .into_iter()

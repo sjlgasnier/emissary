@@ -56,6 +56,3 @@ tracing-subscriber = { workspace = true }
 default = ["std"]
 std = ["dep:parking_lot"]
 no_std = ["dep:spin"]
-
-[lib]
-name = "emissary"

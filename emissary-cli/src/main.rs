@@ -21,11 +21,11 @@ use crate::{
     config::Config,
     error::Error,
     logger::init_logger,
-    tokio_runtime::TokioRuntime,
 };
 
 use clap::Parser;
-use emissary::router::Router;
+use emissary_core::router::Router;
+use emissary_util::runtime::tokio::Runtime;
 
 use std::{fs::File, io::Write};
 
@@ -34,7 +34,6 @@ mod config;
 mod error;
 mod logger;
 mod su3;
-mod tokio_runtime;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -55,9 +54,7 @@ async fn main() -> anyhow::Result<()> {
     match arguments.command {
         None => {
             let path = config.base_path.clone();
-            let config: emissary::Config = config.into();
-            let (router, local_router_info) =
-                Router::new(TokioRuntime::new(), config).await.unwrap();
+            let (router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
 
             // TODO: ugly
             let mut file = File::create(path.join("router.info"))?;

@@ -1806,8 +1806,6 @@ mod tests {
 
     #[tokio::test]
     async fn active_session_destroyed() {
-        crate::util::init_logger();
-
         let socket_factory = SocketFactory::new().await;
 
         let mut manager1 = {

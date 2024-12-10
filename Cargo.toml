@@ -11,8 +11,9 @@ categories = []
 resolver = "2"
 
 members = [
-  "emissary-core",
   "emissary-cli",
+  "emissary-core",
+  "emissary-util",
   "eepnet/tests/util/",
   "eepnet/tests/*/test-runner",
 ]
