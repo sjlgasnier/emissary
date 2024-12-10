@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{primitives::Str, tunnel::TunnelPoolConfig};
+use crate::{primitives::Str, profile::Profile, tunnel::TunnelPoolConfig};
 
 use alloc::{string::String, vec::Vec};
 
@@ -118,6 +118,9 @@ pub struct Config {
     /// Known routers.
     pub routers: Vec<Vec<u8>>,
 
+    /// Known router profiles.
+    pub profiles: Vec<(String, Profile)>,
+
     /// Should the node be run as a floodfill router.
     pub floodfill: bool,
 
@@ -129,4 +132,7 @@ pub struct Config {
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<ExploratoryConfig>,
+
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
 }

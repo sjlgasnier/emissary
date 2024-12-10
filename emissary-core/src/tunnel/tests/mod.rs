@@ -25,7 +25,7 @@ use crate::{
         tunnel::{build::short, data, gateway},
         Message,
     },
-    primitives::{MessageId, RouterId, RouterInfo, TunnelId},
+    primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
         hop::{
@@ -52,7 +52,7 @@ use core::{
 };
 
 /// Make new router.
-pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
+pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
     let mut static_key_bytes = vec![0u8; 32];
     let mut signing_key_bytes = vec![0u8; 32];
 
@@ -62,7 +62,11 @@ pub fn make_router() -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
     let sk = StaticPrivateKey::from(static_key_bytes.clone());
     let pk = sk.public();
 
-    let router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+    let mut router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+    if fast {
+        router_info.capabilities = Capabilities::parse(&Str::from("XR")).expect("to succeed");
+    }
+
     let router_hash: Vec<u8> = router_info.identity.id().into();
     let router_hash = Bytes::from(router_hash);
 
@@ -107,8 +111,8 @@ impl fmt::Debug for TestTransitTunnelManager {
 }
 
 impl TestTransitTunnelManager {
-    pub fn new() -> Self {
-        let (router_hash, public_key, noise, router_info) = make_router();
+    pub fn new(fast: bool) -> Self {
+        let (router_hash, public_key, noise, router_info) = make_router(fast);
         let (transit_tx, transit_rx) = channel(64);
         let (message_tx, message_rx) = channel(64);
         let routing_table =
@@ -179,6 +183,7 @@ impl Future for TestTransitTunnelManager {
 
 /// Build outbound tunnel.
 pub fn build_outbound_tunnel(
+    fast: bool,
     num_hops: usize,
 ) -> (
     Bytes,
@@ -189,8 +194,8 @@ pub fn build_outbound_tunnel(
         Vec<(Bytes, StaticPublicKey)>,
         Vec<TestTransitTunnelManager>,
     ) = (0..num_hops)
-        .map(|manager| {
-            let manager = TestTransitTunnelManager::new();
+        .map(|i| {
+            let manager = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
 
             (
                 (manager.router_hash.clone(), manager.public_key.clone()),
@@ -199,7 +204,7 @@ pub fn build_outbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise, _router_info) = make_router();
+    let (local_hash, local_pk, local_noise, _router_info) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -240,14 +245,15 @@ pub fn build_outbound_tunnel(
 
 /// Build inbound tunnel.
 pub fn build_inbound_tunnel(
+    fast: bool,
     num_hops: usize,
 ) -> (Bytes, InboundTunnel, Vec<TestTransitTunnelManager>) {
     let (hops, mut transit_managers): (
         Vec<(Bytes, StaticPublicKey)>,
         Vec<TestTransitTunnelManager>,
     ) = (0..num_hops)
-        .map(|manager| {
-            let manager = TestTransitTunnelManager::new();
+        .map(|i| {
+            let manager = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
 
             (
                 (manager.router_hash.clone(), manager.public_key.clone()),
@@ -256,7 +262,7 @@ pub fn build_inbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise, _router_info) = make_router();
+    let (local_hash, local_pk, local_noise, _router_info) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let (tx, rx) = channel(64);

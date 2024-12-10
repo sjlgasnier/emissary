@@ -21,7 +21,7 @@ use crate::{
         base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     primitives::{RouterAddress, RouterId, RouterInfo, Str, TransportKind},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener, TcpStream},
     subsystem::SubsystemHandle,
     transports::{
@@ -90,7 +90,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage<R>,
         metrics: R::MetricsHandle,
     ) -> crate::Result<Self> {
         // TODO: handle the case when user doesn't want to enable ntcp2 listener
@@ -109,7 +109,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
             local_signing_key,
             local_router_info,
             subsystem_handle,
-            router_storage,
+            profile_storage,
         )?;
 
         tracing::trace!(

@@ -31,7 +31,35 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::PathBuf,
+    time::Duration,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Profile {
+    /// Last activity as seconds since UNIX epoch.
+    last_activity: Option<u64>,
+
+    /// Number of accepted tunnels.
+    num_accepted: Option<usize>,
+
+    /// Number of successful connections.
+    num_connection: Option<usize>,
+
+    /// Number of dial failures.
+    num_dial_failures: Option<usize>,
+
+    /// Number of rejected tunnels.
+    num_rejected: Option<usize>,
+
+    /// Number of test failures for tunnels where the router was a selected hop.
+    num_test_failures: Option<usize>,
+
+    /// Number of test successes for tunnels where the router was a selected hop.
+    num_test_successes: Option<usize>,
+
+    /// Number of tunnel build request timeouts where this router was a selected hop.
+    num_unaswered: Option<usize>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ExploratoryConfig {
@@ -69,6 +97,8 @@ struct EmissaryConfig {
     i2cp: Option<I2cpConfig>,
     sam: Option<SamConfig>,
     exploratory: Option<ExploratoryConfig>,
+    #[serde(default)]
+    insecure_tunnels: bool,
 }
 
 /// Router configuration.
@@ -88,6 +118,9 @@ pub struct Config {
     /// Router info.
     routers: Vec<Vec<u8>>,
 
+    /// Profiles.
+    profiles: Vec<(String, emissary::Profile)>,
+
     /// SAMv3 config.
     sam_config: Option<emissary::SamConfig>,
 
@@ -105,6 +138,9 @@ pub struct Config {
 
     /// Network ID.
     pub net_id: Option<u8>,
+
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
 }
 
 impl Into<emissary::Config> for Config {
@@ -115,11 +151,13 @@ impl Into<emissary::Config> for Config {
             ntcp2_config: self.ntcp2_config,
             i2cp_config: self.i2cp_config,
             routers: self.routers,
+            profiles: self.profiles,
             samv3_config: self.sam_config,
             floodfill: self.floodfill,
             caps: self.caps,
             net_id: self.net_id,
             exploratory: self.exploratory,
+            insecure_tunnels: self.insecure_tunnels,
         }
     }
 }
@@ -150,6 +188,9 @@ impl TryFrom<Option<PathBuf>> for Config {
         // if base path doesn't exist, create it and return empty config
         if !path.exists() {
             fs::create_dir_all(&path)?;
+            fs::create_dir_all(path.join("routers"))?;
+            fs::create_dir_all(path.join("profiles"))?;
+
             return Ok(Config::new_empty(path)?);
         }
 
@@ -205,39 +246,8 @@ impl TryFrom<Option<PathBuf>> for Config {
             router_config,
         )?;
 
-        // fetch known routers
-        let router_dir = match fs::read_dir(&path.join("routers")) {
-            Ok(router_dir) => router_dir,
-            Err(error) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to open router directory, try reseeding",
-                );
-
-                return Ok(config);
-            }
-        };
-
-        config.routers = router_dir
-            .into_iter()
-            .filter_map(|entry| {
-                let dir = entry.ok()?;
-                let mut file = fs::File::open(dir.path()).ok()?;
-
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents).ok()?;
-
-                Some(contents)
-            })
-            .collect::<Vec<_>>();
-
-        if config.routers.is_empty() {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "no routers found, try reseeding the router",
-            );
-        }
+        config.routers = Self::load_router_infos(&path);
+        config.profiles = Self::load_router_profiles(&path);
 
         Ok(config)
     }
@@ -352,6 +362,7 @@ impl Config {
             floodfill: false,
             caps: None,
             net_id: None,
+            insecure_tunnels: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -366,6 +377,7 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
+            profiles: Vec::new(),
             exploratory: None,
             ntcp2_config: Some(emissary::Ntcp2Config {
                 port: 8888u16,
@@ -384,6 +396,7 @@ impl Config {
             floodfill: false,
             caps: None,
             net_id: None,
+            insecure_tunnels: false,
         })
     }
 
@@ -414,6 +427,7 @@ impl Config {
                     floodfill: false,
                     caps: None,
                     net_id: None,
+                    insecure_tunnels: false,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -427,6 +441,7 @@ impl Config {
         Ok(Self {
             base_path,
             routers: Vec::new(),
+            profiles: Vec::new(),
             exploratory: config.exploratory.map(|config| emissary::ExploratoryConfig {
                 inbound_len: config.inbound_len,
                 inbound_count: config.inbound_count,
@@ -450,7 +465,73 @@ impl Config {
             floodfill: config.floodfill,
             caps: config.caps,
             net_id: config.net_id,
+            insecure_tunnels: config.insecure_tunnels,
         })
+    }
+
+    /// Attempt to load router infos.
+    fn load_router_infos(path: &PathBuf) -> Vec<Vec<u8>> {
+        let Ok(router_dir) = fs::read_dir(&path.join("routers")) else {
+            return Vec::new();
+        };
+
+        router_dir
+            .into_iter()
+            .filter_map(|entry| {
+                let dir = entry.ok()?;
+                let mut file = fs::File::open(dir.path()).ok()?;
+
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents).ok()?;
+
+                Some(contents)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Attempt to load router profiles.
+    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary::Profile)> {
+        let Ok(profile_dir) = fs::read_dir(&path.join("profiles")) else {
+            tracing::error!("not found");
+            return Vec::new();
+        };
+
+        profile_dir
+            .into_iter()
+            .filter_map(|entry| {
+                let dir = entry.ok()?;
+                let mut file = fs::File::open(dir.path()).ok()?;
+
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).ok()?;
+
+                let profile = toml::from_str::<Profile>(&contents).ok()?;
+                let name = {
+                    let input = dir.path().to_owned();
+                    let input = input.to_str().expect("to succeed");
+
+                    let start = input.find("profile-")?;
+                    let start = start + "profile-".len();
+                    let end = input.find(".toml")?;
+
+                    input[start..end].to_string()
+                };
+
+                Some((
+                    name,
+                    emissary::Profile {
+                        last_activity: Duration::from_secs(profile.last_activity.unwrap_or(0)),
+                        num_accepted: profile.num_accepted.unwrap_or(0),
+                        num_connection: profile.num_connection.unwrap_or(0),
+                        num_dial_failures: profile.num_dial_failures.unwrap_or(0),
+                        num_rejected: profile.num_rejected.unwrap_or(0),
+                        num_test_failures: profile.num_test_failures.unwrap_or(0),
+                        num_test_successes: profile.num_test_successes.unwrap_or(0),
+                        num_unaswered: profile.num_unaswered.unwrap_or(0),
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Reseed router from `file`.
@@ -545,20 +626,17 @@ impl Config {
         Ok(num_routers)
     }
 
-    /// Write local `RouterInfo` to disk.
-    #[allow(unused)]
-    pub fn update_router_info(&self, router_info: Vec<u8>) -> crate::Result<()> {
-        let mut file = fs::File::create(self.base_path.join("routerInfo.dat"))?;
-        file.write_all(&router_info)?;
-
-        Ok(())
-    }
-
     /// Attempt to merge `arguments` with [`Config`].
     pub fn merge(mut self, arguments: &Arguments) -> Self {
         if let Some(true) = arguments.floodfill {
             if !self.floodfill {
                 self.floodfill = true;
+            }
+        }
+
+        if let Some(true) = arguments.insecure_tunnels {
+            if !self.insecure_tunnels {
+                self.insecure_tunnels = true;
             }
         }
 
@@ -692,6 +770,7 @@ mod tests {
             floodfill: false,
             caps: None,
             net_id: None,
+            insecure_tunnels: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

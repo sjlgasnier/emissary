@@ -22,7 +22,7 @@ use crate::{
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{MetricType, Runtime},
     sam::SamServer,
     subsystem::SubsystemKind,
@@ -53,9 +53,6 @@ pub enum RouterEvent {}
 
 /// Router.
 pub struct Router<R: Runtime> {
-    /// Runtime used by the router.
-    runtime: R,
-
     /// Transport manager
     ///
     /// Polls both NTCP2 and SSU2 transports.
@@ -90,7 +87,8 @@ impl<R: Runtime> Router<R> {
         let exploratory_config = config.exploratory.clone();
         let floodfill = config.floodfill;
         let net_id = config.net_id.unwrap_or(NET_ID);
-        let router_storage = RouterStorage::new(&config.routers);
+        let insecure_tunnels = config.insecure_tunnels;
+        let profile_storage = ProfileStorage::<R>::new(&config.routers, &config.profiles);
         let local_router_info = RouterInfo::new(now, config);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
@@ -122,7 +120,7 @@ impl<R: Runtime> Router<R> {
             local_key.clone(),
             local_signing_key,
             local_router_info.clone(), // TODO: zzz
-            router_storage.clone(),
+            profile_storage.clone(),
             metrics_handle.clone(),
         );
 
@@ -137,8 +135,9 @@ impl<R: Runtime> Router<R> {
                     local_router_info.clone(),
                     local_key,
                     metrics_handle.clone(),
-                    router_storage.clone(),
+                    profile_storage.clone(),
                     exploratory_config.into(),
+                    insecure_tunnels,
                 );
 
             R::spawn(tunnel_manager);
@@ -153,7 +152,7 @@ impl<R: Runtime> Router<R> {
                 local_router_id,
                 floodfill,
                 transport_service,
-                router_storage.clone(),
+                profile_storage.clone(),
                 metrics_handle.clone(),
                 exploratory_pool_handle,
                 net_id,
@@ -198,7 +197,6 @@ impl<R: Runtime> Router<R> {
 
         Ok((
             Self {
-                runtime,
                 local_router_info,
                 transport_manager,
                 _tunnel_manager_handle: tunnel_manager_handle,

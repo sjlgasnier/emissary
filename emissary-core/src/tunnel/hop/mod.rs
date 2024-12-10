@@ -28,6 +28,7 @@ use crate::{
 };
 
 use bytes::Bytes;
+use hashbrown::HashSet;
 use thingbuf::mpsc::Receiver;
 
 use alloc::{collections::VecDeque, vec::Vec};
@@ -100,6 +101,9 @@ pub trait Tunnel: Send {
 
     /// Get reference to tunnel ID.
     fn tunnel_id(&self) -> &TunnelId;
+
+    /// Get `RouterId`s of tunnel hops.
+    fn hops(&self) -> HashSet<RouterId>;
 }
 
 /// Tunnel builder.

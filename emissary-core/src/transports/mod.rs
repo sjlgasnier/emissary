@@ -21,7 +21,7 @@ use crate::{
     error::ChannelError,
     i2np::Message,
     primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
@@ -123,7 +123,7 @@ impl Default for ProtocolCommand {
 /// but interact with them, namely `NetDb` and `TunnelManager`. [`TransportService`] allows
 /// the subsystem to establish new connections, close existing connections, send and receive
 /// messages to and from the network.
-pub struct TransportService {
+pub struct TransportService<R: Runtime> {
     /// TX channel for sending commands to [`TransportManager`].
     cmd_tx: Sender<ProtocolCommand>,
 
@@ -134,13 +134,13 @@ pub struct TransportService {
     pending_events: VecDeque<InnerSubsystemEvent>,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, Sender<SubsystemCommand>>,
 }
 
-impl TransportService {
+impl<R: Runtime> TransportService<R> {
     /// Attempt to establish connection to `router`.
     ///
     /// The connection is established in the background and the result
@@ -166,7 +166,7 @@ impl TransportService {
             return Ok(());
         }
 
-        match self.router_storage.get(router) {
+        match self.profile_storage.get(router) {
             Some(router_info) => self
                 .cmd_tx
                 .try_send(ProtocolCommand::Connect {
@@ -225,11 +225,11 @@ impl TransportService {
         Self,
         Receiver<ProtocolCommand>,
         Sender<InnerSubsystemEvent>,
-        RouterStorage,
+        ProfileStorage<R>,
     ) {
         let (event_tx, event_rx) = channel(64);
         let (cmd_tx, cmd_rx) = channel(64);
-        let router_storage = RouterStorage::new(&Vec::new());
+        let profile_storage = ProfileStorage::new(&Vec::new(), &Vec::new());
 
         (
             TransportService {
@@ -237,16 +237,16 @@ impl TransportService {
                 event_rx,
                 pending_events: VecDeque::new(),
                 routers: HashMap::new(),
-                router_storage: router_storage.clone(),
+                profile_storage: profile_storage.clone(),
             },
             cmd_rx,
             event_tx,
-            router_storage,
+            profile_storage,
         )
     }
 }
 
-impl Stream for TransportService {
+impl<R: Runtime> Stream for TransportService<R> {
     type Item = SubsystemEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -301,7 +301,7 @@ pub struct TransportManager<R: Runtime> {
     poll_index: usize,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashSet<RouterId>,
@@ -323,7 +323,7 @@ impl<R: Runtime> TransportManager<R> {
         local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage<R>,
         metrics_handle: R::MetricsHandle,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
@@ -337,7 +337,7 @@ impl<R: Runtime> TransportManager<R> {
             metrics_handle,
             poll_index: 0usize,
             routers: HashSet::new(),
-            router_storage,
+            profile_storage,
             runtime,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
@@ -355,7 +355,7 @@ impl<R: Runtime> TransportManager<R> {
     /// Register new subsystem to [`TransportManager`].
     ///
     /// The number of subsystems is fixed and the initialization order is important.
-    pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService {
+    pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService<R> {
         let (event_tx, event_rx) = channel(64);
 
         tracing::debug!(
@@ -371,7 +371,7 @@ impl<R: Runtime> TransportManager<R> {
             event_rx,
             pending_events: VecDeque::new(),
             routers: HashMap::new(),
-            router_storage: self.router_storage.clone(),
+            profile_storage: self.profile_storage.clone(),
         }
     }
 
@@ -396,7 +396,7 @@ impl<R: Runtime> TransportManager<R> {
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),
-                self.router_storage.clone(),
+                self.profile_storage.clone(),
                 self.metrics_handle.clone(),
             )
             .await?,

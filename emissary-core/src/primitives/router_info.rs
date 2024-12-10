@@ -19,8 +19,8 @@
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
     primitives::{
-        router_address::TransportKind, Date, Mapping, RouterAddress, RouterIdentity, Str,
-        LOG_TARGET,
+        router_address::TransportKind, Capabilities, Date, Mapping, RouterAddress, RouterIdentity,
+        Str, LOG_TARGET,
     },
     runtime::Runtime,
     Config,
@@ -38,44 +38,25 @@ use alloc::{string::ToString, vec, vec::Vec};
 use core::str::FromStr;
 
 /// Router information
-//
-// TODO: this should be cheaply clonable
 #[derive(Debug, Clone)]
 pub struct RouterInfo {
-    /// Router identity.
-    pub identity: RouterIdentity,
-
-    /// When the router info was published.
-    pub published: Date,
-
     /// Router addresses.
     pub addresses: HashMap<TransportKind, RouterAddress>,
 
+    /// Router capabilities.
+    pub capabilities: Capabilities,
+
+    /// Router identity.
+    pub identity: RouterIdentity,
+
+    /// Network ID.
+    pub net_id: u8,
+
     /// Router options.
     pub options: HashMap<Str, Str>,
-}
 
-// TODO: remove
-impl core::fmt::Display for RouterInfo {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "\n------------\n")?;
-        write!(f, "RouterInfo\n")?;
-
-        write!(f, "published = {:?}\n", &self.published)?;
-        write!(f, "addresess:\n")?;
-
-        for (key, address) in &self.addresses {
-            write!(f, "--> {key:?} => {address}")?;
-        }
-
-        write!(f, "options:\n")?;
-        for (key, value) in &self.options {
-            write!(f, "--> {key}={value}\n")?;
-        }
-        write!(f, "------------")?;
-
-        Ok(())
-    }
+    /// When the router info was published.
+    pub published: Date,
 }
 
 impl RouterInfo {
@@ -105,28 +86,28 @@ impl RouterInfo {
                 .map_or_else(|| Str::from("2"), |value| Str::from(value.to_string())),
         );
 
-        let caps = Mapping::new(
-            Str::from("caps"),
-            match caps {
-                Some(caps) => Str::from(caps),
-                None => match config.floodfill {
-                    true => Str::from("Xf"),
-                    false => Str::from("L"),
-                },
+        let caps = match caps {
+            Some(caps) => Str::from(caps),
+            None => match config.floodfill {
+                true => Str::from("Xf"),
+                false => Str::from("L"),
             },
-        );
+        };
 
         let router_version = Mapping::new(
             Str::from_str("router.version").unwrap(),
             Str::from_str("0.9.62").unwrap(),
         );
-        let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
+        let caps_mapping = Mapping::new(Str::from("caps"), caps.clone());
+        let options = Mapping::into_hashmap(vec![net_id, caps_mapping, router_version]);
 
         RouterInfo {
-            identity,
-            published: Date::new(now),
             addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2)]),
+            capabilities: Capabilities::parse(&caps).expect("to succeed"),
+            identity,
+            net_id: config.net_id.unwrap_or(2),
             options,
+            published: Date::new(now),
         }
     }
 
@@ -146,6 +127,50 @@ impl RouterInfo {
         // ignore `peer_size`
         let (rest, _) = be_u8(rest)?;
         let (rest, options) = Mapping::parse_multi_frame(rest)?;
+        let options = Mapping::into_hashmap(options);
+
+        let capabilities = match options.get(&Str::from("caps")) {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "router capabilities missing",
+                );
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
+            Some(caps) => match Capabilities::parse(&caps) {
+                Some(caps) => caps,
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %caps,
+                        "invalid capabilities",
+                    );
+                    return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                }
+            },
+        };
+
+        let net_id = match options.get(&Str::from("netId")) {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "network id not specified",
+                );
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
+            Some(net_id) => match net_id.parse::<u8>() {
+                Ok(net_id) => net_id,
+                Err(error) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %net_id,
+                        ?error,
+                        "failed to parse net id",
+                    );
+                    return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                }
+            },
+        };
 
         identity.signing_key().verify(input, rest).or_else(|error| {
             tracing::warn!(
@@ -162,7 +187,9 @@ impl RouterInfo {
                 identity,
                 published,
                 addresses,
-                options: Mapping::into_hashmap(options),
+                options,
+                capabilities,
+                net_id,
             },
         ))
     }
@@ -204,23 +231,31 @@ impl RouterInfo {
     }
 
     /// Try to parse router information from `bytes`.
-    pub fn parse<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Self> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
     /// Returns `true` if the router is a floodfill router.
     pub fn is_floodfill(&self) -> bool {
-        self.options
-            .get(&Str::from_str("caps").expect("valid string"))
-            .map_or_else(|| false, |caps| caps.contains("f"))
+        self.capabilities.is_floodfill()
+    }
+
+    /// Returns `true` if the router is considered reachable.
+    ///
+    /// Router is considered reachable if its caps don't specify otherwise and it has at least one
+    /// published address.
+    pub fn is_reachable(&self) -> bool {
+        // TODO: add ssu2 support
+        self.capabilities.is_reachable()
+            && self.addresses.get(&TransportKind::Ntcp2).map_or(false, |address| {
+                address.options().get(&Str::from("host")).is_some()
+                    && address.options().get(&Str::from("port")).is_some()
+            })
     }
 
     /// Get network ID of the [`RouterInfo`].
-    pub fn net_id(&self) -> Option<u8> {
-        self.options
-            .get(&Str::from("netId"))
-            .map(|value| value.parse::<u8>().ok())
-            .flatten()
+    pub fn net_id(&self) -> u8 {
+        self.net_id
     }
 }
 
@@ -245,6 +280,31 @@ impl RouterInfo {
         Self::from_keys::<R>(static_key, signing_key)
     }
 
+    /// Create new random [`RouterInfo`] and serialize it.
+    pub fn random_with_keys<R: Runtime>() -> (Self, StaticPrivateKey, SigningPrivateKey) {
+        let raw_static_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+        let static_key = StaticPrivateKey::from(raw_static_key.clone());
+
+        let raw_signing_key = {
+            let mut key_bytes = vec![0u8; 32];
+            R::rng().fill_bytes(&mut key_bytes);
+
+            key_bytes
+        };
+        let signing_key = SigningPrivateKey::new(&raw_signing_key).unwrap();
+
+        (
+            Self::from_keys::<R>(raw_static_key, raw_signing_key),
+            static_key,
+            signing_key,
+        )
+    }
+
     /// Create new random [`RouterInfo`] for a floodfill router.
     pub fn floodfill<R: Runtime>() -> Self {
         let static_key = {
@@ -262,7 +322,9 @@ impl RouterInfo {
         };
 
         let mut info = Self::from_keys::<R>(static_key, signing_key);
-        info.options.insert(Str::from("caps"), Str::from("f"));
+        info.options.insert(Str::from("caps"), Str::from("XfR"));
+        info.options.insert(Str::from("netId"), Str::from("2"));
+        info.capabilities = Capabilities::parse(&Str::from("XfR")).expect("to succeed");
 
         info
     }
@@ -271,9 +333,22 @@ impl RouterInfo {
     pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> Self {
         let identity = RouterIdentity::from_keys(static_key, signing_key).expect("to succeed");
 
-        // let ntcp2_config = ntcp2_config.unwrap();
         let ntcp2_port = R::rng().next_u32() as u16;
-        let ntcp2_host = String::from("127.0.0.1");
+        let ntcp2_host = format!(
+            "{}.{}.{}.{}",
+            {
+                loop {
+                    let address = R::rng().next_u32() % 256;
+
+                    if address != 0 {
+                        break address;
+                    }
+                }
+            },
+            R::rng().next_u32() % 256,
+            R::rng().next_u32() % 256,
+            R::rng().next_u32() % 256,
+        );
         let ntcp2_key = {
             let mut key_bytes = vec![0u8; 32];
             R::rng().fill_bytes(&mut key_bytes);
@@ -297,10 +372,12 @@ impl RouterInfo {
         let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
 
         RouterInfo {
-            identity,
-            published: Date::new(R::rng().next_u64()),
             addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2)]),
+            capabilities: Capabilities::parse(&Str::from("L")).expect("to succeed"),
+            identity,
+            net_id: 2,
             options,
+            published: Date::new(R::rng().next_u64()),
         }
     }
 }
@@ -308,8 +385,8 @@ impl RouterInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::str::FromStr;
+    use crate::runtime::mock::MockRuntime;
+    use std::{str::FromStr, time::Duration};
 
     #[test]
     fn parse_router_1() {
@@ -465,5 +542,205 @@ mod tests {
         let router_info_bytes = include_bytes!("../../test-vectors/router4.dat");
 
         assert!(RouterInfo::parse(router_info_bytes).unwrap().is_floodfill())
+    }
+
+    #[test]
+    fn net_id_missing() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([(Str::from("caps"), Str::from("L"))]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn caps_missing() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn hidden_router_not_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("HL")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("HL")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn unreachable_router_not_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("UL")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("UL")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn reachable_but_no_published_address() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_unpublished(vec![1u8; 32]),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LR")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn reachable_explicitly_specified() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LR")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    // router doesn't explicitly specify the `R` flag
+    #[test]
+    fn maybe_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([(
+                TransportKind::Ntcp2,
+                RouterAddress::new_published(
+                    vec![1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".to_string(),
+                ),
+            )]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("Xf")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("Xf")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
     }
 }

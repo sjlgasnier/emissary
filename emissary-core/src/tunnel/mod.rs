@@ -20,7 +20,7 @@ use crate::{
     crypto::StaticPrivateKey,
     i2np::{Message, MessageType},
     primitives::{MessageId, RouterId, RouterInfo, TunnelId},
-    router_storage::RouterStorage,
+    profile::ProfileStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transports::TransportService,
@@ -96,7 +96,7 @@ pub struct TunnelManager<R: Runtime> {
     command_rx: Receiver<TunnelManagerCommand, CommandRecycle>,
 
     /// Exploratory tunnel/hop selector.
-    exploratory_selector: ExploratorySelector,
+    exploratory_selector: ExploratorySelector<R>,
 
     /// Garlic message handler.
     garlic: GarlicHandler<R>,
@@ -123,7 +123,7 @@ pub struct TunnelManager<R: Runtime> {
     router_info: RouterInfo,
 
     /// Router storage.
-    router_storage: RouterStorage,
+    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -132,7 +132,7 @@ pub struct TunnelManager<R: Runtime> {
     routing_table: RoutingTable,
 
     /// Transport service.
-    service: TransportService,
+    service: TransportService<R>,
 }
 
 impl<R: Runtime> TunnelManager<R> {
@@ -141,12 +141,13 @@ impl<R: Runtime> TunnelManager<R> {
     /// Returns a [`TunnelManager`] object, a [`TunnelManagerHandle`] which can be used to create
     /// new tunnel pools and a [`TunnelPoolHandle`] for the exploratory tunnel pool.
     pub fn new(
-        service: TransportService,
+        service: TransportService<R>,
         router_info: RouterInfo,
         local_key: StaticPrivateKey,
         metrics_handle: R::MetricsHandle,
-        router_storage: RouterStorage,
+        profile_storage: ProfileStorage<R>,
         exploratory_config: TunnelPoolConfig,
+        insecure_tunnels: bool,
     ) -> (
         Self,
         TunnelManagerHandle,
@@ -155,6 +156,7 @@ impl<R: Runtime> TunnelManager<R> {
     ) {
         tracing::info!(
             target: LOG_TARGET,
+            ?insecure_tunnels,
             "starting tunnel manager",
         );
 
@@ -184,8 +186,9 @@ impl<R: Runtime> TunnelManager<R> {
         let (pool_handle, exploratory_selector) = {
             let build_parameters = TunnelPoolBuildParameters::new(exploratory_config);
             let selector = ExploratorySelector::new(
-                router_storage.clone(),
+                profile_storage.clone(),
                 build_parameters.context_handle.clone(),
+                insecure_tunnels,
             );
             let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
                 build_parameters,
@@ -218,7 +221,7 @@ impl<R: Runtime> TunnelManager<R> {
                 pending_outbound: HashSet::new(),
                 router_info,
                 routers: HashMap::new(),
-                router_storage,
+                profile_storage,
                 routing_table,
                 service,
             },
@@ -235,7 +238,7 @@ impl<R: Runtime> TunnelManager<R> {
 
     /// Send `message` to router identified by `router_id`.
     ///
-    /// If the router is not connected, its information is looked up from `RouterStorage` and if it
+    /// If the router is not connected, its information is looked up from `ProfileStorage` and if it
     /// exists, it will be dialed and if the connection is established successfully, any pending
     /// messages will be sent to the router once the connection has been registered to
     /// [`TunnelManager`].

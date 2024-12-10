@@ -38,6 +38,7 @@ use crate::{
 };
 
 use futures::{future::BoxFuture, FutureExt};
+use hashbrown::HashSet;
 use thingbuf::mpsc::Receiver;
 
 use alloc::{boxed::Box, vec::Vec};
@@ -288,6 +289,10 @@ impl Tunnel for InboundTunnel {
     fn tunnel_id(&self) -> &TunnelId {
         &self.tunnel_id
     }
+
+    fn hops(&self) -> HashSet<RouterId> {
+        self.hops.iter().map(|hop| hop.router.clone()).collect()
+    }
 }
 
 impl Future for InboundTunnel {
@@ -359,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn fragment_reception_works() {
-        let (_, mut tunnel, mut hops) = build_inbound_tunnel(3usize);
+        let (_, mut tunnel, mut hops) = build_inbound_tunnel(true, 3usize);
         let original = (0..3 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
 
         let message = MessageBuilder::standard()

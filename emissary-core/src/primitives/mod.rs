@@ -18,6 +18,7 @@
 
 use core::{fmt, ops::Deref};
 
+pub use capabilities::Capabilities;
 pub use date::Date;
 pub use destination::{Destination, DestinationId};
 pub use leaseset2::{Lease, LeaseSet2, LeaseSet2Header};
@@ -27,6 +28,7 @@ pub use router_identity::{RouterId, RouterIdentity};
 pub use router_info::RouterInfo;
 pub use string::Str;
 
+mod capabilities;
 mod date;
 mod destination;
 mod leaseset2;
