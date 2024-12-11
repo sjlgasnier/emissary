@@ -492,7 +492,6 @@ impl Config {
     /// Attempt to load router profiles.
     fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary_core::Profile)> {
         let Ok(profile_dir) = fs::read_dir(&path.join("profiles")) else {
-            tracing::error!("not found");
             return Vec::new();
         };
 

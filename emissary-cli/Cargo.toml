@@ -13,7 +13,8 @@ readme.workspace = true
 anyhow = "1.0.86"
 clap = { version = "4.5.7", features = ["derive"] }
 emissary-core = { path = "../emissary-core", features = ["std"] }
-emissary-util = { path = "../emissary-util", features = ["tokio"] }
+emissary-util = { path = "../emissary-util", features = ["async-std"] }
+# emissary-util = { path = "../emissary-util", features = ["tokio"] }
 futures = "0.3.30"
 home = "0.5.9"
 metrics = "0.23.0"

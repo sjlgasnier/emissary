@@ -83,7 +83,7 @@ impl TcpListener<NoopTcpStream> for NoopTcpListener {
         std::future::pending()
     }
 
-    fn poll_accept(&self, _cx: &mut Context<'_>) -> Poll<Option<NoopTcpStream>> {
+    fn poll_accept(&mut self, _cx: &mut Context<'_>) -> Poll<Option<NoopTcpStream>> {
         Poll::Pending
     }
 }

@@ -16,8 +16,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg(feature = "tokio")]
+#![cfg(feature = "async-std")]
 
+use async_std::net;
 use emissary_core::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
     MetricsHandle, Runtime as RuntimeT, TcpListener, TcpStream, UdpSocket,
@@ -26,12 +27,15 @@ use flate2::{
     write::{GzDecoder, GzEncoder},
     Compression,
 };
-use futures::{AsyncRead as _, AsyncWrite as _, Stream};
+use futures::{
+    channel::mpsc::{channel, Receiver, Sender},
+    future::BoxFuture,
+    stream::{BoxStream, FuturesUnordered},
+    AsyncRead as _, AsyncWrite as _, FutureExt, Stream, StreamExt,
+};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use rand_core::{CryptoRng, RngCore};
-use tokio::{io::ReadBuf, net, task};
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
     future::Future,
@@ -43,7 +47,7 @@ use std::{
 };
 
 /// Logging targer for the file.
-const LOG_TARGET: &str = "emissary::runtime::tokio";
+const LOG_TARGET: &str = "emissary::runtime::async-std";
 
 #[derive(Clone)]
 pub struct Runtime {}
@@ -54,18 +58,15 @@ impl Runtime {
     }
 }
 
-pub struct TokioTcpStream(Compat<net::TcpStream>);
+pub struct AsyncStdTcpStream(net::TcpStream);
 
-impl TokioTcpStream {
+impl AsyncStdTcpStream {
     fn new(stream: net::TcpStream) -> Self {
-        let stream = TokioAsyncReadCompatExt::compat(stream).into_inner();
-        let stream = TokioAsyncWriteCompatExt::compat_write(stream);
-
         Self(stream)
     }
 }
 
-impl AsyncRead for TokioTcpStream {
+impl AsyncRead for AsyncStdTcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -80,7 +81,7 @@ impl AsyncRead for TokioTcpStream {
     }
 }
 
-impl AsyncWrite for TokioTcpStream {
+impl AsyncWrite for AsyncStdTcpStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -119,7 +120,7 @@ impl AsyncWrite for TokioTcpStream {
     }
 }
 
-impl TcpStream for TokioTcpStream {
+impl TcpStream for AsyncStdTcpStream {
     async fn connect(address: SocketAddr) -> Option<Self> {
         net::TcpStream::connect(address)
             .await
@@ -136,9 +137,9 @@ impl TcpStream for TokioTcpStream {
     }
 }
 
-pub struct TokioTcpListener(net::TcpListener);
+pub struct AsyncStdTcpListener(BoxStream<'static, async_std::io::Result<net::TcpStream>>);
 
-impl TcpListener<TokioTcpStream> for TokioTcpListener {
+impl TcpListener<AsyncStdTcpStream> for AsyncStdTcpListener {
     // TODO: can be made sync with `socket2`
     async fn bind(address: SocketAddr) -> Option<Self> {
         net::TcpListener::bind(&address)
@@ -152,53 +153,152 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
                 );
             })
             .ok()
-            .map(|listener| TokioTcpListener(listener))
+            .map(|listener| AsyncStdTcpListener(Box::pin(listener.into_incoming())))
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
-        match futures::ready!(self.0.poll_accept(cx)) {
-            Err(_) => return Poll::Ready(None),
-            Ok((stream, _)) => return Poll::Ready(Some(TokioTcpStream::new(stream))),
-        }
-    }
-}
-
-pub struct TokioUdpSocket(net::UdpSocket);
-
-impl UdpSocket for TokioUdpSocket {
-    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
-        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
-    }
-
-    fn poll_send_to(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-        target: SocketAddr,
-    ) -> Poll<Option<usize>> {
-        Poll::Ready(futures::ready!(self.0.poll_send_to(cx, buf, target)).ok())
-    }
-
-    fn poll_recv_from(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<Option<(usize, SocketAddr)>> {
-        let mut buf = ReadBuf::new(buf);
-
-        match futures::ready!(self.0.poll_recv_from(cx, &mut buf)) {
-            Err(_) => return Poll::Ready(None),
-            Ok(from) => {
-                let nread = buf.filled().len();
-                Poll::Ready(Some((nread, from)))
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<AsyncStdTcpStream>> {
+        match futures::ready!(self.0.poll_next_unpin(cx)) {
+            Some(Ok(stream)) => return Poll::Ready(Some(AsyncStdTcpStream(stream))),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to accept connection",
+                );
+                return Poll::Ready(None);
+            }
+            None => {
+                return Poll::Ready(None);
             }
         }
     }
 }
 
-pub struct TokioJoinSet<T>(task::JoinSet<T>, Option<Waker>);
+pub struct AsyncStdUdpSocket {
+    dgram_tx: Sender<(Vec<u8>, SocketAddr)>,
+    dgram_rx: Receiver<(Vec<u8>, SocketAddr)>,
+}
 
-impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
+impl AsyncStdUdpSocket {
+    fn new(socket: net::UdpSocket) -> Self {
+        let (send_tx, mut send_rx): (Sender<(Vec<u8>, SocketAddr)>, _) = channel(2048);
+        let (mut recv_tx, recv_rx) = channel(2048);
+
+        async_std::task::spawn(async move {
+            let mut buffer = vec![0u8; 0xffff];
+
+            loop {
+                futures::select! {
+                    event = send_rx.next() => match event {
+                        Some((datagram, target)) => {
+                            if let Err(error) = socket.send_to(&datagram, target).await {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    ?target,
+                                    ?error,
+                                    "failed to send datagram",
+                                );
+                            }
+                        }
+                        None => return,
+                    },
+                    event = socket.recv_from(&mut buffer).fuse() => match event {
+                        Ok((nread, sender)) => {
+                            if let Err(error) = recv_tx.try_send((buffer[..nread].to_vec(), sender)) {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    ?sender,
+                                    ?error,
+                                    "failed to forward datagram",
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "socket error",
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            dgram_tx: send_tx,
+            dgram_rx: recv_rx,
+        }
+    }
+}
+
+impl UdpSocket for AsyncStdUdpSocket {
+    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
+        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self::new(socket)) }
+    }
+
+    fn poll_send_to(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<Option<usize>> {
+        let len = buf.len();
+        match self.dgram_tx.try_send((buf.to_vec(), target)) {
+            Ok(_) => Poll::Ready(Some(len)),
+            Err(error) => {
+                if error.is_full() {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "datagram channel clogged",
+                    );
+                    return Poll::Ready(Some(len));
+                }
+
+                return Poll::Ready(None);
+            }
+        }
+    }
+
+    fn poll_recv_from(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Option<(usize, SocketAddr)>> {
+        match self.dgram_rx.poll_next_unpin(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some((datagram, from))) =>
+                if buf.len() < datagram.len() {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        datagram_len = ?datagram.len(),
+                        buffer_len = ?buf.len(),
+                        "truncating datagram",
+                    );
+                    debug_assert!(false);
+                    buf.copy_from_slice(&datagram[..buf.len()]);
+
+                    Poll::Ready(Some((buf.len(), from)))
+                } else {
+                    buf[..datagram.len()].copy_from_slice(&datagram);
+                    Poll::Ready(Some((datagram.len(), from)))
+                },
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FuturesJoinSet<T>(FuturesUnordered<BoxFuture<'static, T>>);
+
+impl<T> FuturesJoinSet<T> {
+    fn new() -> Self {
+        Self(FuturesUnordered::new())
+    }
+}
+
+impl<T: Send + 'static> JoinSet<T> for FuturesJoinSet<T> {
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -212,48 +312,80 @@ impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
         F: Future<Output = T> + Send + 'static,
         F::Output: Send,
     {
-        let _ = self.0.spawn(future);
-        self.1.as_mut().map(|waker| waker.wake_by_ref());
+        let handle = async_std::task::spawn(future);
+
+        self.0.push(Box::pin(async move { handle.await }));
     }
 }
 
-impl<T: Send + 'static> Stream for TokioJoinSet<T> {
+impl<T: Send + 'static> Stream for FuturesJoinSet<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.0.poll_join_next(cx) {
-            Poll::Pending | Poll::Ready(None) => {
-                self.1 = Some(cx.waker().clone());
-                Poll::Pending
-            }
-            Poll::Ready(Some(Err(_))) => Poll::Ready(None),
-            Poll::Ready(Some(Ok(value))) => Poll::Ready(Some(value)),
+        match self.0.is_empty() {
+            false => self.0.poll_next_unpin(cx),
+            true => Poll::Pending,
         }
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct TokioInstant(Instant);
+pub struct AsyncStdJoinSet<T>(FuturesJoinSet<T>, Option<Waker>);
 
-impl InstantT for TokioInstant {
+impl<T: Send + 'static> JoinSet<T> for AsyncStdJoinSet<T> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn push<F>(&mut self, future: F)
+    where
+        F: Future<Output = T> + Send + 'static,
+        F::Output: Send,
+    {
+        let _ = self.0.push(future);
+        self.1.as_mut().map(|waker| waker.wake_by_ref());
+    }
+}
+
+impl<T: Send + 'static> Stream for AsyncStdJoinSet<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.0.poll_next_unpin(cx) {
+            Poll::Pending | Poll::Ready(None) => {
+                self.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Poll::Ready(Some(value)) => Poll::Ready(Some(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AsyncStdInstant(Instant);
+
+impl InstantT for AsyncStdInstant {
     fn elapsed(&self) -> Duration {
         self.0.elapsed()
     }
 }
 
 #[derive(Clone)]
-struct TokioMetricsCounter(&'static str);
+struct AsyncStdMetricsCounter(&'static str);
 
-impl Counter for TokioMetricsCounter {
+impl Counter for AsyncStdMetricsCounter {
     fn increment(&mut self, value: usize) {
         counter!(self.0).increment(value as u64);
     }
 }
 
 #[derive(Clone)]
-struct TokioMetricsGauge(&'static str);
+struct AsyncStdMetricsGauge(&'static str);
 
-impl Gauge for TokioMetricsGauge {
+impl Gauge for AsyncStdMetricsGauge {
     fn increment(&mut self, value: usize) {
         gauge!(self.0).increment(value as f64);
     }
@@ -264,45 +396,45 @@ impl Gauge for TokioMetricsGauge {
 }
 
 #[derive(Clone)]
-struct TokioMetricsHistogram(&'static str);
+struct AsyncStdMetricsHistogram(&'static str);
 
-impl Histogram for TokioMetricsHistogram {
+impl Histogram for AsyncStdMetricsHistogram {
     fn record(&mut self, record: f64) {
         histogram!(self.0).record(record);
     }
 }
 
 #[derive(Clone)]
-pub struct TokioMetricsHandle;
+pub struct AsyncStdMetricsHandle;
 
-impl MetricsHandle for TokioMetricsHandle {
+impl MetricsHandle for AsyncStdMetricsHandle {
     fn counter(&self, name: &'static str) -> impl Counter {
-        TokioMetricsCounter(name)
+        AsyncStdMetricsCounter(name)
     }
 
     fn gauge(&self, name: &'static str) -> impl Gauge {
-        TokioMetricsGauge(name)
+        AsyncStdMetricsGauge(name)
     }
 
     fn histogram(&self, name: &'static str) -> impl Histogram {
-        TokioMetricsHistogram(name)
+        AsyncStdMetricsHistogram(name)
     }
 }
 
 impl RuntimeT for Runtime {
-    type TcpStream = TokioTcpStream;
-    type UdpSocket = TokioUdpSocket;
-    type TcpListener = TokioTcpListener;
-    type JoinSet<T: Send + 'static> = TokioJoinSet<T>;
-    type MetricsHandle = TokioMetricsHandle;
-    type Instant = TokioInstant;
+    type TcpStream = AsyncStdTcpStream;
+    type UdpSocket = AsyncStdUdpSocket;
+    type TcpListener = AsyncStdTcpListener;
+    type JoinSet<T: Send + 'static> = AsyncStdJoinSet<T>;
+    type MetricsHandle = AsyncStdMetricsHandle;
+    type Instant = AsyncStdInstant;
 
     fn spawn<F>(future: F)
     where
         F: Future + Send + 'static,
         F::Output: Send,
     {
-        tokio::spawn(future);
+        async_std::task::spawn(future);
     }
 
     fn time_since_epoch() -> Duration {
@@ -310,7 +442,7 @@ impl RuntimeT for Runtime {
     }
 
     fn now() -> Self::Instant {
-        TokioInstant(Instant::now())
+        AsyncStdInstant(Instant::now())
     }
 
     fn rng() -> impl RngCore + CryptoRng {
@@ -318,7 +450,7 @@ impl RuntimeT for Runtime {
     }
 
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T> {
-        TokioJoinSet(task::JoinSet::<T>::new(), None)
+        AsyncStdJoinSet(FuturesJoinSet::<T>::new(), None)
     }
 
     fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
@@ -350,11 +482,11 @@ impl RuntimeT for Runtime {
             .install()
             .expect("to succeed");
 
-        TokioMetricsHandle {}
+        AsyncStdMetricsHandle {}
     }
 
     fn delay(duration: Duration) -> impl Future<Output = ()> + Send {
-        tokio::time::sleep(duration)
+        async_std::task::sleep(duration)
     }
 
     fn gzip_compress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>> {

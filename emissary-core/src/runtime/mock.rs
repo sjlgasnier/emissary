@@ -120,7 +120,7 @@ impl TcpListener<MockTcpStream> for MockTcpListener {
         pending()
     }
 
-    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Option<MockTcpStream>> {
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<MockTcpStream>> {
         Poll::Pending
     }
 }

@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+async-std = { version = "1.13.0", features = ["unstable"], optional = true }
 emissary-core = { path = "../emissary-core", features = ["std"] }
 flate2 = "1.0.33"
 metrics = "0.23.0"
@@ -19,7 +20,6 @@ metrics-exporter-prometheus = "0.15.3"
 futures = { workspace = true }
 rand_core = { workspace = true }
 rand = { workspace = true }
-thingbuf = { version = "0.1.6", features = ["default"] }
 tokio-util = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, features = ["log"] }
@@ -27,3 +27,4 @@ tracing = { workspace = true, features = ["log"] }
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "dep:tokio-util"]
+async-std = ["dep:async-std"]
