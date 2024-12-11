@@ -16,12 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    cli::Arguments,
-    error::Error,
-    su3::{ContentType, FileType, Su3},
-    LOG_TARGET,
-};
+use crate::{cli::Arguments, error::Error, LOG_TARGET};
 
 use home::home_dir;
 use rand::{rngs::OsRng, RngCore};
@@ -29,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{Read, Write},
     path::PathBuf,
     time::Duration,
 };
@@ -531,98 +526,6 @@ impl Config {
                 ))
             })
             .collect()
-    }
-
-    /// Reseed router from `file`.
-    ///
-    /// Returns the number of routers found in the reseed file
-    pub fn reseed(&mut self, file: PathBuf) -> crate::Result<usize> {
-        tracing::info!(
-            target: LOG_TARGET,
-            ?file,
-            "reseed router from file"
-        );
-
-        let parsed = {
-            let mut su3_file = fs::File::open(file)?;
-            let mut contents = Vec::new();
-            su3_file.read_to_end(&mut contents)?;
-
-            Su3::from_bytes(&contents)?
-        };
-
-        assert_eq!(parsed.file_type, FileType::Zip);
-        assert_eq!(parsed.content_type, ContentType::ReseedData);
-
-        let (FileType::Zip, ContentType::ReseedData) = (parsed.file_type, parsed.content_type)
-        else {
-            tracing::error!(
-                target: LOG_TARGET,
-                file_type = ?parsed.file_type,
-                content_type = ?parsed.content_type,
-                "invalid file type",
-            );
-            return Err(Error::InvalidData);
-        };
-
-        // TODO: memory-mapped file
-        let mut test_file = fs::File::create_new("/tmp/routers.zip")?;
-        fs::File::write_all(&mut test_file, &parsed.content)?;
-
-        let mut archive =
-            zip::ZipArchive::new(test_file).map_err(|error| Error::Custom(error.to_string()))?;
-
-        // create directory for router info if it doesn't exist yet
-        let router_path = {
-            let mut path = self.base_path.clone();
-            path.push("routers");
-            let _ = fs::create_dir_all(path.clone());
-
-            path
-        };
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            ?router_path,
-            "parse router info",
-        );
-
-        let num_routers = (0..archive.len()).fold(0usize, |acc, i| {
-            let mut file = archive.by_index(i).expect("to exist");
-            let Some(outpath) = file.enclosed_name() else {
-                return acc;
-            };
-
-            if !file.is_file() {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "non-file encountered in router info, ignoring",
-                );
-                return acc;
-            }
-
-            let path = {
-                let mut path = router_path.clone();
-                path.push(&outpath);
-                path
-            };
-
-            tracing::trace!(
-                target: LOG_TARGET,
-                router = ?outpath.display(),
-                size = ?file.size(),
-                "save router to base path",
-            );
-
-            let mut outfile = fs::File::create(&path).unwrap();
-            io::copy(&mut file, &mut outfile).unwrap();
-
-            acc + 1
-        });
-
-        fs::remove_file("/tmp/routers.zip")?;
-
-        Ok(num_routers)
     }
 
     /// Attempt to merge `arguments` with [`Config`].

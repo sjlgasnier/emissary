@@ -35,7 +35,7 @@ zeroize = { version = "1.8.1", features = ["alloc"], default-features = false }
 
 # workspace dependencies
 ed25519-dalek = { workspace = true, features = ["alloc", "rand_core"] }
-nom = { version = "7.1.3", features = ["alloc"], default-features = false }
+nom = { workspace = true, features = ["alloc"] }
 rand_core = { workspace = true, features = ["alloc"] }
 tracing = { workspace = true }
 x25519-dalek = { workspace = true, features = ["reusable_secrets", "static_secrets", "zeroize"] }

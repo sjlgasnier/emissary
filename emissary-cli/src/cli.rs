@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 
 use std::path::PathBuf;
 
@@ -85,20 +85,4 @@ pub struct Arguments {
     /// Exploratory tunnel configuration
     #[clap(flatten)]
     pub exploratory: TunnelConfig,
-
-    /// Command
-    ///
-    /// If no command is provided, `emissary` starts as an i2p router
-    #[command(subcommand)]
-    pub command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-pub enum Command {
-    /// Reseed router
-    Reseed {
-        /// Reseed `emissary` from file.
-        #[arg(short = 'f', long, value_name = "FILE")]
-        file: PathBuf,
-    },
 }

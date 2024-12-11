@@ -16,12 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    cli::{Arguments, Command},
-    config::Config,
-    error::Error,
-    logger::init_logger,
-};
+use crate::{cli::Arguments, config::Config, error::Error, logger::init_logger};
 
 use clap::Parser;
 use emissary_core::router::Router;
@@ -33,7 +28,6 @@ mod cli;
 mod config;
 mod error;
 mod logger;
-mod su3;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -49,35 +43,16 @@ async fn main() -> anyhow::Result<()> {
     init_logger(arguments.log.clone())?;
 
     // parse router config and merge it with cli options
-    let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
+    let config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
 
-    match arguments.command {
-        None => {
-            let path = config.base_path.clone();
-            let (router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
+    let path = config.base_path.clone();
+    let (router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
 
-            // TODO: ugly
-            let mut file = File::create(path.join("router.info"))?;
-            file.write_all(&local_router_info)?;
+    // TODO: ugly
+    let mut file = File::create(path.join("router.info"))?;
+    file.write_all(&local_router_info)?;
 
-            let _ = router.await;
-        }
-        Some(Command::Reseed { file }) => match config.reseed(file) {
-            Ok(num_routers) => tracing::info!(
-                target: LOG_TARGET,
-                ?num_routers,
-                "router reseeded",
-            ),
-            Err(error) => {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to reseed router",
-                );
-                todo!();
-            }
-        },
-    }
+    let _ = router.await;
 
     Ok(())
 }

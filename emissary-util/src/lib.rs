@@ -17,3 +17,4 @@
 // DEALINGS IN THE SOFTWARE.
 
 pub mod runtime;
+pub mod su3;
