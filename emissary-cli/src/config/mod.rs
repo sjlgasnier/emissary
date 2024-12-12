@@ -16,12 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    cli::Arguments,
-    error::Error,
-    su3::{ContentType, FileType, Su3},
-    LOG_TARGET,
-};
+use crate::{cli::Arguments, error::Error, LOG_TARGET};
 
 use home::home_dir;
 use rand::{rngs::OsRng, RngCore};
@@ -29,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{Read, Write},
     path::PathBuf,
     time::Duration,
 };
@@ -107,28 +102,28 @@ pub struct Config {
     pub base_path: PathBuf,
 
     /// I2CP config.
-    i2cp_config: Option<emissary::I2cpConfig>,
+    pub i2cp_config: Option<emissary_core::I2cpConfig>,
 
     /// NTCP2 config.
-    ntcp2_config: Option<emissary::Ntcp2Config>,
+    pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
 
     /// Exploratory tunnel pool config.
-    pub exploratory: Option<emissary::ExploratoryConfig>,
+    pub exploratory: Option<emissary_core::ExploratoryConfig>,
 
     /// Router info.
-    routers: Vec<Vec<u8>>,
+    pub routers: Vec<Vec<u8>>,
 
     /// Profiles.
-    profiles: Vec<(String, emissary::Profile)>,
+    pub profiles: Vec<(String, emissary_core::Profile)>,
 
     /// SAMv3 config.
-    sam_config: Option<emissary::SamConfig>,
+    pub sam_config: Option<emissary_core::SamConfig>,
 
     /// Signing key.
-    signing_key: Vec<u8>,
+    pub signing_key: Vec<u8>,
 
     /// Static key.
-    static_key: Vec<u8>,
+    pub static_key: Vec<u8>,
 
     /// Should the node be run as a floodfill router.
     pub floodfill: bool,
@@ -143,9 +138,9 @@ pub struct Config {
     pub insecure_tunnels: bool,
 }
 
-impl Into<emissary::Config> for Config {
-    fn into(self) -> emissary::Config {
-        emissary::Config {
+impl Into<emissary_core::Config> for Config {
+    fn into(self) -> emissary_core::Config {
+        emissary_core::Config {
             static_key: self.static_key,
             signing_key: self.signing_key,
             ntcp2_config: self.ntcp2_config,
@@ -379,14 +374,14 @@ impl Config {
             routers: Vec::new(),
             profiles: Vec::new(),
             exploratory: None,
-            ntcp2_config: Some(emissary::Ntcp2Config {
+            ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
                 host: String::from("127.0.0.1"),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: Some(emissary::I2cpConfig { port: 7654u16 }),
-            sam_config: Some(emissary::SamConfig {
+            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            sam_config: Some(emissary_core::SamConfig {
                 tcp_port: 7656u16,
                 udp_port: 7655u16,
                 host: String::from("127.0.0.1"),
@@ -442,20 +437,20 @@ impl Config {
             base_path,
             routers: Vec::new(),
             profiles: Vec::new(),
-            exploratory: config.exploratory.map(|config| emissary::ExploratoryConfig {
+            exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
                 inbound_len: config.inbound_len,
                 inbound_count: config.inbound_count,
                 outbound_len: config.outbound_len,
                 outbound_count: config.outbound_count,
             }),
-            ntcp2_config: config.ntcp2.map(|config| emissary::Ntcp2Config {
+            ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: config.i2cp.map(|config| emissary::I2cpConfig { port: config.port }),
-            sam_config: config.sam.map(|config| emissary::SamConfig {
+            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            sam_config: config.sam.map(|config| emissary_core::SamConfig {
                 tcp_port: config.tcp_port,
                 udp_port: config.udp_port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
@@ -490,9 +485,8 @@ impl Config {
     }
 
     /// Attempt to load router profiles.
-    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary::Profile)> {
+    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary_core::Profile)> {
         let Ok(profile_dir) = fs::read_dir(&path.join("profiles")) else {
-            tracing::error!("not found");
             return Vec::new();
         };
 
@@ -519,7 +513,7 @@ impl Config {
 
                 Some((
                     name,
-                    emissary::Profile {
+                    emissary_core::Profile {
                         last_activity: Duration::from_secs(profile.last_activity.unwrap_or(0)),
                         num_accepted: profile.num_accepted.unwrap_or(0),
                         num_connection: profile.num_connection.unwrap_or(0),
@@ -534,98 +528,6 @@ impl Config {
             .collect()
     }
 
-    /// Reseed router from `file`.
-    ///
-    /// Returns the number of routers found in the reseed file
-    pub fn reseed(&mut self, file: PathBuf) -> crate::Result<usize> {
-        tracing::info!(
-            target: LOG_TARGET,
-            ?file,
-            "reseed router from file"
-        );
-
-        let parsed = {
-            let mut su3_file = fs::File::open(file)?;
-            let mut contents = Vec::new();
-            su3_file.read_to_end(&mut contents)?;
-
-            Su3::from_bytes(&contents)?
-        };
-
-        assert_eq!(parsed.file_type, FileType::Zip);
-        assert_eq!(parsed.content_type, ContentType::ReseedData);
-
-        let (FileType::Zip, ContentType::ReseedData) = (parsed.file_type, parsed.content_type)
-        else {
-            tracing::error!(
-                target: LOG_TARGET,
-                file_type = ?parsed.file_type,
-                content_type = ?parsed.content_type,
-                "invalid file type",
-            );
-            return Err(Error::InvalidData);
-        };
-
-        // TODO: memory-mapped file
-        let mut test_file = fs::File::create_new("/tmp/routers.zip")?;
-        fs::File::write_all(&mut test_file, &parsed.content)?;
-
-        let mut archive =
-            zip::ZipArchive::new(test_file).map_err(|error| Error::Custom(error.to_string()))?;
-
-        // create directory for router info if it doesn't exist yet
-        let router_path = {
-            let mut path = self.base_path.clone();
-            path.push("routers");
-            let _ = fs::create_dir_all(path.clone());
-
-            path
-        };
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            ?router_path,
-            "parse router info",
-        );
-
-        let num_routers = (0..archive.len()).fold(0usize, |acc, i| {
-            let mut file = archive.by_index(i).expect("to exist");
-            let Some(outpath) = file.enclosed_name() else {
-                return acc;
-            };
-
-            if !file.is_file() {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "non-file encountered in router info, ignoring",
-                );
-                return acc;
-            }
-
-            let path = {
-                let mut path = router_path.clone();
-                path.push(&outpath);
-                path
-            };
-
-            tracing::trace!(
-                target: LOG_TARGET,
-                router = ?outpath.display(),
-                size = ?file.size(),
-                "save router to base path",
-            );
-
-            let mut outfile = fs::File::create(&path).unwrap();
-            io::copy(&mut file, &mut outfile).unwrap();
-
-            acc + 1
-        });
-
-        fs::remove_file("/tmp/routers.zip")?;
-
-        Ok(num_routers)
-    }
-
     /// Attempt to merge `arguments` with [`Config`].
     pub fn merge(mut self, arguments: &Arguments) -> Self {
         if let Some(true) = arguments.floodfill {
@@ -634,7 +536,7 @@ impl Config {
             }
         }
 
-        if let Some(true) = arguments.insecure_tunnels {
+        if let Some(true) = arguments.tunnel.insecure_tunnels {
             if !self.insecure_tunnels {
                 self.insecure_tunnels = true;
             }
@@ -649,24 +551,18 @@ impl Config {
         }
 
         self.exploratory = match &mut self.exploratory {
-            None => Some(emissary::ExploratoryConfig {
-                inbound_len: arguments.exploratory.exploratory_inbound_len,
-                inbound_count: arguments.exploratory.exploratory_inbound_count,
-                outbound_len: arguments.exploratory.exploratory_outbound_len,
-                outbound_count: arguments.exploratory.exploratory_outbound_count,
+            None => Some(emissary_core::ExploratoryConfig {
+                inbound_len: arguments.tunnel.exploratory_inbound_len,
+                inbound_count: arguments.tunnel.exploratory_inbound_count,
+                outbound_len: arguments.tunnel.exploratory_outbound_len,
+                outbound_count: arguments.tunnel.exploratory_outbound_count,
             }),
-            Some(config) => Some(emissary::ExploratoryConfig {
-                inbound_len: arguments.exploratory.exploratory_inbound_len.or(config.inbound_len),
-                inbound_count: arguments
-                    .exploratory
-                    .exploratory_inbound_count
-                    .or(config.inbound_count),
-                outbound_len: arguments
-                    .exploratory
-                    .exploratory_outbound_len
-                    .or(config.outbound_len),
+            Some(config) => Some(emissary_core::ExploratoryConfig {
+                inbound_len: arguments.tunnel.exploratory_inbound_len.or(config.inbound_len),
+                inbound_count: arguments.tunnel.exploratory_inbound_count.or(config.inbound_count),
+                outbound_len: arguments.tunnel.exploratory_outbound_len.or(config.outbound_len),
                 outbound_count: arguments
-                    .exploratory
+                    .tunnel
                     .exploratory_outbound_count
                     .or(config.outbound_count),
             }),

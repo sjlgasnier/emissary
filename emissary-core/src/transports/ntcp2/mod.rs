@@ -86,7 +86,6 @@ impl<R: Runtime> Ntcp2Transport<R> {
     /// Create new [`Ntcp2Transport`].
     pub async fn new(
         config: Ntcp2Config,
-        runtime: R,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
@@ -103,7 +102,6 @@ impl<R: Runtime> Ntcp2Transport<R> {
         let listener = Ntcp2Listener::new(socket_address).await?;
 
         let session_manager = SessionManager::new(
-            runtime,
             config.key,
             config.iv.to_vec(),
             local_signing_key,

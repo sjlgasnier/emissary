@@ -2068,8 +2068,6 @@ mod tests {
 
     #[tokio::test]
     async fn exploratory_tunnel_test() {
-        crate::util::init_logger();
-
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..20)
             .map(|i| {
