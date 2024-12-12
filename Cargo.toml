@@ -21,6 +21,7 @@ members = [
 default-members = ["emissary-cli"]
 
 [workspace.dependencies]
+anyhow = "1.0.86"
 ed25519-dalek = { version = "2.1.1", default-features = false }
 flate2 = "1.0.33"
 futures = "0.3.31"

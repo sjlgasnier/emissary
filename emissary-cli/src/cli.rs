@@ -20,24 +20,51 @@ use clap::{Args, Parser};
 
 use std::path::PathBuf;
 
-/// Tunnel configuration.
+/// Tunnel options.
 #[derive(Args)]
-pub struct TunnelConfig {
-    /// Length of an inbound exploratory tunnel.
+pub struct TunnelOptions {
+    /// Length of an inbound exploratory tunnel
     #[arg(long, value_name = "NUM")]
     pub exploratory_inbound_len: Option<usize>,
 
-    /// Number of inbound exploratory tunnels.
+    /// Number of inbound exploratory tunnels
     #[arg(long, value_name = "NUM")]
     pub exploratory_inbound_count: Option<usize>,
 
-    /// Length of an outbound exploratory tunnel.
+    /// Length of an outbound exploratory tunnel
     #[arg(long, value_name = "NUM")]
     pub exploratory_outbound_len: Option<usize>,
 
-    /// Number of outbound exploratory tunnels.
+    /// Number of outbound exploratory tunnels
     #[arg(long, value_name = "NUM")]
     pub exploratory_outbound_count: Option<usize>,
+
+    /// Allow emissary to build insecure tunnels
+    ///
+    /// Disables /16 subnet and maximum tunnel participation checks
+    ///
+    /// Should only be used for testing
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub insecure_tunnels: Option<bool>,
+}
+
+/// Reseed options.
+#[derive(Args)]
+pub struct ReseedOptions {
+    /// Comma-separated list of reseed hosts
+    ///
+    /// Example:
+    ///   --reseed-hosts https://host1.com https://host2.com https://host3.com
+    #[arg(long, value_delimiter = ' ', num_args = 1.., value_name = "HOST")]
+    pub reseed_hosts: Option<Vec<String>>,
+
+    /// Don't reseed the routere even if there aren't enough routers
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_reseed: Option<bool>,
+
+    /// Forcibly reseed the router even if there are enough routers
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub force_reseed: Option<bool>,
 }
 
 #[derive(Parser)]
@@ -66,14 +93,6 @@ pub struct Arguments {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub floodfill: Option<bool>,
 
-    /// Allow emissary to build insecure tunnels.
-    ///
-    /// Disables /16 subnet and maximum tunnel participation checks
-    ///
-    /// Should only be used for testing
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    pub insecure_tunnels: Option<bool>,
-
     /// Router capabilities
     #[arg(long)]
     pub caps: Option<String>,
@@ -82,7 +101,11 @@ pub struct Arguments {
     #[arg(long)]
     pub net_id: Option<u8>,
 
-    /// Exploratory tunnel configuration
+    /// Tunnel options.
     #[clap(flatten)]
-    pub exploratory: TunnelConfig,
+    pub tunnel: TunnelOptions,
+
+    /// Reseed options.
+    #[clap(flatten)]
+    pub reseed: ReseedOptions,
 }

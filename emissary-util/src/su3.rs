@@ -35,6 +35,15 @@ const LOG_TARGET: &str = "emissary::su3";
 /// SU3 magic.
 const SU3_MAGIC: &[u8] = b"I2Psu3";
 
+/// Router info.
+pub struct ReseedRouterInfo {
+    /// File name.
+    pub name: String,
+
+    /// Serialized router info.
+    pub router_info: Vec<u8>,
+}
+
 /// Signature kind.
 #[derive(Debug, PartialEq)]
 pub enum SignatureKind {
@@ -201,7 +210,7 @@ impl<'a> Su3<'a> {
     }
 
     /// Attempt to parse reseed data from `input`.
-    pub fn parse_reseed(input: &'a [u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    pub fn parse_reseed(input: &'a [u8]) -> Option<Vec<ReseedRouterInfo>> {
         let (_, su3) = Self::parse_inner(input.as_ref()).ok()?;
 
         match (su3.file_kind, su3.content_kind) {
@@ -240,7 +249,10 @@ impl<'a> Su3<'a> {
                 let mut router_info = Vec::new();
                 copy(&mut file, &mut router_info).ok()?;
 
-                Some((outpath.display().to_string(), router_info))
+                Some(ReseedRouterInfo {
+                    name: outpath.display().to_string(),
+                    router_info,
+                })
             })
             .collect::<Vec<_>>();
 

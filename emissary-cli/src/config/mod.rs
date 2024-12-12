@@ -102,28 +102,28 @@ pub struct Config {
     pub base_path: PathBuf,
 
     /// I2CP config.
-    i2cp_config: Option<emissary_core::I2cpConfig>,
+    pub i2cp_config: Option<emissary_core::I2cpConfig>,
 
     /// NTCP2 config.
-    ntcp2_config: Option<emissary_core::Ntcp2Config>,
+    pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<emissary_core::ExploratoryConfig>,
 
     /// Router info.
-    routers: Vec<Vec<u8>>,
+    pub routers: Vec<Vec<u8>>,
 
     /// Profiles.
-    profiles: Vec<(String, emissary_core::Profile)>,
+    pub profiles: Vec<(String, emissary_core::Profile)>,
 
     /// SAMv3 config.
-    sam_config: Option<emissary_core::SamConfig>,
+    pub sam_config: Option<emissary_core::SamConfig>,
 
     /// Signing key.
-    signing_key: Vec<u8>,
+    pub signing_key: Vec<u8>,
 
     /// Static key.
-    static_key: Vec<u8>,
+    pub static_key: Vec<u8>,
 
     /// Should the node be run as a floodfill router.
     pub floodfill: bool,
@@ -536,7 +536,7 @@ impl Config {
             }
         }
 
-        if let Some(true) = arguments.insecure_tunnels {
+        if let Some(true) = arguments.tunnel.insecure_tunnels {
             if !self.insecure_tunnels {
                 self.insecure_tunnels = true;
             }
@@ -552,23 +552,17 @@ impl Config {
 
         self.exploratory = match &mut self.exploratory {
             None => Some(emissary_core::ExploratoryConfig {
-                inbound_len: arguments.exploratory.exploratory_inbound_len,
-                inbound_count: arguments.exploratory.exploratory_inbound_count,
-                outbound_len: arguments.exploratory.exploratory_outbound_len,
-                outbound_count: arguments.exploratory.exploratory_outbound_count,
+                inbound_len: arguments.tunnel.exploratory_inbound_len,
+                inbound_count: arguments.tunnel.exploratory_inbound_count,
+                outbound_len: arguments.tunnel.exploratory_outbound_len,
+                outbound_count: arguments.tunnel.exploratory_outbound_count,
             }),
             Some(config) => Some(emissary_core::ExploratoryConfig {
-                inbound_len: arguments.exploratory.exploratory_inbound_len.or(config.inbound_len),
-                inbound_count: arguments
-                    .exploratory
-                    .exploratory_inbound_count
-                    .or(config.inbound_count),
-                outbound_len: arguments
-                    .exploratory
-                    .exploratory_outbound_len
-                    .or(config.outbound_len),
+                inbound_len: arguments.tunnel.exploratory_inbound_len.or(config.inbound_len),
+                inbound_count: arguments.tunnel.exploratory_inbound_count.or(config.inbound_count),
+                outbound_len: arguments.tunnel.exploratory_outbound_len.or(config.outbound_len),
                 outbound_count: arguments
-                    .exploratory
+                    .tunnel
                     .exploratory_outbound_count
                     .or(config.outbound_count),
             }),

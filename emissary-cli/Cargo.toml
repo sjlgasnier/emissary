@@ -10,7 +10,6 @@ categories.workspace = true
 readme.workspace = true
 
 [dependencies]
-anyhow = "1.0.86"
 clap = { version = "4.5.7", features = ["derive"] }
 emissary-core = { path = "../emissary-core", features = ["std"] }
 emissary-util = { path = "../emissary-util", features = ["tokio"] }
@@ -23,6 +22,7 @@ thiserror = "1.0.61"
 toml = "0.8.14"
 
 # workspace dependencies
+anyhow = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 flate2 = { workspace = true }
 rand_core = { workspace = true }
