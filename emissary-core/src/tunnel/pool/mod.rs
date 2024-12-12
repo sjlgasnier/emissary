@@ -17,8 +17,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::{chachapoly::ChaChaPoly, EphemeralPrivateKey},
     error::{ChannelError, Error},
-    i2np::{Message, MessageBuilder, MessageType},
+    i2np::{
+        garlic::{DeliveryInstructions, GarlicMessageBuilder},
+        Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
+    },
     primitives::{Lease, MessageId, RouterId, Str, TunnelId},
     runtime::{Counter, Gauge, Histogram, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
@@ -637,12 +641,51 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     out
                 };
 
-                let message = MessageBuilder::standard()
-                    .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
-                    .with_message_type(MessageType::Data)
-                    .with_message_id(message_id)
-                    .with_payload(&payload)
-                    .build();
+                // wrap the message inside a garlic message destined to ourselves
+                let message = {
+                    let expiration = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                    let mut message = GarlicMessageBuilder::new()
+                        .with_garlic_clove(
+                            MessageType::Data,
+                            message_id,
+                            expiration,
+                            DeliveryInstructions::Local,
+                            &MessageBuilder::standard()
+                                .with_expiration(expiration)
+                                .with_message_type(MessageType::Data)
+                                .with_message_id(message_id)
+                                .with_payload(&payload)
+                                .build(),
+                        )
+                        .build();
+
+                    let ephemeral_secret = EphemeralPrivateKey::new(R::rng());
+                    let ephemeral_public = ephemeral_secret.public_key();
+                    let (key, tag) = self.noise.derive_outbound_garlic_key(
+                        self.noise.local_public_key(),
+                        ephemeral_secret,
+                    );
+
+                    // message length + poly13055 tg + ephemeral key + garlic message length
+                    let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+                    // encryption must succeed since the parameters are managed by us
+                    ChaChaPoly::new(&key)
+                        .encrypt_with_ad_new(&tag, &mut message)
+                        .expect("to succeed");
+
+                    out.put_u32(message.len() as u32 + 32);
+                    out.put_slice(&ephemeral_public.to_vec());
+                    out.put_slice(&message);
+
+                    MessageBuilder::standard()
+                        .with_expiration(expiration)
+                        .with_message_type(MessageType::Garlic)
+                        .with_message_id(message_id)
+                        .with_payload(&out)
+                        .build()
+                };
 
                 // outbound tunnel must exist since it was jus iterated over
                 let (router, mut messages) = self

@@ -139,29 +139,34 @@ impl TunnelPoolContextHandle {
 
                         message_id
                     }
-                    None => {
-                        return self
-                            .event_tx
-                            .try_send(TunnelPoolEvent::Message { message })
-                            .map_err(|error| {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?message_id,
-                                    ?error,
-                                    "failed to route garlic message to client destination",
-                                );
+                    None => match inner.listeners.remove(&message_id) {
+                        Some(listener) =>
+                            return listener
+                                .send(message)
+                                .map_err(|message| RoutingError::ChannelClosed(message)),
+                        None =>
+                            return self
+                                .event_tx
+                                .try_send(TunnelPoolEvent::Message { message })
+                                .map_err(|error| {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?message_id,
+                                        ?error,
+                                        "failed to route garlic message to client destination",
+                                    );
 
-                                match error {
-                                    mpsc::errors::TrySendError::Full(
-                                        TunnelPoolEvent::Message { message },
-                                    ) => RoutingError::ChannelFull(message),
-                                    mpsc::errors::TrySendError::Closed(
-                                        TunnelPoolEvent::Message { message },
-                                    ) => RoutingError::ChannelClosed(message),
-                                    _ => unreachable!(),
-                                }
-                            });
-                    }
+                                    match error {
+                                        mpsc::errors::TrySendError::Full(
+                                            TunnelPoolEvent::Message { message },
+                                        ) => RoutingError::ChannelFull(message),
+                                        mpsc::errors::TrySendError::Closed(
+                                            TunnelPoolEvent::Message { message },
+                                        ) => RoutingError::ChannelClosed(message),
+                                        _ => unreachable!(),
+                                    }
+                                }),
+                    },
                 }
             }
             MessageType::DatabaseStore

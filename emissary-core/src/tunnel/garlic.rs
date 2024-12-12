@@ -24,13 +24,15 @@ use crate::{
             DeliveryInstructions as CloveDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
         },
         tunnel::gateway::TunnelGateway,
-        Message, MessageBuilder,
+        Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::noise::NoiseContext,
     Error,
 };
+
+use rand_core::RngCore;
 
 use alloc::{vec, vec::Vec};
 use core::time::Duration;
@@ -121,7 +123,7 @@ impl<R: Runtime> GarlicHandler<R> {
 
         // derive cipher key and associated data and decrypt the garlic message
         let message = {
-            let (mut cipher_key, associated_data) = self.noise.derive_garlic_key(
+            let (mut cipher_key, associated_data) = self.noise.derive_inbound_garlic_key(
                 EphemeralPublicKey::try_from(&payload[4..36]).expect("valid public key"),
             );
 
@@ -148,7 +150,7 @@ impl<R: Runtime> GarlicHandler<R> {
                             message_type,
                             message_id: *message_id,
                             expiration: expiration.into(),
-                            payload: message_body.to_vec(), // TODO: is this really needed
+                            payload: message_body.to_vec(),
                         },
                     }),
                     CloveDeliveryInstructions::Router { hash } =>
@@ -171,7 +173,7 @@ impl<R: Runtime> GarlicHandler<R> {
 
                         let message = TunnelGateway {
                             tunnel_id: tunnel_id.into(),
-                            payload: message_body,
+                            payload: &message,
                         }
                         .serialize();
 
@@ -179,9 +181,9 @@ impl<R: Runtime> GarlicHandler<R> {
                             tunnel: TunnelId::from(tunnel_id),
                             router: RouterId::from(hash),
                             message: MessageBuilder::short()
-                                .with_message_type(message_type)
-                                .with_message_id(message_id)
-                                .with_expiration((R::time_since_epoch() + Duration::from_secs(10)))
+                                .with_message_type(MessageType::TunnelGateway)
+                                .with_message_id(R::rng().next_u32())
+                                .with_expiration((expiration))
                                 .with_payload(&message)
                                 .build(),
                         })
@@ -207,5 +209,153 @@ impl<R: Runtime> GarlicHandler<R> {
             .collect::<Vec<_>>();
 
         Ok(messages.into_iter())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::{EphemeralPrivateKey, StaticPrivateKey},
+        i2np::{garlic::GarlicMessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
+        primitives::{DestinationId, MessageId, RouterId},
+        runtime::mock::MockRuntime,
+    };
+    use bytes::{BufMut, Bytes, BytesMut};
+    use rand_core::RngCore;
+
+    #[test]
+    fn serialize_deserialize() {
+        let remote_key = StaticPrivateKey::new(rand::thread_rng());
+        let remote_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let local_key = StaticPrivateKey::new(rand::thread_rng());
+        let local_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let mut garlic = GarlicHandler::<MockRuntime>::new(
+            NoiseContext::new(remote_key.clone(), remote_router_id),
+            MockRuntime::register_metrics(vec![]),
+        );
+
+        // construct garlic message
+        let message_id_1 = MessageId::from(MockRuntime::rng().next_u32());
+        let message_id_2 = MessageId::from(MockRuntime::rng().next_u32());
+        let message_id_3 = MessageId::from(MockRuntime::rng().next_u32());
+        let message_id_4 = MessageId::from(MockRuntime::rng().next_u32());
+
+        let router_delivery_router = RouterId::random();
+        let tunnel_delivery_router = RouterId::random();
+        let tunnel_delivery_tunnel = TunnelId::random();
+        let destination_id = DestinationId::random();
+
+        let mut message = GarlicMessageBuilder::new()
+            .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::Data,
+                message_id_1,
+                MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                CloveDeliveryInstructions::Local,
+                &vec![1, 1, 1, 1],
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                message_id_2,
+                MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                CloveDeliveryInstructions::Router {
+                    hash: &router_delivery_router.to_vec(),
+                },
+                &vec![2, 2, 2, 2],
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                message_id_3,
+                MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                CloveDeliveryInstructions::Tunnel {
+                    hash: &tunnel_delivery_router.to_vec(),
+                    tunnel_id: *tunnel_delivery_tunnel,
+                },
+                &vec![3, 3, 3, 3],
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                message_id_4,
+                MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                CloveDeliveryInstructions::Destination {
+                    hash: &destination_id.to_vec(),
+                },
+                &vec![4, 4, 4, 4],
+            )
+            .build();
+
+        let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+        // derive outbound garlic context
+        let local_noise = NoiseContext::new(local_key, local_router_id);
+        let ephemeral_secret = EphemeralPrivateKey::new(rand::thread_rng());
+        let ephemeral_public = ephemeral_secret.public_key();
+        let (local_key, local_state) =
+            local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
+
+        ChaChaPoly::new(&local_key)
+            .encrypt_with_ad_new(&local_state, &mut message)
+            .unwrap();
+
+        out.put_u32(message.len() as u32 + 32);
+        out.put_slice(&ephemeral_public.to_vec());
+        out.put_slice(&message);
+
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: MockRuntime::rng().next_u32(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: out.to_vec(),
+        };
+
+        let mut blocks = garlic.handle_message(message).unwrap();
+
+        match blocks.next().unwrap() {
+            DeliveryInstructions::Local { message } => {
+                assert_eq!(message.message_type, MessageType::Data);
+                assert_eq!(message.message_id, *message_id_1);
+                assert_eq!(message.payload, vec![1, 1, 1, 1]);
+            }
+            _ => panic!("invalid delivery type"),
+        }
+
+        match blocks.next().unwrap() {
+            DeliveryInstructions::Router { router, message } => {
+                assert_eq!(router, router_delivery_router);
+
+                let message = Message::parse_short(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Data);
+                assert_eq!(message.message_id, *message_id_2);
+                assert_eq!(message.payload, vec![2, 2, 2, 2]);
+            }
+            _ => panic!("invalid delivery type"),
+        }
+
+        match blocks.next().unwrap() {
+            DeliveryInstructions::Tunnel {
+                tunnel,
+                router,
+                message,
+            } => {
+                assert_eq!(router, tunnel_delivery_router);
+                assert_eq!(tunnel, tunnel_delivery_tunnel);
+
+                let message = Message::parse_short(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::TunnelGateway);
+
+                let TunnelGateway { tunnel_id, payload } =
+                    TunnelGateway::parse(&message.payload).unwrap();
+                assert_eq!(tunnel_id, tunnel_delivery_tunnel);
+
+                let message = Message::parse_standard(&payload).unwrap();
+                assert_eq!(message.message_type, MessageType::Data);
+                assert_eq!(message.message_id, *message_id_3);
+                assert_eq!(message.payload, vec![3, 3, 3, 3]);
+            }
+            _ => panic!("invalid delivery type"),
+        }
     }
 }

@@ -682,6 +682,11 @@ impl NoiseContext {
         &self.local_router_hash
     }
 
+    /// Get copy of local public key.
+    pub fn local_public_key(&self) -> StaticPublicKey {
+        self.local_key.public()
+    }
+
     /// Create outbound Noise context for tunnels created by the local router.
     pub fn create_outbound_session<R: Runtime>(
         &self,
@@ -756,10 +761,13 @@ impl NoiseContext {
         LongInboundSession::new(chaining_key, aead_key, state)
     }
 
-    /// Derive keys for `GarlicMessage`.
+    /// Derive keys for an inbound `GarlicMessage`.
     ///
     /// Returns a ChaCha20Poly1305 cipher key.
-    pub fn derive_garlic_key(&self, ephemeral_key: EphemeralPublicKey) -> (Vec<u8>, Vec<u8>) {
+    pub fn derive_inbound_garlic_key(
+        &self,
+        ephemeral_key: EphemeralPublicKey,
+    ) -> (Vec<u8>, Vec<u8>) {
         let state = Sha256::new()
             .update(&self.inbound_state)
             .update::<&[u8]>(ephemeral_key.as_ref())
@@ -774,5 +782,68 @@ impl NoiseContext {
         chaining_key.zeroize();
 
         (aead_key, state)
+    }
+
+    /// Derive keys for an outbound `GarlicMessage`.
+    ///
+    /// Returns a ChaCha20Poly1305 cipher key.
+    pub fn derive_outbound_garlic_key(
+        &self,
+        remote_public: StaticPublicKey,
+        mut ephemeral_secret: EphemeralPrivateKey,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let ephemeral_public = ephemeral_secret.public_key();
+        let state = Sha256::new()
+            .update(
+                Sha256::new()
+                    .update(&self.outbound_state)
+                    .update::<&[u8]>(&remote_public.as_ref())
+                    .finalize(),
+            )
+            .update::<&[u8]>(ephemeral_public.as_ref())
+            .finalize();
+
+        let mut shared_secret = ephemeral_secret.diffie_hellman(&remote_public);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+        chaining_key.zeroize();
+        ephemeral_secret.zeroize();
+
+        (aead_key, state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::RouterId;
+
+    #[test]
+    fn derive_garlic_keys() {
+        let remote_key = StaticPrivateKey::new(rand::thread_rng());
+        let remote_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let local_key = StaticPrivateKey::new(rand::thread_rng());
+        let local_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let remote_noise = NoiseContext::new(remote_key.clone(), remote_router_id);
+        let local_noise = NoiseContext::new(local_key, local_router_id);
+
+        // derive outbound garlic context
+        let ephemeral_secret = EphemeralPrivateKey::new(rand::thread_rng());
+        let ephemeral_public = ephemeral_secret.public_key();
+        let (local_key, local_state) =
+            local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
+
+        // derive inbound garlic context from the received ephemeral public key
+        let (remote_key, remote_state) = remote_noise.derive_inbound_garlic_key(ephemeral_public);
+
+        // verify states match
+        assert_eq!(local_key, remote_key);
+        assert_eq!(local_state, remote_state);
     }
 }
