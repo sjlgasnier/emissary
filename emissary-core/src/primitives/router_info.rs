@@ -120,7 +120,7 @@ impl RouterInfo {
         for _ in 0..num_addresses {
             let (_rest, address) = RouterAddress::parse_frame(rest)?;
 
-            addresses.insert(*address.transport(), address);
+            addresses.insert(address.transport, address);
             rest = _rest;
         }
 
@@ -248,8 +248,8 @@ impl RouterInfo {
         // TODO: add ssu2 support
         self.capabilities.is_reachable()
             && self.addresses.get(&TransportKind::Ntcp2).map_or(false, |address| {
-                address.options().get(&Str::from("host")).is_some()
-                    && address.options().get(&Str::from("port")).is_some()
+                address.options.get(&Str::from("host")).is_some()
+                    && address.options.get(&Str::from("port")).is_some()
             })
     }
 
@@ -397,7 +397,7 @@ mod tests {
 
         // ssu
         assert_eq!(
-            router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost(),
+            router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost,
             10
         );
         assert_eq!(
@@ -405,7 +405,7 @@ mod tests {
                 .addresses
                 .get(&TransportKind::Ssu2)
                 .unwrap()
-                .options()
+                .options
                 .get(&Str::from_str("host").unwrap()),
             Some(&Str::from_str("217.70.194.82").unwrap())
         );
@@ -414,28 +414,28 @@ mod tests {
                 .addresses
                 .get(&TransportKind::Ssu2)
                 .unwrap()
-                .options()
+                .options
                 .get(&Str::from_str("port").unwrap()),
             Some(&Str::from_str("10994").unwrap())
         );
 
         // ntcp2
         assert_eq!(
-            router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost(),
+            router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost,
             14
         );
         assert!(router_info
             .addresses
             .get(&TransportKind::Ntcp2)
             .unwrap()
-            .options()
+            .options
             .get(&Str::from_str("host").unwrap())
             .is_none());
         assert!(router_info
             .addresses
             .get(&TransportKind::Ntcp2)
             .unwrap()
-            .options()
+            .options
             .get(&Str::from_str("port").unwrap())
             .is_none());
 
@@ -463,7 +463,7 @@ mod tests {
 
         // ssu
         assert_eq!(
-            router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost(),
+            router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost,
             10
         );
         assert_eq!(
@@ -471,7 +471,7 @@ mod tests {
                 .addresses
                 .get(&TransportKind::Ssu2)
                 .unwrap()
-                .options()
+                .options
                 .get(&Str::from_str("host").unwrap()),
             Some(&Str::from_str("68.202.112.209").unwrap())
         );
@@ -480,14 +480,14 @@ mod tests {
                 .addresses
                 .get(&TransportKind::Ssu2)
                 .unwrap()
-                .options()
+                .options
                 .get(&Str::from_str("port").unwrap()),
             Some(&Str::from_str("11331").unwrap())
         );
 
         // ntcp2
         assert_eq!(
-            router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost(),
+            router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost,
             3
         );
         assert_eq!(
@@ -495,7 +495,7 @@ mod tests {
                 .addresses
                 .get(&TransportKind::Ntcp2)
                 .unwrap()
-                .options()
+                .options
                 .get(&Str::from_str("host").unwrap()),
             Some(&Str::from_str("68.202.112.209").unwrap())
         );
@@ -504,7 +504,7 @@ mod tests {
                 .addresses
                 .get(&TransportKind::Ntcp2)
                 .unwrap()
-                .options()
+                .options
                 .get(&Str::from_str("port").unwrap()),
             Some(&Str::from_str("11331").unwrap())
         );

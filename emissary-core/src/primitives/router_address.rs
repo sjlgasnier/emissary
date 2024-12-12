@@ -21,6 +21,7 @@ use crate::{
     primitives::{Date, Mapping, Str},
 };
 
+use bytes::{BufMut, BytesMut};
 use hashbrown::HashMap;
 use nom::{
     error::{make_error, ErrorKind},
@@ -66,52 +67,32 @@ impl TryFrom<Str> for TransportKind {
 }
 
 impl TransportKind {
+    /// Serialize [`TransportKind`].
     fn serialize(&self) -> Vec<u8> {
         match self {
-            Self::Ntcp2 => Str::from_str("NTCP2").expect("to succeed").serialize(),
-            Self::Ssu2 => Str::from_str("NTCP2").expect("to succeed").serialize(),
+            Self::Ntcp2 => Str::from("NTCP2").serialize(),
+            Self::Ssu2 => Str::from("SSU2").serialize(),
         }
     }
 }
 
-/// Router address information.
-//
-// TODO: cheaply clonable
+/// Router address.
 #[derive(Debug, Clone)]
 pub struct RouterAddress {
     /// Router cost.
-    cost: u8,
+    pub cost: u8,
 
     /// When the router expires (always 0).
-    expires: Date,
+    pub expires: Date,
 
     /// Transport.
-    transport: TransportKind,
+    pub transport: TransportKind,
 
     /// Options.
-    options: HashMap<Str, Str>,
+    pub options: HashMap<Str, Str>,
 
     /// Router's socket address.
-    socket_address: Option<SocketAddr>,
-}
-
-impl fmt::Display for RouterAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "RouterAddress (cost {}, transport {:?}, num options {})\n",
-            self.cost,
-            self.transport,
-            self.options.len()
-        )?;
-
-        write!(f, "addresses:\n")?;
-        for (key, value) in &self.options {
-            write!(f, "--> {key}={value}\n")?;
-        }
-
-        Ok(())
-    }
+    pub socket_address: Option<SocketAddr>,
 }
 
 impl RouterAddress {
@@ -134,29 +115,19 @@ impl RouterAddress {
     }
 
     /// Create new unpublished [`RouterAddress`].
-    //
-    // TODO: no unwraps
     pub fn new_published(key: Vec<u8>, iv: [u8; 16], port: u16, host: String) -> Self {
-        let static_key = StaticPublicKey::from_private_x25519(&key).unwrap();
+        // conversion must succeed since `key` is managed by us
+        let static_key = StaticPublicKey::from_private_x25519(&key).expect("to succeed");
 
         let mut options = HashMap::<Str, Str>::new();
-        options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
+        options.insert(Str::from("v"), Str::from("2"));
         options.insert(
-            Str::from_str("s").unwrap(),
-            Str::from_str(&base64_encode(&static_key.to_vec())).unwrap(),
+            Str::from("s"),
+            Str::from(base64_encode(&static_key.to_vec())),
         );
-        options.insert(
-            Str::from_str("host").unwrap(),
-            Str::from_str(&host).unwrap(),
-        );
-        options.insert(
-            Str::from_str("port").unwrap(),
-            Str::from_str(port.to_string().as_str()).unwrap(),
-        );
-        options.insert(
-            Str::from_str("i").unwrap(),
-            Str::from_str(&base64_encode(iv)).unwrap(),
-        );
+        options.insert(Str::from("host"), Str::from(host.clone()));
+        options.insert(Str::from("port"), Str::from(port.to_string()));
+        options.insert(Str::from("i"), Str::from(base64_encode(iv)));
 
         Self {
             cost: 10,
@@ -178,8 +149,8 @@ impl RouterAddress {
         let (rest, options) = Mapping::parse_multi_frame(rest)?;
         let options = Mapping::into_hashmap(options);
         let socket_address: Option<SocketAddr> = {
-            let maybe_host = options.get(&Str::from_str("host").expect("to succeed"));
-            let maybe_port = options.get(&Str::from_str("port").expect("to succeed"));
+            let maybe_host = options.get(&Str::from("host"));
+            let maybe_port = options.get(&Str::from("port"));
 
             match (maybe_host, maybe_port) {
                 (Some(host), Some(port)) => {
@@ -223,12 +194,12 @@ impl RouterAddress {
     }
 
     /// Try to convert `bytes` into a [`RouterAddress`].
-    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<RouterAddress> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<RouterAddress> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
-    // TODO: zzz
-    pub fn serialize(&self) -> Vec<u8> {
+    /// Serialize [`RouterAddress`].
+    pub fn serialize(&self) -> BytesMut {
         let options = {
             let mut options = self.options.clone().into_iter().collect::<Vec<_>>();
             options.sort_by(|a, b| a.0.cmp(&b.0));
@@ -241,36 +212,68 @@ impl RouterAddress {
         };
 
         let transport = self.transport.serialize();
-        let size = (options.len() as u16).to_be_bytes().to_vec();
-        let mut out = vec![0u8; 1 + 8 + transport.len() + options.len() + 2];
+        let mut out = BytesMut::with_capacity(1 + 8 + transport.len() + options.len() + 2);
 
-        out[0] = self.cost;
-        out[1..9].copy_from_slice(&self.expires.serialize());
-        out[9..9 + transport.len()].copy_from_slice(&transport);
-        out[9 + transport.len()..9 + transport.len() + 2].copy_from_slice(&size);
-        out[9 + transport.len() + 2..9 + transport.len() + 2 + options.len()]
-            .copy_from_slice(&options);
+        out.put_u8(self.cost);
+        out.put_slice(&self.expires.serialize());
+        out.put_slice(&transport);
+        out.put_u16(options.len() as u16);
+        out.put_slice(&options);
 
         out
     }
+}
 
-    /// Get address cost.
-    pub fn cost(&self) -> u8 {
-        self.cost
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_deserialize_unpublished() {
+        let serialized = RouterAddress::new_unpublished(vec![1u8; 32]).serialize();
+        let static_key = StaticPublicKey::from_private_x25519(&vec![1u8; 32]).expect("to succeed");
+
+        let address = RouterAddress::parse(&serialized).unwrap();
+        assert_eq!(address.cost, 10);
+        assert_eq!(
+            address.options.get(&Str::from("s")),
+            Some(&Str::from(base64_encode(static_key.to_vec())))
+        );
+        assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
+        assert!(address.options.get(&Str::from("i")).is_none());
+        assert!(address.options.get(&Str::from("host")).is_none());
+        assert!(address.options.get(&Str::from("port")).is_none());
     }
 
-    /// Get address transport.
-    pub fn transport(&self) -> &TransportKind {
-        &self.transport
-    }
+    #[test]
+    fn serialize_deserialize_published() {
+        let serialized = RouterAddress::new_published(
+            vec![1u8; 32],
+            [0xaa; 16],
+            8888,
+            String::from("127.0.0.1"),
+        )
+        .serialize();
+        let static_key = StaticPublicKey::from_private_x25519(&vec![1u8; 32]).expect("to succeed");
 
-    /// Get address options.
-    pub fn options(&self) -> &HashMap<Str, Str> {
-        &self.options
-    }
-
-    /// Get transport's socket address if it exists.
-    pub fn socket_address(&self) -> Option<SocketAddr> {
-        self.socket_address
+        let address = RouterAddress::parse(&serialized).unwrap();
+        assert_eq!(address.cost, 10);
+        assert_eq!(
+            address.options.get(&Str::from("i")),
+            Some(&Str::from(base64_encode(&[0xaa; 16])))
+        );
+        assert_eq!(
+            address.options.get(&Str::from("s")),
+            Some(&Str::from(base64_encode(static_key.to_vec())))
+        );
+        assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
+        assert_eq!(
+            address.options.get(&Str::from("host")),
+            Some(&Str::from("127.0.0.1"))
+        );
+        assert_eq!(
+            address.options.get(&Str::from("port")),
+            Some(&Str::from("8888"))
+        );
     }
 }

@@ -819,4 +819,61 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn invalid_signature() {
+        let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+        let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let wrong_sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
+        let destination =
+            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+        let id = destination.id();
+
+        let (router1, tunnel1, expires1, lease1) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let (router2, tunnel2, expires2, lease2) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let mut serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                published: 1337,
+                expires: 2 * 1337,
+            },
+            public_keys: vec![sk.public()],
+            leases: vec![lease1.clone(), lease2.clone()],
+        }
+        .serialize(&wrong_sgk);
+
+        assert!(LeaseSet2::parse(&serialized).is_none());
+    }
 }

@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn empty_mapping() {
-        assert!(Str::from_bytes(Vec::new()).is_none());
+        assert!(Str::parse(Vec::new()).is_none());
     }
 
     #[test]

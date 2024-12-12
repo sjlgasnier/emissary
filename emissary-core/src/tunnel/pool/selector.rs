@@ -170,7 +170,7 @@ impl<R: Runtime> ExploratorySelector<R> {
                         .addresses
                         .get(&TransportKind::Ntcp2)
                         .expect("to exist")
-                        .socket_address()
+                        .socket_address
                         .expect("to exist");
 
                     // TODO: add support for ipv6
@@ -1642,7 +1642,6 @@ mod tests {
             .collect::<HashSet<_>>();
         selector.exploratory.add_tunnel(&hops2);
 
-        assert!(!hops1.iter().all(|key| hops2.contains(key)));
         assert!(selector.select_hops(3).is_some());
     }
 

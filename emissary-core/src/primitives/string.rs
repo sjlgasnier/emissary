@@ -156,7 +156,7 @@ impl Str {
     }
 
     /// Try to convert `bytes` into a [`Str`].
-    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Option<Str> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Str> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn empty_string() {
-        assert!(Str::from_bytes(Vec::new()).is_none());
+        assert!(Str::parse(Vec::new()).is_none());
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
         string.push_front(string.len() as u8);
         let string: Vec<u8> = string.into();
 
-        assert_eq!(Str::from_bytes(string), Some(Str::from("hello, world!")),);
+        assert_eq!(Str::parse(string), Some(Str::from("hello, world!")),);
     }
 
     #[test]
@@ -198,7 +198,7 @@ mod tests {
         string.push_back(4);
         let string: Vec<u8> = string.into();
 
-        assert_eq!(Str::from_bytes(string), Some(Str::from("hello, world!")));
+        assert_eq!(Str::parse(string), Some(Str::from("hello, world!")));
     }
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
     fn serialize_works() {
         let bytes = Str::from("hello, world!").serialize();
 
-        assert_eq!(Str::from_bytes(bytes), Some(Str::from("hello, world!")));
+        assert_eq!(Str::parse(bytes), Some(Str::from("hello, world!")));
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
         string.push_front(string.len() as u8);
         let string: Vec<u8> = string.into();
 
-        assert!(Str::from_bytes(string).unwrap().contains("world"));
+        assert!(Str::parse(string).unwrap().contains("world"));
     }
 
     #[test]
@@ -242,6 +242,39 @@ mod tests {
         string.push_front(string.len() as u8);
         let string: Vec<u8> = string.into();
 
-        assert!(!Str::from_bytes(string).unwrap().contains("goodbye"));
+        assert!(!Str::parse(string).unwrap().contains("goodbye"));
+    }
+
+    #[test]
+    fn try_parse_non_utf8() {
+        let string = vec![
+            230, 214, 155, 197, 98, 170, 161, 183, 41, 58, 103, 216, 196, 180, 218, 194, 93, 131,
+            248, 109, 234, 196, 246, 15, 126, 91, 198, 187, 11, 54, 197, 115, 230, 214, 155, 197,
+            98, 170, 161, 183, 41, 58, 103, 216, 196, 180, 218, 194, 93, 131, 248, 109, 234, 196,
+            246, 15, 126, 91, 198, 187, 11, 54, 197, 115, 230, 214, 155, 197, 98, 170, 161, 183,
+            41, 58, 103, 216, 196, 180, 218, 194, 93, 131, 248, 109, 234, 196, 246, 15, 126, 91,
+            198, 187, 11, 54, 197, 115, 230, 214, 155, 197, 98, 170, 161, 183, 41, 58, 103, 216,
+            196, 180, 218, 194, 93, 131, 248, 109, 234, 196, 246, 15, 126, 91, 198, 187, 11, 54,
+            197, 115, 230, 214, 155, 197, 98, 170, 161, 183, 41, 58, 103, 216, 196, 180, 218, 194,
+            93, 131, 248, 109, 234, 196, 246, 15, 126, 91, 198, 187, 11, 54, 197, 115, 230, 214,
+            155, 197, 98, 170, 161, 183, 41, 58, 103, 216, 196, 180, 218, 194, 93, 131, 248, 109,
+            234, 196, 246, 15, 126, 91, 198, 187, 11, 54, 197, 115, 230, 214, 155, 197, 98, 170,
+            161, 183, 41, 58, 103, 216, 196, 180, 218, 194, 93, 131, 248, 109, 234, 196, 246, 15,
+            126, 91, 198, 187, 11, 54, 197, 115, 230, 64, 231, 155, 2, 143, 122, 48, 137, 247, 79,
+            229, 220, 40, 212, 53, 67, 193, 196, 204, 21, 45, 109, 227, 237, 29, 17, 31, 189, 17,
+            189, 195, 40, 5, 0, 4, 0, 7, 0, 0, 102, 216, 119, 64, 2, 88, 0, 0, 0, 0, 2, 0, 4, 0,
+            32, 103, 57, 105, 36, 53, 6, 188, 207, 237, 100, 79, 208, 65, 73, 180, 118, 143, 162,
+            202, 8, 103, 162, 220, 12, 95, 156, 67, 68, 62, 83, 112, 109, 0, 0, 1, 0, 119, 187, 61,
+            243, 159, 159, 198, 178, 65, 81, 148, 19, 78, 105, 92, 175, 190, 170, 136, 62, 19, 45,
+            23, 246, 228, 210, 215, 161, 129, 149, 160, 57, 137, 141, 144, 141, 163, 247, 34, 120,
+        ];
+        let tmp: &[u8] = string.as_ref();
+
+        assert!(Str::try_from(tmp).is_err());
+    }
+
+    #[test]
+    fn try_parse_too_long_str() {
+        assert!(Str::from_str(&"a".repeat(256)).is_err());
     }
 }

@@ -97,7 +97,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
             .addresses
             .get(&TransportKind::Ntcp2)
             .expect("to exist")
-            .socket_address()
+            .socket_address
             .expect("to exist");
         let listener = Ntcp2Listener::new(socket_address).await?;
 

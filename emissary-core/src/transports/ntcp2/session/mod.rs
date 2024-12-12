@@ -229,21 +229,21 @@ impl<R: Runtime> SessionManager<R> {
                     router.addresses.get(&TransportKind::Ntcp2).ok_or(Error::NotSupported)?;
 
                 let static_key = ntcp2
-                    .options()
+                    .options
                     .get(&Str::from_str("s").expect("to succeed"))
                     .ok_or_else(|| {
                         tracing::warn!(target: LOG_TARGET, "static key missing from ntcp2 info");
                         Error::InvalidData
                     })?;
 
-                let iv = ntcp2.options().get(&Str::from_str("i").expect("to succeed")).ok_or_else(
+                let iv = ntcp2.options.get(&Str::from_str("i").expect("to succeed")).ok_or_else(
                     || {
                         tracing::warn!(target: LOG_TARGET, "iv missing from ntcp2 info");
                         Error::InvalidData
                     },
                 )?;
 
-                let socket_address = ntcp2.socket_address().ok_or_else(|| {
+                let socket_address = ntcp2.socket_address.ok_or_else(|| {
                     tracing::debug!(target: LOG_TARGET, "router doesn't have socket address");
                     Error::InvalidData
                 })?;
