@@ -23,11 +23,12 @@ use crate::{
     },
     i2np::{
         tunnel::{build::short, data, gateway},
-        Message,
+        Message, MessageType,
     },
     primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
+        garlic::DeliveryInstructions,
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
             TunnelBuildParameters, TunnelInfo,
@@ -50,6 +51,8 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+
+use super::garlic::GarlicHandler;
 
 /// Make new router.
 pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
@@ -80,6 +83,9 @@ pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterI
 
 /// [`TransitTunnelManager`] for testing.
 pub struct TestTransitTunnelManager {
+    /// Garlic handler.
+    garlic: GarlicHandler<MockRuntime>,
+
     /// Transit tunnel manager.
     manager: TransitTunnelManager<MockRuntime>,
 
@@ -95,11 +101,11 @@ pub struct TestTransitTunnelManager {
     /// Router hash.
     router_hash: Bytes,
 
-    /// Routing table.
-    routing_table: RoutingTable,
-
     /// Router info.
     router_info: RouterInfo,
+
+    /// Routing table.
+    routing_table: RoutingTable,
 }
 
 impl fmt::Debug for TestTransitTunnelManager {
@@ -119,6 +125,7 @@ impl TestTransitTunnelManager {
             RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
 
         Self {
+            garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![])),
             manager: TransitTunnelManager::<MockRuntime>::new(
                 noise,
                 routing_table.clone(),
@@ -152,6 +159,11 @@ impl TestTransitTunnelManager {
     /// Get ID of the router.
     pub fn router(&self) -> RouterId {
         self.router.clone()
+    }
+
+    /// Get mutable reference to [`GarlicHandler`].
+    pub fn garlic(&mut self) -> &mut GarlicHandler<MockRuntime> {
+        &mut self.garlic
     }
 
     /// Handle short tunnel build.
@@ -288,8 +300,14 @@ pub fn build_inbound_tunnel(
         })
         .unwrap();
 
+    let message = match transit_managers[0].garlic().handle_message(message).unwrap().next() {
+        Some(DeliveryInstructions::Local { message }) => message,
+        _ => panic!("invalid delivery instructions"),
+    };
+
     assert_eq!(message.message_id, message_id.into());
     assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+    assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
     assert_eq!(message.payload[0], 4u8);
     assert_eq!(message.payload[1..].len() % 218, 0);
 

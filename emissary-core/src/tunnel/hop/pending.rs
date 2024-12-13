@@ -20,12 +20,13 @@ use crate::{
     crypto::{
         chachapoly::{ChaCha, ChaChaPoly},
         sha256::Sha256,
+        EphemeralPrivateKey,
     },
     error::TunnelError,
     i2np::{
-        garlic::{GarlicMessage, GarlicMessageBlock},
+        garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBlock, GarlicMessageBuilder},
         tunnel::build::short,
-        HopRole, Message, MessageBuilder, MessageType,
+        HopRole, Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -36,7 +37,7 @@ use crate::{
     Error,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
 
@@ -126,6 +127,10 @@ impl<T: Tunnel> PendingTunnel<T> {
         let build_expiration = time_now + TUNNEL_BUILD_EXPIRATION;
         let num_hops =
             NonZeroUsize::new(hops.len()).ok_or(TunnelError::NotEnoughHops(hops.len()))?;
+
+        // save the first hop's static key in case this is an inbound tunnel build so that the
+        // tunnel build message can be garlic-encrypted, preventing OBEP from reading the message
+        let first_hop_static_key = hops[0].1.clone();
 
         // prepare router info for build records
         //
@@ -222,8 +227,6 @@ impl<T: Tunnel> PendingTunnel<T> {
             )
         });
 
-        // TODO: garlic encrypt for inbound builds
-
         Ok((
             Self {
                 hops: tunnel_hops,
@@ -232,11 +235,48 @@ impl<T: Tunnel> PendingTunnel<T> {
                 _tunnel: Default::default(),
             },
             RouterId::from(router_hashes[0].clone().to_vec()),
-            Message {
-                message_id: *message_id,
-                expiration: build_expiration,
-                message_type: MessageType::ShortTunnelBuild,
-                payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
+            match T::direction() {
+                TunnelDirection::Outbound => Message {
+                    message_id: *message_id,
+                    expiration: build_expiration,
+                    message_type: MessageType::ShortTunnelBuild,
+                    payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
+                },
+                TunnelDirection::Inbound => {
+                    let mut message = GarlicMessageBuilder::new()
+                        .with_garlic_clove(
+                            MessageType::ShortTunnelBuild,
+                            message_id,
+                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                            DeliveryInstructions::Local,
+                            &short::TunnelBuildReplyBuilder::from_records(encrypted_records),
+                        )
+                        .build();
+
+                    let ephemeral_secret = EphemeralPrivateKey::new(R::rng());
+                    let ephemeral_public = ephemeral_secret.public_key();
+                    let (key, tag) =
+                        noise.derive_outbound_garlic_key(first_hop_static_key, ephemeral_secret);
+
+                    // message length + poly13055 tg + ephemeral key + garlic message length
+                    let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+                    // encryption must succeed since the parameters are managed by us
+                    ChaChaPoly::new(&key)
+                        .encrypt_with_ad_new(&tag, &mut message)
+                        .expect("to succeed");
+
+                    out.put_u32(message.len() as u32 + 32);
+                    out.put_slice(&ephemeral_public.to_vec());
+                    out.put_slice(&message);
+
+                    Message {
+                        message_type: MessageType::Garlic,
+                        message_id: *message_id,
+                        expiration: R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                        payload: out.to_vec(),
+                    }
+                }
             },
         ))
     }
@@ -397,6 +437,7 @@ mod test {
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
+            garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler},
             noise::NoiseContext,
             pool::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle},
             routing_table::RoutingTable,
@@ -474,7 +515,10 @@ mod test {
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
-            Vec<TransitTunnelManager<MockRuntime>>,
+            Vec<(
+                GarlicHandler<MockRuntime>,
+                TransitTunnelManager<MockRuntime>,
+            )>,
         ) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
@@ -486,11 +530,14 @@ mod test {
 
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(
-                        noise_context,
-                        routing_table,
-                        transit_rx,
-                        handle.clone(),
+                    (
+                        GarlicHandler::new(noise_context.clone(), handle.clone()),
+                        TransitTunnelManager::new(
+                            noise_context,
+                            routing_table,
+                            transit_rx,
+                            handle.clone(),
+                        ),
                     ),
                 )
             })
@@ -523,6 +570,11 @@ mod test {
             })
             .unwrap();
 
+        let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
+
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
         assert_eq!(message.payload[0], 4u8);
@@ -530,7 +582,7 @@ mod test {
 
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
-            |acc, ((router_hash, _), transit_manager)| {
+            |acc, ((router_hash, _), (_, transit_manager))| {
                 let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },

@@ -407,8 +407,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 // could be in a different pool), it'll be received by the selected tunnel's
                 // `TunnelPool` which routes the message to the listener
                 Some((gateway, router_id, handle)) => {
-                    // TODO: rewrite this comment
-                    //
                     // if an inbound tunnel exists, the reply is routed through it and received
                     // by its `TunnelPool` which routes the message to the listener
                     let (message_id, message_rx) = handle.add_listener(&mut R::rng());
@@ -1115,6 +1113,7 @@ mod tests {
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
         tunnel::{
+            garlic::DeliveryInstructions as GarlicDeliveryInstructions,
             pool::selector::ClientSelector, routing_table::RoutingKind,
             tests::TestTransitTunnelManager,
         },
@@ -1345,6 +1344,18 @@ mod tests {
             panic!("invalid routing kind")
         };
         let message = Message::parse_short(&message).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+        let message = match routers
+            .get_mut(&router)
+            .unwrap()
+            .garlic()
+            .handle_message(message)
+            .unwrap()
+            .next()
+        {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
 
@@ -1429,6 +1440,18 @@ mod tests {
             panic!("invalid routing kind")
         };
         let message = Message::parse_short(&message).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+        let message = match routers
+            .get_mut(&router)
+            .unwrap()
+            .garlic()
+            .handle_message(message)
+            .unwrap()
+            .next()
+        {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
 
@@ -1549,7 +1572,7 @@ mod tests {
                 num_inbound_hops: 3usize,
                 num_outbound: 0usize,
                 num_outbound_hops: 0usize,
-                ..Default::default()
+                name: Str::from("client"),
             };
             let client_parameters = TunnelPoolBuildParameters::new(pool_config);
             let client_pool_handle = client_parameters.context_handle.clone();
@@ -1573,56 +1596,67 @@ mod tests {
 
             assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
 
-            let Ok(RoutingKind::External { router_id, message }) = manager_rx.try_recv() else {
-                panic!("invalid routing kind")
-            };
+            // inbound tunnel build is garlic encrypted and exceeds the tunnel data limit
+            // so it's split into two fragments
+            let mut obep = Option::<RouterId>::None;
 
-            // 1st hop (participant)
-            let (router_id, message) = {
+            while let Ok(RoutingKind::External { router_id, message }) = manager_rx.try_recv() {
+                // 1st hop (participant)
+                let (router_id, message) = {
+                    let message = Message::parse_short(&message).unwrap();
+                    let mut router = routers.get_mut(&router_id).unwrap();
+
+                    router.routing_table().route_message(message).unwrap();
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(250), &mut router)
+                            .await
+                            .is_err()
+                    );
+
+                    let RoutingKind::External { router_id, message } =
+                        router.message_rx().try_recv().unwrap()
+                    else {
+                        panic!("invalid routing kind");
+                    };
+                    (router_id, message)
+                };
+
+                // 2nd hop (participant)
+                let (router_id, message) = {
+                    let message = Message::parse_short(&message).unwrap();
+                    let mut router = routers.get_mut(&router_id).unwrap();
+
+                    router.routing_table().route_message(message).unwrap();
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(250), &mut router)
+                            .await
+                            .is_err()
+                    );
+
+                    let RoutingKind::External { router_id, message } =
+                        router.message_rx().try_recv().unwrap()
+                    else {
+                        panic!("invalid routing kind");
+                    };
+                    (router_id, message)
+                };
+
+                // 3rd hop (obep)
                 let message = Message::parse_short(&message).unwrap();
                 let mut router = routers.get_mut(&router_id).unwrap();
+                obep = Some(router_id);
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(250), &mut router).await.is_err()
+                );
+            }
 
-                let RoutingKind::External { router_id, message } =
-                    router.message_rx().try_recv().unwrap()
-                else {
-                    panic!("invalid routing kind");
-                };
-                (router_id, message)
-            };
-
-            // 2nd hop (participant)
-            let (router_id, message) = {
-                let message = Message::parse_short(&message).unwrap();
-                let mut router = routers.get_mut(&router_id).unwrap();
-
-                router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-
-                let RoutingKind::External { router_id, message } =
-                    router.message_rx().try_recv().unwrap()
-                else {
-                    panic!("invalid routing kind");
-                };
-                (router_id, message)
-            };
-
-            // 3rd hop (obep)
-            let (router_id, message) = {
-                let message = Message::parse_short(&message).unwrap();
-                let mut router = routers.get_mut(&router_id).unwrap();
-
-                router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
-
-                let RoutingKind::External { router_id, message } =
-                    router.message_rx().try_recv().unwrap()
-                else {
-                    panic!("invalid routing kind");
-                };
-                (router_id, message)
+            let mut router = routers.get_mut(&obep.unwrap()).unwrap();
+            let RoutingKind::External { router_id, message } =
+                router.message_rx().try_recv().unwrap()
+            else {
+                panic!("invalid routing kind");
             };
 
             // inbound build 1st hop (ibgw)
@@ -1630,8 +1664,16 @@ mod tests {
                 let message = Message::parse_short(&message).unwrap();
                 let mut router = routers.get_mut(&router_id).unwrap();
 
+                assert_eq!(message.message_type, MessageType::Garlic);
+                let message = match router.garlic().handle_message(message).unwrap().next() {
+                    Some(GarlicDeliveryInstructions::Local { message }) => message,
+                    _ => panic!("invalid delivery instructions"),
+                };
+
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(250), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -1663,7 +1705,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(250), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -1761,6 +1805,18 @@ mod tests {
             panic!("invalid routing kind")
         };
         let message = Message::parse_short(&message).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+        let message = match routers
+            .get_mut(&router)
+            .unwrap()
+            .garlic()
+            .handle_message(message)
+            .unwrap()
+            .next()
+        {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
 
@@ -2084,6 +2140,18 @@ mod tests {
             panic!("invalid routing kind")
         };
         let message = Message::parse_short(&message).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+        let message = match routers
+            .get_mut(&router)
+            .unwrap()
+            .garlic()
+            .handle_message(message)
+            .unwrap()
+            .next()
+        {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
         let (router, message) =
             routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
 
@@ -2174,6 +2242,21 @@ mod tests {
 
             // 1st outbound hop
             let message = Message::parse_short(&message).unwrap();
+            let message = match message.message_type {
+                MessageType::Garlic => match routers
+                    .get_mut(&router)
+                    .unwrap()
+                    .garlic()
+                    .handle_message(message)
+                    .unwrap()
+                    .next()
+                {
+                    Some(GarlicDeliveryInstructions::Local { message }) => message,
+                    _ => panic!("invalid delivery instructions"),
+                },
+                _ => message,
+            };
+
             let (router, message) =
                 routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
 

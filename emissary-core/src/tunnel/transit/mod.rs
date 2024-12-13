@@ -531,6 +531,7 @@ mod tests {
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
+            garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler},
             hop::{
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
@@ -599,7 +600,10 @@ mod tests {
         let handle = MockRuntime::register_metrics(vec![]);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
-            Vec<TransitTunnelManager<MockRuntime>>,
+            Vec<(
+                GarlicHandler<MockRuntime>,
+                TransitTunnelManager<MockRuntime>,
+            )>,
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
@@ -611,11 +615,14 @@ mod tests {
 
                 (
                     (router_hash, pk),
-                    TransitTunnelManager::new(
-                        noise_context,
-                        routing_table,
-                        transit_rx,
-                        handle.clone(),
+                    (
+                        GarlicHandler::new(noise_context.clone(), handle.clone()),
+                        TransitTunnelManager::new(
+                            noise_context,
+                            routing_table,
+                            transit_rx,
+                            handle.clone(),
+                        ),
                     ),
                 )
             })
@@ -647,7 +654,12 @@ mod tests {
             })
             .unwrap();
 
-        assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
+        let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
+
+        assert!(transit_managers[0].1.handle_short_tunnel_build(message).is_ok());
     }
 
     #[tokio::test]

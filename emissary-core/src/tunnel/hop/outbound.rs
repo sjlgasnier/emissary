@@ -123,7 +123,7 @@ impl<R: Runtime> OutboundTunnel<R> {
                     .build()
             });
 
-        (next_hop.router.clone(), messages)
+        (next_hop.router.clone(), messages.into_iter())
     }
 
     /// Send `message` to tunnel identified by the (`router`, `gateway`) tuple.
