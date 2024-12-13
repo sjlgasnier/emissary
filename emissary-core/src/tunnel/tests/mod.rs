@@ -250,6 +250,7 @@ pub fn build_outbound_tunnel(
     } = gateway::TunnelGateway::parse(&message.payload).unwrap();
 
     let message = Message::parse_standard(&payload).unwrap();
+    assert_eq!(message.message_type, MessageType::Garlic);
     let tunnel = pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
 
     (local_hash, tunnel, transit_managers)

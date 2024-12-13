@@ -64,7 +64,7 @@ pub struct TunnelKeys {
     /// Garlic key.
     ///
     /// Only available for OBEP.
-    garlic_key: Option<Vec<u8>>,
+    garlic_key: Option<Bytes>,
 
     /// Garlic tag.
     ///
@@ -85,13 +85,17 @@ pub struct TunnelKeys {
 
 impl TunnelKeys {
     /// Get reference to Garlic key.
-    pub fn garlic_key(&self) -> &[u8] {
-        self.garlic_key.as_ref().expect("garlic key to exist").as_ref()
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_key(&self) -> Bytes {
+        self.garlic_key.as_ref().expect("garlic key to exist").clone()
     }
 
     /// Get reference to Garlic tag.
-    pub fn garlic_tag(&self) -> &[u8] {
-        self.garlic_tag.as_ref().expect("garlic tag to exist").as_ref()
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_tag(&self) -> Bytes {
+        self.garlic_tag.as_ref().expect("garlic tag to exist").clone()
     }
 
     /// Get reference to IV key.
@@ -174,11 +178,13 @@ impl TunnelKeys {
                 let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
                 let mut ck =
                     Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
-                let garlic_key = Hmac::new(&temp_key)
-                    .update(&ck)
-                    .update(&b"RGarlicKeyAndTag")
-                    .update(&[0x02])
-                    .finalize();
+                let garlic_key = Bytes::from(
+                    Hmac::new(&temp_key)
+                        .update(&ck)
+                        .update(&b"RGarlicKeyAndTag")
+                        .update(&[0x02])
+                        .finalize(),
+                );
                 let garlic_tag = Bytes::from(ck[..8].to_vec());
 
                 temp_key.zeroize();
@@ -598,13 +604,17 @@ impl OutboundSession {
     }
 
     /// Get reference to Garlic key.
-    pub fn garlic_key(&self) -> &[u8] {
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_key(&self) -> Bytes {
         self.tunnel_keys.garlic_key()
     }
 
     /// Get reference to Garlic tag.
-    pub fn garlic_tag(&self) -> &[u8] {
-        &self.tunnel_keys.garlic_tag()
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_tag(&self) -> Bytes {
+        self.tunnel_keys.garlic_tag()
     }
 
     /// Get owned garlic tag.

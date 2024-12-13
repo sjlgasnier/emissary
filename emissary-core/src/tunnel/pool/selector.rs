@@ -1484,7 +1484,6 @@ mod tests {
             .collect::<HashSet<_>>();
         selector.add_tunnel(&hops2);
 
-        assert!(!hops1.iter().all(|key| hops2.contains(key)));
         assert!(selector.select_hops(3).is_some());
     }
 

@@ -55,6 +55,9 @@ const NUM_BUILD_RECORDS: usize = 4;
 /// How long is reply waited for a build request until it's considered expired.
 const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(10);
 
+/// Short tunnel build request record size.
+const SHORT_RECORD_LEN: usize = 218;
+
 /// Outbound tunnel.
 pub struct PendingTunnel<T: Tunnel> {
     /// Pending tunnel hops.
@@ -213,8 +216,6 @@ impl<T: Tunnel> PendingTunnel<T> {
             .collect::<Vec<_>>();
 
         // double encrypt records
-        //
-        // TODO: randomize order
         tunnel_hops.iter().enumerate().for_each(|(hop_idx, hop)| {
             encrypted_records.iter_mut().skip(hop_idx + 1).enumerate().for_each(
                 |(record_idx, mut record)| {
@@ -310,8 +311,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                 // garlic decrypt the payload with OBEP's garlic key and tag
                 // and try to parse the plaintext into a `GarlicMessage`
                 let mut record = message.payload[12..].to_vec();
-                ChaChaPoly::new(outbound_endpoint.key_context.garlic_key())
-                    .decrypt_with_ad(outbound_endpoint.key_context.garlic_tag(), &mut record)?;
+                ChaChaPoly::new(&outbound_endpoint.key_context.garlic_key())
+                    .decrypt_with_ad(&outbound_endpoint.key_context.garlic_tag(), &mut record)?;
 
                 let message = GarlicMessage::parse(&record).ok_or_else(|| {
                     tracing::warn!(
@@ -358,6 +359,18 @@ impl<T: Tunnel> PendingTunnel<T> {
             }
         };
 
+        if payload.len() != (NUM_BUILD_RECORDS * SHORT_RECORD_LEN + 1) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                tunnel = %self.tunnel_id,
+                direction = ?T::direction(),
+                expected_size = ?(self.hops.len() * SHORT_RECORD_LEN + 1),
+                actual_size = ?payload.len(),
+                "malformed tunnel build reply"
+            );
+            return Err(Error::Tunnel(TunnelError::InvalidMessage));
+        }
+
         self.hops
             .into_iter()
             .enumerate()
@@ -365,9 +378,9 @@ impl<T: Tunnel> PendingTunnel<T> {
             .try_fold(
                 TunnelBuilder::new(self.tunnel_id, self.receiver),
                 |builder, (hop_idx, hop)| {
-                    // TODO: ensure `payload` is long enough
-                    let mut record =
-                        payload[1 + (hop_idx * 218)..1 + ((1 + hop_idx) * 218)].to_vec();
+                    let mut record = payload
+                        [1 + (hop_idx * SHORT_RECORD_LEN)..1 + ((1 + hop_idx) * SHORT_RECORD_LEN)]
+                        .to_vec();
 
                     ChaChaPoly::with_nonce(&hop.key_context.reply_key(), hop_idx as u64)
                         .decrypt_with_ad(&hop.key_context.state(), &mut record)
@@ -717,6 +730,52 @@ mod test {
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
         assert_eq!(message.payload[0], 4u8);
         assert_eq!(message.payload[1..].len() % 218, 0);
+
+        // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {
+            Error::Tunnel(TunnelError::InvalidMessage) => {}
+            _ => panic!("invalid error"),
+        }
+    }
+
+    #[test]
+    fn malformed_tunnel_build_reply() {
+        crate::util::init_logger();
+
+        let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .unzip();
+
+        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, next_router, mut message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+        assert_eq!(message.payload[0], 4u8);
+
+        // set random data as payload which causes the length check to fail
+        message.message_type = MessageType::OutboundTunnelBuildReply;
+        message.payload = vec![0u8; 123];
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
         match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {

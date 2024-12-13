@@ -25,13 +25,13 @@ use crate::{
     },
     error::{RejectionReason, RoutingError, TunnelError},
     i2np::{
-        garlic::GarlicMessage,
+        garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBuilder},
         tunnel::{
             build::{short, variable},
             data::EncryptedTunnelData,
             gateway::TunnelGateway,
         },
-        HopRole, Message, MessageBuilder, MessageType,
+        HopRole, Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{RouterId, TunnelId},
     runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
@@ -44,7 +44,7 @@ use crate::{
     Error,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use hashbrown::HashMap;
 use rand_core::RngCore;
@@ -360,69 +360,98 @@ impl<R: Runtime> TransitTunnelManager<R> {
         // try to insert transit tunnel into routing table, allocating it a channel
         //
         // if the tunnel already exists in the routing table, the build request is rejected
-        match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
-            Err(error) => {
-                tracing::warn!(
+        let (garlic_key, garlic_tag) =
+            match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
+                Err(error) => {
+                    tracing::warn!(
                     target: LOG_TARGET,
                     %tunnel_id,
                     ?error,
                     "tunnel already exists in routing table, rejecting",
-                );
-                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
+                    );
+                    self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
 
-                record[48] = 0x00; // no options
-                record[49] = 0x00;
-                record[201] = 0x30; // reject
+                    record[48] = 0x00; // no options
+                    record[49] = 0x00;
+                    record[201] = 0x30; // reject
 
-                session.create_tunnel_keys(role)?;
-                session.encrypt_build_records(&mut payload, record_idx)?;
-            }
-            Ok(receiver) => {
-                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
-                self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+                    session.create_tunnel_keys(role)?;
+                    session.encrypt_build_records(&mut payload, record_idx)?;
 
-                record[48] = 0x00; // no options
-                record[49] = 0x00;
-                record[201] = 0x00; // accept
+                    match role {
+                        HopRole::OutboundEndpoint => {
+                            let tunnel_keys = session.finalize()?;
 
-                session.create_tunnel_keys(role)?;
-                session.encrypt_build_records(&mut payload, record_idx)?;
-
-                // start tunnel event loop
-                //
-                // an accepted tunnel must be maintained for 10 minutes as we won't know
-                // if another participant of the tunnel rejected it
-                match role {
-                    HopRole::InboundGateway => self.tunnels.push(InboundGateway::<R>::new(
-                        tunnel_id,
-                        next_tunnel_id,
-                        next_router.clone(),
-                        session.finalize()?,
-                        self.routing_table.clone(),
-                        self.metrics_handle.clone(),
-                        receiver,
-                    )),
-                    HopRole::Participant => self.tunnels.push(Participant::<R>::new(
-                        tunnel_id,
-                        next_tunnel_id,
-                        next_router.clone(),
-                        session.finalize()?,
-                        self.routing_table.clone(),
-                        self.metrics_handle.clone(),
-                        receiver,
-                    )),
-                    HopRole::OutboundEndpoint => self.tunnels.push(OutboundEndpoint::<R>::new(
-                        tunnel_id,
-                        next_tunnel_id,
-                        next_router.clone(),
-                        session.finalize()?,
-                        self.routing_table.clone(),
-                        self.metrics_handle.clone(),
-                        receiver,
-                    )),
+                            (
+                                Some(tunnel_keys.garlic_key()),
+                                Some(tunnel_keys.garlic_tag()),
+                            )
+                        }
+                        _ => (None, None),
+                    }
                 }
-            }
-        }
+                Ok(receiver) => {
+                    self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
+                    self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+
+                    record[48] = 0x00; // no options
+                    record[49] = 0x00;
+                    record[201] = 0x00; // accept
+
+                    session.create_tunnel_keys(role)?;
+                    session.encrypt_build_records(&mut payload, record_idx)?;
+
+                    // start tunnel event loop
+                    //
+                    // an accepted tunnel must be maintained for 10 minutes as we won't know
+                    // if another participant of the tunnel rejected it
+                    match role {
+                        HopRole::InboundGateway => {
+                            self.tunnels.push(InboundGateway::<R>::new(
+                                tunnel_id,
+                                next_tunnel_id,
+                                next_router.clone(),
+                                session.finalize()?,
+                                self.routing_table.clone(),
+                                self.metrics_handle.clone(),
+                                receiver,
+                            ));
+
+                            (None, None)
+                        }
+                        HopRole::Participant => {
+                            self.tunnels.push(Participant::<R>::new(
+                                tunnel_id,
+                                next_tunnel_id,
+                                next_router.clone(),
+                                session.finalize()?,
+                                self.routing_table.clone(),
+                                self.metrics_handle.clone(),
+                                receiver,
+                            ));
+
+                            (None, None)
+                        }
+                        HopRole::OutboundEndpoint => {
+                            let tunnel_keys = session.finalize()?;
+                            let garlic_key = tunnel_keys.garlic_key();
+                            let garlic_tag = tunnel_keys.garlic_tag();
+
+                            self.tunnels.push(OutboundEndpoint::<R>::new(
+                                tunnel_id,
+                                next_tunnel_id,
+                                next_router.clone(),
+                                tunnel_keys,
+                                self.routing_table.clone(),
+                                self.metrics_handle.clone(),
+                                receiver,
+                            ));
+
+                            (Some(garlic_key), Some(garlic_tag))
+                        }
+                    }
+                }
+            };
 
         match role {
             // IBGWs and participants just forward the build request as-is to the next hop
@@ -439,23 +468,48 @@ impl<R: Runtime> TransitTunnelManager<R> {
             // OBEP wraps the `OutboundBuildTunnelReply` in a `TunnelGateway` in order for
             // the recipient IBGW to be able to forward the tunnel build reply correctly
             HopRole::OutboundEndpoint => {
-                // TODO: garlic encrypt
-                let msg = MessageBuilder::standard()
-                    .with_message_type(MessageType::OutboundTunnelBuildReply)
+                // garlic tag and key must exist since this is a response for an OBEP
+                let garlic_key = garlic_key.expect("to exist");
+                let garlic_tag = garlic_tag.expect("to exist");
+
+                let mut message = GarlicMessageBuilder::new()
+                    .with_garlic_clove(
+                        MessageType::OutboundTunnelBuildReply,
+                        next_message_id,
+                        R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                        DeliveryInstructions::Local,
+                        &payload,
+                    )
+                    .build();
+
+                // message length + poly13055 tag + garlic tag + garlic message length
+                let mut out = BytesMut::with_capacity(message.len() + 16 + 8 + 4);
+
+                // encryption must succeed since the parameters are managed by us
+                ChaChaPoly::new(&garlic_key)
+                    .encrypt_with_ad_new(&garlic_tag, &mut message)
+                    .expect("to succeed");
+
+                out.put_u32(message.len() as u32 + 8);
+                out.put_slice(&garlic_tag);
+                out.put_slice(&message);
+
+                let message = MessageBuilder::standard()
+                    .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_message_type(MessageType::Garlic)
                     .with_message_id(next_message_id)
-                    .with_expiration(expiration)
-                    .with_payload(&payload)
+                    .with_payload(&out)
                     .build();
 
                 let msg = TunnelGateway {
                     tunnel_id: next_tunnel_id.into(),
-                    payload: &msg,
+                    payload: &message,
                 }
                 .serialize();
 
                 let message = MessageBuilder::short()
                     .with_message_type(MessageType::TunnelGateway)
-                    .with_message_id(R::rng().next_u32())
+                    .with_message_id(next_message_id)
                     .with_expiration(expiration)
                     .with_payload(&msg)
                     .build();
@@ -698,7 +752,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
-                    noise: local_noise,
+                    noise: local_noise.clone(),
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
                         gateway,
@@ -733,16 +787,10 @@ mod tests {
         } = TunnelGateway::parse(&payload).unwrap();
 
         assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
+        let message = Message::parse_standard(&payload).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
 
-        let Some(Message {
-            message_type: MessageType::OutboundTunnelBuildReply,
-            message_id,
-            expiration,
-            payload,
-        }) = Message::parse_standard(&payload)
-        else {
-            panic!("invalid message");
-        };
+        pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
     }
 
     #[test]
