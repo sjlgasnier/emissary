@@ -37,7 +37,7 @@ use crate::{
     },
     primitives::{RouterInfo, Str, TransportKind},
     profile::ProfileStorage,
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
+    runtime::{Runtime, TcpStream},
     transports::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
         SubsystemHandle,
@@ -49,7 +49,7 @@ use crate::{
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use alloc::{vec, vec::Vec};
-use core::{future::Future, marker::PhantomData, net::SocketAddr, str::FromStr};
+use core::{future::Future, marker::PhantomData, str::FromStr};
 
 mod active;
 mod initiator;
@@ -97,8 +97,11 @@ impl KeyContext {
 }
 
 /// Initiator options.
+//
+// TODO: remove zerocopy
 #[derive(Debug, AsBytes, FromBytes, FromZeroes)]
 #[repr(packed)]
+#[allow(unused)]
 pub(super) struct InitiatorOptions {
     id: u8,
     version: u8,
@@ -110,8 +113,11 @@ pub(super) struct InitiatorOptions {
 }
 
 /// Responder options.
+//
+// TODO: remove zerocopy
 #[derive(Debug, AsBytes, FromBytes, FromZeroes)]
 #[repr(packed)]
+#[allow(unused)]
 pub(super) struct ResponderOptions {
     reserved1: [u8; 2],
     padding_length: [u8; 2],
@@ -216,7 +222,6 @@ impl<R: Runtime> SessionManager<R> {
         router: RouterInfo,
     ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
-        let local_router_hash = self.local_router_info.identity.hash().to_vec();
         let router_id = router.identity.id();
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
@@ -320,7 +325,7 @@ impl<R: Runtime> SessionManager<R> {
             let mut reply = alloc::vec![0u8; padding_len];
             stream.read_exact(&mut reply).await?;
 
-            let (mut key_context, message) = initiator.finalize(&reply)?;
+            let (key_context, message) = initiator.finalize(&reply)?;
             stream.write_all(&message).await?;
 
             Ok(Ntcp2Session::<R>::new(
@@ -337,9 +342,8 @@ impl<R: Runtime> SessionManager<R> {
     pub fn accept_session(
         &self,
         mut stream: R::TcpStream,
-    ) -> impl Future<Output = crate::Result<(Ntcp2Session<R>)>> {
+    ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
         let net_id = self.local_router_info.net_id();
-        let local_info = self.local_router_info.serialize(&self.local_signing_key);
         let local_router_hash = self.local_router_info.identity.hash().to_vec();
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
@@ -354,7 +358,7 @@ impl<R: Runtime> SessionManager<R> {
                 "read `SessionRequest` from socket",
             );
 
-            /// read first part of `SessionRequest` which has fixed length
+            // read first part of `SessionRequest` which has fixed length
             let mut message = vec![0u8; 64];
             stream.read_exact(&mut message).await?;
 

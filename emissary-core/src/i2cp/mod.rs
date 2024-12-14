@@ -21,7 +21,7 @@
 //! https://geti2p.net/en/docs/protocol/i2cp
 
 use crate::{
-    error::{ConnectionError, I2cpError},
+    error::{ConnectionError, Error, I2cpError},
     i2cp::{
         pending::{I2cpSessionContext, PendingI2cpSession},
         session::I2cpSession,
@@ -31,12 +31,11 @@ use crate::{
     runtime::{JoinSet, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
     util::AsyncReadExt,
-    Error,
 };
 
 use futures::StreamExt;
 
-use alloc::{string::String, vec};
+use alloc::vec;
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -178,7 +177,6 @@ impl<R: Runtime> Future for I2cpServer<R> {
                 Poll::Ready(Some(Ok(stream))) => {
                     let session_id = self.next_session_id();
                     let tunnel_manager_handle = self.tunnel_manager_handle.clone();
-                    let netdb_handle = self.netdb_handle.clone();
 
                     tracing::trace!(
                         target: LOG_TARGET,
@@ -190,7 +188,6 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         session_id,
                         I2cpSocket::new(stream),
                         tunnel_manager_handle,
-                        netdb_handle,
                     ));
                 }
             }

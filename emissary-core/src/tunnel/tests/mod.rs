@@ -17,14 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base64_encode, EphemeralPublicKey, SigningPrivateKey, SigningPublicKey, StaticPrivateKey,
-        StaticPublicKey,
-    },
-    i2np::{
-        tunnel::{build::short, data, gateway},
-        Message, MessageType,
-    },
+    crypto::{StaticPrivateKey, StaticPublicKey},
+    i2np::{tunnel::gateway, Message, MessageType},
     primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
     tunnel::{
@@ -34,7 +28,7 @@ use crate::{
             TunnelBuildParameters, TunnelInfo,
         },
         noise::NoiseContext,
-        pool::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle},
+        pool::TunnelPoolBuildParameters,
         routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
@@ -43,7 +37,7 @@ use crate::{
 use bytes::Bytes;
 use futures::FutureExt;
 use rand_core::RngCore;
-use thingbuf::mpsc::{channel, Receiver, Sender};
+use thingbuf::mpsc::{channel, Receiver};
 
 use core::{
     fmt,
@@ -216,12 +210,12 @@ pub fn build_outbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise, _router_info) = make_router(fast);
+    let (local_hash, _local_pk, local_noise, _router_info) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
-    let (pending_tunnel, next_router, message) =
+    let (pending_tunnel, _next_router, message) =
         PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
             TunnelBuildParameters {
                 hops: hops.clone(),
@@ -239,15 +233,13 @@ pub fn build_outbound_tunnel(
 
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
-        |acc, ((router_hash, _), transit_manager)| {
+        |acc, ((_, _), transit_manager)| {
             let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
             Message::parse_short(&message).unwrap()
         },
     );
-    let gateway::TunnelGateway {
-        tunnel_id: recv_tunnel_id,
-        payload,
-    } = gateway::TunnelGateway::parse(&message.payload).unwrap();
+    let gateway::TunnelGateway { payload, .. } =
+        gateway::TunnelGateway::parse(&message.payload).unwrap();
 
     let message = Message::parse_standard(&payload).unwrap();
     assert_eq!(message.message_type, MessageType::Garlic);
@@ -275,12 +267,11 @@ pub fn build_inbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise, _router_info) = make_router(fast);
+    let (local_hash, _local_pk, local_noise, _router_info) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-    let (tx, rx) = channel(64);
+    let (_tx, rx) = channel(64);
     let TunnelPoolBuildParameters {
-        context,
         context_handle: handle,
         ..
     } = TunnelPoolBuildParameters::new(Default::default());
@@ -314,7 +305,7 @@ pub fn build_inbound_tunnel(
 
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
-        |acc, ((router_hash, _), transit_manager)| {
+        |acc, ((_, _), transit_manager)| {
             let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
             Message::parse_short(&message).unwrap()
         },

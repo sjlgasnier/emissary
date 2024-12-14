@@ -147,11 +147,8 @@ impl fmt::Debug for DestinationKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transient => f.debug_struct("DestinationKind::Transient").finish(),
-            Self::Persistent {
-                destination,
-                private_key,
-                signing_key,
-            } => f.debug_struct("DestinationKind::Persistent").finish_non_exhaustive(),
+            Self::Persistent { .. } =>
+                f.debug_struct("DestinationKind::Persistent").finish_non_exhaustive(),
         }
     }
 }
@@ -310,7 +307,9 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                     Some("STREAM") => SessionKind::Stream,
                     style @ (Some("RAW") | Some("DATAGRAM")) => {
                         // currently only forwarded datagrams are supported
-                        let port = value.key_value_pairs.get("PORT").ok_or_else(|| {
+                        //
+                        // TODO: why is port unused?
+                        let _ = value.key_value_pairs.get("PORT").ok_or_else(|| {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 "only forwarded raw datagrams are supported",
@@ -349,8 +348,7 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                             Destination::parse_frame(&decoded).map_err(|_| ())?;
                         let (rest, private_key) =
                             take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
-                        let (rest, signing_key) =
-                            take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
+                        let (_, signing_key) = take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
 
                         DestinationKind::Persistent {
                             destination,
@@ -450,7 +448,7 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         ()
                     })?
                     .parse::<u16>()
-                    .map_err(|error| ())?;
+                    .map_err(|_| ())?;
 
                 Ok(SamCommand::Forward {
                     session_id: session_id.to_string(),
@@ -688,7 +686,6 @@ mod tests {
             let encryption_key = StaticPrivateKey::new(rng);
 
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
 
             let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
             out.put_slice(&destination.serialize());
@@ -732,7 +729,7 @@ mod tests {
     #[test]
     fn parse_stream_connect() {
         let destination = {
-            let mut signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+            let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
             base64_encode(Destination::new(signing_key.public()).serialize())
         };
 
@@ -741,8 +738,8 @@ mod tests {
         )) {
             Some(SamCommand::Connect {
                 session_id,
-                destination,
                 options,
+                ..
             }) => {
                 assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
                 assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
@@ -857,8 +854,8 @@ mod tests {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Datagram,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.2.2.2".to_string()));
@@ -881,8 +878,8 @@ mod tests {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Datagram,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.0.0.1".to_string()));
@@ -912,7 +909,6 @@ mod tests {
                 let encryption_key = StaticPrivateKey::new(rng);
 
                 let destination = Destination::new(signing_key.public());
-                let destination_id = destination.id();
 
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
@@ -975,8 +971,8 @@ mod tests {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Anonymous,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.2.2.2".to_string()));
@@ -999,8 +995,8 @@ mod tests {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Anonymous,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.0.0.1".to_string()));
@@ -1030,7 +1026,6 @@ mod tests {
                 let encryption_key = StaticPrivateKey::new(rng);
 
                 let destination = Destination::new(signing_key.public());
-                let destination_id = destination.id();
 
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
@@ -1082,7 +1077,6 @@ mod tests {
         let destination = {
             let mut rng = MockRuntime::rng();
             let signing_key = SigningPrivateKey::random(&mut rng);
-            let encryption_key = StaticPrivateKey::new(rng);
 
             Destination::new(signing_key.public())
         };
@@ -1099,13 +1093,13 @@ mod tests {
         match Datagram::parse(&datagram) {
             Some(Datagram {
                 session_id,
-                destination: parsed,
                 datagram,
+                ..
             }) => {
                 assert_eq!(*session_id, *"test");
                 assert_eq!(datagram, b"hello, world");
             }
-            response => panic!("invalid datagram"),
+            _ => panic!("invalid datagram"),
         }
 
         {
@@ -1128,7 +1122,7 @@ mod tests {
                     assert_eq!(*session_id, *"12OzbmMqo3bdv3w8");
                     assert_eq!(datagram, b"hello, world 1");
                 }
-                response => panic!("invalid datagram"),
+                _ => panic!("invalid datagram"),
             }
         }
     }

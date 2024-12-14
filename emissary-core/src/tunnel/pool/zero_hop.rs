@@ -25,7 +25,6 @@ use crate::{
 
 use futures::{future::BoxFuture, FutureExt};
 use futures_channel::oneshot;
-use rand_core::RngCore;
 use thingbuf::mpsc;
 
 use alloc::boxed::Box;
@@ -150,9 +149,4 @@ impl Future for ZeroHopInboundTunnel {
 
         Poll::Pending
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 }

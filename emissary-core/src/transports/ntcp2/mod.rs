@@ -17,18 +17,15 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
-    },
-    primitives::{RouterAddress, RouterId, RouterInfo, Str, TransportKind},
+    crypto::SigningPrivateKey,
+    primitives::{RouterId, RouterInfo, TransportKind},
     profile::ProfileStorage,
-    runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener, TcpStream},
+    runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemHandle,
     transports::{
         metrics::*,
         ntcp2::{
             listener::Ntcp2Listener,
-            message::MessageBlock,
             session::{Ntcp2Session, SessionManager},
         },
         Transport, TransportEvent,
@@ -38,13 +35,10 @@ use crate::{
 
 use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
-use thingbuf::mpsc::Sender;
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::{
-    marker::PhantomData,
     pin::Pin,
-    str::FromStr,
     task::{Context, Poll, Waker},
 };
 
@@ -245,7 +239,14 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         router_info,
                     }));
                 }
-                Some(Err(error)) => return Poll::Ready(Some(TransportEvent::ConnectionFailure {})),
+                Some(Err(error)) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to connect to router",
+                    );
+                    return Poll::Ready(Some(TransportEvent::ConnectionFailure {}));
+                }
                 None => return Poll::Ready(None),
             }
         }

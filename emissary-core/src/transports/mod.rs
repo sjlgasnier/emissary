@@ -17,17 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::SigningPrivateKey,
     error::ChannelError,
-    i2np::Message,
-    primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
+    primitives::{RouterId, RouterInfo, TransportKind},
     profile::ProfileStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
     transports::{metrics::*, ntcp2::Ntcp2Transport},
-    Error, Ntcp2Config,
+    Ntcp2Config,
 };
 
 use futures::{Stream, StreamExt};
@@ -47,20 +46,6 @@ mod ssu2;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::transport-manager";
-
-// TODO: introduce `Endpoint`?
-
-#[derive(Debug, Clone)]
-pub enum NetworkEvent {
-    /// Connection successfully established to remote peer.
-    ConnectionEstablished {
-        /// `RouterInfo` for the connected peer.
-        router: RouterInfo,
-    },
-    ConnectionClosed {},
-    ConnectionFailure {},
-    Message {},
-}
 
 /// Transport event.
 #[derive(Debug)]
@@ -285,9 +270,6 @@ pub struct TransportManager<R: Runtime> {
     /// TX channel passed onto other subsystems.
     cmd_tx: Sender<ProtocolCommand>,
 
-    /// Local key.
-    local_key: StaticPrivateKey,
-
     /// Local `RouterInfo`.
     local_router_info: RouterInfo,
 
@@ -316,7 +298,6 @@ pub struct TransportManager<R: Runtime> {
 impl<R: Runtime> TransportManager<R> {
     /// Create new [`TransportManager`].
     pub fn new(
-        local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         profile_storage: ProfileStorage<R>,
@@ -327,7 +308,6 @@ impl<R: Runtime> TransportManager<R> {
         Self {
             cmd_rx,
             cmd_tx,
-            local_key,
             local_router_info,
             local_signing_key,
             metrics_handle,
@@ -450,9 +430,6 @@ impl<R: Runtime> Future for TransportManager<R> {
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionFailure {})) => {
                     self.metrics_handle.counter(NUM_DIAL_FAILURES).increment(1);
-                }
-                Poll::Ready(Some(event)) => {
-                    tracing::warn!("unhandled event: {event:?}");
                 }
             }
 

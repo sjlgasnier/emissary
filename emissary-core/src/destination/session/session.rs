@@ -46,7 +46,7 @@ use parking_lot::RwLock;
 #[cfg(feature = "no_std")]
 use spin::rwlock::RwLock;
 
-use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{fmt, marker::PhantomData, mem, time::Duration};
 
 /// Garlic message overheard.
@@ -369,10 +369,10 @@ impl<R: Runtime> PendingSession<R> {
                 outbound,
                 mut send_tag_set,
                 recv_tag_set,
-                remote_public_key,
                 garlic_tags,
                 nsr_tag_set_entries,
                 tag_set_entries,
+                ..
             } => {
                 let TagSetEntry {
                     key,
@@ -582,7 +582,7 @@ impl<R: Runtime> PendingSession<R> {
                 remote_public_key,
                 garlic_tags,
                 mut nsr_tag_set_entries,
-                mut tag_set_entries,
+                tag_set_entries,
             } => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -723,15 +723,9 @@ impl<R: Runtime> NsrContext<R> {
     fn try_expire(&mut self) -> Option<impl Iterator<Item = u64>> {
         match self {
             Self::Inactive => None,
+            Self::Active { created, .. } if created.elapsed() < NSR_CONTEXT_MAX_AGE => None,
             Self::Active {
-                created,
-                tag_set_entries,
-                sessions,
-            } if created.elapsed() < NSR_CONTEXT_MAX_AGE => None,
-            Self::Active {
-                created,
-                tag_set_entries,
-                sessions,
+                tag_set_entries, ..
             } => {
                 let garlic_tags = tag_set_entries.keys().copied().collect::<Vec<_>>();
                 *self = Self::Inactive;

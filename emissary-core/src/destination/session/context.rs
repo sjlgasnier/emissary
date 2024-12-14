@@ -29,7 +29,6 @@ use crate::{
     },
     primitives::{DestinationId, MessageId},
     runtime::Runtime,
-    Error,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -395,7 +394,6 @@ impl<R: Runtime> KeyContext<R> {
 
         Ok((
             InboundSession::new(
-                self.private_key.clone(),
                 static_key,
                 public_key,
                 chaining_key,

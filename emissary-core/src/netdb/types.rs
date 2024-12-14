@@ -21,10 +21,7 @@
 
 //! Kademlia types.
 
-use crate::{
-    primitives::RouterId,
-    runtime::{Instant, Runtime},
-};
+use crate::{primitives::RouterId, runtime::Runtime};
 
 use sha2::{
     digest::generic_array::{typenum::U32, GenericArray},
@@ -35,7 +32,6 @@ use uint::construct_uint;
 use alloc::vec::Vec;
 use core::{
     borrow::Borrow,
-    fmt,
     hash::{Hash, Hasher},
 };
 

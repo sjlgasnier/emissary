@@ -24,7 +24,7 @@
 use crate::{
     netdb::{
         bucket::{KBucket, KBucketEntry},
-        types::{Distance, FloodFill, Key, U256},
+        types::{Distance, FloodFill, Key},
     },
     primitives::RouterId,
     runtime::Runtime,
@@ -239,7 +239,7 @@ impl Iterator for ClosestBucketsIter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::{netdb::types::U256, runtime::mock::MockRuntime};
     use core::time::Duration;
 
     #[test]

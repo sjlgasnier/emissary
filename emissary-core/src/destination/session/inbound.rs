@@ -117,9 +117,6 @@ impl fmt::Debug for InboundSessionState {
 
 /// Inbound session.
 pub struct InboundSession<R: Runtime> {
-    /// Static private key of the session.
-    private_key: StaticPrivateKey,
-
     /// State of the inbound session.
     state: InboundSessionState,
 
@@ -130,14 +127,12 @@ pub struct InboundSession<R: Runtime> {
 impl<R: Runtime> InboundSession<R> {
     /// Create new [`InboundSession`].
     pub fn new(
-        private_key: StaticPrivateKey,
         remote_static_public_key: StaticPublicKey,
         remote_ephemeral_public_key: StaticPublicKey,
         chaining_key: Vec<u8>,
         state: Vec<u8>,
     ) -> Self {
         Self {
-            private_key,
             state: InboundSessionState::AwaitingNewSessionReplyTransmit {
                 chaining_key,
                 remote_static_public_key,

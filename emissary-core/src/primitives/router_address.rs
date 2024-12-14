@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, base64_encode, StaticPublicKey},
+    crypto::{base64_encode, StaticPublicKey},
     primitives::{Date, Mapping, Str},
 };
 
@@ -31,13 +31,11 @@ use nom::{
 
 use alloc::{
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 use core::{
-    fmt,
     net::{IpAddr, SocketAddr},
-    str::{self, FromStr},
+    str::FromStr,
 };
 
 /// Transport kind.

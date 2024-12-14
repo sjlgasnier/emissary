@@ -281,6 +281,7 @@ pub enum RouteKind {
     Tunnel(TunnelId),
 
     /// Listener for message not found.
+    #[allow(unused)]
     Message(MessageId),
 }
 
@@ -297,17 +298,21 @@ impl fmt::Display for RouteKind {
 #[derive(Debug)]
 pub enum RoutingError {
     /// Route not found.
+    #[allow(unused)]
     RouteNotFound(Message, RouteKind),
 
     /// Failed to parse route from message.
     ///
     /// Message is invalid and doesn't contain a route.
+    #[allow(unused)]
     FailedToParseRoute(Message),
 
     /// Channel full.
+    #[allow(unused)]
     ChannelFull(Message),
 
     /// Channel closed.
+    #[allow(unused)]
     ChannelClosed(Message),
 
     /// Tunnel already exists in the routing table.
@@ -318,7 +323,7 @@ impl fmt::Display for RoutingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RouteNotFound(_, route) => write!(f, "route not found: {route}"),
-            Self::FailedToParseRoute(message) => write!(f, "failed to parse route"),
+            Self::FailedToParseRoute(_) => write!(f, "failed to parse route"),
             Self::ChannelFull(_) => write!(f, "channel full"),
             Self::ChannelClosed(_) => write!(f, "channel closed"),
             Self::TunnelExists(tunnel_id) =>
@@ -391,7 +396,7 @@ impl From<chacha20poly1305::Error> for Error {
 }
 
 impl From<Error> for SessionError {
-    fn from(value: Error) -> Self {
+    fn from(_: Error) -> Self {
         SessionError::Chacha
     }
 }

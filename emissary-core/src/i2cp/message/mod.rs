@@ -21,16 +21,13 @@ use crate::{
     i2cp::payload::I2cpParameters,
     primitives::{Date, Destination, LeaseSet2, Mapping, Str},
     runtime::Runtime,
-    tunnel::TunnelPoolConfig,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use hashbrown::HashMap;
 use nom::{
     bytes::complete::take,
-    error::{make_error, ErrorKind},
     number::complete::{be_u16, be_u32, be_u8},
-    Err, IResult,
 };
 
 use alloc::vec::Vec;
@@ -93,13 +90,13 @@ pub enum RequestKind {
     /// Host name.
     HostName {
         /// Host name.
-        host_name: Str,
+        _host_name: Str,
     },
 
     /// Hash.
     Hash {
         /// SHA256 hash.
-        hash: Vec<u8>,
+        _hash: Vec<u8>,
     },
 }
 
@@ -255,6 +252,7 @@ impl MessageType {
 }
 
 /// I2CP message.
+#[allow(unused)]
 pub enum Message {
     /// Bandwidth limit
     BandwidthLimits,
@@ -457,7 +455,7 @@ impl Message {
         let (rest, destination) = Destination::parse_frame(input.as_ref()).ok()?;
         let (rest, options) = Mapping::parse_multi_frame(rest).ok()?;
         let (rest, date) = Date::parse_frame(rest).ok()?;
-        let (rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
+        let (_rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
 
         match destination.verifying_key() {
             None => tracing::debug!(
@@ -495,10 +493,10 @@ impl Message {
 
         let kind = match kind {
             0 => RequestKind::Hash {
-                hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
+                _hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
             },
             1 => RequestKind::HostName {
-                host_name: Str::parse_frame(rest).ok()?.1,
+                _host_name: Str::parse_frame(rest).ok()?.1,
             },
             kind => {
                 tracing::warn!(
@@ -577,7 +575,7 @@ impl Message {
         };
 
         let (rest, num_private_keys) = be_u8::<_, ()>(rest).ok()?;
-        let (rest, private_keys) = (0..num_private_keys).try_fold(
+        let (_rest, private_keys) = (0..num_private_keys).try_fold(
             (rest, Vec::<StaticPrivateKey>::new()),
             |(rest, mut keys), _| {
                 let (rest, key_kind) = be_u16::<_, ()>(rest).ok()?;

@@ -520,7 +520,7 @@ impl<'a> GarlicMessage<'a> {
 
     /// Try to parse [`GarlicMessage::NextKey`] from `input`.
     fn parse_next_key(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
+        let (rest, _size) = be_u16(input)?;
         let (rest, flag) = be_u8(rest)?;
         let (rest, key_id) = be_u16(rest)?;
 

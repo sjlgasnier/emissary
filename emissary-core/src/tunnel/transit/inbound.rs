@@ -17,17 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        aes::{cbc, ecb},
-        sha256::Sha256,
-    },
-    error::{RejectionReason, TunnelError},
+    crypto::aes::{cbc, ecb},
+    error::{Error, RejectionReason, TunnelError},
     i2np::{
         tunnel::{
             data::{EncryptedTunnelData, TunnelDataBuilder},
             gateway::TunnelGateway,
         },
-        HopRole, Message, MessageBuilder, MessageType,
+        Message, MessageBuilder, MessageType,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -36,10 +33,8 @@ use crate::{
         routing_table::RoutingTable,
         transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
-    Error,
 };
 
-use bytes::{Buf, BufMut, BytesMut};
 use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 use thingbuf::mpsc::Receiver;
@@ -47,7 +42,6 @@ use thingbuf::mpsc::Receiver;
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
-    marker::PhantomData,
     ops::{Range, RangeFrom},
     pin::Pin,
     task::{Context, Poll},
@@ -72,6 +66,7 @@ pub struct InboundGateway<R: Runtime> {
     message_rx: Receiver<Message>,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics_handle: R::MetricsHandle,
 
     /// Next router ID.
@@ -95,9 +90,10 @@ pub struct InboundGateway<R: Runtime> {
 
 impl<R: Runtime> InboundGateway<R> {
     /// Handle `TunnelGateway` message.
+    #[allow(unused)]
     fn handle_tunnel_data(
         &mut self,
-        tunnel_data: &EncryptedTunnelData,
+        _: &EncryptedTunnelData,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         tracing::warn!(
             target: LOG_TARGET,
@@ -187,10 +183,6 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
             tunnel_id,
             tunnel_keys,
         }
-    }
-
-    fn role(&self) -> HopRole {
-        HopRole::InboundGateway
     }
 }
 

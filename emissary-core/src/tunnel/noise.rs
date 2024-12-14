@@ -41,24 +41,6 @@ const LOG_TARGET: &str = "emissary::tunnel::noise";
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
 
-/// Tunnel key context.
-pub struct TunnelKeyContext {
-    iv_key: Vec<u8>,
-    layer_key: Vec<u8>,
-}
-
-impl TunnelKeyContext {
-    /// Get reference to IV key.
-    pub fn iv_key(&self) -> &[u8] {
-        &self.iv_key
-    }
-
-    /// Get reference to layer key.
-    pub fn layer_key(&self) -> &[u8] {
-        &self.layer_key
-    }
-}
-
 /// Tunnel keys.
 pub struct TunnelKeys {
     /// Garlic key.
@@ -144,8 +126,10 @@ impl TunnelKeys {
             .update(&[0x02])
             .finalize();
 
+        temp_key.zeroize();
+
         let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
         let layer_key = Hmac::new(&temp_key)
             .update(&ck)
             .update(&b"SMTunnelLayerKey")
@@ -175,8 +159,10 @@ impl TunnelKeys {
                     .update(&[0x02])
                     .finalize();
 
+                temp_key.zeroize();
+
                 let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-                let mut ck =
+                let ck =
                     Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
                 let garlic_key = Bytes::from(
                     Hmac::new(&temp_key)
@@ -395,7 +381,7 @@ impl ShortInboundSession {
     }
 
     /// Finalize inbound session creation and return tunnel keys.
-    pub fn finalize(mut self) -> crate::Result<TunnelKeys> {
+    pub fn finalize(self) -> crate::Result<TunnelKeys> {
         match self.state {
             ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys } => Ok(tunnel_keys),
             state => {
@@ -526,6 +512,8 @@ impl LongInboundSession {
                     .unwrap();
                 record[512..528].copy_from_slice(&tag);
 
+                chaining_key.zeroize();
+
                 self.state = LongInboundSessionState::BuildRecordsEncrypted;
 
                 Ok(())
@@ -543,7 +531,7 @@ impl LongInboundSession {
     }
 
     /// Finalize inbound session creation and return tunnel keys.
-    pub fn finalize(mut self, layer_key: Vec<u8>, iv_key: Vec<u8>) -> crate::Result<TunnelKeys> {
+    pub fn finalize(self, layer_key: Vec<u8>, iv_key: Vec<u8>) -> crate::Result<TunnelKeys> {
         match self.state {
             LongInboundSessionState::BuildRecordsEncrypted => Ok(TunnelKeys {
                 garlic_key: None,
@@ -800,7 +788,7 @@ impl NoiseContext {
     pub fn derive_outbound_garlic_key(
         &self,
         remote_public: StaticPublicKey,
-        mut ephemeral_secret: EphemeralPrivateKey,
+        ephemeral_secret: EphemeralPrivateKey,
     ) -> (Vec<u8>, Vec<u8>) {
         let ephemeral_public = ephemeral_secret.public_key();
         let state = Sha256::new()

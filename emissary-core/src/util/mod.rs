@@ -24,7 +24,6 @@ use crate::{
 
 use rand_core::RngCore;
 
-use alloc::string::String;
 use core::{
     future::Future,
     pin::Pin,
@@ -161,8 +160,6 @@ pub fn shuffle<T>(array: &mut Vec<T>, rng: &mut impl RngCore) {
 
 #[cfg(test)]
 pub fn init_logger() {
-    use tracing_subscriber::prelude::*;
-
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();

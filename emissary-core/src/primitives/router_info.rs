@@ -17,12 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::SigningPrivateKey,
     primitives::{
         router_address::TransportKind, Capabilities, Date, Mapping, RouterAddress, RouterIdentity,
         Str, LOG_TARGET,
     },
-    runtime::Runtime,
     Config,
 };
 
@@ -32,7 +31,6 @@ use nom::{
     number::complete::be_u8,
     Err, IResult,
 };
-use rand_core::RngCore;
 
 use alloc::{string::ToString, vec, vec::Vec};
 use core::str::FromStr;
@@ -262,7 +260,9 @@ impl RouterInfo {
 #[cfg(test)]
 impl RouterInfo {
     /// Create new random [`RouterInfo`].
-    pub fn random<R: Runtime>() -> Self {
+    pub fn random<R: crate::runtime::Runtime>() -> Self {
+        use rand_core::RngCore;
+
         let static_key = {
             let mut key_bytes = vec![0u8; 32];
             R::rng().fill_bytes(&mut key_bytes);
@@ -281,14 +281,17 @@ impl RouterInfo {
     }
 
     /// Create new random [`RouterInfo`] and serialize it.
-    pub fn random_with_keys<R: Runtime>() -> (Self, StaticPrivateKey, SigningPrivateKey) {
+    pub fn random_with_keys<R: crate::runtime::Runtime>(
+    ) -> (Self, crate::crypto::StaticPrivateKey, SigningPrivateKey) {
+        use rand_core::RngCore;
+
         let raw_static_key = {
             let mut key_bytes = vec![0u8; 32];
             R::rng().fill_bytes(&mut key_bytes);
 
             key_bytes
         };
-        let static_key = StaticPrivateKey::from(raw_static_key.clone());
+        let static_key = crate::crypto::StaticPrivateKey::from(raw_static_key.clone());
 
         let raw_signing_key = {
             let mut key_bytes = vec![0u8; 32];
@@ -306,7 +309,9 @@ impl RouterInfo {
     }
 
     /// Create new random [`RouterInfo`] for a floodfill router.
-    pub fn floodfill<R: Runtime>() -> Self {
+    pub fn floodfill<R: crate::runtime::Runtime>() -> Self {
+        use rand_core::RngCore;
+
         let static_key = {
             let mut key_bytes = vec![0u8; 32];
             R::rng().fill_bytes(&mut key_bytes);
@@ -330,7 +335,12 @@ impl RouterInfo {
     }
 
     /// Create new random [`RouterInfo`] from static and signing keys.
-    pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> Self {
+    pub fn from_keys<R: crate::runtime::Runtime>(
+        static_key: Vec<u8>,
+        signing_key: Vec<u8>,
+    ) -> Self {
+        use rand_core::RngCore;
+
         let identity = RouterIdentity::from_keys(static_key, signing_key).expect("to succeed");
 
         let ntcp2_port = R::rng().next_u32() as u16;
@@ -385,7 +395,7 @@ impl RouterInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::runtime::{mock::MockRuntime, Runtime};
     use std::{str::FromStr, time::Duration};
 
     #[test]

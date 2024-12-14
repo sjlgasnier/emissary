@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPrivateKey,
     i2np::{Message, MessageType},
-    primitives::{MessageId, RouterId, RouterInfo, TunnelId},
+    primitives::{RouterId, RouterInfo},
     profile::ProfileStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
@@ -29,17 +29,14 @@ use crate::{
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
         noise::NoiseContext,
-        pool::{
-            ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters,
-            TunnelPoolContext,
-        },
+        pool::{ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters},
         routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
 };
 
 use futures::StreamExt;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{vec, vec::Vec};
@@ -113,17 +110,8 @@ pub struct TunnelManager<R: Runtime> {
     /// Noise context for tunnels.
     noise: NoiseContext,
 
-    /// Pending inbound tunnels.
-    pending_inbound: HashSet<MessageId>,
-
-    /// Pending outbound tunnels.
-    pending_outbound: HashSet<TunnelId>,
-
     /// Local router info.
     router_info: RouterInfo,
-
-    /// Router storage.
-    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -217,11 +205,8 @@ impl<R: Runtime> TunnelManager<R> {
                 metrics_handle: metrics_handle.clone(),
                 netdb_tx,
                 noise,
-                pending_inbound: HashSet::new(),
-                pending_outbound: HashSet::new(),
                 router_info,
                 routers: HashMap::new(),
-                profile_storage,
                 routing_table,
                 service,
             },
@@ -288,7 +273,15 @@ impl<R: Runtime> TunnelManager<R> {
                         "start dialing router",
                     );
 
-                    self.service.connect(&router_id);
+                    if let Err(error) = self.service.connect(&router_id) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?error,
+                            "failed to dial router",
+                        );
+                    }
+
                     self.routers.insert(
                         router_id.clone(),
                         RouterState::Dialing {
@@ -300,33 +293,41 @@ impl<R: Runtime> TunnelManager<R> {
         }
     }
 
-    /// Handle established connection to `router`.
+    /// Handle established connection to router identified by `router_id`.
     ///
-    /// Store `router` into `routers` and send any pending messages to `router`.
-    fn on_connection_established(&mut self, router: RouterId) {
+    /// Store `router` into `routers` and send any pending messages to router identified by
+    /// `router_id`.
+    fn on_connection_established(&mut self, router_id: RouterId) {
         tracing::trace!(
             target: LOG_TARGET,
-            %router,
+            %router_id,
             "connection established",
         );
 
-        match self.routers.remove(&router) {
+        match self.routers.remove(&router_id) {
             Some(RouterState::Dialing { pending_messages }) if !pending_messages.is_empty() => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?router,
+                    %router_id,
                     "router with pending messages connected",
                 );
 
                 for message in pending_messages {
-                    self.service.send(&router, message);
+                    if let Err(error) = self.service.send(&router_id, message) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?error,
+                            "failed to send message to router",
+                        );
+                    }
                 }
             }
             Some(RouterState::Dialing { .. }) | None => {}
             state => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    ?router,
+                    %router_id,
                     ?state,
                     "invalid state for connected router",
                 );
@@ -334,7 +335,7 @@ impl<R: Runtime> TunnelManager<R> {
             }
         }
 
-        self.routers.insert(router.clone(), RouterState::Connected);
+        self.routers.insert(router_id, RouterState::Connected);
     }
 
     /// Handle closed connection to `router`.
@@ -370,20 +371,49 @@ impl<R: Runtime> TunnelManager<R> {
     ///
     /// Decrypt the payload, return I2NP messages inside the garlic cloves
     /// and process them individually.
-    fn on_garlic(&mut self, message: Message) {
+    fn on_garlic(&mut self, message: Message) -> crate::Result<()> {
         self.garlic.handle_message(message).map(|messages| {
             messages.for_each(|delivery_instructions| match delivery_instructions {
-                DeliveryInstructions::Local { message } => self.on_message(message),
-                DeliveryInstructions::Router { router, message } =>
-                    self.send_message(&router, message),
+                DeliveryInstructions::Local { message } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        "garlic message for local delivery",
+                    );
+
+                    self.on_message(message);
+                }
+                DeliveryInstructions::Router { router, message } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        router_id = %router,
+                        "garlic message for router delivery",
+                    );
+
+                    self.send_message(&router, message);
+                }
                 DeliveryInstructions::Tunnel {
                     router,
                     tunnel,
                     message,
-                } => self.send_message(&router, message),
-                DeliveryInstructions::Destination => unreachable!(),
+                } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        router_id = %router,
+                        tunnel_id = %tunnel,
+                        "garlic message for tunnel delivery",
+                    );
+
+                    self.send_message(&router, message);
+                }
+                DeliveryInstructions::Destination => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "garlic message for destination",
+                    );
+                    debug_assert!(false);
+                }
             })
-        });
+        })
     }
 
     /// Create new [`TunnelPool`] for a client destination.
@@ -428,7 +458,14 @@ impl<R: Runtime> TunnelManager<R> {
                 if let Err(error) = self.routing_table.route_message(message) {
                     tracing::error!(target: LOG_TARGET, ?error, "failed to route message");
                 },
-            MessageType::Garlic => self.on_garlic(message),
+            MessageType::Garlic =>
+                if let Err(error) = self.on_garlic(message) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to handle garlic message",
+                    );
+                },
             MessageType::TunnelBuildReply
             | MessageType::Data
             | MessageType::VariableTunnelBuildReply => unimplemented!(),
@@ -481,7 +518,7 @@ impl<R: Runtime> Future for TunnelManager<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TunnelManagerCommand::CreateTunnelPool { config, tx })) => {
-                    tx.send(self.on_create_tunnel_pool(config));
+                    let _ = tx.send(self.on_create_tunnel_pool(config));
                 }
                 Poll::Ready(Some(TunnelManagerCommand::Dummy)) => unreachable!(),
             }

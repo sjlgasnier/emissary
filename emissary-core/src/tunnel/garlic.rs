@@ -33,9 +33,9 @@ use crate::{
 };
 
 use rand_core::RngCore;
+use zeroize::Zeroize;
 
-use alloc::{vec, vec::Vec};
-use core::time::Duration;
+use alloc::vec::Vec;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::garlic";
@@ -70,6 +70,7 @@ pub enum DeliveryInstructions {
     },
 
     /// Unimplemented.
+    #[allow(unused)]
     Destination,
 }
 
@@ -79,6 +80,7 @@ pub struct GarlicHandler<R: Runtime> {
     noise: NoiseContext,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics_handle: R::MetricsHandle,
 }
 
@@ -97,10 +99,10 @@ impl<R: Runtime> GarlicHandler<R> {
         message: Message,
     ) -> crate::Result<impl Iterator<Item = DeliveryInstructions>> {
         let Message {
-            message_type,
             message_id,
             expiration,
             payload,
+            ..
         } = message;
 
         tracing::trace!(
@@ -129,6 +131,8 @@ impl<R: Runtime> GarlicHandler<R> {
 
             let mut message = payload[36..].to_vec();
             ChaChaPoly::new(&cipher_key).decrypt_with_ad(&associated_data, &mut message)?;
+
+            cipher_key.zeroize();
 
             message
         };
@@ -183,7 +187,7 @@ impl<R: Runtime> GarlicHandler<R> {
                             message: MessageBuilder::short()
                                 .with_message_type(MessageType::TunnelGateway)
                                 .with_message_id(R::rng().next_u32())
-                                .with_expiration((expiration))
+                                .with_expiration(expiration)
                                 .with_payload(&message)
                                 .build(),
                         })

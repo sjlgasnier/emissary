@@ -20,11 +20,6 @@ use crate::{primitives::Str, profile::Profile, tunnel::TunnelPoolConfig};
 
 use alloc::{string::String, vec::Vec};
 
-pub enum Transport {
-    Enabled { port: u16, host: Option<String> },
-    Disabled,
-}
-
 /// Exploratory tunnel pool config.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExploratoryConfig {

@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn send_leaseset_query() {
-        let (tx, mut rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
+        let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
         assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn channel_full() {
-        let (tx, mut rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
+        let (tx, _rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
         for _ in 0..5 {

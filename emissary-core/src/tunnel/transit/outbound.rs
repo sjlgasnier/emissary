@@ -17,17 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        aes::{cbc, ecb},
-        sha256::Sha256,
-    },
-    error::{RejectionReason, TunnelError},
+    crypto::sha256::Sha256,
+    error::{Error, RejectionReason, TunnelError},
     i2np::{
         tunnel::{
-            data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
+            data::{EncryptedTunnelData, MessageKind, TunnelData},
             gateway::TunnelGateway,
         },
-        HopRole, Message, MessageBuilder, MessageType,
+        Message, MessageBuilder, MessageType,
     },
     primitives::{MessageId, RouterId, TunnelId},
     runtime::Runtime,
@@ -37,7 +34,6 @@ use crate::{
         routing_table::RoutingTable,
         transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
-    Error,
 };
 
 use futures::{future::BoxFuture, FutureExt};
@@ -46,7 +42,6 @@ use rand_core::RngCore;
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -68,13 +63,8 @@ pub struct OutboundEndpoint<R: Runtime> {
     message_rx: Receiver<Message>,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics_handle: R::MetricsHandle,
-
-    /// Next router ID.
-    next_router: RouterId,
-
-    /// Next tunnel ID.
-    next_tunnel_id: TunnelId,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -159,7 +149,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
         let payload_start = self.find_payload_start(&ciphertext, &iv)?;
 
         let our_message = ciphertext[payload_start..].to_vec();
-        let message = TunnelData::parse(&our_message).ok_or_else(|| {
+        let _ = TunnelData::parse(&our_message).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
                 tunnel_id = %self.tunnel_id,
@@ -284,8 +274,8 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
     /// Create new [`OutboundEndpoint`].
     fn new(
         tunnel_id: TunnelId,
-        next_tunnel_id: TunnelId,
-        next_router: RouterId,
+        _next_tunnel_id: TunnelId,
+        _next_router: RouterId,
         tunnel_keys: TunnelKeys,
         routing_table: RoutingTable,
         metrics_handle: R::MetricsHandle,
@@ -296,16 +286,10 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
             fragment: FragmentHandler::new(),
             message_rx,
             metrics_handle,
-            next_router,
-            next_tunnel_id,
             routing_table,
             tunnel_id,
             tunnel_keys,
         }
-    }
-
-    fn role(&self) -> HopRole {
-        HopRole::OutboundEndpoint
     }
 }
 
@@ -373,11 +357,12 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{EphemeralPublicKey, StaticPrivateKey},
+        i2np::HopRole,
         runtime::mock::MockRuntime,
         tunnel::{
             hop::{
-                outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind, Tunnel,
-                TunnelBuildParameters, TunnelHop, TunnelInfo,
+                outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
+                TunnelBuildParameters, TunnelInfo,
             },
             noise::NoiseContext,
         },
@@ -390,7 +375,7 @@ mod tests {
     // verify that the payload inside the `TunnelData` message gets routed correctly TunnelManager
     #[tokio::test]
     async fn obep_routes_message_to_self() {
-        let (tx, rx) = channel(64);
+        let (_tx, rx) = channel(64);
         let (transit_tx, transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
@@ -440,12 +425,12 @@ mod tests {
             );
 
             let router_id = Into::<Vec<u8>>::into(obep_router_id.clone());
-            let (idx, mut record) = message.payload[1..]
+            let (idx, record) = message.payload[1..]
                 .chunks_mut(218)
                 .enumerate()
-                .find(|(i, chunk)| &chunk[..16] == &router_id[..16])
+                .find(|(_, chunk)| &chunk[..16] == &router_id[..16])
                 .unwrap();
-            let decrypted_record = obep_session.decrypt_build_record(record[48..].to_vec());
+            let _decrypted_record = obep_session.decrypt_build_record(record[48..].to_vec());
             obep_session.create_tunnel_keys(HopRole::OutboundEndpoint).unwrap();
 
             record[48] = 0x00;
@@ -476,7 +461,7 @@ mod tests {
             .with_payload(&vec![1, 2, 3, 4])
             .build();
 
-        let (to_router, mut messages) = obgw.send_to_router(obep_router_id.clone(), message);
+        let (_to_router, mut messages) = obgw.send_to_router(obep_router_id.clone(), message);
         let message = messages.next().expect("to exist");
 
         let message = Message::parse_short(&message).unwrap();

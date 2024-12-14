@@ -17,17 +17,15 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    primitives::RouterInfo,
     runtime::{Runtime, TcpListener},
     transports::ntcp2::LOG_TARGET,
 };
 
-use futures::{Future, FutureExt, Stream};
+use futures::Stream;
 
-use alloc::{string::String, vec::Vec};
 use core::{
     net::SocketAddr,
-    pin::{pin, Pin},
+    pin::Pin,
     task::{Context, Poll},
 };
 
@@ -43,7 +41,7 @@ pub struct Ntcp2Listener<R: Runtime> {
 impl<R: Runtime> Ntcp2Listener<R> {
     /// Create new [`Ntcp2Listener`].
     pub async fn new(address: SocketAddr) -> crate::Result<Self> {
-        let mut listener = R::TcpListener::bind(address).await.unwrap();
+        let listener = R::TcpListener::bind(address).await.unwrap();
 
         tracing::trace!(
             target: LOG_TARGET,

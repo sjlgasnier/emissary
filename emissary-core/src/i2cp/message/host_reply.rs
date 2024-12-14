@@ -23,6 +23,7 @@ use bytes::{BufMut, BytesMut};
 /// Reply kind for host lookup.
 pub enum HostReplyKind {
     /// Lookup succeeded.
+    #[allow(unused)]
     Success {
         /// Serialized destination.
         destination: BytesMut,
@@ -32,15 +33,19 @@ pub enum HostReplyKind {
     Failure,
 
     /// Password required.
+    #[allow(unused)]
     PasswordRequired,
 
     /// Private key required.
+    #[allow(unused)]
     PrivateKeyRequired,
 
     /// Password and private key required.
+    #[allow(unused)]
     PaswordAndPrivateKeyRequired,
 
     /// Failed to decrypt [`LeaseSet`].
+    #[allow(unused)]
     LeasesetDecryptionFailed,
 }
 

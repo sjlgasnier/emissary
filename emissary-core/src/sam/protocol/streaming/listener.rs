@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    error::{ConnectionError, Error, StreamingError},
+    error::StreamingError,
     primitives::DestinationId,
     runtime::{JoinSet, Runtime, TcpStream},
     sam::socket::SamSocket,
@@ -86,6 +86,7 @@ impl<R: Runtime> fmt::Debug for ListenerKind<R> {
 /// Socket kind for a SAMV3 socket.
 pub enum SocketKind<R: Runtime> {
     /// Direct connection opened with `STREAM CONNECT`.
+    #[allow(unused)]
     Connect {
         /// Underlying TCP stream of the SAMv3 socket.
         socket: R::TcpStream,
@@ -180,6 +181,7 @@ enum ListenerState<R: Runtime> {
     /// Listener is configured to be persistent.
     Persistent {
         /// Socket that was used to send the `STREAM FORWARD` command.
+        #[allow(unused)]
         socket: SamSocket<R>,
 
         /// Port of the active TCP listener.
@@ -562,7 +564,6 @@ mod tests {
         mock::{MockRuntime, MockTcpStream},
         noop::{NoopRuntime, NoopTcpStream},
     };
-    use std::time::Duration;
     use tokio::net::TcpListener;
 
     #[test]

@@ -18,10 +18,10 @@
 
 // TODO: documentation
 
-use futures::{future::BoxFuture, Stream};
+use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     fmt,
     future::Future,

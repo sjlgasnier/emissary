@@ -25,7 +25,7 @@ use crate::{
     protocol::Protocol,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamVersion, SessionKind},
+        parser::{DestinationKind, SessionKind},
         pending::session::SamSessionContext,
         protocol::{
             datagram::DatagramManager,
@@ -147,15 +147,9 @@ enum ProtocolKind<R: Runtime> {
 impl<R: Runtime> fmt::Debug for ProtocolKind<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stream {
-                socket,
-                destination,
-                options,
-            } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
-            Self::Datagram {
-                destination,
-                datagrams,
-            } => f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
+            Self::Stream { .. } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
+            Self::Datagram { .. } =>
+                f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
         }
     }
 }
@@ -204,6 +198,7 @@ pub struct SamSession<R: Runtime> {
     encryption_key: StaticPrivateKey,
 
     /// Session options.
+    #[allow(unused)]
     options: HashMap<String, String>,
 
     /// Pending outbound streams.
@@ -233,9 +228,6 @@ pub struct SamSession<R: Runtime> {
 
     /// I2P virtual stream manager.
     stream_manager: StreamManager<R>,
-
-    /// Negotiated SAMv3 version.
-    version: SamVersion,
 }
 
 impl<R: Runtime> SamSession<R> {
@@ -253,7 +245,7 @@ impl<R: Runtime> SamSession<R> {
             session_id,
             session_kind,
             tunnel_pool_handle,
-            version,
+            ..
         } = context;
 
         let (session_destination, dest, privkey, encryption_key, signing_key) = {
@@ -357,7 +349,6 @@ impl<R: Runtime> SamSession<R> {
             signing_key: signing_key.clone(),
             socket,
             stream_manager: StreamManager::new(dest, signing_key),
-            version,
         }
     }
 
@@ -695,12 +686,13 @@ impl<R: Runtime> SamSession<R> {
                     session_id = ?self.session_id,
                     %destination_id,
                     ?protocol,
+                    ?error,
                     "failed to find lease set",
                 );
 
                 if let ProtocolKind::Stream { mut socket, .. } = protocol {
                     R::spawn(async move {
-                        socket
+                        let _ = socket
                             .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
                             .await;
                     });
@@ -712,6 +704,7 @@ impl<R: Runtime> SamSession<R> {
                     session_id = ?self.session_id,
                     %destination_id,
                     ?state,
+                    ?error,
                     "stream in invalid state for lease set query error",
                 );
                 debug_assert!(false);
@@ -750,6 +743,7 @@ impl<R: Runtime> SamSession<R> {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     session_id = ?self.session_id,
+                                    ?protocol,
                                     ?error,
                                     "failed to handle datagram",
                                 );
@@ -850,7 +844,14 @@ impl<R: Runtime> Future for SamSession<R> {
                 Poll::Ready(Some(StreamManagerEvent::StreamRejected { destination_id })) => {
                     self.pending_outbound.remove(&destination_id);
                 }
-                Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id })) => {}
+                Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id })) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        ?destination_id,
+                        "stream closed",
+                    );
+                }
             }
         }
 

@@ -194,6 +194,7 @@ enum QueryKind {
     },
 
     /// Router exploration.
+    #[allow(unused)]
     Exploration,
 }
 
@@ -436,7 +437,7 @@ impl<R: Runtime> NetDb<R> {
                 );
                 self.floodfills.insert(router_id, FloodfillState::Disconnected);
             }
-            Some(state) => {
+            Some(_) => {
                 self.floodfills.insert(router_id, FloodfillState::Disconnected);
             }
             None => {}
@@ -869,7 +870,7 @@ impl<R: Runtime> NetDb<R> {
                             target: LOG_TARGET,
                             "router info received",
                         ),
-                        DatabaseStorePayload::LeaseSet2 { lease_set } => tracing::warn!(
+                        DatabaseStorePayload::LeaseSet2 { .. } => tracing::warn!(
                             target: LOG_TARGET,
                             "ignoring lease set database store",
                         ),
@@ -927,8 +928,8 @@ impl<R: Runtime> NetDb<R> {
                 "ignoring database lookup, not a floodfill",
             ),
             MessageType::DatabaseSearchReply => {
-                let DatabaseSearchReply { key, routers, .. } =
-                    DatabaseSearchReply::parse(&message.payload).ok_or_else(|| {
+                let DatabaseSearchReply { key, .. } = DatabaseSearchReply::parse(&message.payload)
+                    .ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,
                             "malformed database search reply",
@@ -985,7 +986,7 @@ impl<R: Runtime> NetDb<R> {
             );
             debug_assert!(false);
 
-            tx.send(Err(QueryError::NoTunnel));
+            let _ = tx.send(Err(QueryError::NoTunnel));
             return;
         };
 
@@ -997,7 +998,7 @@ impl<R: Runtime> NetDb<R> {
             );
             debug_assert!(false);
 
-            tx.send(Err(QueryError::NoTunnel));
+            let _ = tx.send(Err(QueryError::NoTunnel));
             return;
         };
 
@@ -1270,7 +1271,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1353,7 +1354,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -1363,7 +1364,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             false,
@@ -1436,25 +1437,11 @@ mod tests {
 
     #[tokio::test]
     async fn expired_lease_set_store() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -1464,7 +1451,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1539,20 +1526,6 @@ mod tests {
 
     #[tokio::test]
     async fn expired_lease_sets_are_pruned() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
@@ -1567,7 +1540,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1816,7 +1789,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1893,25 +1866,11 @@ mod tests {
 
     #[tokio::test]
     async fn stale_router_info_not_stored_nor_flooded() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -1921,7 +1880,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -1988,11 +1947,11 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_query() {
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2002,7 +1961,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2092,11 +2051,11 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_query_value_not_found() {
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2106,7 +2065,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2163,7 +2122,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_info_query() {
-        let (mut service, rx, tx, storage) = TransportService::new();
+        let (mut service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // register new router into `service`
@@ -2178,7 +2137,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), service.next()).await;
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2188,7 +2147,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2268,7 +2227,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_info_query_value_not_found() {
-        let (mut service, rx, tx, storage) = TransportService::new();
+        let (mut service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // register new router into `service`
@@ -2283,7 +2242,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), service.next()).await;
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2293,7 +2252,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2341,11 +2300,11 @@ mod tests {
 
     #[tokio::test]
     async fn pending_messages_sent_when_floodfill_connects() {
-        let (service, rx, tx, storage) = TransportService::new();
+        let (service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2355,7 +2314,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             false,
@@ -2374,7 +2333,7 @@ mod tests {
         let selected_floofill = netdb
             .floodfills
             .iter()
-            .find(|(key, state)| match state {
+            .find(|(_, state)| match state {
                 FloodfillState::Dialing { pending_messages } if pending_messages.len() == 1 => true,
                 _ => false,
             })
@@ -2414,21 +2373,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_pending_lease_sets_not_flooded() {
-        let (service, _rx, tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
@@ -2442,7 +2387,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2629,12 +2574,8 @@ mod tests {
                     let message = Message::parse_short(&message).unwrap();
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
 
-                    let DatabaseStore {
-                        key,
-                        payload,
-                        reply,
-                        ..
-                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    let DatabaseStore { key, payload, .. } =
+                        DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
 
                     assert_eq!(key, key2);
                     assert!(std::matches!(
@@ -2655,21 +2596,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_pending_router_infos_not_flooded() {
-        let (service, _rx, tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
@@ -2683,7 +2610,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2864,12 +2791,8 @@ mod tests {
                     let message = Message::parse_short(&message).unwrap();
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
 
-                    let DatabaseStore {
-                        key,
-                        payload,
-                        reply,
-                        ..
-                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    let DatabaseStore { key, payload, .. } =
+                        DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
 
                     assert_eq!(key, key2);
                     assert!(std::matches!(
@@ -2890,25 +2813,11 @@ mod tests {
 
     #[tokio::test]
     async fn router_info_with_different_network_id_ignored() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2918,7 +2827,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -2988,7 +2897,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2998,7 +2907,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
@@ -3070,7 +2979,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -3080,7 +2989,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,

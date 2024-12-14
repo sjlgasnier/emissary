@@ -17,20 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
-    sam::parser::{SamCommand, SamVersion},
+    runtime::{AsyncRead, AsyncWrite, Runtime},
+    sam::parser::SamCommand,
     util::AsyncWriteExt,
 };
 
-use bytes::BytesMut;
 use futures::Stream;
 
-use alloc::{
-    collections::VecDeque,
-    string::{String, ToString},
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use core::{
     mem,
     pin::Pin,
@@ -73,9 +67,6 @@ pub struct SamSocket<R: Runtime> {
     /// Read offset.
     read_offset: usize,
 
-    /// Start offset for partial reads.
-    start_offset: Option<usize>,
-
     /// TCP stream.
     stream: R::TcpStream,
 
@@ -90,7 +81,6 @@ impl<R: Runtime> SamSocket<R> {
             pending_messages: VecDeque::new(),
             read_buffer: vec![0u8; 4096],
             read_offset: 0usize,
-            start_offset: None,
             stream,
             write_state: WriteState::GetMessage,
         }
@@ -131,7 +121,7 @@ impl<R: Runtime> Stream for SamSocket<R> {
 
                     return Poll::Ready(None);
                 }
-                Poll::Ready((Ok(nread))) => {
+                Poll::Ready(Ok(nread)) => {
                     if nread == 0 {
                         tracing::debug!(
                             target: LOG_TARGET,
@@ -150,30 +140,28 @@ impl<R: Runtime> Stream for SamSocket<R> {
                         // full command read
                         //
                         // parse and return it to socket's owner
-                        Some(pos) => {
-                            let command = match core::str::from_utf8(&this.read_buffer[..pos]) {
-                                Ok(command) => {
-                                    this.read_offset = 0usize;
+                        Some(pos) => match core::str::from_utf8(&this.read_buffer[..pos]) {
+                            Ok(command) => {
+                                this.read_offset = 0usize;
 
-                                    match SamCommand::parse(command) {
-                                        Some(command) => return Poll::Ready(Some(command)),
-                                        None => tracing::warn!(
-                                            target: LOG_TARGET,
-                                            %command,
-                                            "invalid sam command",
-                                        ),
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
+                                match SamCommand::parse(command) {
+                                    Some(command) => return Poll::Ready(Some(command)),
+                                    None => tracing::warn!(
                                         target: LOG_TARGET,
-                                        ?error,
-                                        "invalid command"
-                                    );
-                                    return Poll::Ready(None);
+                                        %command,
+                                        "invalid sam command",
+                                    ),
                                 }
-                            };
-                        }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?error,
+                                    "invalid command"
+                                );
+                                return Poll::Ready(None);
+                            }
+                        },
                     }
                 }
             }
@@ -199,7 +187,7 @@ impl<R: Runtime> Stream for SamSocket<R> {
                             this.write_state = WriteState::SendMessage { offset, message };
                             break;
                         }
-                        Poll::Ready(Err(error)) => return Poll::Ready(None),
+                        Poll::Ready(Err(_)) => return Poll::Ready(None),
                         Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -238,16 +226,16 @@ impl<R: Runtime> Stream for SamSocket<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{
-        mock::{MockRuntime, MockTcpStream},
-        TcpStream as _,
+    use crate::{
+        runtime::{
+            mock::{MockRuntime, MockTcpStream},
+            TcpStream as _,
+        },
+        sam::parser::SamVersion,
     };
     use futures::StreamExt;
     use std::time::Duration;
-    use tokio::{
-        io::AsyncWriteExt,
-        net::{TcpListener, TcpStream},
-    };
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     #[tokio::test]
     async fn read_command_normal() {

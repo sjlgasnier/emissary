@@ -23,7 +23,7 @@ use crate::{
     runtime::Runtime,
 };
 
-use chrono::{DateTime, NaiveTime, TimeZone, Utc};
+use chrono::DateTime;
 use hashbrown::HashSet;
 
 use alloc::string::{String, ToString};
@@ -34,6 +34,7 @@ pub struct Dht<R: Runtime> {
     routing_table: RoutingTable<R>,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics: R::MetricsHandle,
 }
 

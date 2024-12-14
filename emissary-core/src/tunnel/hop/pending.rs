@@ -26,20 +26,19 @@ use crate::{
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBlock, GarlicMessageBuilder},
         tunnel::build::short,
-        HopRole, Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
+        Message, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::hop::{
-        inbound::InboundTunnel, outbound::OutboundTunnel, ReceiverKind, Tunnel,
-        TunnelBuildParameters, TunnelBuilder, TunnelDirection, TunnelHop, TunnelInfo,
+        outbound::OutboundTunnel, ReceiverKind, Tunnel, TunnelBuildParameters, TunnelBuilder,
+        TunnelDirection, TunnelHop, TunnelInfo,
     },
     Error,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
 use rand_core::RngCore;
-use thingbuf::mpsc::Receiver;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{iter, marker::PhantomData, num::NonZeroUsize, time::Duration};
@@ -159,7 +158,6 @@ impl<T: Tunnel> PendingTunnel<T> {
                 )| {
                     (
                         TunnelHop {
-                            role: hop_role,
                             tunnel_id: *tunnel_id,
                             router: RouterId::from(router_hash),
                             key_context: noise.create_outbound_session::<R>(key, hop_role),
@@ -188,7 +186,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             .iter()
             .zip(build_records.iter_mut())
             .zip(tunnel_hops.iter_mut())
-            .filter_map(|(((router_hash), mut record), mut tunnel_hop)| {
+            .filter_map(|((router_hash, mut record), tunnel_hop)| {
                 ChaChaPoly::new(&tunnel_hop.key_context.aead_key())
                     .encrypt_with_ad_new(&tunnel_hop.key_context.state(), &mut record)
                     .ok()
@@ -287,7 +285,7 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn try_build_tunnel<R: Runtime>(self, mut message: Message) -> crate::Result<T> {
+    pub fn try_build_tunnel<R: Runtime>(self, message: Message) -> crate::Result<T> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
@@ -445,14 +443,15 @@ impl<T: Tunnel> PendingTunnel<T> {
 mod test {
     use super::*;
     use crate::{
-        crypto::{base64_encode, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey},
-        i2np::tunnel::{build::short::TunnelBuildRecord, gateway::TunnelGateway},
+        crypto::{EphemeralPublicKey, StaticPublicKey},
+        i2np::tunnel::gateway::TunnelGateway,
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
             garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler},
+            hop::inbound::InboundTunnel,
             noise::NoiseContext,
-            pool::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle},
+            pool::TunnelPoolBuildParameters,
             routing_table::RoutingTable,
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
@@ -463,8 +462,6 @@ mod test {
 
     #[tokio::test]
     async fn create_outbound_tunnel() {
-        let handle = MockRuntime::register_metrics(vec![]);
-
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
             Vec<TestTransitTunnelManager>,
@@ -476,7 +473,7 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -504,7 +501,7 @@ mod test {
 
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
-            |acc, ((router_hash, _), transit_manager)| {
+            |acc, ((_, _), transit_manager)| {
                 let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
@@ -537,7 +534,7 @@ mod test {
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
@@ -556,16 +553,15 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let _gateway = TunnelId::from(MockRuntime::rng().next_u32());
         let TunnelPoolBuildParameters {
-            context,
             context_handle: handle,
             ..
         } = TunnelPoolBuildParameters::new(Default::default());
-        let (tx, rx) = channel(64);
+        let (_tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
@@ -595,7 +591,7 @@ mod test {
 
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
-            |acc, ((router_hash, _), (_, transit_manager))| {
+            |acc, ((_, _), (_, transit_manager))| {
                 let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
@@ -613,7 +609,7 @@ mod test {
             .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -662,14 +658,14 @@ mod test {
         for ((router_hash, _), noise) in hops.iter().zip(noise_contexts.iter()) {
             let (record_idx, record) = find_own_record(&router_hash, &mut payload[1..]).unwrap();
 
-            let mut new_record = record[..].to_vec();
+            let new_record = record[..].to_vec();
 
             let pk = EphemeralPublicKey::try_from(&new_record[16..48]).unwrap();
 
             let mut session = noise.create_short_inbound_session(pk);
             let decrypted_record = session.decrypt_build_record(record[48..].to_vec()).unwrap();
 
-            let (tunnel_id, role) = {
+            let (_tunnel_id, role) = {
                 let record = short::TunnelBuildRecord::parse(&decrypted_record).unwrap();
                 (record.tunnel_id(), record.role())
             };
@@ -699,13 +695,13 @@ mod test {
 
     #[test]
     fn invalid_ciphertext() {
-        let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -742,13 +738,13 @@ mod test {
     fn malformed_tunnel_build_reply() {
         crate::util::init_logger();
 
-        let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());

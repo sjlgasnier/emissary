@@ -23,9 +23,8 @@
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
     error::ConnectionError,
-    i2np::MessageType,
     primitives::{RouterId, RouterInfo},
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
+    runtime::{AsyncRead, AsyncWrite, Runtime},
     subsystem::SubsystemCommand,
     transports::{
         ntcp2::{
@@ -34,14 +33,12 @@ use crate::{
         },
         SubsystemHandle,
     },
-    util::{AsyncReadExt, AsyncWriteExt},
     Error,
 };
 
-use futures::{future::FusedFuture, FutureExt};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{
     future::Future,
     mem,
@@ -149,9 +146,8 @@ impl<R: Runtime> Ntcp2Session<R> {
         router_info: RouterInfo,
         stream: R::TcpStream,
         key_context: KeyContext,
-        mut subsystem_handle: SubsystemHandle,
+        subsystem_handle: SubsystemHandle,
     ) -> Self {
-        let router = router_info.identity.id();
         let KeyContext {
             send_key,
             recv_key,
@@ -236,7 +232,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                             );
                             return Poll::Ready(Err(error));
                         }
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 return Poll::Ready(Err(Error::Connection(
                                     ConnectionError::SocketClosed,
@@ -264,7 +260,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..size]) {
                         Poll::Pending => break,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 return Poll::Ready(Err(Error::Connection(
                                     ConnectionError::SocketClosed,

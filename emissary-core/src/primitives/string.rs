@@ -30,7 +30,7 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
 use core::{
     fmt,
     hash::{Hash, Hasher},
@@ -169,7 +169,6 @@ impl Str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::AsBytes;
     use std::collections::VecDeque;
 
     #[test]

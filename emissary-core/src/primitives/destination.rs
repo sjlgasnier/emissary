@@ -63,9 +63,6 @@ const DESTINATION_WITH_NULL_CERT_LEN: usize = 387usize;
 /// Minimum serialized length of [`Destination`].
 const DESTINATION_MINIMUM_LEN: usize = 387usize;
 
-/// Certificate header length.
-const CERTIFICATE_HEADER_LEN: usize = 3usize;
-
 /// Serialized [`Destination`] length without certificate.
 const DESTINATION_LEN_NO_CERTIFICATE: usize = 384usize;
 

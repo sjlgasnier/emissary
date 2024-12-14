@@ -16,10 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    i2cp::message::{MessageType, I2CP_HEADER_SIZE},
-    primitives::{Date, Str},
-};
+use crate::i2cp::message::{MessageType, I2CP_HEADER_SIZE};
 
 use bytes::{BufMut, BytesMut};
 

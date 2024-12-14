@@ -35,6 +35,7 @@ use core::{fmt, mem};
 /// "The maximum number of messages before the DH must ratchet is 65535." [1]
 ///
 /// [1]: https://geti2p.net/spec/ecies#new-session-tags-and-comparison-to-signal
+#[allow(unused)]
 const MAX_TAGS: usize = 65535;
 
 /// Maximum key ID.
@@ -163,6 +164,7 @@ struct KeyContext {
     session_tag_constant: Vec<u8>,
 
     /// Session tag key.
+    #[allow(unused)]
     session_tag_key: Vec<u8>,
 
     /// Symmetric key.
@@ -240,11 +242,13 @@ pub struct TagSet {
     /// Receive key ID.
     ///
     /// `None` if new session keys haven't been exchanged.
+    #[allow(unused)]
     recv_key_id: Option<u16>,
 
     /// Send key ID.
     ///
     /// `None` if new session keys haven't been exchanged.
+    #[allow(unused)]
     send_key_id: Option<u16>,
 
     /// Next tag index.

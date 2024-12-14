@@ -22,7 +22,7 @@ use crate::{
     primitives::{Lease, TunnelId},
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamCommand, SamVersion, SessionKind},
+        parser::{DestinationKind, SamVersion, SessionKind},
         session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
@@ -63,9 +63,6 @@ pub struct SamSessionContext<R: Runtime> {
 
     /// Session kind.
     pub session_kind: SessionKind,
-
-    /// Negotiated version.
-    pub version: SamVersion,
 
     /// SAMv3 socket.
     pub socket: SamSocket<R>,
@@ -336,7 +333,6 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             destination,
                             outbound,
-                            version,
                             session_id,
                             session_kind,
                             socket,
@@ -390,7 +386,6 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             options,
                             destination,
                             outbound,
-                            version,
                             session_id,
                             session_kind,
                             socket,

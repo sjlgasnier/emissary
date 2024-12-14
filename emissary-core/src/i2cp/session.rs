@@ -28,14 +28,14 @@ use crate::{
         socket::I2cpSocket,
     },
     netdb::NetDbHandle,
-    primitives::{Date, DestinationId, Lease, Str, TunnelId},
+    primitives::{Date, DestinationId, Str},
     protocol::Protocol,
     runtime::Runtime,
 };
 
 use bytes::Bytes;
 use futures::StreamExt;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{
@@ -53,12 +53,14 @@ const LOG_TARGET: &str = "emissary::i2cp::session";
 /// Message is marked as outbound because a lease set query for the remote destination is pending.
 struct PendingMessage {
     /// I2CP protocol parameters.
+    #[allow(unused)]
     parameters: I2cpParameters,
 
     /// Payload.
     payload: Vec<u8>,
 
     /// Session ID.
+    #[allow(unused)]
     session_id: SessionId,
 }
 
@@ -67,20 +69,12 @@ pub struct I2cpSession<R: Runtime> {
     /// Destination.
     destination: Destination<R>,
 
-    /// Active inbound tunnels and their leases.
-    inbound: HashMap<TunnelId, Lease>,
-
-    /// Handle to `NetDb`.
-    netdb_handle: NetDbHandle,
-
     /// Next message ID.
     next_message_id: u32,
 
     /// Session options.
+    #[allow(unused)]
     options: HashMap<Str, Str>,
-
-    /// Active outbound tunnels.
-    outbound: HashSet<TunnelId>,
 
     /// Pending outbound connections.
     pending_connections: HashMap<DestinationId, VecDeque<PendingMessage>>,
@@ -124,21 +118,18 @@ impl<R: Runtime> I2cpSession<R> {
             destination_id.clone(),
             private_keys[0].clone(),
             leaseset.clone(),
-            netdb_handle.clone(),
+            netdb_handle,
             tunnel_pool_handle,
-            outbound.clone().into_iter().collect(),
-            inbound.clone().into_values().collect(),
+            outbound.into_iter().collect(),
+            inbound.into_values().collect(),
         );
         destination.publish_lease_set(Bytes::from(destination_id.to_vec()), leaseset);
 
         Self {
             destination,
-            inbound,
-            netdb_handle,
             next_message_id: 0u32,
             options,
             pending_connections: HashMap::new(),
-            outbound,
             session_id,
             socket,
         }

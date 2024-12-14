@@ -102,7 +102,7 @@ pub struct Reader<'a> {
     router_infos: RwLockReadGuard<'a, HashMap<RouterId, RouterInfo>>,
 
     /// Read access to profiles.
-    profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
+    _profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
 }
 
 impl<'a> Reader<'a> {
@@ -190,11 +190,6 @@ impl<R: Runtime> ProfileStorage<R> {
         }
     }
 
-    /// Return the number of routers in [`ProfileStorage`].
-    pub fn len(&self) -> usize {
-        self.routers.read().len()
-    }
-
     /// Insert `router` into [`ProfileStorage`].
     pub fn add_router(&self, router_info: RouterInfo) {
         let router_id = router_info.identity.id();
@@ -220,7 +215,6 @@ impl<R: Runtime> ProfileStorage<R> {
                 fast.remove(&router_id);
             }
         }
-        let fast = router_info.capabilities.is_fast();
 
         if self.routers.write().insert(router_id.clone(), router_info).is_none() {
             self.profiles.write().insert(router_id, Profile::new());
@@ -230,21 +224,6 @@ impl<R: Runtime> ProfileStorage<R> {
     // TODO: remove
     pub fn get(&self, router: &RouterId) -> Option<RouterInfo> {
         self.routers.read().get(router).map(|router_info| router_info.clone())
-    }
-
-    // TODO: remove
-    pub fn get_routers(
-        &self,
-        num_routers: usize,
-        filter: impl Fn(&RouterId, &RouterInfo) -> bool,
-    ) -> Vec<RouterInfo> {
-        let inner = self.routers.read();
-
-        inner
-            .iter()
-            .filter_map(|(router, info)| filter(router, info).then_some(info.clone()))
-            .take(num_routers)
-            .collect()
     }
 
     /// Get `RouterId`s of those routers that pass `filter`.
@@ -306,7 +285,7 @@ impl<R: Runtime> ProfileStorage<R> {
     pub fn reader(&self) -> Reader {
         Reader {
             router_infos: self.routers.read(),
-            profiles: self.profiles.read(),
+            _profiles: self.profiles.read(),
         }
     }
 
@@ -321,6 +300,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record that `router_id` accepted a tunnel build request.
+    #[allow(unused)]
     pub fn tunnel_build_accepted(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
         let profile = inner.get_mut(router_id).expect("to exist");
@@ -331,6 +311,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record that `router_id` rejected a tunnel build request.
+    #[allow(unused)]
     pub fn tunnel_build_rejected(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
         let profile = inner.get_mut(router_id).expect("to exist");
@@ -340,8 +321,8 @@ impl<R: Runtime> ProfileStorage<R> {
         profile.last_activity = R::time_since_epoch();
     }
 
-    // profile must exist since it's controlled by us
     /// Record that `router_id` failed to answer a tunnel build request.
+    #[allow(unused)]
     pub fn tunnel_build_not_answered(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
         let profile = inner.get_mut(router_id).expect("to exist");
@@ -352,6 +333,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record test success for a tunnel that `router_id` was a participant of.
+    #[allow(unused)]
     pub fn tunnel_test_succeeded(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
         let profile = inner.get_mut(router_id).expect("to exist");
@@ -362,6 +344,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record test failure for a tunnel that `router_id` was a participant of.
+    #[allow(unused)]
     pub fn tunnel_test_failed(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
         let profile = inner.get_mut(router_id).expect("to exist");

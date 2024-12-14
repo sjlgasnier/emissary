@@ -134,11 +134,9 @@ impl<R: Runtime> PendingStream<R> {
             send_stream_id,
             recv_stream_id,
             seq_nro,
-            ack_through,
-            nacks,
-            resend_delay,
             flags,
             payload,
+            ..
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
         tracing::trace!(

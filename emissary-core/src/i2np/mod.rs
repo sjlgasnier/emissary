@@ -20,24 +20,17 @@
 //!
 //! https://geti2p.net/spec/i2np
 
-use crate::{
-    crypto::{base64_encode, sha256::Sha256},
-    primitives::{Date, Mapping, MessageId, TunnelId},
-    runtime::Runtime,
-    subsystem::SubsystemKind,
-};
+use crate::{crypto::sha256::Sha256, runtime::Runtime, subsystem::SubsystemKind};
 
 use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
     number::complete::{be_u16, be_u32, be_u64, be_u8},
-    sequence::tuple,
     Err, IResult,
 };
-use rand_core::RngCore;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
 pub mod database;
@@ -47,21 +40,6 @@ pub mod tunnel;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::i2np";
-
-/// Garlic certificate length.
-const GARLIC_CERTIFICATE_LEN: usize = 3usize;
-
-// Truncated identity hash length.
-const TRUNCATED_IDENITTY_LEN: usize = 16usize;
-
-// x25519 ephemeral key length.
-const X25519_KEY_LEN: usize = 32usize;
-
-/// Encrypted build request length.
-const ENCRYPTED_BUILD_REQUEST_LEN: usize = 464usize;
-
-/// Poly1305 authentication tag length.
-const POLY1305_TAG_LEN: usize = 16usize;
 
 /// Poly1305 authentication tag length.
 const ROUTER_HASH_LEN: usize = 32usize;
@@ -336,12 +314,12 @@ impl<'a> MessageBuilder<'a> {
     }
 
     /// Serialize I2NP message.
-    pub fn build(mut self) -> Vec<u8> {
+    pub fn build(self) -> Vec<u8> {
         match self {
             Self::Standard {
                 message_type,
                 message_id,
-                mut expiration,
+                expiration,
                 mut payload,
             } => {
                 let payload = payload.take().expect("to exist");
@@ -350,7 +328,7 @@ impl<'a> MessageBuilder<'a> {
                 out.put_u8(message_type.expect("to exist").as_u8());
                 out.put_u32(message_id.expect("to exist"));
                 out.put_u64(expiration.expect("to exist").as_millis() as u64);
-                out.put_u16((payload.len() as u16));
+                out.put_u16(payload.len() as u16);
                 out.put_u8(Sha256::new().update(&payload).finalize()[0]); // checksum
                 out.put_slice(&payload);
 

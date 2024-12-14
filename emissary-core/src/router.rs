@@ -23,7 +23,7 @@ use crate::{
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
     profile::ProfileStorage,
-    runtime::{MetricType, Runtime},
+    runtime::Runtime,
     sam::SamServer,
     subsystem::SubsystemKind,
     transports::TransportManager,
@@ -31,11 +31,9 @@ use crate::{
     Config, I2cpConfig, SamConfig,
 };
 
-use futures::{FutureExt, Stream, StreamExt};
-use hashbrown::HashMap;
-use thingbuf::mpsc;
+use futures::FutureExt;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
     pin::Pin,
@@ -57,9 +55,6 @@ pub struct Router<R: Runtime> {
     ///
     /// Polls both NTCP2 and SSU2 transports.
     transport_manager: TransportManager<R>,
-
-    /// Local router info.
-    local_router_info: RouterInfo,
 
     /// Handle to [`TunnelManager`].
     _tunnel_manager_handle: TunnelManagerHandle,
@@ -93,9 +88,6 @@ impl<R: Runtime> Router<R> {
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
 
-        let local_test = local_key.public().to_vec();
-        let ntcp_test = StaticPrivateKey::from(ntcp2_config.key.clone()).public().to_vec();
-
         tracing::info!(
             target: LOG_TARGET,
             local_router_hash = ?base64_encode(local_router_info.identity.hash()),
@@ -116,9 +108,8 @@ impl<R: Runtime> Router<R> {
         //
         // note: order of initialization is important
         let mut transport_manager = TransportManager::new(
-            local_key.clone(),
             local_signing_key,
-            local_router_info.clone(), // TODO: zzz
+            local_router_info.clone(),
             profile_storage.clone(),
             metrics_handle.clone(),
         );
@@ -196,7 +187,6 @@ impl<R: Runtime> Router<R> {
 
         Ok((
             Self {
-                local_router_info,
                 transport_manager,
                 _tunnel_manager_handle: tunnel_manager_handle,
             },

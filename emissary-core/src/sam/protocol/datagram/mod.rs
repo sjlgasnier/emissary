@@ -108,8 +108,7 @@ impl<R: Runtime> DatagramManager<R> {
                 // TODO: verify signature
                 let (rest, destination) =
                     Destination::parse_frame(&payload).map_err(|_| Error::InvalidData)?;
-                let (rest, signature) =
-                    take::<_, _, ()>(64usize)(rest).map_err(|_| Error::InvalidData)?;
+                let (rest, _) = take::<_, _, ()>(64usize)(rest).map_err(|_| Error::InvalidData)?;
 
                 // TODO: ensure there is a listener in `src_port`
                 let port = self.options.get("PORT").ok_or(Error::InvalidState)?;

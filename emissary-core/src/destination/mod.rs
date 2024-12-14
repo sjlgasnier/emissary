@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPrivateKey,
     destination::session::{SessionManager, SessionManagerEvent},
-    error::{ChannelError, Error, QueryError, SessionError},
+    error::{Error, QueryError},
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType, ReplyType as LookupReplyType},
@@ -41,7 +41,7 @@ use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     mem,
     pin::Pin,
@@ -63,9 +63,6 @@ const LEASE_SET_EXPIRATION: Duration = Duration::from_secs(9 * 60);
 
 /// Local lease set expiration timeout.
 const LEASE_SET_MAX_AGE: Duration = Duration::from_secs(2 * 60);
-
-/// How soon is the lease set publish retried after it failed.
-const LEASE_SET_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Number of retries before lease set query is aborted.
 ///
@@ -142,6 +139,7 @@ pub struct Destination<R: Runtime> {
     inbound_tunnels: Vec<Lease>,
 
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
+    #[allow(unused)]
     lease_set: Bytes,
 
     /// Timer which expires when a new lease set needs to be published
@@ -463,13 +461,11 @@ impl<R: Runtime> Destination<R> {
         // attempt to get an IBGW for lease set storage verification
         //
         // see comment above why this check must be made
-        let Some(
-            (Lease {
-                router_id: gateway_router_id,
-                tunnel_id: gateway_tunnel_id,
-                ..
-            }),
-        ) = self.inbound_tunnels.get(0).cloned()
+        let Some(Lease {
+            router_id: gateway_router_id,
+            tunnel_id: gateway_tunnel_id,
+            ..
+        }) = self.inbound_tunnels.get(0).cloned()
         else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -542,7 +538,8 @@ impl<R: Runtime> Destination<R> {
                 .with_payload(&message)
                 .build();
 
-            tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
+            // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
+            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
 
             // verify there's at least one other floodfill before proceeding to storage verification
             if floodfills.len() == 1 {
@@ -573,7 +570,8 @@ impl<R: Runtime> Destination<R> {
                 .with_payload(&message)
                 .build();
 
-            tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
+            // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
+            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
         })
     }
 }
@@ -744,6 +742,7 @@ enum LeaseSetPublishTimer {
     },
 
     /// Attempt to retry publishing an old lease set.
+    #[allow(unused)]
     Republish {
         // Timer.
         timer: BoxFuture<'static, ()>,
@@ -762,22 +761,6 @@ impl LeaseSetPublishTimer {
         Self::CreateNew {
             timer: Box::pin(R::delay(LEASE_SET_EXPIRATION)),
         }
-    }
-
-    /// Reset timer.
-    fn reset<R: Runtime>(&mut self) {
-        *self = Self::CreateNew {
-            timer: Box::pin(R::delay(LEASE_SET_EXPIRATION)),
-        };
-    }
-
-    /// Set timer in republish mode.
-    fn retry<R: Runtime>(&mut self, key: Bytes, lease_set: Bytes) {
-        *self = Self::Republish {
-            timer: Box::pin(R::delay(LEASE_SET_REPUBLISH_TIMEOUT)),
-            key,
-            lease_set,
-        };
     }
 
     /// Set timer as inactive.
@@ -826,7 +809,6 @@ impl Stream for LeaseSetPublishTimer {
 mod tests {
     use super::*;
     use crate::{
-        netdb::NetDbAction,
         primitives::{RouterId, TunnelId},
         runtime::{mock::MockRuntime, Runtime},
         tunnel::TunnelPoolConfig,
@@ -971,7 +953,7 @@ mod tests {
             Vec::new(),
         );
 
-        destination.send_message(&DestinationId::random(), vec![1, 2, 3, 4]);
+        destination.send_message(&DestinationId::random(), vec![1, 2, 3, 4]).unwrap();
     }
 
     #[tokio::test]
@@ -1022,7 +1004,7 @@ mod tests {
             .expect("no timeout")
             .expect("to succeed")
         {
-            DestinationEvent::CreateLeaseSet { leases } => {}
+            DestinationEvent::CreateLeaseSet { .. } => {}
             _ => panic!("invalid event"),
         }
     }
@@ -1073,7 +1055,7 @@ mod tests {
             .expect("no timeout")
             .expect("to succeed")
         {
-            DestinationEvent::CreateLeaseSet { leases } => {}
+            DestinationEvent::CreateLeaseSet { .. } => {}
             _ => panic!("invalid event"),
         }
     }

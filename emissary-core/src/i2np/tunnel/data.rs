@@ -535,7 +535,7 @@ impl<'a> TunnelDataBuilder<'a> {
         if let Some(padding) = padding {
             // calculate padding size and generate random offset into `padding`
             let padding_size = payload_size.saturating_sub(message.len());
-            let padding_offset = (R::rng().next_u32() as usize % (TUNNEL_DATA_LEN - padding_size));
+            let padding_offset = R::rng().next_u32() as usize % (TUNNEL_DATA_LEN - padding_size);
 
             out.put_slice(&padding[padding_offset..padding_offset + padding_size]);
         }
@@ -661,7 +661,7 @@ impl<'a> TunnelDataBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{mock::MockRuntime, Runtime};
+    use crate::runtime::mock::MockRuntime;
 
     fn find_payload_start(ciphertext: &[u8], iv: &[u8]) -> Option<usize> {
         let padding_end = ciphertext[4..].iter().enumerate().find(|(_, byte)| byte == &&0x0)?;

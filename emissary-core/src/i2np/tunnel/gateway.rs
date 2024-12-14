@@ -25,7 +25,7 @@ use nom::{
     IResult,
 };
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 /// Tunnel gateway message.
 pub struct TunnelGateway<'a> {

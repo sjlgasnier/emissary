@@ -48,7 +48,7 @@ pub struct TunnelId(u32);
 impl TunnelId {
     #[cfg(test)]
     pub fn random() -> TunnelId {
-        use rand::{Rng, RngCore};
+        use rand::RngCore;
 
         TunnelId::from(rand::thread_rng().next_u32())
     }
@@ -87,7 +87,7 @@ pub struct MessageId(u32);
 impl MessageId {
     #[cfg(test)]
     pub fn random() -> MessageId {
-        use rand::{Rng, RngCore};
+        use rand::RngCore;
 
         MessageId::from(rand::thread_rng().next_u32())
     }

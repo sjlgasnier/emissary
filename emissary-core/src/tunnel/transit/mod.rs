@@ -17,18 +17,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base64_encode,
-        chachapoly::{ChaCha, ChaChaPoly},
-        sha256::Sha256,
-        EphemeralPublicKey, StaticPublicKey,
-    },
-    error::{RejectionReason, RoutingError, TunnelError},
+    crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
+    error::{RejectionReason, TunnelError},
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBuilder},
         tunnel::{
             build::{short, variable},
-            data::EncryptedTunnelData,
             gateway::TunnelGateway,
         },
         HopRole, Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
@@ -44,13 +38,11 @@ use crate::{
     Error,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
-use hashbrown::HashMap;
-use rand_core::RngCore;
-use thingbuf::mpsc::{channel, Receiver};
+use thingbuf::mpsc::Receiver;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
     ops::{Range, RangeFrom},
@@ -103,9 +95,6 @@ pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
     ) -> Self;
-
-    /// Get role of the transit tunnel hop.
-    fn role(&self) -> HopRole;
 }
 
 /// Transit tunnel manager.
@@ -153,7 +142,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 payload[1..]
                     .chunks_mut(RECORD_SIZE)
                     .enumerate()
-                    .find(|(i, chunk)| &chunk[..16] == &self.noise.local_router_hash()[..16])
+                    .find(|(_, chunk)| &chunk[..16] == &self.noise.local_router_hash()[..16])
             })
             .flatten()
     }
@@ -172,7 +161,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
             ..
         } = message;
 
-        let (record_idx, mut record) = self
+        let (_, mut record) = self
             .find_local_record::<VARIABLE_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
@@ -315,10 +304,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
         message: Message,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         let Message {
-            message_type,
             message_id,
             expiration,
             mut payload,
+            ..
         } = message;
 
         let (record_idx, record) = self
@@ -581,7 +570,7 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::StaticPrivateKey,
+        crypto::{StaticPrivateKey, StaticPublicKey},
         primitives::MessageId,
         runtime::mock::MockRuntime,
         tunnel::{
@@ -590,13 +579,13 @@ mod tests {
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
             },
-            pool::{
-                TunnelPool, TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle,
-            },
+            pool::TunnelPoolBuildParameters,
             tests::make_router,
         },
     };
-    use thingbuf::mpsc::{channel, Sender};
+    use bytes::Bytes;
+    use rand_core::RngCore;
+    use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn accept_tunnel_build_request_participant() {
@@ -609,7 +598,7 @@ mod tests {
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
@@ -625,12 +614,12 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
@@ -663,7 +652,7 @@ mod tests {
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
@@ -682,17 +671,16 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let TunnelPoolBuildParameters {
-            context,
             context_handle: handle,
             ..
         } = TunnelPoolBuildParameters::new(Default::default());
-        let (tx, rx) = channel(64);
+        let (_tx, rx) = channel(64);
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
                 noise: local_noise,
@@ -727,7 +715,7 @@ mod tests {
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
@@ -743,12 +731,12 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
-        let (pending_tunnel, next_router, message) =
+        let (pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
@@ -774,9 +762,8 @@ mod tests {
 
         let Message {
             message_type,
-            message_id,
-            expiration,
             payload,
+            ..
         } = Message::parse_short(&msg).unwrap();
 
         assert_eq!(message_type, MessageType::TunnelGateway);
@@ -796,7 +783,7 @@ mod tests {
     #[test]
     fn local_record_not_found() {
         let handle = MockRuntime::register_metrics(vec![]);
-        let (hops, mut transit_managers): (
+        let (hops, _transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
             Vec<TransitTunnelManager<MockRuntime>>,
         ) = (0..3)
@@ -804,7 +791,7 @@ mod tests {
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
@@ -820,12 +807,12 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
@@ -844,7 +831,7 @@ mod tests {
         // make new router which is not part of the tunnel build request
         let (_, _, noise, _) = make_router(true);
         let (transit_tx, transit_rx) = channel(16);
-        let (manager_tx, manager_rx) = channel(16);
+        let (manager_tx, _manager_rx) = channel(16);
         let routing_table = RoutingTable::new(RouterId::from(&local_hash), manager_tx, transit_tx);
         let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
             noise,
@@ -870,7 +857,7 @@ mod tests {
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
@@ -886,7 +873,7 @@ mod tests {
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -901,7 +888,7 @@ mod tests {
         };
         hops[0].1 = new_pubkey;
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),

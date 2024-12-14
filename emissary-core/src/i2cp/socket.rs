@@ -18,8 +18,7 @@
 
 use crate::{
     i2cp::message::{Message, MessageType, I2CP_HEADER_SIZE},
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
-    Error,
+    runtime::{AsyncRead, AsyncWrite, Runtime},
 };
 
 use bytes::BytesMut;
@@ -145,7 +144,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
                             return Poll::Ready(None);
                         }
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 tracing::debug!(
                                     target: LOG_TARGET,
@@ -225,7 +224,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
                             return Poll::Ready(None);
                         }
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 tracing::debug!(
                                     target: LOG_TARGET,
@@ -296,7 +295,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                             this.write_state = WriteState::SendMessage { offset, message };
                             break;
                         }
-                        Poll::Ready(Err(error)) => return Poll::Ready(None),
+                        Poll::Ready(Err(_)) => return Poll::Ready(None),
                         Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
                             tracing::debug!(
                                 target: LOG_TARGET,

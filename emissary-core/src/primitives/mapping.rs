@@ -119,8 +119,6 @@ impl Mapping {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
     use super::*;
 
     #[test]
@@ -205,7 +203,7 @@ mod tests {
             }
         );
 
-        let (rest, mapping) = Mapping::parse_frame(rest).unwrap();
+        let (_rest, mapping) = Mapping::parse_frame(rest).unwrap();
         assert_eq!(
             mapping,
             Mapping {

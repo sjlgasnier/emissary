@@ -2661,6 +2661,7 @@ mod tests {
         assert_eq!(rto.exponential_backoff(), Duration::from_millis(238));
     }
 
+    #[tokio::test]
     async fn client_closes_socket_with_pending_data() {
         let (
             stream,

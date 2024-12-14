@@ -24,9 +24,9 @@ use crate::{
     error::{ChannelError, ConnectionError, Error},
     netdb::NetDbHandle,
     primitives::Str,
-    runtime::{JoinSet, MetricsHandle, Runtime, TcpListener, UdpSocket},
+    runtime::{JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
-        parser::{Datagram, SamCommand},
+        parser::Datagram,
         pending::{
             connection::{ConnectionKind, PendingSamConnection},
             session::{PendingSamSession, SamSessionContext},
@@ -36,7 +36,7 @@ use crate::{
     tunnel::{TunnelManagerHandle, TunnelPoolConfig},
 };
 
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, with_recycle, Receiver, Sender};
 
@@ -162,6 +162,7 @@ pub struct SamServer<R: Runtime> {
     listener: R::TcpListener,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics: R::MetricsHandle,
 
     /// Handle to `NetDb`.
@@ -241,7 +242,7 @@ impl<R: Runtime> SamServer<R> {
 impl<R: Runtime> Future for SamServer<R> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = Pin::into_inner(self);
 
         loop {
@@ -258,7 +259,7 @@ impl<R: Runtime> Future for SamServer<R> {
             match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.read_buffer) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some((nread, address))) => {
+                Poll::Ready(Some((nread, _))) => {
                     let Some(Datagram {
                         session_id,
                         destination,
@@ -282,6 +283,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?session_id,
+                            ?error,
                             "failed to send datagram to active session",
                         );
                     }
@@ -406,9 +408,9 @@ impl<R: Runtime> Future for SamServer<R> {
                     ConnectionKind::Stream {
                         session_id,
                         socket,
-                        version,
                         destination,
                         options,
+                        ..
                     } => {
                         if let Err(error) = this.active_sessions.send_command(
                             &session_id,
@@ -429,8 +431,8 @@ impl<R: Runtime> Future for SamServer<R> {
                     ConnectionKind::Accept {
                         session_id,
                         socket,
-                        version,
                         options,
+                        ..
                     } => {
                         if let Err(error) = this.active_sessions.send_command(
                             &session_id,
@@ -447,9 +449,9 @@ impl<R: Runtime> Future for SamServer<R> {
                     ConnectionKind::Forward {
                         session_id,
                         socket,
-                        version,
                         port,
                         options,
+                        ..
                     } => {
                         if let Err(error) = this.active_sessions.send_command(
                             &session_id,
@@ -467,11 +469,6 @@ impl<R: Runtime> Future for SamServer<R> {
                             )
                         }
                     }
-                    kind => tracing::warn!(
-                        target: LOG_TARGET,
-                        ?kind,
-                        "currently unuspported command",
-                    ),
                 },
                 Poll::Ready(Some(Err(error))) => tracing::trace!(
                     target: LOG_TARGET,

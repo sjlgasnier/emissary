@@ -26,7 +26,6 @@ use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
     number::complete::{be_u16, be_u32, be_u8},
-    sequence::tuple,
     Err, IResult,
 };
 
@@ -108,6 +107,7 @@ pub enum MessageBlock<'a> {
     },
 
     /// Options update.
+    #[allow(unused)]
     Options {
         /// Requested minimum padding for transfers.
         t_min: u8,
@@ -147,6 +147,7 @@ pub enum MessageBlock<'a> {
     },
 
     /// Session termination.
+    #[allow(unused)]
     Termination {
         /// How many valid frames have been received.
         valid_frames: u64,
@@ -220,7 +221,7 @@ impl<'a> MessageBlock<'a> {
     }
 
     /// Parse [`MessageBlock::`].
-    fn parse_options(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+    fn parse_options(_: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
         todo!("options not supported");
     }
 
@@ -257,7 +258,7 @@ impl<'a> MessageBlock<'a> {
     }
 
     /// Parse [`MessageBlock::Termination`].
-    fn parse_termination(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+    fn parse_termination(_: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
         todo!("termination support not implemented");
     }
 

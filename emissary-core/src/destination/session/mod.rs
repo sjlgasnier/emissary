@@ -26,7 +26,7 @@ use crate::{
         context::KeyContext,
         session::{PendingSession, PendingSessionEvent, Session},
     },
-    error::{Error, SessionError},
+    error::SessionError,
     i2np::{
         database::store::{
             DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
@@ -242,11 +242,6 @@ impl<R: Runtime> SessionManager<R> {
         public_key: StaticPublicKey,
     ) {
         self.remote_destinations.insert(destination_id, public_key);
-    }
-
-    /// Remove remote destination from [`SessionKeyManager`].
-    pub fn remove_remote_destination(&mut self, destination_id: &DestinationId) {
-        self.remote_destinations.remove(destination_id);
     }
 
     /// Remove session for `destination_id` from active sessions.
@@ -802,8 +797,7 @@ impl<R: Runtime> SessionManager<R> {
     /// Removes all pending sessions that have expired and calls `Session::maintain()` for each
     /// active session which removes expired tags of the active session.
     fn maintain(&mut self) {
-        let remove = self
-            .pending
+        self.pending
             .iter()
             .filter_map(|(key, session)| session.is_expired().then_some(key.clone()))
             .collect::<Vec<_>>()

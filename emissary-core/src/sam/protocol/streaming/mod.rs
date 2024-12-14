@@ -229,12 +229,10 @@ impl<R: Runtime> StreamManager<R> {
         let Packet {
             send_stream_id,
             recv_stream_id,
-            seq_nro,
-            ack_through,
             nacks,
-            resend_delay,
             flags,
             payload,
+            ..
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
         // if this is a syn-ack for an outbound stream, initialize state
@@ -553,12 +551,7 @@ impl<R: Runtime> StreamManager<R> {
 
     /// Handle `payload` received from `src_port` to `dst_port`.
     pub fn on_packet(&mut self, payload: I2cpPayload) -> Result<(), StreamingError> {
-        let I2cpPayload {
-            dst_port,
-            payload,
-            src_port,
-            ..
-        } = payload;
+        let I2cpPayload { payload, .. } = payload;
 
         let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
@@ -712,11 +705,6 @@ impl<R: Runtime> StreamManager<R> {
         (packet, recv_stream_id)
     }
 
-    /// Remove pending outbound stream associated with `recv_stream_id`.
-    pub fn remove_pending_stream(&mut self, recv_stream_id: u32) {
-        self.pending_outbound.remove(&recv_stream_id);
-    }
-
     /// Remove all streaming context associated with `destination_id`.
     pub fn remove_session(&mut self, destination_id: &DestinationId) {
         let Some(streams) = self.destination_streams.remove(destination_id) else {
@@ -841,10 +829,8 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         // stream must exist since it was just fetched from `pending_outbound`
                         let PendingOutboundStream {
                             destination_id,
-                            silent,
                             mut socket,
-                            packet,
-                            num_sent,
+                            ..
                         } = self.pending_outbound.remove(&stream_id).expect("to exist");
 
                         tracing::debug!(
@@ -857,7 +843,7 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         // send rejection to client and return event to `SamSession`
                         // indicating that the connection failed
                         R::spawn(async move {
-                            socket
+                            let _ = socket
                                 .send_message_blocking(
                                     b"STREAM STATUS RESULT=CANT_REACH_PEER\n".to_vec(),
                                 )
@@ -913,7 +899,6 @@ mod tests {
         },
         sam::{protocol::streaming::packet::PacketBuilder, socket::SamSocket},
     };
-    use rand::RngCore;
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, BufReader},
         net::TcpListener,
@@ -934,7 +919,7 @@ mod tests {
             let address = self.listener.local_addr().unwrap();
             let (stream1, stream2) =
                 tokio::join!(self.listener.accept(), MockTcpStream::connect(address));
-            let (mut stream, _) = stream1.unwrap();
+            let (stream, _) = stream1.unwrap();
 
             (SamSocket::new(stream2.unwrap()), stream)
         }
@@ -946,8 +931,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (_stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
         let destination = Destination::new(signing_key.public());
@@ -1096,8 +1081,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (_stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1172,8 +1157,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (_stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1244,8 +1229,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let port = address.port();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Persistent {
@@ -1384,7 +1369,6 @@ mod tests {
                         let Packet {
                             send_stream_id,
                             recv_stream_id,
-                            flags,
                             ack_through,
                             ..
                         } = Packet::parse(&packet).unwrap();
@@ -1407,7 +1391,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
         let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1434,14 +1418,12 @@ mod tests {
         let mut manager1 = {
             let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let mut manager2 = {
             let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1455,8 +1437,8 @@ mod tests {
             .is_ok());
 
         // create new oubound stream to `manager1`
-        let (socket, mut client_stream) = socket_factory.socket().await;
-        let (packet, stream_id) =
+        let (socket, client_stream) = socket_factory.socket().await;
+        let (packet, _stream_id) =
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
         assert!(manager1
@@ -1521,12 +1503,11 @@ mod tests {
         let mut manager2 = {
             let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         // create new oubound stream to `manager1`
-        let (socket, mut client_stream) = socket_factory.socket().await;
+        let (socket, client_stream) = socket_factory.socket().await;
         let _ = manager2.create_stream(remote.clone(), socket, false);
 
         // verify the syn packet is sent twice more
@@ -1573,7 +1554,6 @@ mod tests {
         let mut manager = {
             let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1629,12 +1609,11 @@ mod tests {
         let mut manager = {
             let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
+        let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
@@ -1692,7 +1671,6 @@ mod tests {
         let mut manager = {
             let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1721,7 +1699,7 @@ mod tests {
         assert!(!manager.pending_inbound.is_empty());
 
         // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
+        let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
@@ -1756,13 +1734,11 @@ mod tests {
         let mut manager = {
             let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
         let destination = Destination::new(signing_key.public());
-        let destination_id = base64_encode(destination.id().to_vec());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
@@ -1785,7 +1761,7 @@ mod tests {
         assert!(!manager.pending_inbound.is_empty());
 
         // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
+        let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
@@ -1811,14 +1787,12 @@ mod tests {
         let mut manager1 = {
             let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let mut manager2 = {
             let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1832,8 +1806,8 @@ mod tests {
             .is_ok());
 
         // create new oubound stream to `manager1`
-        let (socket, mut client_stream) = socket_factory.socket().await;
-        let (packet, stream_id) =
+        let (socket, client_stream) = socket_factory.socket().await;
+        let (packet, _stream_id) =
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
         assert!(manager1

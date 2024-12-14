@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::Error;
+use crate::error::Error;
 
 use data_encoding::{Encoding, Specification};
 use ed25519_dalek::Signer;
@@ -36,9 +36,6 @@ pub mod siphash;
 // Taken from `ire` which is licensed under MIT
 //
 // Credits to str4d
-//
-// TODO: move to separate file?
-// TODO: oncecell?
 lazy_static! {
     pub static ref I2P_BASE64: Encoding = {
         let mut spec = Specification::new();
@@ -70,6 +67,7 @@ pub fn base32_encode(data: impl AsRef<[u8]>) -> String {
 }
 
 /// Base32 decode `data`.
+#[allow(unused)]
 pub fn base32_decode(data: impl AsRef<[u8]>) -> Option<Vec<u8>> {
     I2P_BASE32.decode(data.as_ref()).ok()
 }
@@ -248,16 +246,10 @@ pub enum EphemeralPublicKey {
 }
 
 impl EphemeralPublicKey {
+    /// Convert [`EphemeralPublicKey`] to a byte vector.
     pub fn to_vec(&self) -> Vec<u8> {
         match self {
             Self::X25519(key) => key.as_bytes().to_vec(),
-        }
-    }
-
-    /// Zeroize private key.
-    pub fn zeroize(self) {
-        match self {
-            Self::X25519(mut key) => key.zeroize(),
         }
     }
 }
