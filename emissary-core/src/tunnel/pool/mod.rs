@@ -270,6 +270,30 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
         )
     }
 
+    /// Calculate the number of outbound tunnels that need to be built.
+    fn calculate_outbound_build_count(&self) -> usize {
+        let max_tunnels = self.config.num_outbound + self.expiring_outbound.len();
+
+        // fewer than requested amount of tunnels
+        if self.outbound.len() + self.pending_outbound.len() < max_tunnels {
+            return max_tunnels - self.outbound.len() - self.pending_outbound.len();
+        }
+
+        0usize
+    }
+
+    /// Calculate the number of inbound tunnels that need to be built.
+    fn calculate_inbound_build_count(&self) -> usize {
+        let max_tunnels = self.config.num_inbound + self.expiring_inbound.len();
+
+        // fewer than requested amount of tunnels
+        if self.inbound.len() + self.pending_inbound.len() < max_tunnels {
+            return max_tunnels - self.inbound.len() - self.pending_inbound.len();
+        }
+
+        0usize
+    }
+
     /// Maintain the tunnel pool.
     ///
     /// If the number of inbound/outbound is less than desired, build new tunnels.
@@ -278,18 +302,24 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
     /// and sending a test message to the outbound tunnel and receiving the message back via the
     /// paired inbound tunnels.
     fn maintain_pool(&mut self) {
-        // build one or more outbound tunnels
-        //
-        // select an inbound tunnel for reply delivery from one of the available inbound tunnels
-        // and if none exist, create a fake 0-hop inbound tunnel
-        let num_outbound_to_build = self
-            .config
-            .num_outbound
-            .saturating_sub(self.outbound.len())
-            .saturating_sub(self.pending_outbound.len())
-            .saturating_add(self.expiring_outbound.len());
+        tracing::debug!(
+            target: LOG_TARGET,
+            name = %self.config.name,
+            num_outbound = ?self.outbound.len(),
+            num_pending_outbound = self.pending_outbound.len(),
+            num_expiring_outbound = self.expiring_outbound.len(),
+            num_inbound = ?self.inbound.len(),
+            num_pending_inbound = self.pending_inbound.len(),
+            num_expiring_inbound = self.expiring_inbound.len(),
+            "maintain tunnel pool",
+        );
 
-        for _ in 0..num_outbound_to_build {
+        tracing::error!(
+            "num outbound to build = {}",
+            self.calculate_outbound_build_count()
+        );
+
+        for _ in 0..self.calculate_outbound_build_count() {
             // attempt to select hops for the outbound tunnel
             //
             // if there aren't enough available hops, the tunnel build is skipped
@@ -492,20 +522,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             }
         }
 
-        // build one or more inbound tunnels
-        //
-        // select an outbound for request delivery from one of the available outbound tunnels
-        //
-        // select an inbound tunnel for reply delivery from one of the pool's inbound tunnels
-        // and if none exist, use a fake 0-hop outbound tunnel
-        let num_inbound_to_build = self
-            .config
-            .num_inbound
-            .saturating_sub(self.inbound.len())
-            .saturating_sub(self.pending_inbound.len())
-            .saturating_add(self.expiring_inbound.len());
+        tracing::error!(
+            "num inbound to build = {}",
+            self.calculate_inbound_build_count()
+        );
 
-        for _ in 0..num_inbound_to_build {
+        // build one or more inbound tunnels
+        for _ in 0..self.calculate_inbound_build_count() {
             // tunnel that's used to deliver the tunnel build request message
             //
             // if it's `None`, a fake 0-hop outbound tunnel is used
@@ -770,7 +793,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                 }
                 Ok(tunnel) => {
-                    tracing::debug!(
+                    tracing::info!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         outbound_tunnel_id = %tunnel.tunnel_id(),
@@ -779,6 +802,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                     self.selector.add_outbound_tunnel(tunnel_id, tunnel.hops());
                     self.outbound.insert(tunnel_id, tunnel);
+                    self.tunnel_timers.add_outbound_tunnel(tunnel_id);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
                     self.metrics.gauge(NUM_OUTBOUND_TUNNELS).increment(1);
                     self.metrics.counter(NUM_BUILD_SUCCESSES).increment(1);
@@ -814,7 +838,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).decrement(1);
                 }
                 Ok(tunnel) => {
-                    tracing::debug!(
+                    tracing::info!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         tunnel_id = %tunnel.tunnel_id(),
@@ -829,6 +853,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     let (router_id, tunnel_id) = tunnel.gateway();
                     self.selector.add_inbound_tunnel(tunnel_id, router_id.clone(), tunnel.hops());
                     self.inbound_tunnels.insert(tunnel_id, router_id.clone());
+                    self.tunnel_timers.add_inbound_tunnel(tunnel_id);
 
                     // inform the owner of the tunnel pool that a new inbound tunnel has been built
                     if let Err(error) = self.context.register_inbound_tunnel_built(
@@ -861,15 +886,15 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
             match event {
                 None => return Poll::Ready(()),
                 Some((tunnel_id, gateway_tunnel_id)) => {
-                    tracing::debug!(
+                    tracing::info!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         %tunnel_id,
                         %gateway_tunnel_id,
-                        "inbound tunnel exited",
+                        "inbound tunnel expired",
                     );
 
-                    self.expiring_inbound.remove(&tunnel_id);
+                    self.expiring_inbound.remove(&gateway_tunnel_id);
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).decrement(1);
@@ -1044,7 +1069,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
             match event {
                 None => return Poll::Ready(()),
                 Some(TunnelTimerEvent::Destroy { tunnel_id }) => {
-                    tracing::debug!(
+                    tracing::info!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         %tunnel_id,
@@ -1068,22 +1093,22 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 Some(TunnelTimerEvent::Rebuild {
                     kind: TunnelKind::Outbound { tunnel_id },
                 }) => {
-                    tracing::trace!(
+                    tracing::debug!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         %tunnel_id,
-                        "outbound tunnel about to expire",
+                        "outbound tunnel is about to expire",
                     );
                     self.expiring_outbound.insert(tunnel_id);
                 }
                 Some(TunnelTimerEvent::Rebuild {
                     kind: TunnelKind::Inbound { tunnel_id },
                 }) => {
-                    tracing::trace!(
+                    tracing::debug!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         %tunnel_id,
-                        "inbound tunnel about to expire",
+                        "inbound tunnel is about to expire",
                     );
                     self.expiring_inbound.insert(tunnel_id);
                 }
