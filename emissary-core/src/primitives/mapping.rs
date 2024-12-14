@@ -97,7 +97,7 @@ impl Mapping {
     }
 
     /// Try to convert `bytes` into a [`Mapping`].
-    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Mapping> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Mapping> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
@@ -131,7 +131,7 @@ mod tests {
         let mapping = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
 
         assert_eq!(
-            Mapping::from_bytes(mapping),
+            Mapping::parse(mapping),
             Some(Mapping {
                 key: Str::from("hello"),
                 value: Str::from("world"),
@@ -148,7 +148,7 @@ mod tests {
         mapping.push(4);
 
         assert_eq!(
-            Mapping::from_bytes(mapping),
+            Mapping::parse(mapping),
             Some(Mapping {
                 key: Str::from("hello"),
                 value: Str::from("world"),

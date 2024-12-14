@@ -1,8 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use emissary::i2np::{Message, MessageBuilder, MessageType};
+use emissary_core::i2np::{Message, MessageBuilder, MessageType};
 use libfuzzer_sys::fuzz_target;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Arbitrary)]
 enum GeneratedMessageType {
@@ -49,7 +50,7 @@ fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
             let message = MessageBuilder::standard()
                 .with_message_type(values.0.into())
                 .with_message_id(values.1)
-                .with_expiration(values.2)
+                .with_expiration(Duration::from_secs(values.2))
                 .with_payload(&values.3)
                 .build();
 
@@ -60,7 +61,7 @@ fuzz_target!(|buffer: Vec<(GeneratedMessageType, u32, u64, Vec<u8>)>| {
             let message = MessageBuilder::short()
                 .with_message_type(values.0.into())
                 .with_message_id(values.1)
-                .with_expiration(values.2)
+                .with_expiration(Duration::from_secs(values.2))
                 .with_payload(&values.3)
                 .build();
 

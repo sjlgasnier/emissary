@@ -295,7 +295,14 @@ impl<R: Runtime> DatabaseStore<R> {
                     },
                 ))
             }
-            store_type => todo!("support for {store_type:?} not implemented"),
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "support for store kind not implemented",
+                );
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
         }
     }
 

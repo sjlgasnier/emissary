@@ -59,7 +59,11 @@ impl LeaseSet2Header {
         let (rest, flags) = be_u16(rest)?;
 
         if flags & 1 == 1 {
-            todo!("offline signatures not supported");
+            tracing::warn!(
+                target: LOG_TARGET,
+                "offline signatures not supported",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         }
 
         Ok((
@@ -67,7 +71,7 @@ impl LeaseSet2Header {
             Self {
                 destination,
                 published,
-                expires: published + expires as u32,
+                expires: published.saturating_add(expires as u32),
             },
         ))
     }

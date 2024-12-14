@@ -444,10 +444,8 @@ pub struct GarlicMessage<'a> {
 impl<'a> GarlicMessage<'a> {
     /// Try to parse [`GarlicMessage::DateTime`] from `input`.
     fn parse_date_time(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
+        let (rest, _size) = be_u16(input)?;
         let (rest, timestamp) = be_u32(rest)?;
-
-        debug_assert!(size == 4, "invalid size for datetime block {size:?}");
 
         Ok((rest, GarlicMessageBlock::DateTime { timestamp }))
     }
@@ -456,9 +454,21 @@ impl<'a> GarlicMessage<'a> {
     fn parse_delivery_instructions(input: &'a [u8]) -> IResult<&'a [u8], DeliveryInstructions<'a>> {
         let (rest, flag) = be_u8(input)?;
 
-        // TODO: handle gracefully
-        assert!(flag >> 7 & 1 == 0, "encrypted garlic");
-        assert!(flag >> 4 & 1 == 0, "delay");
+        if flag >> 7 & 1 != 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "encrypted garlic messages not supported",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        if flag >> 4 & 1 != 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "delay not supproted",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
 
         match (flag >> 5) & 0x3 {
             0x00 => Ok((rest, DeliveryInstructions::Local)),
@@ -478,7 +488,14 @@ impl<'a> GarlicMessage<'a> {
 
                 Ok((rest, DeliveryInstructions::Tunnel { hash, tunnel_id }))
             }
-            _ => panic!("invalid garlic type"), // TODO: don't panic
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "invalid delivery kind",
+                );
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
         }
     }
 

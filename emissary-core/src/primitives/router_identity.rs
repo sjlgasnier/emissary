@@ -18,7 +18,8 @@
 
 use crate::{
     crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
-    Error,
+    error::Error,
+    primitives::LOG_TARGET,
 };
 
 use bytes::Bytes;
@@ -138,6 +139,15 @@ impl RouterIdentity {
 
     /// Parse [`RouterIdentity`] from `input`, returning rest of `input` and parsed router identity.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterIdentity> {
+        if input.len() < 384 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                len = ?input.len(),
+                "router identity is too short"
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
         let (_, (initial_bytes, rest)) = tuple((take(384usize), take(input.len() - 384)))(input)?;
 
         let (rest, cert_type) = be_u8(rest)?;
@@ -177,7 +187,7 @@ impl RouterIdentity {
 
     /// Try to parse router information from `bytes`.
     #[allow(unused)]
-    fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Self> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Self> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
@@ -257,11 +267,16 @@ mod tests {
     #[test]
     fn expected_router_hash() {
         let router = include_bytes!("../../test-vectors/router1.dat");
-        let identity = RouterIdentity::from_bytes(router).unwrap();
+        let identity = RouterIdentity::parse(router).unwrap();
 
         assert_eq!(
             base64_encode(&identity.identity_hash),
             "jLD5rTYg4zg~d4oQ29ogPtGcZPQYM3pHAKY8VHNZv30="
         );
+    }
+
+    #[test]
+    fn too_short_router_identity() {
+        assert!(RouterIdentity::parse(vec![1, 2, 3, 4]).is_none());
     }
 }
