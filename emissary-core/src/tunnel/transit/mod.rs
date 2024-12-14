@@ -142,7 +142,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 payload[1..]
                     .chunks_mut(RECORD_SIZE)
                     .enumerate()
-                    .find(|(_, chunk)| &chunk[..16] == &self.noise.local_router_hash()[..16])
+                    .find(|(_, chunk)| chunk[..16] == self.noise.local_router_hash()[..16])
             })
             .flatten()
     }
@@ -161,7 +161,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
             ..
         } = message;
 
-        let (_, mut record) = self
+        let (_, record) = self
             .find_local_record::<VARIABLE_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
@@ -231,7 +231,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 record[49] = 0x00;
                 record[511] = 0x30; // reject
 
-                session.encrypt_build_record(&mut record)?;
+                session.encrypt_build_record(record)?;
             }
             Ok(receiver) => {
                 self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
@@ -241,7 +241,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 record[49] = 0x00;
                 record[511] = 0x00; // accept
 
-                session.encrypt_build_record(&mut record)?;
+                session.encrypt_build_record(record)?;
 
                 // start tunnel event loop
                 //
@@ -461,7 +461,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 let garlic_key = garlic_key.expect("to exist");
                 let garlic_tag = garlic_tag.expect("to exist");
 
-                let mut message = GarlicMessageBuilder::new()
+                let mut message = GarlicMessageBuilder::default()
                     .with_garlic_clove(
                         MessageType::OutboundTunnelBuildReply,
                         next_message_id,
@@ -491,7 +491,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     .build();
 
                 let msg = TunnelGateway {
-                    tunnel_id: next_tunnel_id.into(),
+                    tunnel_id: next_tunnel_id,
                     payload: &message,
                 }
                 .serialize();

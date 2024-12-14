@@ -384,33 +384,26 @@ impl<R: Runtime> InboundContext<R> {
             if self.ack_timer.is_none() {
                 self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
             }
-        } else {
-            if self.missing.first() == Some(&seq_nro) {
+        } else if self.missing.first() == Some(&seq_nro) {
+            self.ready.push_back(payload);
+            self.missing.remove(&seq_nro);
+
+            let mut next_seq = seq_nro + 1;
+
+            while let Some(payload) = self.pending.remove(&next_seq) {
                 self.ready.push_back(payload);
-                self.missing.remove(&seq_nro);
+                next_seq += 1;
+            }
 
-                let mut next_seq = seq_nro + 1;
+            if self.ack_timer.is_none() {
+                self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
+            }
+        } else {
+            self.missing.remove(&seq_nro);
+            self.pending.insert(seq_nro, payload);
 
-                loop {
-                    match self.pending.remove(&next_seq) {
-                        Some(payload) => {
-                            self.ready.push_back(payload);
-                            next_seq += 1;
-                        }
-                        None => break,
-                    }
-                }
-
-                if self.ack_timer.is_none() {
-                    self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
-                }
-            } else {
-                self.missing.remove(&seq_nro);
-                self.pending.insert(seq_nro, payload);
-
-                if self.ack_timer.is_none() {
-                    self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
-                }
+            if self.ack_timer.is_none() {
+                self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
             }
         }
 
@@ -648,7 +641,7 @@ impl<R: Runtime> Stream<R> {
             .unacked
             .iter()
             .filter_map(|(seq_nro, _)| {
-                (seq_nro <= &ack_through && nacks.iter().find(|nack| nack == &seq_nro).is_none())
+                (seq_nro <= &ack_through && !nacks.iter().any(|nack| nack == seq_nro))
                     .then_some(*seq_nro)
             })
             .collect::<Vec<_>>()
@@ -905,7 +898,7 @@ impl<R: Runtime> Future for Stream<R> {
                             break;
                         }
                         Poll::Ready(Err(_)) => return Poll::Ready(this.recv_stream_id),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                        Poll::Ready(Ok(0)) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 "wrote zero bytes to socket",

@@ -49,12 +49,12 @@ impl SipHash {
     fn derive_keys(key: &[u8], h: &[u8]) -> (KeyContext, KeyContext) {
         // from specification, generation additional symmetric key for SipHash
         let mut temp_key = {
-            let mut ask_master = Hmac::new(&key).update(&b"ask"[..]).update(&[0x01]).finalize();
+            let mut ask_master = Hmac::new(key).update(&b"ask"[..]).update([0x01]).finalize();
 
-            let temp_key = Hmac::new(&ask_master).update(&h).update(&b"siphash"[..]).finalize();
+            let temp_key = Hmac::new(&ask_master).update(h).update(&b"siphash"[..]).finalize();
 
-            let mut sip_master = Hmac::new(&temp_key).update(&[0x01]).finalize();
-            let temp_key = Hmac::new(&sip_master).update(&[]).finalize();
+            let mut sip_master = Hmac::new(&temp_key).update([0x01]).finalize();
+            let temp_key = Hmac::new(&sip_master).update([]).finalize();
 
             ask_master.zeroize();
             sip_master.zeroize();
@@ -63,10 +63,10 @@ impl SipHash {
         };
 
         // initiator's SipHash keys
-        let sipkeys_ab = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let sipkeys_ab = Hmac::new(&temp_key).update([0x01]).finalize();
 
         // responder's SipHash keys
-        let sipkeys_ba = Hmac::new(&temp_key).update(&sipkeys_ab).update(&[0x02]).finalize();
+        let sipkeys_ba = Hmac::new(&temp_key).update(&sipkeys_ab).update([0x02]).finalize();
 
         temp_key.zeroize();
 

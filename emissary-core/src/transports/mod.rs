@@ -235,25 +235,21 @@ impl<R: Runtime> Stream for TransportService<R> {
     type Item = SubsystemEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match futures::ready!(self.event_rx.poll_recv(cx)) {
-                None => return Poll::Ready(None),
-                Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => {
-                    self.routers.insert(router.clone(), tx);
-                    return Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router }));
-                }
-                Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
-                    self.routers.remove(&router);
-                    return Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }));
-                }
-                Some(InnerSubsystemEvent::ConnectionFailure { router }) => {
-                    return Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router }));
-                }
-                Some(InnerSubsystemEvent::I2Np { messages }) => {
-                    return Poll::Ready(Some(SubsystemEvent::I2Np { messages }));
-                }
-                Some(InnerSubsystemEvent::Dummy) => unreachable!(),
+        match futures::ready!(self.event_rx.poll_recv(cx)) {
+            None => Poll::Ready(None),
+            Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => {
+                self.routers.insert(router.clone(), tx);
+                Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router }))
             }
+            Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
+                self.routers.remove(&router);
+                Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }))
+            }
+            Some(InnerSubsystemEvent::ConnectionFailure { router }) =>
+                Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })),
+            Some(InnerSubsystemEvent::I2Np { messages }) =>
+                Poll::Ready(Some(SubsystemEvent::I2Np { messages })),
+            Some(InnerSubsystemEvent::Dummy) => unreachable!(),
         }
     }
 }
@@ -322,9 +318,8 @@ impl<R: Runtime> TransportManager<R> {
     /// Collect `TransportManager`-related metric counters, gauges and histograms.
     pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
         let metrics = register_metrics(metrics);
-        let metrics = Ntcp2Transport::<R>::metrics(metrics);
 
-        metrics
+        Ntcp2Transport::<R>::metrics(metrics)
     }
 
     /// Register new subsystem to [`TransportManager`].

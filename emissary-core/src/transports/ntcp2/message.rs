@@ -274,13 +274,13 @@ impl<'a> MessageBlock<'a> {
         let (rest, block_type) = be_u8(input)?;
 
         match BlockType::from_u8(block_type) {
-            None => return Err(Err::Error(make_error(input, ErrorKind::Fail))),
             Some(BlockType::DateTime) => Self::parse_date_time(rest),
             Some(BlockType::Options) => Self::parse_options(rest),
             Some(BlockType::RouterInfo) => Self::parse_router_info(rest),
             Some(BlockType::I2Np) => Self::parse_i2np(rest),
             Some(BlockType::Termination) => Self::parse_termination(rest),
             Some(BlockType::Padding) => Self::parse_padding(rest),
+            None => Err(Err::Error(make_error(input, ErrorKind::Fail))),
         }
     }
 
@@ -323,9 +323,9 @@ impl<'a> MessageBlock<'a> {
         let block_size = router_info.len() as u16 + 1u16; // router info length + 1 byte for the flag
 
         out[0] = BlockType::RouterInfo.as_u8();
-        out[1..3].copy_from_slice(&block_size.to_be_bytes().to_vec());
+        out[1..3].copy_from_slice(block_size.to_be_bytes().as_ref());
         out[3] = 0;
-        out[4..].copy_from_slice(&router_info);
+        out[4..].copy_from_slice(router_info);
 
         out
     }
@@ -335,7 +335,7 @@ impl<'a> MessageBlock<'a> {
         let mut out = vec![0u8; message.len() + 1];
 
         out[0] = BlockType::I2Np.as_u8();
-        out[1..].copy_from_slice(&message);
+        out[1..].copy_from_slice(message);
 
         out
     }

@@ -517,7 +517,7 @@ impl<R: Runtime> NetDb<R> {
 
         // parse the router info set from the database store, store it in the set of router infos we
         // keep track of and flood it to three floodfills closest to `key`
-        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(&message);
+        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
         self.router_infos.insert(
             key.clone(),
             (
@@ -591,7 +591,7 @@ impl<R: Runtime> NetDb<R> {
 
         // parse the raw lease set from the database store, store it in the set of leases we keep
         // track of and flood it to three floodfills closest to `key`
-        let raw_lease_set = DatabaseStore::<R>::extract_raw_lease_set(&message);
+        let raw_lease_set = DatabaseStore::<R>::extract_raw_lease_set(message);
         let expires = lease_set.expires();
 
         self.lease_sets.insert(key.clone(), (raw_lease_set.clone(), expires));
@@ -1097,7 +1097,7 @@ impl<R: Runtime> NetDb<R> {
         };
 
         let floodfills = self.dht.closest(&key, 1usize).collect::<Vec<_>>();
-        let Some(floodfill) = floodfills.get(0) else {
+        let Some(floodfill) = floodfills.first() else {
             tracing::warn!(
                 target: LOG_TARGET,
                 "cannot perform router exploration, not enough floodfills",

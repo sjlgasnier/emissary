@@ -24,7 +24,7 @@ use lazy_static::lazy_static;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::convert::TryInto;
 
 pub mod aes;
@@ -80,7 +80,7 @@ pub enum StaticPublicKey {
     X25519(x25519_dalek::PublicKey),
 
     /// ElGamal.
-    ElGamal([u8; 256]),
+    ElGamal(Box<[u8; 256]>),
 }
 
 impl StaticPublicKey {
@@ -101,7 +101,7 @@ impl StaticPublicKey {
     /// Create new ElGamal static public key.
     pub fn new_elgamal(key: &[u8]) -> Option<Self> {
         let key: [u8; 256] = key.try_into().ok()?;
-        Some(StaticPublicKey::ElGamal(key))
+        Some(StaticPublicKey::ElGamal(Box::new(key)))
     }
 
     /// Convert public key to byte array.
@@ -151,7 +151,7 @@ impl AsRef<[u8]> for StaticPublicKey {
 impl AsRef<x25519_dalek::PublicKey> for StaticPublicKey {
     fn as_ref(&self) -> &x25519_dalek::PublicKey {
         match self {
-            Self::X25519(key) => &key,
+            Self::X25519(key) => key,
             Self::ElGamal(_) => todo!(),
         }
     }
@@ -275,7 +275,7 @@ impl AsRef<[u8]> for EphemeralPublicKey {
 impl AsRef<x25519_dalek::PublicKey> for EphemeralPublicKey {
     fn as_ref(&self) -> &x25519_dalek::PublicKey {
         match self {
-            Self::X25519(key) => &key,
+            Self::X25519(key) => key,
         }
     }
 }
@@ -304,7 +304,7 @@ impl SigningPrivateKey {
     /// Sign `message`.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         match self {
-            Self::Ed25519(key) => key.sign(&message).to_bytes().to_vec(),
+            Self::Ed25519(key) => key.sign(message).to_bytes().to_vec(),
         }
     }
 
@@ -368,7 +368,7 @@ impl SigningPublicKey {
                 let signature: [u8; 64] = signature.try_into().map_err(|_| Error::InvalidData)?;
                 let signature = ed25519_dalek::Signature::from_bytes(&signature);
 
-                key.verify_strict(&message, &signature).map_err(From::from)
+                key.verify_strict(message, &signature).map_err(From::from)
             }
         }
     }

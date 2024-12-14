@@ -182,7 +182,7 @@ impl<R: Runtime> SessionManager<R> {
         let local_key = StaticPrivateKey::from(local_key);
 
         // initial state
-        let state = Sha256::new().update(&PROTOCOL_NAME.as_bytes().to_vec()).finalize();
+        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
 
         // chaining key
         let chaining_key = state.clone();
@@ -193,7 +193,7 @@ impl<R: Runtime> SessionManager<R> {
         // MixHash(rs)
         let inbound_initial_state = Sha256::new()
             .update(&outbound_initial_state)
-            .update(&local_key.public().to_vec())
+            .update(local_key.public().to_vec())
             .finalize();
 
         Ok(Self {
@@ -362,7 +362,7 @@ impl<R: Runtime> SessionManager<R> {
             let mut message = vec![0u8; 64];
             stream.read_exact(&mut message).await?;
 
-            let (mut responder, padding_len) = Responder::new::<R>(
+            let (mut responder, padding_len) = Responder::new(
                 inbound_initial_state.clone(),
                 chaining_key.clone(),
                 local_router_hash,

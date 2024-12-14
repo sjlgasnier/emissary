@@ -342,6 +342,7 @@ impl<'a> Packet<'a> {
 }
 
 /// Flags builder for [`PacketBuilder`].
+#[derive(Default)]
 pub struct FlagsBuilder<'a> {
     /// Included destination, if received.
     destination: Option<Bytes>,
@@ -363,20 +364,6 @@ pub struct FlagsBuilder<'a> {
 
     /// Included signature, if received.
     signature: Option<&'a [u8]>,
-}
-
-impl<'a> Default for FlagsBuilder<'a> {
-    fn default() -> Self {
-        Self {
-            destination: None,
-            flags: 0u16,
-            max_packet_size: None,
-            offline_signature: None,
-            options_len: 0usize,
-            requested_delay: None,
-            signature: None,
-        }
-    }
 }
 
 impl<'a> FlagsBuilder<'a> {
@@ -658,7 +645,7 @@ impl<'a> PacketBuilder<'a> {
         }
 
         if let Some(payload) = self.payload {
-            out.put_slice(&payload);
+            out.put_slice(payload);
         }
 
         out
@@ -711,7 +698,7 @@ impl<'a> PacketBuilder<'a> {
         let signature_start = match self.payload {
             None => out.len() - SIGNATURE_LEN,
             Some(payload) => {
-                out.put_slice(&payload);
+                out.put_slice(payload);
                 out.len() - SIGNATURE_LEN - payload.len()
             }
         };

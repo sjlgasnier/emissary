@@ -110,7 +110,7 @@ impl RouterInfo {
     }
 
     fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterInfo> {
-        let (rest, identity) = RouterIdentity::parse_frame(input.as_ref())?;
+        let (rest, identity) = RouterIdentity::parse_frame(input)?;
         let (rest, published) = Date::parse_frame(rest)?;
         let (mut rest, num_addresses) = be_u8(rest)?;
         let mut addresses = HashMap::<TransportKind, RouterAddress>::new();
@@ -135,7 +135,7 @@ impl RouterInfo {
                 );
                 return Err(Err::Error(make_error(input, ErrorKind::Fail)));
             }
-            Some(caps) => match Capabilities::parse(&caps) {
+            Some(caps) => match Capabilities::parse(caps) {
                 Some(caps) => caps,
                 None => {
                     tracing::warn!(
@@ -170,13 +170,13 @@ impl RouterInfo {
             },
         };
 
-        identity.signing_key().verify(input, rest).or_else(|error| {
+        identity.signing_key().verify(input, rest).map_err(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?error,
                 "invalid signature for router info",
             );
-            Err(Err::Error(make_error(input, ErrorKind::Fail)))
+            Err::Error(make_error(input, ErrorKind::Fail))
         })?;
 
         Ok((
@@ -203,8 +203,7 @@ impl RouterInfo {
 
             options
                 .into_iter()
-                .map(|(key, value)| Mapping::new(key, value).serialize())
-                .flatten()
+                .flat_map(|(key, value)| Mapping::new(key, value).serialize())
                 .collect::<Vec<_>>()
         };
 

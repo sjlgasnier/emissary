@@ -38,7 +38,7 @@ use crate::{
 use zerocopy::{AsBytes, FromBytes};
 use zeroize::Zeroize;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::fmt;
 
 /// Logging target for the file.
@@ -93,7 +93,7 @@ enum InitiatorState {
         remote_key: Vec<u8>,
 
         // Responder's public key.
-        responder_public: StaticPublicKey,
+        responder_public: Box<StaticPublicKey>,
     },
 
     /// Initiator state has been poisoned.
@@ -147,7 +147,7 @@ impl Initiator {
         );
 
         let chaining_key = chaining_key.clone();
-        let state = Sha256::new().update(&state).update(&remote_static_key.to_vec()).finalize();
+        let state = Sha256::new().update(&state).update(remote_static_key.to_vec()).finalize();
 
         // generate ephemeral key pair and apply MixHash(epub)
         let sk = EphemeralPrivateKey::new(R::rng());
@@ -163,10 +163,10 @@ impl Initiator {
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
 
             // output 1
-            let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+            let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
 
             // output 2
-            let local_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+            let local_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();
@@ -258,7 +258,7 @@ impl Initiator {
 
         // decrypt `Y`
         let mut aes = Aes::new_decryptor(&router_hash, &iv);
-        let y = aes.decrypt(bytes[..32].to_vec());
+        let y = aes.decrypt(&bytes[..32]);
 
         // MixHash(e.pubkey)
         state = Sha256::new().update(&state).update(&y).finalize();
@@ -271,10 +271,10 @@ impl Initiator {
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
 
             // output 1
-            let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+            let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
 
             // output 2
-            let remote_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+            let remote_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             ephemeral_key.zeroize();
             shared.zeroize();
@@ -308,7 +308,7 @@ impl Initiator {
             router_hash,
             chaining_key,
             remote_key,
-            responder_public,
+            responder_public: Box::new(responder_public),
         };
 
         Ok(padding)
@@ -343,7 +343,7 @@ impl Initiator {
         );
 
         // MixHash(padding)
-        state = Sha256::new().update(&state).update(&padding).finalize();
+        state = Sha256::new().update(&state).update(padding).finalize();
 
         // encrypt local public key
         let mut s_p_bytes = local_static_key.public().to_vec();
@@ -355,7 +355,7 @@ impl Initiator {
 
         // perform diffie-hellman key exchange and derive keys for data phase
         let (key_context, message) = {
-            let mut shared = local_static_key.diffie_hellman(&responder_public);
+            let mut shared = local_static_key.diffie_hellman(&*responder_public);
 
             // MixKey(DH())
             //
@@ -365,11 +365,11 @@ impl Initiator {
 
             // Output 1
             // Set a new chaining key from the temp key
-            let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+            let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
 
             // Output 2
             // Generate the cipher key k
-            let k = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+            let k = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             // h from message 3 part 1 is used as the associated data
             // for the AEAD in message 3 part 2
@@ -391,9 +391,9 @@ impl Initiator {
                 .copy_from_slice(&tag2);
 
             // create send and receive keys
-            let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-            let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-            let receive_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
+            let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+            let send_key = Hmac::new(&temp_key).update([0x01]).finalize();
+            let receive_key = Hmac::new(&temp_key).update(&send_key).update([0x02]).finalize();
 
             // siphash context for (de)obfuscating message sizes
             let sip = SipHash::new_initiator(&temp_key, &state);

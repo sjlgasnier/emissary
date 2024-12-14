@@ -237,7 +237,7 @@ impl<R: Runtime> TunnelManager<R> {
     fn send_message(&mut self, router_id: &RouterId, message: Vec<u8>) {
         match self.routers.get_mut(router_id) {
             Some(RouterState::Connected) => {
-                if let Err(error) = self.service.send(&router_id, message) {
+                if let Err(error) = self.service.send(router_id, message) {
                     tracing::error!(
                         target: LOG_TARGET,
                         %router_id,
@@ -273,7 +273,7 @@ impl<R: Runtime> TunnelManager<R> {
                         "start dialing router",
                     );
 
-                    if let Err(error) = self.service.connect(&router_id) {
+                    if let Err(error) = self.service.connect(router_id) {
                         tracing::debug!(
                             target: LOG_TARGET,
                             %router_id,

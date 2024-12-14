@@ -265,7 +265,7 @@ impl<R: Runtime> SamSession<R> {
                     destination,
                     private_key,
                     signing_key,
-                } => (private_key, signing_key, destination.id(), destination),
+                } => (*private_key, *signing_key, destination.id(), destination),
             };
 
             // from specification:
@@ -767,14 +767,14 @@ impl<R: Runtime> Future for SamSession<R> {
             match self.socket.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(command)) => match command {
-                    command => tracing::warn!(
+                Poll::Ready(Some(command)) => {
+                    tracing::warn!(
                         target: LOG_TARGET,
                         session_id = %self.session_id,
                         ?command,
                         "ignoring command"
-                    ),
-                },
+                    );
+                }
             }
         }
 

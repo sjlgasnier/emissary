@@ -53,7 +53,7 @@ impl RouterId {
 
     /// Copy [`RouterId`] into a byte vector.
     pub fn to_vec(&self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes()).expect("to succeed")
+        base64_decode(self.0.as_bytes()).expect("to succeed")
     }
 }
 
@@ -69,9 +69,9 @@ impl<T: AsRef<[u8]>> From<T> for RouterId {
     }
 }
 
-impl Into<Vec<u8>> for RouterId {
-    fn into(self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes()).expect("to succeed")
+impl From<RouterId> for Vec<u8> {
+    fn from(value: RouterId) -> Self {
+        base64_decode(value.0.as_bytes()).expect("to succeed")
     }
 }
 
@@ -116,7 +116,7 @@ impl RouterIdentity {
 
         let identity_hash = Sha256::new()
             .update(
-                &RouterIdentitySerialized {
+                RouterIdentitySerialized {
                     public_key: static_key.clone().to_bytes(),
                     padding: [0u8; 320],
                     signing_key: signing_key.clone().to_bytes(),

@@ -58,8 +58,8 @@ impl<R: Runtime> Stream for Ntcp2Listener<R> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.listener.poll_accept(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(stream)) => return Poll::Ready(Some(stream)),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(stream)) => Poll::Ready(Some(stream)),
         }
     }
 }

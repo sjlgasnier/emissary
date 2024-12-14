@@ -366,7 +366,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         break;
                     }
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                    Poll::Ready(Ok(0)) =>
                         return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
                     Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
                         true => {
@@ -393,7 +393,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         break;
                     }
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                    Poll::Ready(Ok(0)) =>
                         return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
                     Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
                         true => {

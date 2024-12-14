@@ -188,7 +188,7 @@ impl<R: Runtime> Stream for SamSocket<R> {
                             break;
                         }
                         Poll::Ready(Err(_)) => return Poll::Ready(None),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                        Poll::Ready(Ok(0)) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 "wrote zero bytes to socket",

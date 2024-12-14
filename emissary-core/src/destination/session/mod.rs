@@ -280,13 +280,13 @@ impl<R: Runtime> SessionManager<R> {
         let database_store = DatabaseStoreBuilder::new(
             Bytes::from(self.destination_id.to_vec()),
             DatabaseStoreKind::LeaseSet2 {
-                lease_set: Bytes::from(self.lease_set.clone()),
+                lease_set: self.lease_set.clone(),
             },
         )
         .build();
 
         let hash = destination_id.to_vec();
-        let builder = GarlicMessageBuilder::new()
+        let builder = GarlicMessageBuilder::default()
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
@@ -338,7 +338,7 @@ impl<R: Runtime> SessionManager<R> {
                     out.put_slice(&message);
                     out
                 };
-                let mut builder = GarlicMessageBuilder::new().with_garlic_clove(
+                let mut builder = GarlicMessageBuilder::default().with_garlic_clove(
                     MessageType::Data,
                     MessageId::from(R::rng().next_u32()),
                     R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
@@ -374,7 +374,7 @@ impl<R: Runtime> SessionManager<R> {
                         let database_store = DatabaseStoreBuilder::new(
                             Bytes::from(self.destination_id.to_vec()),
                             DatabaseStoreKind::LeaseSet2 {
-                                lease_set: Bytes::from(lease_set.clone()),
+                                lease_set: lease_set.clone(),
                             },
                         )
                         .build();
@@ -472,7 +472,7 @@ impl<R: Runtime> SessionManager<R> {
                     // and create a pending outbound session
                     let (session, payload) = self.key_context.create_outbound_session(
                         destination_id.clone(),
-                        &public_key,
+                        public_key,
                         self.lease_set.clone(),
                         &message,
                     );
@@ -567,11 +567,14 @@ impl<R: Runtime> SessionManager<R> {
 
                 // locate `DatabaseStore` i2np message from the clove set
                 let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
-                    clove_set.blocks.iter().find(|clove| match clove {
-                        GarlicMessageBlock::GarlicClove { message_type, .. }
-                            if message_type == &MessageType::DatabaseStore =>
-                            true,
-                        _ => false,
+                    clove_set.blocks.iter().find(|clove| {
+                        core::matches!(
+                            clove,
+                            GarlicMessageBlock::GarlicClove {
+                                message_type: MessageType::DatabaseStore,
+                                ..
+                            }
+                        )
                     })
                 else {
                     tracing::warn!(
@@ -587,7 +590,7 @@ impl<R: Runtime> SessionManager<R> {
                 let Some(DatabaseStore {
                     payload: DatabaseStorePayload::LeaseSet2 { lease_set },
                     ..
-                }) = DatabaseStore::<R>::parse(&message_body)
+                }) = DatabaseStore::<R>::parse(message_body)
                 else {
                     tracing::warn!(
                         target: LOG_TARGET,

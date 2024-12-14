@@ -29,7 +29,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 #[cfg(feature = "no_std")]
 use spin::rwlock::{RwLock, RwLockReadGuard};
 
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{marker::PhantomData, time::Duration};
 
 /// Logging target for the file.
@@ -134,7 +134,7 @@ pub struct ProfileStorage<R: Runtime> {
 
 impl<R: Runtime> ProfileStorage<R> {
     /// Create new [`ProfileStorage`].
-    pub fn new(routers: &Vec<Vec<u8>>, profiles: &Vec<(String, Profile)>) -> Self {
+    pub fn new(routers: &[Vec<u8>], profiles: &[(String, Profile)]) -> Self {
         tracing::info!(
             target: LOG_TARGET,
             num_routers = ?routers.len(),
@@ -143,7 +143,7 @@ impl<R: Runtime> ProfileStorage<R> {
         );
 
         let routers = routers
-            .into_iter()
+            .iter()
             .filter_map(|router| {
                 RouterInfo::parse(router).map(|router| (router.identity.id(), router))
             })
@@ -153,7 +153,7 @@ impl<R: Runtime> ProfileStorage<R> {
             .iter()
             .filter_map(|(router_id, profile)| {
                 let router_id =
-                    RouterId::from(base64_decode(&router_id).expect("valid base64 name"));
+                    RouterId::from(base64_decode(router_id).expect("valid base64 name"));
 
                 routers.contains_key(&router_id).then_some((router_id, *profile))
             })
@@ -223,7 +223,7 @@ impl<R: Runtime> ProfileStorage<R> {
 
     // TODO: remove
     pub fn get(&self, router: &RouterId) -> Option<RouterInfo> {
-        self.routers.read().get(router).map(|router_info| router_info.clone())
+        self.routers.read().get(router).cloned()
     }
 
     /// Get `RouterId`s of those routers that pass `filter`.

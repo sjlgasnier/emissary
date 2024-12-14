@@ -77,7 +77,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         );
 
         // hop must exist since the tunnel is created by us
-        let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let next_hop = self.hops.first().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
         // split `message` into one or more i2np message fragments
@@ -85,7 +85,6 @@ impl<R: Runtime> OutboundTunnel<R> {
         let messages = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_router_delivery(&router, &message)
             .build::<R>(&self.padding_bytes)
-            .into_iter()
             .map(|mut message| {
                 let (iv, ciphertext) = self.hops.iter().rev().fold(
                     (
@@ -93,13 +92,13 @@ impl<R: Runtime> OutboundTunnel<R> {
                         message[PAYLOAD_OFFSET].to_vec(),
                     ),
                     |(iv, message), hop| {
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(&iv);
 
-                        let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                        let mut aes = cbc::Aes::new_decryptor(hop.key_context.layer_key(), &iv);
                         let ciphertext = aes.decrypt(message);
 
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(iv);
 
                         (iv, ciphertext)
@@ -139,7 +138,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         );
 
         // hop must exist since the tunnel is created by us
-        let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let next_hop = self.hops.first().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
         // split `message` into one or more i2np message fragments
@@ -147,7 +146,6 @@ impl<R: Runtime> OutboundTunnel<R> {
         let messages = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(&router, gateway, &message)
             .build::<R>(&self.padding_bytes)
-            .into_iter()
             .map(|mut message| {
                 let (iv, ciphertext) = self.hops.iter().rev().fold(
                     (
@@ -155,13 +153,13 @@ impl<R: Runtime> OutboundTunnel<R> {
                         message[PAYLOAD_OFFSET].to_vec(),
                     ),
                     |(iv, message), hop| {
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(&iv);
 
-                        let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                        let mut aes = cbc::Aes::new_decryptor(hop.key_context.layer_key(), &iv);
                         let ciphertext = aes.decrypt(message);
 
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(iv);
 
                         (iv, ciphertext)

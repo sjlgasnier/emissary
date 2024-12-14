@@ -118,17 +118,16 @@ impl<R: Runtime> InboundGateway<R> {
         );
 
         let messages = TunnelDataBuilder::new(self.next_tunnel_id)
-            .with_local_delivery(&tunnel_gateway.payload)
+            .with_local_delivery(tunnel_gateway.payload)
             .build::<R>(&self.padding_bytes)
-            .into_iter()
             .map(|mut message| {
-                let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
+                let mut aes = ecb::Aes::new_encryptor(self.tunnel_keys.iv_key());
                 let iv = aes.encrypt(&message[AES_IV_OFFSET]);
 
-                let mut aes = cbc::Aes::new_encryptor(&self.tunnel_keys.layer_key(), &iv);
+                let mut aes = cbc::Aes::new_encryptor(self.tunnel_keys.layer_key(), &iv);
                 let ciphertext = aes.encrypt(&message[PAYLOAD_OFFSET]);
 
-                let mut aes = ecb::Aes::new_encryptor(&self.tunnel_keys.iv_key());
+                let mut aes = ecb::Aes::new_encryptor(self.tunnel_keys.iv_key());
                 let iv = aes.encrypt(iv);
 
                 message[AES_IV_OFFSET].copy_from_slice(&iv);
@@ -234,7 +233,7 @@ impl<R: Runtime> Future for InboundGateway<R> {
             }
         }
 
-        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+        if self.expiration_timer.poll_unpin(cx).is_ready() {
             return Poll::Ready(self.tunnel_id);
         }
 

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -138,21 +138,21 @@ pub struct Config {
     pub insecure_tunnels: bool,
 }
 
-impl Into<emissary_core::Config> for Config {
-    fn into(self) -> emissary_core::Config {
+impl From<Config> for emissary_core::Config {
+    fn from(val: Config) -> Self {
         emissary_core::Config {
-            static_key: self.static_key,
-            signing_key: self.signing_key,
-            ntcp2_config: self.ntcp2_config,
-            i2cp_config: self.i2cp_config,
-            routers: self.routers,
-            profiles: self.profiles,
-            samv3_config: self.sam_config,
-            floodfill: self.floodfill,
-            caps: self.caps,
-            net_id: self.net_id,
-            exploratory: self.exploratory,
-            insecure_tunnels: self.insecure_tunnels,
+            static_key: val.static_key,
+            signing_key: val.signing_key,
+            ntcp2_config: val.ntcp2_config,
+            i2cp_config: val.i2cp_config,
+            routers: val.routers,
+            profiles: val.profiles,
+            samv3_config: val.sam_config,
+            floodfill: val.floodfill,
+            caps: val.caps,
+            net_id: val.net_id,
+            exploratory: val.exploratory,
+            insecure_tunnels: val.insecure_tunnels,
         }
     }
 }
@@ -170,7 +170,7 @@ impl TryFrom<Option<PathBuf>> for Config {
                         path
                     })
                 },
-                |path| Some(path),
+                Some,
             )
             .ok_or(Error::Custom(String::from("couldn't resolve base path")))?;
 
@@ -186,7 +186,7 @@ impl TryFrom<Option<PathBuf>> for Config {
             fs::create_dir_all(path.join("routers"))?;
             fs::create_dir_all(path.join("profiles"))?;
 
-            return Ok(Config::new_empty(path)?);
+            return Config::new_empty(path);
         }
 
         // read static & signing keys from disk or generate new ones
@@ -294,7 +294,7 @@ impl Config {
 
     /// Load key from disk.
     fn load_key(path: PathBuf, key_type: &str) -> crate::Result<[u8; 32]> {
-        let mut file = fs::File::open(&path.join(format!("{key_type}.key")))?;
+        let mut file = fs::File::open(path.join(format!("{key_type}.key")))?;
         let mut key_bytes = [0u8; 32];
         file.read_exact(&mut key_bytes)?;
 
@@ -304,7 +304,7 @@ impl Config {
     /// Load NTCP2 key and IV from disk.
     fn load_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
         let key_bytes = {
-            let mut file = fs::File::open(&path.join("ntcp2.keys"))?;
+            let mut file = fs::File::open(path.join("ntcp2.keys"))?;
             let mut key_bytes = [0u8; 32 + 16];
             file.read_exact(&mut key_bytes)?;
 
@@ -319,7 +319,7 @@ impl Config {
 
     fn load_router_config(path: PathBuf) -> crate::Result<EmissaryConfig> {
         // parse configuration, if it exists
-        let mut file = fs::File::open(&path.join("router.toml"))?;
+        let mut file = fs::File::open(path.join("router.toml"))?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
 
@@ -361,7 +361,7 @@ impl Config {
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
-        file.write_all(&config.as_bytes())?;
+        file.write_all(config.as_bytes())?;
 
         tracing::info!(
             target: LOG_TARGET,
@@ -427,7 +427,7 @@ impl Config {
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
                 let mut file = fs::File::create(base_path.join("router.toml"))?;
-                file.write_all(&toml_config.as_bytes())?;
+                file.write_all(toml_config.as_bytes())?;
 
                 config
             }
@@ -465,8 +465,8 @@ impl Config {
     }
 
     /// Attempt to load router infos.
-    fn load_router_infos(path: &PathBuf) -> Vec<Vec<u8>> {
-        let Ok(router_dir) = fs::read_dir(&path.join("routers")) else {
+    fn load_router_infos(path: &Path) -> Vec<Vec<u8>> {
+        let Ok(router_dir) = fs::read_dir(path.join("routers")) else {
             return Vec::new();
         };
 
@@ -485,8 +485,8 @@ impl Config {
     }
 
     /// Attempt to load router profiles.
-    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary_core::Profile)> {
-        let Ok(profile_dir) = fs::read_dir(&path.join("profiles")) else {
+    fn load_router_profiles(path: &Path) -> Vec<(String, emissary_core::Profile)> {
+        let Ok(profile_dir) = fs::read_dir(path.join("profiles")) else {
             return Vec::new();
         };
 
@@ -670,7 +670,7 @@ mod tests {
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
-        file.write_all(&config.as_bytes()).unwrap();
+        file.write_all(config.as_bytes()).unwrap();
 
         // load the new config
         //

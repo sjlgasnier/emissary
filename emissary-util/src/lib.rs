@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+#![allow(clippy::manual_async_fn)]
+
 pub mod reseeder;
 pub mod runtime;
 pub mod su3;

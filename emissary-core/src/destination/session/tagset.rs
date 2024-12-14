@@ -176,29 +176,29 @@ impl KeyContext {
     pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
         let temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
         let next_root_key =
-            Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"KDFDHRatchetStep").update([0x01]).finalize();
         let ratchet_key = Hmac::new(&temp_key)
             .update(&next_root_key)
-            .update(&b"KDFDHRatchetStep")
-            .update(&[0x02])
+            .update(b"KDFDHRatchetStep")
+            .update([0x02])
             .finalize();
 
-        let temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
+        let temp_key = Hmac::new(&ratchet_key).update([]).finalize();
         let session_tag_key =
-            Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"TagAndKeyGenKeys").update([0x01]).finalize();
         let symmetric_key = Hmac::new(&temp_key)
             .update(&session_tag_key)
-            .update(&b"TagAndKeyGenKeys")
-            .update(&[0x02])
+            .update(b"TagAndKeyGenKeys")
+            .update([0x02])
             .finalize();
 
-        let mut temp_key = Hmac::new(&session_tag_key).update(&[]).finalize();
+        let mut temp_key = Hmac::new(&session_tag_key).update([]).finalize();
         let session_key_data =
-            Hmac::new(&temp_key).update(&b"STInitialization").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"STInitialization").update([0x01]).finalize();
         let session_tag_constant = Hmac::new(&temp_key)
             .update(&session_key_data)
-            .update(&b"STInitialization")
-            .update(&[0x02])
+            .update(b"STInitialization")
+            .update([0x02])
             .finalize();
 
         temp_key.zeroize();
@@ -290,13 +290,13 @@ impl TagSet {
 
             // store session key data for the next session tag ratchet
             self.key_context.session_key_data = Bytes::from(
-                Hmac::new(&temp_key).update(&b"SessionTagKeyGen").update(&[0x01]).finalize(),
+                Hmac::new(&temp_key).update(b"SessionTagKeyGen").update([0x01]).finalize(),
             );
 
             let session_tag_key_data = Hmac::new(&temp_key)
                 .update(&self.key_context.session_key_data)
-                .update(&b"SessionTagKeyGen")
-                .update(&[0x02])
+                .update(b"SessionTagKeyGen")
+                .update([0x02])
                 .finalize();
 
             temp_key.zeroize();
@@ -305,16 +305,16 @@ impl TagSet {
         };
 
         let symmetric_key = {
-            let mut temp_key = Hmac::new(&self.key_context.symmetric_key).update(&[]).finalize();
+            let mut temp_key = Hmac::new(&self.key_context.symmetric_key).update([]).finalize();
 
             // store symmetric key for the next key ratchet
             self.key_context.symmetric_key =
-                Hmac::new(&temp_key).update(&b"SymmetricRatchet").update(&[0x01]).finalize();
+                Hmac::new(&temp_key).update("SymmetricRatchet").update([0x01]).finalize();
 
             let symmetric_key = Hmac::new(&temp_key)
                 .update(&self.key_context.symmetric_key)
-                .update(&b"SymmetricRatchet")
-                .update(&[0x02])
+                .update(b"SymmetricRatchet")
+                .update([0x02])
                 .finalize();
 
             temp_key.zeroize();
@@ -348,9 +348,9 @@ impl TagSet {
     ) {
         let tag_set_key = {
             let mut shared = private_key.diffie_hellman(&public_key);
-            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+            let mut temp_key = Hmac::new(&shared).update([]).finalize();
             let tagset_key =
-                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
+                Hmac::new(&temp_key).update(b"XDHRatchetTagSet").update([0x01]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();

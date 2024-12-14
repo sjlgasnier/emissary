@@ -215,11 +215,11 @@ impl<'a> MessageKind<'a> {
             MessageKind::Unfragmented {
                 delivery_instructions,
             } => match delivery_instructions {
-                DeliveryInstructions::Local => BytesMut::from_iter(vec![0x00].into_iter()),
+                DeliveryInstructions::Local => BytesMut::from_iter(vec![0x00]),
                 DeliveryInstructions::Router { hash } => {
                     let mut out = BytesMut::with_capacity(33);
                     out.put_u8(0x02 << 5);
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
 
                     out
                 }
@@ -227,7 +227,7 @@ impl<'a> MessageKind<'a> {
                     let mut out = BytesMut::with_capacity(37);
                     out.put_u8(0x01 << 5);
                     out.put_u32(tunnel_id);
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
 
                     out
                 }
@@ -246,7 +246,7 @@ impl<'a> MessageKind<'a> {
                 DeliveryInstructions::Router { hash } => {
                     let mut out = BytesMut::with_capacity(38);
                     out.put_u8((0x01 << 3) | (0x02 << 5));
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
                     out.put_u32(message_id);
 
                     out
@@ -255,7 +255,7 @@ impl<'a> MessageKind<'a> {
                     let mut out = BytesMut::with_capacity(41);
                     out.put_u8((0x01 << 3) | (0x01 << 5));
                     out.put_u32(tunnel_id);
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
                     out.put_u32(message_id);
 
                     out
@@ -502,8 +502,8 @@ impl<'a> TunnelDataBuilder<'a> {
             &Sha256::new()
                 .update(delivery_instructions)
                 .update((message.len() as u16).to_be_bytes())
-                .update(&message)
-                .update(&iv)
+                .update(message)
+                .update(iv)
                 .finalize()[..4],
         )
         .expect("to succeed")
@@ -530,7 +530,7 @@ impl<'a> TunnelDataBuilder<'a> {
 
         out.put_u32(tunnel_id.into());
         out.put_slice(&aes_iv);
-        out.put_slice(&Self::checksum(&delivery_instructions, &message, &aes_iv));
+        out.put_slice(&Self::checksum(delivery_instructions, message, &aes_iv));
 
         if let Some(padding) = padding {
             // calculate padding size and generate random offset into `padding`
@@ -541,7 +541,7 @@ impl<'a> TunnelDataBuilder<'a> {
         }
 
         out.put_u8(0x00); // zero byte (end of padding)
-        out.put_slice(&delivery_instructions);
+        out.put_slice(delivery_instructions);
         out.put_u16(message.len() as u16);
         out.put_slice(message);
 

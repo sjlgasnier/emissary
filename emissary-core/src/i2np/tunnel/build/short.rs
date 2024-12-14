@@ -135,7 +135,7 @@ impl<'a> TunnelBuildRecordBuilder<'a> {
 
         out.put_u32(*self.tunnel_id.expect("to exist"));
         out.put_u32(*self.next_tunnel_id.expect("to exist"));
-        out.put_slice(&self.next_router_hash.expect("to exist"));
+        out.put_slice(self.next_router_hash.expect("to exist"));
         out.put_u8(self.role.expect("to exist").as_u8());
         out.put_u16(0u16); // reserved
         out.put_u8(0u8); // encryption type

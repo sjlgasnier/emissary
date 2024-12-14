@@ -84,7 +84,7 @@ impl<R: Runtime> RoutingTable<R> {
     }
 
     /// Get an entry for `peer` into a k-bucket.
-    pub fn entry<'a>(&'a mut self, key: Key<RouterId>) -> KBucketEntry<'a, R> {
+    pub fn entry(&mut self, key: Key<RouterId>) -> KBucketEntry<'_, R> {
         let Some(index) = BucketIndex::new(&self.local_key.distance(&key)) else {
             return KBucketEntry::LocalNode;
         };
@@ -127,8 +127,7 @@ impl<R: Runtime> RoutingTable<R> {
         limit: usize,
     ) -> impl Iterator<Item = RouterId> + 'a {
         ClosestBucketsIter::new(self.local_key.distance(&target))
-            .map(move |index| self.buckets[*index].closest_iter(&target))
-            .flatten()
+            .flat_map(move |index| self.buckets[*index].closest_iter(&target))
             .take(limit)
     }
 
@@ -141,8 +140,7 @@ impl<R: Runtime> RoutingTable<R> {
         ignore: &'b HashSet<RouterId>,
     ) -> impl Iterator<Item = RouterId> + 'a {
         ClosestBucketsIter::new(self.local_key.distance(&target))
-            .map(move |index| self.buckets[*index].closest_iter(&target))
-            .flatten()
+            .flat_map(move |index| self.buckets[*index].closest_iter(&target))
             .filter(|router_id| !ignore.contains(router_id))
             .take(limit)
     }

@@ -139,9 +139,7 @@ impl TunnelPoolContextHandle {
                     }
                     None => match inner.listeners.remove(&message_id) {
                         Some(listener) =>
-                            return listener
-                                .send(message)
-                                .map_err(|message| RoutingError::ChannelClosed(message)),
+                            return listener.send(message).map_err(RoutingError::ChannelClosed),
                         None =>
                             return self
                                 .event_tx
@@ -203,23 +201,16 @@ impl TunnelPoolContextHandle {
         };
 
         match inner.listeners.remove(&message_id) {
-            Some(listener) =>
-                listener.send(message).map_err(|message| RoutingError::ChannelClosed(message)),
+            Some(listener) => listener.send(message).map_err(RoutingError::ChannelClosed),
             // TODO: is this necessary?
             None =>
                 self.tx
                     .try_send(TunnelMessage::Inbound { message })
                     .map_err(|error| match error {
-                        mpsc::errors::TrySendError::Full(message) => match message {
-                            TunnelMessage::Inbound { message } =>
-                                RoutingError::ChannelFull(message),
-                            _ => unreachable!(),
-                        },
-                        mpsc::errors::TrySendError::Closed(message) => match message {
-                            TunnelMessage::Inbound { message } =>
-                                RoutingError::ChannelClosed(message),
-                            _ => unreachable!(),
-                        },
+                        mpsc::errors::TrySendError::Full(TunnelMessage::Inbound { message }) =>
+                            RoutingError::ChannelFull(message),
+                        mpsc::errors::TrySendError::Closed(TunnelMessage::Inbound { message }) =>
+                            RoutingError::ChannelClosed(message),
                         _ => unreachable!(),
                     }),
         }

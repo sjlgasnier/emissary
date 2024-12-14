@@ -34,7 +34,7 @@ const LOG_TARGET: &str = "emissary::reseeder";
 const NUM_RETRIES: usize = 5usize;
 
 /// Reseed servers.
-const RESEED_SERVERS: &'static [&str] = &[
+const RESEED_SERVERS: &[&str] = &[
     "https://reseed.stormycloud.org/",
     "https://i2p.ghativega.in/",
     "https://reseed-pl.i2pd.xyz/",
@@ -123,7 +123,7 @@ impl Reseeder {
     /// Reseed from `hosts` or from `RESEED_SERVERS` if `hosts` are not specified.
     pub async fn reseed(hosts: Option<Vec<String>>) -> anyhow::Result<Vec<ReseedRouterInfo>> {
         match hosts {
-            None => Self::reseed_inner(&RESEED_SERVERS).await,
+            None => Self::reseed_inner(RESEED_SERVERS).await,
             Some(hosts) =>
                 Self::reseed_inner(&hosts.iter().map(AsRef::as_ref).collect::<Vec<_>>()).await,
         }

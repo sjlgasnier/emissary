@@ -118,22 +118,22 @@ impl TunnelKeys {
 impl TunnelKeys {
     /// Create new [`TunnelKeys`].
     fn new(mut chaining_key: Vec<u8>, hop_role: HopRole) -> TunnelKeys {
-        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let mut temp_key = Hmac::new(&chaining_key).update([]).finalize();
+        let ck = Hmac::new(&temp_key).update(b"SMTunnelReplyKey").update([0x01]).finalize();
         let reply_key = Hmac::new(&temp_key)
             .update(&ck)
-            .update(&b"SMTunnelReplyKey")
-            .update(&[0x02])
+            .update(b"SMTunnelReplyKey")
+            .update([0x02])
             .finalize();
 
         temp_key.zeroize();
 
-        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-        let ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        let mut temp_key = Hmac::new(&ck).update([]).finalize();
+        let ck = Hmac::new(&temp_key).update(b"SMTunnelLayerKey").update([0x01]).finalize();
         let layer_key = Hmac::new(&temp_key)
             .update(&ck)
-            .update(&b"SMTunnelLayerKey")
-            .update(&[0x02])
+            .update(b"SMTunnelLayerKey")
+            .update([0x02])
             .finalize();
 
         match hop_role {
@@ -150,25 +150,23 @@ impl TunnelKeys {
                 }
             }
             HopRole::OutboundEndpoint => {
-                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-                let ck =
-                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let mut temp_key = Hmac::new(&ck).update([]).finalize();
+                let ck = Hmac::new(&temp_key).update(b"TunnelLayerIVKey").update([0x01]).finalize();
                 let iv_key = Hmac::new(&temp_key)
                     .update(&ck)
-                    .update(&b"TunnelLayerIVKey")
-                    .update(&[0x02])
+                    .update(b"TunnelLayerIVKey")
+                    .update([0x02])
                     .finalize();
 
                 temp_key.zeroize();
 
-                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-                let ck =
-                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
+                let mut temp_key = Hmac::new(&ck).update([]).finalize();
+                let ck = Hmac::new(&temp_key).update(b"RGarlicKeyAndTag").update([0x01]).finalize();
                 let garlic_key = Bytes::from(
                     Hmac::new(&temp_key)
                         .update(&ck)
-                        .update(&b"RGarlicKeyAndTag")
-                        .update(&[0x02])
+                        .update(b"RGarlicKeyAndTag")
+                        .update([0x02])
                         .finalize(),
                 );
                 let garlic_tag = Bytes::from(ck[..8].to_vec());
@@ -353,15 +351,14 @@ impl ShortInboundSession {
 
                 // encrypt our record with chachapoly, using the associated data derived in
                 // `Self::decrypt_build_record()` and encrypt the other records with
-                payload[1..].chunks_mut(218).enumerate().for_each(|(idx, mut record)| {
+                payload[1..].chunks_mut(218).enumerate().for_each(|(idx, record)| {
                     if idx == our_record {
-                        let tag = ChaChaPoly::with_nonce(&tunnel_keys.reply_key(), idx as u64)
+                        let tag = ChaChaPoly::with_nonce(tunnel_keys.reply_key(), idx as u64)
                             .encrypt_with_ad(&state, &mut record[0..202])
                             .unwrap();
                         record[202..218].copy_from_slice(&tag);
                     } else {
-                        ChaCha::with_nonce(&tunnel_keys.reply_key(), idx as u64)
-                            .encrypt(&mut record);
+                        ChaCha::with_nonce(tunnel_keys.reply_key(), idx as u64).encrypt(record);
                     }
                 });
                 self.state = ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys };
@@ -613,17 +610,17 @@ impl OutboundSession {
 
     /// Get reference to IV key.
     pub fn iv_key(&self) -> &[u8] {
-        &self.tunnel_keys.iv_key()
+        self.tunnel_keys.iv_key()
     }
 
     /// Get reference to layer key.
     pub fn layer_key(&self) -> &[u8] {
-        &self.tunnel_keys.layer_key()
+        self.tunnel_keys.layer_key()
     }
 
     /// Get reference to reply key.
     pub fn reply_key(&self) -> &[u8] {
-        &self.tunnel_keys.reply_key()
+        self.tunnel_keys.reply_key()
     }
 }
 
@@ -704,8 +701,8 @@ impl NoiseContext {
 
         let mut shared_secret = local_ephemeral.diffie_hellman(&remote_static);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -726,12 +723,10 @@ impl NoiseContext {
     ) -> ShortInboundSession {
         let mut shared_secret = self.local_key.diffie_hellman(&remote_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
-        let state = Sha256::new()
-            .update(&self.inbound_state)
-            .update(&remote_key.to_vec())
-            .finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        let state =
+            Sha256::new().update(&self.inbound_state).update(remote_key.to_vec()).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -746,12 +741,10 @@ impl NoiseContext {
     ) -> LongInboundSession {
         let mut shared_secret = self.local_key.diffie_hellman(&remote_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
-        let state = Sha256::new()
-            .update(&self.inbound_state)
-            .update(&remote_key.to_vec())
-            .finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        let state =
+            Sha256::new().update(&self.inbound_state).update(remote_key.to_vec()).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -772,8 +765,8 @@ impl NoiseContext {
             .finalize();
         let mut shared_secret = self.local_key.diffie_hellman(&ephemeral_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -795,7 +788,7 @@ impl NoiseContext {
             .update(
                 Sha256::new()
                     .update(&self.outbound_state)
-                    .update::<&[u8]>(&remote_public.as_ref())
+                    .update::<&[u8]>(remote_public.as_ref())
                     .finalize(),
             )
             .update::<&[u8]>(ephemeral_public.as_ref())
@@ -803,8 +796,8 @@ impl NoiseContext {
 
         let mut shared_secret = ephemeral_secret.diffie_hellman(&remote_public);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();

@@ -60,9 +60,9 @@ impl From<u32> for TunnelId {
     }
 }
 
-impl Into<u32> for TunnelId {
-    fn into(self) -> u32 {
-        self.0
+impl From<TunnelId> for u32 {
+    fn from(value: TunnelId) -> Self {
+        value.0
     }
 }
 
@@ -99,15 +99,15 @@ impl From<u32> for MessageId {
     }
 }
 
-impl fmt::Display for MessageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+impl From<MessageId> for u32 {
+    fn from(value: MessageId) -> Self {
+        value.0
     }
 }
 
-impl Into<u32> for MessageId {
-    fn into(self) -> u32 {
-        self.0
+impl fmt::Display for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

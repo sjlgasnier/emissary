@@ -149,7 +149,7 @@ impl<T: AsyncWrite + Unpin> AsyncWriteExt for T {
 }
 
 /// Fisher-Yates shuffle.
-pub fn shuffle<T>(array: &mut Vec<T>, rng: &mut impl RngCore) {
+pub fn shuffle<T>(array: &mut [T], rng: &mut impl RngCore) {
     let len = array.len();
 
     for i in (1..len).rev() {

@@ -45,7 +45,7 @@ const LOG_TARGET: &str = "emissary::tunnel::routing-table";
 pub enum RoutingKind {
     /// Message needs to be send to an external router.
     External {
-        ///
+        /// Router ID.
         router_id: RouterId,
 
         /// Serialize I2NP essage.

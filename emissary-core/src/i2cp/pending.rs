@@ -314,7 +314,7 @@ impl<R: Runtime> PendingI2cpSession<R> {
                                         || Str::from(destination.id().to_string()),
                                         |name| name.clone(),
                                     );
-                                options.insert(Str::from("inbound.nickname"), Str::from(name));
+                                options.insert(Str::from("inbound.nickname"), name);
 
                                 TunnelPoolConfig::from(&options)
                             }

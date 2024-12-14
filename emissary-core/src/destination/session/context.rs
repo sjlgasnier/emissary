@@ -143,13 +143,13 @@ impl<R: Runtime> KeyContext<R> {
         let database_store = DatabaseStoreBuilder::new(
             Bytes::from(destination_id.to_vec()),
             DatabaseStoreKind::LeaseSet2 {
-                lease_set: Bytes::from(lease_set.clone()),
+                lease_set: lease_set.clone(),
             },
         )
         .build();
 
         let hash = destination_id.to_vec();
-        let payload = GarlicMessageBuilder::new()
+        let payload = GarlicMessageBuilder::default()
             .with_date_time(R::time_since_epoch().as_secs() as u32)
             .with_garlic_clove(
                 MessageType::DatabaseStore,
@@ -167,7 +167,7 @@ impl<R: Runtime> KeyContext<R> {
                     let mut out = BytesMut::with_capacity(payload.len() + 4);
 
                     out.put_u32(payload.len() as u32);
-                    out.put_slice(&payload);
+                    out.put_slice(payload);
 
                     out.freeze().to_vec()
                 },
@@ -202,19 +202,16 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, static_key_ciphertext) = {
             let mut shared = private_key.diffie_hellman(remote_public_key);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
-            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let mut cipher_key = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&b"")
-                .update(&[0x02])
-                .finalize();
+            let chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
+            let mut cipher_key =
+                Hmac::new(&temp_key).update(&chaining_key).update(b"").update([0x02]).finalize();
 
             // encrypt initiator's static public key
             //
             // `encrypt_with_ad()` must succeed as it's called with valid parameters
             let mut static_key = {
                 let mut out = BytesMut::with_capacity(32 + 16);
-                out.put_slice(&self.public_key.as_ref());
+                out.put_slice(self.public_key.as_ref());
 
                 out.freeze().to_vec()
             };
@@ -237,12 +234,9 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, payload_ciphertext) = {
             let mut shared = self.private_key.diffie_hellman(remote_public_key);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let mut cipher_key = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&b"")
-                .update(&[0x02])
-                .finalize();
+            let chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
+            let mut cipher_key =
+                Hmac::new(&temp_key).update(&chaining_key).update(b"").update([0x02]).finalize();
 
             // create buffer with 16 extra bytes for poly1305 auth tag
             let mut payload = {
@@ -342,12 +336,9 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, mut cipher_key) = {
             let mut shared = self.private_key.diffie_hellman(&public_key);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
-            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let cipher_key = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&b"")
-                .update(&[0x02])
-                .finalize();
+            let chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
+            let cipher_key =
+                Hmac::new(&temp_key).update(&chaining_key).update(b"").update([0x02]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();
@@ -375,12 +366,9 @@ impl<R: Runtime> KeyContext<R> {
         let (chaining_key, payload) = {
             let mut shared = self.private_key.diffie_hellman(&static_key);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let mut cipher_key = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&b"")
-                .update(&[0x02])
-                .finalize();
+            let chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
+            let mut cipher_key =
+                Hmac::new(&temp_key).update(&chaining_key).update(b"").update([0x02]).finalize();
 
             let mut payload = message[NS_PAYLOAD_OFFSET].to_vec();
             ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut payload)?;

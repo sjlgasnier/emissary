@@ -599,9 +599,9 @@ impl<R: Runtime> StreamManager<R> {
                     if let Some(PendingStream { destination_id, .. }) =
                         self.pending_inbound.remove(&packet.recv_stream_id())
                     {
-                        self.destination_streams.get_mut(&destination_id).map(|streams| {
-                            streams.remove(&packet.recv_stream_id());
-                        });
+                        if let Some(stream) = self.destination_streams.get_mut(&destination_id) {
+                            stream.remove(&packet.recv_stream_id());
+                        }
                     }
                 }
                 PendingStreamResult::Destroy => {
@@ -615,9 +615,9 @@ impl<R: Runtime> StreamManager<R> {
                     if let Some(PendingStream { destination_id, .. }) =
                         self.pending_inbound.remove(&packet.recv_stream_id())
                     {
-                        self.destination_streams.get_mut(&destination_id).map(|streams| {
-                            streams.remove(&packet.recv_stream_id());
-                        });
+                        if let Some(stream) = self.destination_streams.get_mut(&destination_id) {
+                            stream.remove(&packet.recv_stream_id());
+                        }
                     }
                 }
             }
@@ -735,16 +735,14 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
             return Poll::Ready(Some(event));
         }
 
-        loop {
-            match self.outbound_rx.poll_recv(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some((destination_id, packet))) =>
-                    return Poll::Ready(Some(StreamManagerEvent::SendPacket {
-                        destination_id,
-                        packet,
-                    })),
-            }
+        match self.outbound_rx.poll_recv(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some((destination_id, packet))) =>
+                return Poll::Ready(Some(StreamManagerEvent::SendPacket {
+                    destination_id,
+                    packet,
+                })),
         }
 
         loop {

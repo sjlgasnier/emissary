@@ -97,7 +97,7 @@ impl RouterAddress {
     /// Create new unpublished [`RouterAddress`].
     pub fn new_unpublished(static_key: Vec<u8>) -> Self {
         let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
-        let key = base64_encode(&static_key.to_vec());
+        let key = base64_encode(static_key.to_vec());
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
@@ -121,7 +121,7 @@ impl RouterAddress {
         options.insert(Str::from("v"), Str::from("2"));
         options.insert(
             Str::from("s"),
-            Str::from(base64_encode(&static_key.to_vec())),
+            Str::from(base64_encode(static_key.to_vec())),
         );
         options.insert(Str::from("host"), Str::from(host.clone()));
         options.insert(Str::from("port"), Str::from(port.to_string()));
@@ -204,8 +204,7 @@ impl RouterAddress {
 
             options
                 .into_iter()
-                .map(|(key, value)| Mapping::new(key, value).serialize())
-                .flatten()
+                .flat_map(|(key, value)| Mapping::new(key, value).serialize())
                 .collect::<Vec<_>>()
         };
 

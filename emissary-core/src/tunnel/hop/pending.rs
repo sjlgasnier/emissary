@@ -186,23 +186,23 @@ impl<T: Tunnel> PendingTunnel<T> {
             .iter()
             .zip(build_records.iter_mut())
             .zip(tunnel_hops.iter_mut())
-            .filter_map(|((router_hash, mut record), tunnel_hop)| {
-                ChaChaPoly::new(&tunnel_hop.key_context.aead_key())
-                    .encrypt_with_ad_new(&tunnel_hop.key_context.state(), &mut record)
+            .filter_map(|((router_hash, record), tunnel_hop)| {
+                ChaChaPoly::new(tunnel_hop.key_context.aead_key())
+                    .encrypt_with_ad_new(tunnel_hop.key_context.state(), record)
                     .ok()
                     .map(|_| {
                         // update associated data to include the encrypted record
                         // which is used when decrypting the build reply
                         tunnel_hop.key_context.set_state(
                             Sha256::new()
-                                .update(&tunnel_hop.key_context.state())
+                                .update(tunnel_hop.key_context.state())
                                 .update(&record)
                                 .finalize(),
                         );
 
                         let mut full_record = router_hash[..16].to_vec();
-                        full_record.extend_from_slice(&tunnel_hop.key_context.ephemeral_key());
-                        full_record.extend_from_slice(&record);
+                        full_record.extend_from_slice(tunnel_hop.key_context.ephemeral_key());
+                        full_record.extend_from_slice(record);
 
                         full_record
                     })
@@ -216,12 +216,12 @@ impl<T: Tunnel> PendingTunnel<T> {
         // double encrypt records
         tunnel_hops.iter().enumerate().for_each(|(hop_idx, hop)| {
             encrypted_records.iter_mut().skip(hop_idx + 1).enumerate().for_each(
-                |(record_idx, mut record)| {
+                |(record_idx, record)| {
                     ChaCha::with_nonce(
-                        &hop.key_context.reply_key(),
+                        hop.key_context.reply_key(),
                         (hop_idx + record_idx + 1) as u64,
                     )
-                    .decrypt(&mut record);
+                    .decrypt(record);
                 },
             )
         });
@@ -242,7 +242,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                     payload: short::TunnelBuildReplyBuilder::from_records(encrypted_records),
                 },
                 TunnelDirection::Inbound => {
-                    let mut message = GarlicMessageBuilder::new()
+                    let mut message = GarlicMessageBuilder::default()
                         .with_garlic_clove(
                             MessageType::ShortTunnelBuild,
                             message_id,
@@ -324,12 +324,14 @@ impl<T: Tunnel> PendingTunnel<T> {
 
                 // try to locate a garlic glove containing `OutboundTunnelBuildReply`
                 // and discard any other cloves as they're no interesting at this time
-                match message.blocks.into_iter().find(|message| match message {
-                    GarlicMessageBlock::GarlicClove {
-                        message_type: MessageType::OutboundTunnelBuildReply,
-                        ..
-                    } => true,
-                    _ => false,
+                match message.blocks.into_iter().find(|message| {
+                    core::matches!(
+                        message,
+                        GarlicMessageBlock::GarlicClove {
+                            message_type: MessageType::OutboundTunnelBuildReply,
+                            ..
+                        }
+                    )
                 }) {
                     Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =>
                         message_body.to_vec(),
@@ -380,8 +382,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                         [1 + (hop_idx * SHORT_RECORD_LEN)..1 + ((1 + hop_idx) * SHORT_RECORD_LEN)]
                         .to_vec();
 
-                    ChaChaPoly::with_nonce(&hop.key_context.reply_key(), hop_idx as u64)
-                        .decrypt_with_ad(&hop.key_context.state(), &mut record)
+                    ChaChaPoly::with_nonce(hop.key_context.reply_key(), hop_idx as u64)
+                        .decrypt_with_ad(hop.key_context.state(), &mut record)
                         .map_err(|error| {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -422,9 +424,9 @@ impl<T: Tunnel> PendingTunnel<T> {
                         .chunks_mut(218)
                         .enumerate()
                         .filter(|(index, _)| index != &hop_idx)
-                        .for_each(|(index, mut record)| {
-                            ChaCha::with_nonce(&hop.key_context.reply_key(), index as u64)
-                                .encrypt(&mut record);
+                        .for_each(|(index, record)| {
+                            ChaCha::with_nonce(hop.key_context.reply_key(), index as u64)
+                                .encrypt(record);
                         });
 
                     Ok(builder.with_hop(hop))

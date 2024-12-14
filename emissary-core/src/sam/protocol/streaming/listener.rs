@@ -307,11 +307,11 @@ impl<R: Runtime> StreamListener<R> {
                     kind: PendingListenerKind::Ephemeral,
                 },
                 kind @ ListenerKind::Ephemeral { .. },
-            ) => return Some(kind),
+            ) => Some(kind),
 
             // only an unitialized listener can accept `STREAM FORWARD`
             (ListenerState::Uninitialized { .. }, kind @ ListenerKind::Persistent { .. }) =>
-                return Some(kind),
+                Some(kind),
 
             // all other states are invalid and the accept requested is rejected
             (state, kind @ (ListenerKind::Ephemeral { .. } | ListenerKind::Persistent { .. })) => {
@@ -406,7 +406,10 @@ impl<R: Runtime> StreamListener<R> {
                                 .await
                                 .map(|()| socket)
                         });
-                        self.waker.take().map(|waker| waker.wake_by_ref());
+
+                        if let Some(waker) = self.waker.take() {
+                            waker.wake_by_ref();
+                        }
 
                         Ok(false)
                     }
@@ -435,7 +438,10 @@ impl<R: Runtime> StreamListener<R> {
                             .await
                             .map(|()| socket)
                     });
-                    self.waker.take().map(|waker| waker.wake_by_ref());
+
+                    if let Some(waker) = self.waker.take() {
+                        waker.wake_by_ref();
+                    }
 
                     Ok(false)
                 }
@@ -455,7 +461,10 @@ impl<R: Runtime> StreamListener<R> {
                             .await
                             .map(|()| socket)
                     });
-                    self.waker.take().map(|waker| waker.wake_by_ref());
+
+                    if let Some(waker) = self.waker.take() {
+                        waker.wake_by_ref();
+                    }
 
                     Ok(false)
                 }
@@ -485,7 +494,10 @@ impl<R: Runtime> StreamListener<R> {
                         .await
                         .map(|()| socket)
                 });
-                self.waker.take().map(|waker| waker.wake_by_ref());
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
 
                 Ok(false)
             }

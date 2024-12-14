@@ -115,7 +115,7 @@ impl<R: Runtime> DatagramManager<R> {
 
                 let info = format!(
                     "{} FROM_PORT={dst_port} TO_PORT={src_port}\n",
-                    base64_encode(&destination.serialize())
+                    base64_encode(destination.serialize())
                 )
                 .as_bytes()
                 .to_vec();

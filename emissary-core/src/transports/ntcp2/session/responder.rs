@@ -39,7 +39,7 @@ use crate::{
 use zerocopy::{AsBytes, FromBytes};
 use zeroize::Zeroize;
 
-use alloc::{vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::fmt;
 
 /// Logging target for the file.
@@ -60,7 +60,7 @@ enum ResponderState {
         iv: [u8; 16],
 
         /// Initator's ephemeral public key.
-        ephemeral_key: StaticPublicKey,
+        ephemeral_key: Box<StaticPublicKey>,
 
         /// Chaining key.
         chaining_key: Vec<u8>,
@@ -122,7 +122,7 @@ impl Responder {
     /// to be read from the socket in order for the session to make progress.
     ///
     /// [1]: [KDF part 1](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1)
-    pub fn new<R: Runtime>(
+    pub fn new(
         state: Vec<u8>,
         chaining_key: Vec<u8>,
         local_router_hash: Vec<u8>,
@@ -137,7 +137,7 @@ impl Responder {
 
         // decrypt X
         let mut aes = Aes::new_decryptor(&local_router_hash, &iv);
-        let x = aes.decrypt(message[..32].to_vec());
+        let x = aes.decrypt(&message[..32]);
 
         let state = Sha256::new().update(&state).update(&x).finalize();
 
@@ -150,10 +150,10 @@ impl Responder {
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
 
             // output 1
-            let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+            let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
 
             // output 2
-            let remote_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+            let remote_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();
@@ -175,7 +175,7 @@ impl Responder {
         let new_state = Sha256::new().update(&state).update(&message[32..64]).finalize();
 
         let mut options = message[32..].to_vec();
-        let _ = ChaChaPoly::new(&remote_key).decrypt_with_ad(&state, &mut options)?;
+        ChaChaPoly::new(&remote_key).decrypt_with_ad(&state, &mut options)?;
 
         remote_key.zeroize();
 
@@ -203,7 +203,7 @@ impl Responder {
                     iv: aes.iv(),
                     chaining_key,
                     m3_p2_len,
-                    ephemeral_key,
+                    ephemeral_key: Box::new(ephemeral_key),
                 },
             },
             padding_len,
@@ -256,14 +256,14 @@ impl Responder {
         // perform dh between initator's and responder's ephemeral keys
         // and derive local key for encrypting message part 2
         let (chaining_key, local_key) = {
-            let mut shared = sk.diffie_hellman(&ephemeral_key);
+            let mut shared = sk.diffie_hellman(&*ephemeral_key);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
 
             // output 1
-            let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+            let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
 
             // output 2
-            let local_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+            let local_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             ephemeral_key.zeroize();
             shared.zeroize();
@@ -351,13 +351,12 @@ impl Responder {
         let mut initiator_public = message[..48].to_vec();
         let mut cipher = ChaChaPoly::with_nonce(&local_key, 1u64);
 
-        cipher.decrypt_with_ad(&state, &mut initiator_public).map_err(|error| {
+        cipher.decrypt_with_ad(&state, &mut initiator_public).inspect_err(|error| {
             tracing::debug!(
                 target: LOG_TARGET,
+                ?error,
                 "failed to decrypt remote's public key"
             );
-
-            error
         })?;
 
         // perform diffie-hellman key exchange and derive keys for data phase
@@ -377,11 +376,11 @@ impl Responder {
 
         // Output 1
         // Set a new chaining key from the temp key
-        let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
 
         // Output 2
         // Generate the cipher key k
-        let k = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let k = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         // MixHash(ciphertext)
         //
@@ -399,13 +398,12 @@ impl Responder {
             let mut router_info = message[48..].to_vec();
             let mut cipher = ChaChaPoly::with_nonce(&k, 0);
 
-            cipher.decrypt_with_ad(&state, &mut router_info).map_err(|error| {
+            cipher.decrypt_with_ad(&state, &mut router_info).inspect_err(|error| {
                 tracing::debug!(
                     target: LOG_TARGET,
+                    ?error,
                     "failed to decrypt remote's router info"
                 );
-
-                error
             })?;
 
             match MessageBlock::parse(&router_info) {
@@ -430,9 +428,9 @@ impl Responder {
         }?;
 
         // create send and receive keys
-        let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-        let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
+        let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+        let send_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let recv_key = Hmac::new(&temp_key).update(&send_key).update([0x02]).finalize();
 
         // siphash context for (de)obfuscating message sizes
         let sip = SipHash::new_responder(&temp_key, &next_state);

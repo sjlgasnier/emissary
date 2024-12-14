@@ -187,7 +187,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                     continue;
                                 };
 
-                                let Some(message) = Message::parse::<R>(msg_type, &[]) else {
+                                let Some(message) = Message::parse(msg_type, []) else {
                                     tracing::warn!(
                                         target: LOG_TARGET,
                                         ?msg_type,
@@ -257,8 +257,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 continue;
                             };
 
-                            let Some(message) =
-                                Message::parse::<R>(msg_type, &this.read_buffer[..size])
+                            let Some(message) = Message::parse(msg_type, &this.read_buffer[..size])
                             else {
                                 tracing::warn!(
                                     target: LOG_TARGET,
@@ -296,7 +295,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                             break;
                         }
                         Poll::Ready(Err(_)) => return Poll::Ready(None),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                        Poll::Ready(Ok(0)) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 "wrote zero bytes to socket",

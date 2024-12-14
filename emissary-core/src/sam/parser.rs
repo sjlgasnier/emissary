@@ -35,6 +35,7 @@ use nom::{
 };
 
 use alloc::{
+    boxed::Box,
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
@@ -78,12 +79,12 @@ pub enum SessionKind {
     Anonymous,
 }
 
-impl Into<Protocol> for SessionKind {
-    fn into(self) -> Protocol {
-        match self {
-            Self::Stream => Protocol::Streaming,
-            Self::Datagram => Protocol::Datagram,
-            Self::Anonymous => Protocol::Anonymous,
+impl From<SessionKind> for Protocol {
+    fn from(value: SessionKind) -> Self {
+        match value {
+            SessionKind::Stream => Protocol::Streaming,
+            SessionKind::Datagram => Protocol::Datagram,
+            SessionKind::Anonymous => Protocol::Anonymous,
         }
     }
 }
@@ -136,10 +137,10 @@ pub enum DestinationKind {
         destination: Destination,
 
         /// Private key of the destination.
-        private_key: StaticPrivateKey,
+        private_key: Box<StaticPrivateKey>,
 
         /// Signing key of the destination.
-        signing_key: SigningPrivateKey,
+        signing_key: Box<SigningPrivateKey>,
     },
 }
 
@@ -169,7 +170,9 @@ impl PartialEq for DestinationKind {
                     signing_key: sign2,
                 },
             ) =>
-                dst1 == dst2 && priv1.as_ref() == priv2.as_ref() && sign1.as_ref() == sign2.as_ref(),
+                dst1 == dst2
+                    && (**priv1).as_ref() == (**priv2).as_ref()
+                    && (**sign1).as_ref() == (**sign2).as_ref(),
             _ => false,
         }
     }
@@ -282,13 +285,11 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                 min: value
                     .key_value_pairs
                     .get("MIN")
-                    .map(|value| SamVersion::try_from(*value).ok())
-                    .flatten(),
+                    .and_then(|value| SamVersion::try_from(*value).ok()),
                 max: value
                     .key_value_pairs
                     .get("MAX")
-                    .map(|value| SamVersion::try_from(*value).ok())
-                    .flatten(),
+                    .and_then(|value| SamVersion::try_from(*value).ok()),
             }),
             ("SESSION", Some("CREATE")) => {
                 let session_id = value
@@ -299,7 +300,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                             target: LOG_TARGET,
                             "session id missing from `SESSION CREATE`",
                         );
-                        ()
                     })?
                     .to_string();
 
@@ -314,8 +314,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                                 target: LOG_TARGET,
                                 "only forwarded raw datagrams are supported",
                             );
-
-                            ()
                         })?;
 
                         // if no host was specified, default to localhost
@@ -352,8 +350,8 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
 
                         DestinationKind::Persistent {
                             destination,
-                            private_key: StaticPrivateKey::from(private_key.to_vec()),
-                            signing_key: SigningPrivateKey::new(&signing_key).ok_or(())?,
+                            private_key: Box::new(StaticPrivateKey::from(private_key.to_vec())),
+                            signing_key: Box::new(SigningPrivateKey::new(signing_key).ok_or(())?),
                         }
                     }
                     None => {
@@ -383,16 +381,12 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         target: LOG_TARGET,
                         "session id missing for `STREAM CONNECT`"
                     );
-
-                    ()
                 })?;
                 let destination = value.key_value_pairs.get("DESTINATION").ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         "destination missing for `STREAM CONNECT`"
                     );
-
-                    ()
                 })?;
 
                 let decoded = base64_decode(destination).ok_or(())?;
@@ -414,8 +408,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         target: LOG_TARGET,
                         "session id missing for `STREAM ACCEPT`"
                     );
-
-                    ()
                 })?;
 
                 Ok(SamCommand::Accept {
@@ -433,8 +425,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         target: LOG_TARGET,
                         "session id missing for `STREAM FORWARD`"
                     );
-
-                    ()
                 })?;
                 let port = value
                     .key_value_pairs
@@ -444,8 +434,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                             target: LOG_TARGET,
                             "destination missing for `STREAM FORWARD`"
                         );
-
-                        ()
                     })?
                     .parse::<u16>()
                     .map_err(|_| ())?;

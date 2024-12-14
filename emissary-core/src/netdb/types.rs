@@ -200,10 +200,6 @@ impl<R: Runtime> PartialEq for FloodFill<R> {
     fn eq(&self, other: &Self) -> bool {
         self.key.eq(&other.key)
     }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.key.ne(&other.key)
-    }
 }
 
 impl<R: Runtime> Eq for FloodFill<R> {}

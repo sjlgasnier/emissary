@@ -269,7 +269,7 @@ impl<R: Runtime> Destination<R> {
                 "failed to start lease set query after {NUM_QUERY_RETRIES} retries",
             );
 
-            return (destination_id, Err(QueryError::RetryFailure));
+            (destination_id, Err(QueryError::RetryFailure))
         });
 
         LeaseSetStatus::NotFound
@@ -366,7 +366,7 @@ impl<R: Runtime> Destination<R> {
         Ok(self
             .session_manager
             .decrypt(message)
-            .map_err(|error| Error::Session(error))?
+            .map_err(Error::Session)?
             .filter_map(|clove| match clove.message_type {
                 MessageType::DatabaseStore => {
                     tracing::debug!(
@@ -445,7 +445,7 @@ impl<R: Runtime> Destination<R> {
         // outbound tunnels expired, leaving the destination with no outbound tunnel
         //
         // TODO: make tunnel selection more random
-        let gateway = match self.outbound_tunnels.get(0) {
+        let gateway = match self.outbound_tunnels.first() {
             Some(gateway) => *gateway,
             None => {
                 tracing::warn!(
@@ -465,7 +465,7 @@ impl<R: Runtime> Destination<R> {
             router_id: gateway_router_id,
             tunnel_id: gateway_tunnel_id,
             ..
-        }) = self.inbound_tunnels.get(0).cloned()
+        }) = self.inbound_tunnels.first().cloned()
         else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -607,7 +607,7 @@ impl<R: Runtime> Stream for Destination<R> {
                         // reset timer so it doesn't fire when the client is creating the lease set
                         self.lease_set_publish_timer.deactivate();
 
-                        let leases = mem::replace(&mut self.pending_inbound, Vec::new())
+                        let leases = mem::take(&mut self.pending_inbound)
                             .into_iter()
                             .filter_map(|(lease, created)| {
                                 (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
@@ -665,39 +665,35 @@ impl<R: Runtime> Stream for Destination<R> {
             }
         }
 
-        loop {
-            match self.query_futures.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some((destination_id, result))) => match result {
-                    Err(error) => {
-                        self.pending_queries.remove(&destination_id);
-                        return Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
-                            destination_id,
-                            error,
-                        }));
-                    }
-                    Ok(lease_set) => {
-                        self.pending_queries.remove(&destination_id);
-                        self.session_manager.add_remote_destination(
-                            destination_id.clone(),
-                            lease_set.public_keys[0].clone(),
-                        );
-                        self.remote_destinations.insert(destination_id.clone(), lease_set);
+        match self.query_futures.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some((destination_id, result))) => match result {
+                Err(error) => {
+                    self.pending_queries.remove(&destination_id);
+                    return Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
+                        destination_id,
+                        error,
+                    }));
+                }
+                Ok(lease_set) => {
+                    self.pending_queries.remove(&destination_id);
+                    self.session_manager.add_remote_destination(
+                        destination_id.clone(),
+                        lease_set.public_keys[0].clone(),
+                    );
+                    self.remote_destinations.insert(destination_id.clone(), lease_set);
 
-                        return Poll::Ready(Some(DestinationEvent::LeaseSetFound {
-                            destination_id,
-                        }));
-                    }
-                },
-            }
+                    return Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id }));
+                }
+            },
         }
 
         match self.lease_set_publish_timer.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
             Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew)) => {
-                let leases = mem::replace(&mut self.pending_inbound, Vec::new())
+                let leases = mem::take(&mut self.pending_inbound)
                     .into_iter()
                     .filter_map(|(lease, created)| {
                         (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)

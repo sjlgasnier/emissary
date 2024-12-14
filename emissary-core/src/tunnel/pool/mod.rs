@@ -657,7 +657,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 let payload = {
                     let mut out = BytesMut::with_capacity(11 + 4);
                     out.put_u32(11);
-                    out.put_slice(&b"tunnel test".to_vec());
+                    out.put_slice(b"tunnel test".as_ref());
 
                     out
                 };
@@ -666,7 +666,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 let message = {
                     let expiration = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
 
-                    let mut message = GarlicMessageBuilder::new()
+                    let mut message = GarlicMessageBuilder::default()
                         .with_garlic_clove(
                             MessageType::Data,
                             message_id,
@@ -1108,7 +1108,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         // the client is informed that the pool is shut down before it's shutdown so
         // the destination can starts up its own shutdown process
         if let Some(rx) = &mut self.shutdown_rx {
-            if let Poll::Ready(_) = rx.poll_unpin(cx) {
+            if rx.poll_unpin(cx).is_ready() {
                 tracing::info!(
                     target: LOG_TARGET,
                     name = %self.config.name,

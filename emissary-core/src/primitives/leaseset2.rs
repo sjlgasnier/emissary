@@ -223,7 +223,7 @@ impl LeaseSet2 {
 
                     match pubkey_type {
                         0x0004 => {
-                            let key = StaticPublicKey::new_x25519(&pubkey)?;
+                            let key = StaticPublicKey::new_x25519(pubkey)?;
                             public_keys.push(key);
 
                             Some((rest, public_keys))
@@ -317,14 +317,14 @@ impl LeaseSet2 {
 
                 return Err(Err::Error(make_error(input, ErrorKind::Fail)));
             }
-            Some(signing_key) => signing_key.verify(&bytes, signature).or_else(|error| {
+            Some(signing_key) => signing_key.verify(&bytes, signature).map_err(|error| {
                 tracing::warn!(
                     target: LOG_TARGET,
                     ?error,
                     "invalid signature for leaseset2",
                 );
 
-                Err(Err::Error(make_error(input, ErrorKind::Fail)))
+                Err::Error(make_error(input, ErrorKind::Fail))
             })?,
         }
 

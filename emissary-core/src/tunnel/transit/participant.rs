@@ -106,7 +106,7 @@ impl<R: Runtime> Participant<R> {
             .with_payload(&out)
             .build();
 
-        return Ok((self.next_router.clone(), message));
+        Ok((self.next_router.clone(), message))
     }
 }
 
@@ -180,7 +180,7 @@ impl<R: Runtime> Future for Participant<R> {
             }
         }
 
-        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+        if self.expiration_timer.poll_unpin(cx).is_ready() {
             return Poll::Ready(self.tunnel_id);
         }
 

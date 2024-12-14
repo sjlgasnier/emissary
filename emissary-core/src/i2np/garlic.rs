@@ -30,7 +30,7 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, time::Duration};
 
 /// Garlic message header length.
@@ -361,7 +361,7 @@ pub enum GarlicMessageBlock<'a> {
     /// Next key.
     NextKey {
         /// `NextKey` kind.
-        kind: NextKeyKind,
+        kind: Box<NextKeyKind>,
     },
 
     /// ACK.
@@ -494,7 +494,7 @@ impl<'a> GarlicMessage<'a> {
                     ?kind,
                     "invalid delivery kind",
                 );
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                Err(Err::Error(make_error(input, ErrorKind::Fail)))
             }
         }
     }
@@ -566,7 +566,12 @@ impl<'a> GarlicMessage<'a> {
             _ => unreachable!(),
         };
 
-        Ok((rest, GarlicMessageBlock::NextKey { kind }))
+        Ok((
+            rest,
+            GarlicMessageBlock::NextKey {
+                kind: Box::new(kind),
+            },
+        ))
     }
 
     /// Try to parse [`GarlicMessage::AckRequest`] from `input`.
@@ -658,6 +663,7 @@ impl<'a> GarlicMessage<'a> {
 }
 
 /// Garlic message builder.
+#[derive(Default)]
 pub struct GarlicMessageBuilder<'a> {
     /// Cloves.
     cloves: Vec<GarlicMessageBlock<'a>>,
@@ -667,14 +673,6 @@ pub struct GarlicMessageBuilder<'a> {
 }
 
 impl<'a> GarlicMessageBuilder<'a> {
-    /// Create new [`GarlicMessageBuilder`].
-    pub fn new() -> Self {
-        Self {
-            cloves: Vec::new(),
-            message_size: 0usize,
-        }
-    }
-
     /// Add [`GarlicMessageBlock::DateTime`].
     pub fn with_date_time(mut self, timestamp: u32) -> Self {
         self.message_size = self.message_size.saturating_add(GARLIC_HEADER_LEN).saturating_add(4); // 4-byte timestamp
@@ -715,7 +713,9 @@ impl<'a> GarlicMessageBuilder<'a> {
     // Add [`GarlicMessageBlock::NextKey`]
     pub fn with_next_key(mut self, kind: NextKeyKind) -> Self {
         self.message_size += kind.serialized_len();
-        self.cloves.push(GarlicMessageBlock::NextKey { kind });
+        self.cloves.push(GarlicMessageBlock::NextKey {
+            kind: Box::new(kind),
+        });
         self
     }
 
@@ -766,7 +766,7 @@ impl<'a> GarlicMessageBuilder<'a> {
                     out.put_u32(expiration.as_secs() as u32);
                     out.put_slice(message_body);
                 }
-                GarlicMessageBlock::NextKey { kind } => match kind {
+                GarlicMessageBlock::NextKey { kind } => match *kind {
                     NextKeyKind::ForwardKey {
                         key_id,
                         public_key,
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn unsupported_garlic_message_block() {
-        let mut message = GarlicMessageBuilder::new()
+        let mut message = GarlicMessageBuilder::default()
             .with_date_time(1337u32)
             .with_garlic_clove(
                 MessageType::DatabaseStore,

@@ -301,7 +301,7 @@ impl<R: Runtime> DatabaseStore<R> {
                     ?kind,
                     "support for store kind not implemented",
                 );
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                Err(Err::Error(make_error(input, ErrorKind::Fail)))
             }
         }
     }

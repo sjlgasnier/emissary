@@ -16,8 +16,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg(feature = "tokio")]
-
 use emissary_core::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
     MetricsHandle, Runtime as RuntimeT, TcpListener, TcpStream, UdpSocket,
@@ -45,7 +43,7 @@ use std::{
 /// Logging targer for the file.
 const LOG_TARGET: &str = "emissary::runtime::tokio";
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct Runtime {}
 
 impl Runtime {
@@ -132,7 +130,7 @@ impl TcpStream for TokioTcpStream {
                 );
             })
             .ok()
-            .map(|stream| Self::new(stream))
+            .map(Self::new)
     }
 }
 
@@ -152,13 +150,13 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
                 );
             })
             .ok()
-            .map(|listener| TokioTcpListener(listener))
+            .map(TokioTcpListener)
     }
 
     fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
         match futures::ready!(self.0.poll_accept(cx)) {
-            Err(_) => return Poll::Ready(None),
-            Ok((stream, _)) => return Poll::Ready(Some(TokioTcpStream::new(stream))),
+            Err(_) => Poll::Ready(None),
+            Ok((stream, _)) => Poll::Ready(Some(TokioTcpStream::new(stream))),
         }
     }
 }
@@ -167,7 +165,7 @@ pub struct TokioUdpSocket(net::UdpSocket);
 
 impl UdpSocket for TokioUdpSocket {
     fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
-        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
+        async move { net::UdpSocket::bind(address).await.ok().map(Self) }
     }
 
     fn poll_send_to(
@@ -187,7 +185,7 @@ impl UdpSocket for TokioUdpSocket {
         let mut buf = ReadBuf::new(buf);
 
         match futures::ready!(self.0.poll_recv_from(cx, &mut buf)) {
-            Err(_) => return Poll::Ready(None),
+            Err(_) => Poll::Ready(None),
             Ok(from) => {
                 let nread = buf.filled().len();
                 Poll::Ready(Some((nread, from)))
@@ -213,7 +211,11 @@ impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
         F::Output: Send,
     {
         let _ = self.0.spawn(future);
-        self.1.as_mut().map(|waker| waker.wake_by_ref());
+
+        // TODO: remove?
+        if let Some(waker) = self.1.take() {
+            waker.wake_by_ref();
+        }
     }
 }
 

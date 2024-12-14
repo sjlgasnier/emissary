@@ -83,8 +83,6 @@ impl TryFrom<&[u8]> for Str {
                     ?error,
                     "failed to parse `Str`",
                 );
-
-                ()
             })?
             .to_owned();
 

@@ -283,7 +283,7 @@ impl<R: Runtime> PendingSession<R> {
                 );
 
                 let hash = self.remote.to_vec();
-                let message = GarlicMessageBuilder::new()
+                let message = GarlicMessageBuilder::default()
                     .with_garlic_clove(
                         MessageType::Data,
                         MessageId::from(R::rng().next_u32()),
@@ -406,7 +406,7 @@ impl<R: Runtime> PendingSession<R> {
                     out
                 };
                 let hash = self.remote.to_vec();
-                let builder = GarlicMessageBuilder::new().with_garlic_clove(
+                let builder = GarlicMessageBuilder::default().with_garlic_clove(
                     MessageType::Data,
                     MessageId::from(R::rng().next_u32()),
                     R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
@@ -920,7 +920,7 @@ impl<R: Runtime> Session<R> {
                     "handle `NextKey` block",
                 );
 
-                match kind {
+                match **kind {
                     NextKeyKind::ForwardKey { .. } => {
                         // collect all tags of the current tag set into a separate storage from
                         // which they're easy to expire once the tag set they belonged to us expires

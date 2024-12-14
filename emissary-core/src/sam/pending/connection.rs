@@ -449,7 +449,7 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
             }
         }
 
-        if let Poll::Ready(_) = self.keep_alive_timer.poll_unpin(cx) {
+        if self.keep_alive_timer.poll_unpin(cx).is_ready() {
             tracing::debug!(
                 target: LOG_TARGET,
                 "keep-alive timer expired, closing connection",

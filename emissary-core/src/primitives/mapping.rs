@@ -59,9 +59,9 @@ impl Mapping {
         let mut out = vec![0u8; size];
 
         out[..key.len()].copy_from_slice(&key);
-        out[key.len()] = '=' as u8;
+        out[key.len()] = b'=';
         out[1 + key.len()..1 + key.len() + value.len()].copy_from_slice(&value);
-        out[1 + key.len() + value.len()] = ';' as u8;
+        out[1 + key.len() + value.len()] = b';';
 
         out
     }

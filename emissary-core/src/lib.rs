@@ -17,6 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
+#![allow(clippy::wrong_self_convention)]
+#![allow(clippy::manual_async_fn)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::assign_op_pattern)]
+#![allow(clippy::new_ret_no_self)]
+#![allow(clippy::module_inception)]
 
 extern crate alloc;
 

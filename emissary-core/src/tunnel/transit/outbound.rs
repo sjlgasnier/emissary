@@ -94,10 +94,8 @@ impl<R: Runtime> OutboundEndpoint<R> {
                     Error::Tunnel(TunnelError::InvalidMessage)
                 },
             )?;
-        let checksum = Sha256::new()
-            .update(&ciphertext[4 + padding_end.0 + 1..])
-            .update(&iv)
-            .finalize();
+        let checksum =
+            Sha256::new().update(&ciphertext[4 + padding_end.0 + 1..]).update(iv).finalize();
 
         if ciphertext[..4] != checksum[..4] {
             tracing::warn!(
@@ -160,7 +158,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
         })?;
 
         // parse messages and fragments and return an iterator of ready messages
-        let messages = TunnelData::parse(&ciphertext[payload_start..].to_vec())
+        let messages = TunnelData::parse(&ciphertext[payload_start..])
             .ok_or_else(|| {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -344,7 +342,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
             }
         }
 
-        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+        if self.expiration_timer.poll_unpin(cx).is_ready() {
             return Poll::Ready(self.tunnel_id);
         }
 

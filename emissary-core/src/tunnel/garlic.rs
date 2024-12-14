@@ -153,7 +153,7 @@ impl<R: Runtime> GarlicHandler<R> {
                         message: Message {
                             message_type,
                             message_id: *message_id,
-                            expiration: expiration.into(),
+                            expiration,
                             payload: message_body.to_vec(),
                         },
                     }),
@@ -164,7 +164,7 @@ impl<R: Runtime> GarlicHandler<R> {
                                 .with_message_type(message_type)
                                 .with_message_id(message_id)
                                 .with_expiration(expiration)
-                                .with_payload(&message_body)
+                                .with_payload(message_body)
                                 .build(),
                         }),
                     CloveDeliveryInstructions::Tunnel { hash, tunnel_id } => {
@@ -172,7 +172,7 @@ impl<R: Runtime> GarlicHandler<R> {
                             .with_message_type(message_type)
                             .with_message_id(message_id)
                             .with_expiration(expiration)
-                            .with_payload(&message_body)
+                            .with_payload(message_body)
                             .build();
 
                         let message = TunnelGateway {
@@ -252,7 +252,7 @@ mod tests {
         let tunnel_delivery_tunnel = TunnelId::random();
         let destination_id = DestinationId::random();
 
-        let mut message = GarlicMessageBuilder::new()
+        let mut message = GarlicMessageBuilder::default()
             .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
             .with_garlic_clove(
                 MessageType::Data,

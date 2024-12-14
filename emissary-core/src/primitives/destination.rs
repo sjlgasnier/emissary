@@ -80,7 +80,7 @@ impl DestinationId {
 
     /// Copy [`DestinationId`] into a byte vector.
     pub fn to_vec(&self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes()).expect("to succeed")
+        base64_decode(self.0.as_bytes()).expect("to succeed")
     }
 }
 

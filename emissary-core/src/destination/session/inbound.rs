@@ -35,7 +35,7 @@ use curve25519_elligator2::{MapToPointVariant, Randomized};
 use hashbrown::HashMap;
 use zeroize::Zeroize;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{fmt, marker::PhantomData, mem};
 
 /// Logging target for the file.
@@ -175,11 +175,9 @@ impl<R: Runtime> InboundSession<R> {
 
                 // create garlic tag for the `NewSessionReply` message
                 let (nsr_tag_set, garlic_tag) = {
-                    let temp_key = Hmac::new(&ns_chaining_key).update(&[]).finalize();
-                    let tagset_key = Hmac::new(&temp_key)
-                        .update(&b"SessionReplyTags")
-                        .update(&[0x01])
-                        .finalize();
+                    let temp_key = Hmac::new(&ns_chaining_key).update([]).finalize();
+                    let tagset_key =
+                        Hmac::new(&temp_key).update(b"SessionReplyTags").update([0x01]).finalize();
                     let mut nsr_tag_set = TagSet::new(&ns_chaining_key, tagset_key);
 
                     // `next_entry()` must succeed as `nsr_tag_set` is a fresh `TagSet`
@@ -201,16 +199,16 @@ impl<R: Runtime> InboundSession<R> {
                         ephemeral_private_key.diffie_hellman(&remote_ephemeral_public_key);
                     let mut temp_key = Hmac::new(&ns_chaining_key).update(&shared).finalize();
                     let mut chaining_key =
-                        Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+                        Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
 
                     // static-ephemeral
                     shared = ephemeral_private_key.diffie_hellman(&remote_static_public_key);
                     temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-                    chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+                    chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
                     let keydata = Hmac::new(&temp_key)
                         .update(&chaining_key)
-                        .update(&b"")
-                        .update(&[0x02])
+                        .update(b"")
+                        .update([0x02])
                         .finalize();
 
                     shared.zeroize();
@@ -221,34 +219,32 @@ impl<R: Runtime> InboundSession<R> {
 
                 // calculate new state encrypting the empty key section
                 let state = {
-                    let state = Sha256::new()
-                        .update(&ns_state)
-                        .update(&garlic_tag.to_le_bytes())
-                        .finalize();
+                    let state =
+                        Sha256::new().update(&ns_state).update(garlic_tag.to_le_bytes()).finalize();
 
                     Sha256::new()
                         .update(&state)
                         .update::<&[u8]>(ephemeral_public_key.as_ref())
                         .finalize()
                 };
-                let mac = ChaChaPoly::new(&keydata).encrypt_with_ad(&state, &mut vec![])?;
+                let mac = ChaChaPoly::new(&keydata).encrypt_with_ad(&state, &mut [])?;
 
                 // include `mac` into state for payload section's encryption
                 let state = Sha256::new().update(&state).update(&mac).finalize();
 
                 // split key into send and receive keys
-                let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-                let recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-                let send_key = Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
+                let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+                let recv_key = Hmac::new(&temp_key).update([0x01]).finalize();
+                let send_key = Hmac::new(&temp_key).update(&recv_key).update([0x02]).finalize();
 
                 // initialize send and receive tag sets
                 let send_tag_set = TagSet::new(&chaining_key, &send_key);
                 let mut recv_tag_set = TagSet::new(chaining_key, recv_key);
 
                 // decode payload of the `NewSessionReply` message
-                let temp_key = Hmac::new(&send_key).update(&[]).finalize();
+                let temp_key = Hmac::new(&send_key).update([]).finalize();
                 let payload_key =
-                    Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
+                    Hmac::new(&temp_key).update(b"AttachPayloadKDF").update([0x01]).finalize();
 
                 ChaChaPoly::new(&payload_key).encrypt_with_ad_new(&state, &mut payload)?;
 
@@ -342,16 +338,16 @@ impl<R: Runtime> InboundSession<R> {
                         ephemeral_private_key.diffie_hellman(&remote_ephemeral_public_key);
                     let mut temp_key = Hmac::new(&ns_chaining_key).update(&shared).finalize();
                     let mut chaining_key =
-                        Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+                        Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
 
                     // static-ephemeral
                     shared = ephemeral_private_key.diffie_hellman(&remote_static_public_key);
                     temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-                    chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+                    chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
                     let keydata = Hmac::new(&temp_key)
                         .update(&chaining_key)
-                        .update(&b"")
-                        .update(&[0x02])
+                        .update(b"")
+                        .update([0x02])
                         .finalize();
 
                     shared.zeroize();
@@ -362,34 +358,32 @@ impl<R: Runtime> InboundSession<R> {
 
                 // calculate new state encrypting the empty key section
                 let state = {
-                    let state = Sha256::new()
-                        .update(&ns_state)
-                        .update(&garlic_tag.to_le_bytes())
-                        .finalize();
+                    let state =
+                        Sha256::new().update(&ns_state).update(garlic_tag.to_le_bytes()).finalize();
 
                     Sha256::new()
                         .update(&state)
                         .update::<&[u8]>(ephemeral_public_key.as_ref())
                         .finalize()
                 };
-                let mac = ChaChaPoly::new(&keydata).encrypt_with_ad(&state, &mut vec![])?;
+                let mac = ChaChaPoly::new(&keydata).encrypt_with_ad(&state, &mut [])?;
 
                 // include `mac` into state for payload section's encryption
                 let state = Sha256::new().update(&state).update(&mac).finalize();
 
                 // split key into send and receive keys
-                let temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-                let recv_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-                let send_key = Hmac::new(&temp_key).update(&recv_key).update(&[0x02]).finalize();
+                let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+                let recv_key = Hmac::new(&temp_key).update([0x01]).finalize();
+                let send_key = Hmac::new(&temp_key).update(&recv_key).update([0x02]).finalize();
 
                 // initialize send and receive tag sets
                 let send_tag_set = TagSet::new(&chaining_key, &send_key);
                 let mut recv_tag_set = TagSet::new(chaining_key, recv_key);
 
                 // decode payload of the `NewSessionReply` message
-                let temp_key = Hmac::new(&send_key).update(&[]).finalize();
+                let temp_key = Hmac::new(&send_key).update([]).finalize();
                 let payload_key =
-                    Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
+                    Hmac::new(&temp_key).update(b"AttachPayloadKDF").update([0x01]).finalize();
 
                 ChaChaPoly::new(&payload_key).encrypt_with_ad_new(&state, &mut payload)?;
 

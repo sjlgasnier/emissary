@@ -137,8 +137,11 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
 
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
-        self.waker.as_mut().map(|waker| waker.wake_by_ref());
         self.metrics.counter(NUM_OUTBOUND).increment(1);
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
+        }
     }
 
     fn accept(&mut self, router: &RouterId) {
@@ -151,7 +154,10 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                 );
 
                 self.open_connections.push(session.run());
-                self.waker.as_mut().map(|waker| waker.wake_by_ref());
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
             }
             None => {
                 tracing::warn!(
