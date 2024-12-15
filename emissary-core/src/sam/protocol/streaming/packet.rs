@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn syn_flags() {
         let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-        let destination = Destination::new(signing_key.public());
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
 
         let (flags, options) = FlagsBuilder::default()
             .with_synchronize()
@@ -779,7 +779,7 @@ mod tests {
     #[test]
     fn all_flags() {
         let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-        let destination = Destination::new(signing_key.public());
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
 
         let (flags, options) = FlagsBuilder::default()
             .with_synchronize()
@@ -820,7 +820,7 @@ mod tests {
     #[test]
     fn build_syn() {
         let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-        let destination = Destination::new(signing_key.public());
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let recv_destination_id = DestinationId::random();
         let mut payload = "hello, world".as_bytes();
 
@@ -914,7 +914,7 @@ mod tests {
     #[should_panic]
     fn call_build_and_sign_without_signature() {
         let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-        let destination = Destination::new(signing_key.public());
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let recv_destination_id = DestinationId::random();
         let mut payload = "hello, world".as_bytes();
 
@@ -934,7 +934,7 @@ mod tests {
     #[should_panic]
     fn call_build_with_signature() {
         let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-        let destination = Destination::new(signing_key.public());
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let recv_destination_id = DestinationId::random();
         let mut payload = "hello, world".as_bytes();
 

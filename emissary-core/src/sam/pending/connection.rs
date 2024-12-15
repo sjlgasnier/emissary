@@ -404,7 +404,7 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
 
                             let signing_key = SigningPrivateKey::random(&mut rng);
                             let private_key = StaticPrivateKey::new(rng);
-                            let destination = Destination::new(signing_key.public());
+                            let destination = Destination::new::<R>(signing_key.public());
 
                             (private_key, signing_key, destination)
                         };

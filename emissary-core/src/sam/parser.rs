@@ -673,7 +673,7 @@ mod tests {
             let signing_key = SigningPrivateKey::random(&mut rng);
             let encryption_key = StaticPrivateKey::new(rng);
 
-            let destination = Destination::new(signing_key.public());
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
 
             let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
             out.put_slice(&destination.serialize());
@@ -718,7 +718,7 @@ mod tests {
     fn parse_stream_connect() {
         let destination = {
             let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-            base64_encode(Destination::new(signing_key.public()).serialize())
+            base64_encode(Destination::new::<MockRuntime>(signing_key.public()).serialize())
         };
 
         match SamCommand::parse(&format!(
@@ -896,7 +896,7 @@ mod tests {
                 let signing_key = SigningPrivateKey::random(&mut rng);
                 let encryption_key = StaticPrivateKey::new(rng);
 
-                let destination = Destination::new(signing_key.public());
+                let destination = Destination::new::<MockRuntime>(signing_key.public());
 
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
@@ -1013,7 +1013,7 @@ mod tests {
                 let signing_key = SigningPrivateKey::random(&mut rng);
                 let encryption_key = StaticPrivateKey::new(rng);
 
-                let destination = Destination::new(signing_key.public());
+                let destination = Destination::new::<MockRuntime>(signing_key.public());
 
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
@@ -1066,7 +1066,7 @@ mod tests {
             let mut rng = MockRuntime::rng();
             let signing_key = SigningPrivateKey::random(&mut rng);
 
-            Destination::new(signing_key.public())
+            Destination::new::<MockRuntime>(signing_key.public())
         };
         let serialized = {
             let mut out = BytesMut::with_capacity(destination.serialized_len());

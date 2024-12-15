@@ -1286,7 +1286,7 @@ mod tests {
         let (key, lease_set) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1379,7 +1379,7 @@ mod tests {
         let (key, lease_set) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1466,7 +1466,7 @@ mod tests {
         let (key, lease_set) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1555,7 +1555,7 @@ mod tests {
         let (key1, expired_lease_set1) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1589,7 +1589,7 @@ mod tests {
         let (key2, expired_lease_set2) = {
             let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1623,7 +1623,7 @@ mod tests {
         let (key3, valid_lease_set) = {
             let sgk = SigningPrivateKey::new(&[3u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1976,7 +1976,7 @@ mod tests {
         let (key, lease_set, expires) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -2402,7 +2402,7 @@ mod tests {
         let (key1, expired_lease_set1) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -2436,7 +2436,7 @@ mod tests {
         let (key2, valid_lease_set) = {
             let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -2922,7 +2922,7 @@ mod tests {
         let (key, lease_set) = {
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {

@@ -256,7 +256,7 @@ impl<R: Runtime> SamSession<R> {
                     let signing_key = SigningPrivateKey::random(&mut rng);
                     let encryption_key = StaticPrivateKey::new(rng);
 
-                    let destination = Dest::new(signing_key.public());
+                    let destination = Dest::new::<R>(signing_key.public());
                     let destination_id = destination.id();
 
                     (encryption_key, signing_key, destination_id, destination)

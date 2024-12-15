@@ -404,7 +404,10 @@ impl LeaseSet2 {
 
     #[cfg(test)]
     pub fn random() -> (LeaseSet2, SigningPrivateKey) {
-        use crate::crypto::{SigningPublicKey, StaticPrivateKey};
+        use crate::{
+            crypto::{SigningPublicKey, StaticPrivateKey},
+            runtime::mock::MockRuntime,
+        };
         use rand::{Rng, RngCore};
 
         let mut rng = rand::thread_rng();
@@ -423,7 +426,9 @@ impl LeaseSet2 {
             rng.fill_bytes(&mut signing_key);
 
             (
-                Destination::new(SigningPublicKey::from_private_ed25519(&signing_key).unwrap()),
+                Destination::new::<MockRuntime>(
+                    SigningPublicKey::from_private_ed25519(&signing_key).unwrap(),
+                ),
                 SigningPrivateKey::new(&signing_key).unwrap(),
             )
         };
@@ -468,8 +473,9 @@ mod tests {
     fn serialize_and_parse_leaset() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination =
-            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+        let destination = Destination::new::<MockRuntime>(
+            SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+        );
         let id = destination.id();
 
         let (_router1, _tunnel1, _expires1, lease1) = {
@@ -531,8 +537,9 @@ mod tests {
     fn serialize_and_parse_leaset_no_leases() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination =
-            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+        let destination = Destination::new::<MockRuntime>(
+            SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+        );
 
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
@@ -551,8 +558,9 @@ mod tests {
     #[test]
     fn serialize_and_parse_leaset_no_public_keys() {
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination =
-            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+        let destination = Destination::new::<MockRuntime>(
+            SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+        );
 
         let (_router1, _tunnel1, _expires1, lease1) = {
             let router_id = RouterId::random();
@@ -612,8 +620,9 @@ mod tests {
     fn serialize_and_parse_leaset_too_many_leases() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination =
-            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+        let destination = Destination::new::<MockRuntime>(
+            SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+        );
 
         let leases = (0..17)
             .map(|_| Lease {
@@ -704,8 +713,9 @@ mod tests {
 
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination =
-                Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+            let destination = Destination::new::<MockRuntime>(
+                SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+            );
 
             let lease1 = Lease {
                 router_id: RouterId::random(),
@@ -742,8 +752,9 @@ mod tests {
             let now = MockRuntime::time_since_epoch();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let destination =
-                Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+            let destination = Destination::new::<MockRuntime>(
+                SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+            );
 
             let lease1 = Lease {
                 router_id: RouterId::random(),
@@ -780,7 +791,7 @@ mod tests {
             let now = MockRuntime::time_since_epoch();
             let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
             let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
 
             let lease1 = Lease {
                 router_id: RouterId::random(),
@@ -817,8 +828,9 @@ mod tests {
     fn invalid_signature() {
         let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
         let wrong_sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
-        let destination =
-            Destination::new(SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap());
+        let destination = Destination::new::<MockRuntime>(
+            SigningPublicKey::from_private_ed25519(&[1u8; 32]).unwrap(),
+        );
 
         let (_router1, _tunnel1, _expires1, lease1) = {
             let router_id = RouterId::random();
