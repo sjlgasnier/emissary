@@ -249,7 +249,7 @@ impl<R: Runtime> SessionManager<R> {
             let Some(mut stream) = R::TcpStream::connect(socket_address).await else {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    router = ?router_id,
+                    %router_id,
                     "failed to dial router",
                 );
                 subsystem_handle.report_connection_failure(router_id).await;
@@ -443,7 +443,7 @@ mod tests {
         fn build(mut self) -> Ntcp2 {
             let signing_key = SigningPrivateKey::random(&mut thread_rng());
             let static_key = StaticPrivateKey::new(thread_rng());
-            let identity = RouterIdentity::from_keys(
+            let identity = RouterIdentity::from_keys::<MockRuntime>(
                 static_key.as_ref().to_vec(),
                 signing_key.as_ref().to_vec(),
             )

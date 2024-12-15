@@ -139,7 +139,6 @@ impl From<[u8; 32]> for StaticPublicKey {
     }
 }
 
-// TODO: remove?
 impl AsRef<[u8]> for StaticPublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
@@ -386,5 +385,13 @@ impl SigningPublicKey {
     /// Convert public key to byte vector.
     pub fn to_vec(&self) -> Vec<u8> {
         self.to_bytes().to_vec()
+    }
+}
+
+impl AsRef<[u8]> for SigningPublicKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Ed25519(key) => key.as_bytes(),
+        }
     }
 }

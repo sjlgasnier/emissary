@@ -17,12 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey, StaticPublicKey},
+    crypto::{
+        base64_decode, base64_encode, sha256::Sha256, SigningPrivateKey, SigningPublicKey,
+        StaticPrivateKey, StaticPublicKey,
+    },
     error::Error,
     primitives::LOG_TARGET,
+    runtime::Runtime,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -30,13 +34,29 @@ use nom::{
     sequence::tuple,
     Err, IResult,
 };
-use zerocopy::AsBytes;
+use rand_core::RngCore;
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
-#[cfg(test)]
-use crate::crypto::{SigningPrivateKey, StaticPrivateKey};
+/// Length of serialized [`RouterIdentity`].
+const SERIALIZED_LEN: usize = 391usize;
+
+/// Key certificate.
+const KEY_CERTIFICATE: u8 = 0x05;
+
+/// Key certificate length.
+const KEY_CERTIFICATE_LEN: u16 = 0x04;
+
+/// Key kind for `EdDSA_SHA512_Ed25519`.
+///
+/// https://geti2p.net/spec/common-structures#key-certificates
+const KEY_KIND_EDDSA_SHA512_ED25519: u16 = 0x0007;
+
+/// Key kind for `X25519`.
+///
+/// https://geti2p.net/spec/common-structures#key-certificates
+const KEY_KIND_X25519: u16 = 0x0004;
 
 /// Short router identity hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -75,71 +95,63 @@ impl From<RouterId> for Vec<u8> {
     }
 }
 
-// TODO: doc
-#[derive(Debug, AsBytes)]
-#[repr(C)]
-struct RouterIdentitySerialized {
-    public_key: [u8; 32],
-    padding: [u8; 320],
-    signing_key: [u8; 32],
-    certificate_type: u8,
-    certificate_len: [u8; 2],
-    signing_key_type: [u8; 2],
-    public_key_type: [u8; 2],
-}
-
 /// Router identity.
-//
-// TODO: cheaply cloanble
 #[derive(Debug, Clone)]
 pub struct RouterIdentity {
-    /// Router's public key.
-    static_key: StaticPublicKey,
+    /// Identity hash.
+    identity_hash: Bytes,
+
+    /// Padding bytes.
+    padding: Bytes,
+
+    /// Router ID.
+    router: RouterId,
 
     /// Router's signing key.
     signing_key: SigningPublicKey,
 
-    /// Identity hash.
-    identity_hash: Bytes,
-
-    /// Router ID.
-    router: RouterId,
+    /// Router's public key.
+    static_key: StaticPublicKey,
 }
 
 impl RouterIdentity {
     /// Create new [`RouterIdentity`] from keys.
-    pub fn from_keys(static_key: Vec<u8>, signing_key: Vec<u8>) -> crate::Result<Self> {
-        let static_key =
-            StaticPublicKey::from_private_x25519(&static_key).ok_or(Error::InvalidData)?;
-        let signing_key =
-            SigningPublicKey::from_private_ed25519(&signing_key).ok_or(Error::InvalidData)?;
+    pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> crate::Result<Self> {
+        let static_key = StaticPrivateKey::from(static_key).public();
+        let signing_key = SigningPrivateKey::new(&signing_key).ok_or(Error::InvalidData)?.public();
+        let padding = {
+            let mut padding = [0u8; 320];
+            R::rng().fill_bytes(&mut padding);
 
-        let identity_hash = Sha256::new()
-            .update(
-                RouterIdentitySerialized {
-                    public_key: static_key.clone().to_bytes(),
-                    padding: [0u8; 320],
-                    signing_key: signing_key.clone().to_bytes(),
-                    certificate_type: 5u8,
-                    certificate_len: 4u16.to_be_bytes(),
-                    signing_key_type: 7u16.to_be_bytes(),
-                    public_key_type: 4u16.to_be_bytes(),
-                }
-                .as_bytes(),
-            )
-            .finalize();
+            padding
+        };
+
+        let identity_hash = {
+            let mut out = BytesMut::with_capacity(SERIALIZED_LEN);
+
+            out.put_slice(static_key.as_ref());
+            out.put_slice(&padding);
+            out.put_slice(signing_key.as_ref());
+            out.put_u8(KEY_CERTIFICATE);
+            out.put_u16(KEY_CERTIFICATE_LEN);
+            out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519);
+            out.put_u16(KEY_KIND_X25519);
+
+            Sha256::new().update(&out).finalize()
+        };
 
         Ok(Self {
-            static_key,
-            signing_key,
             identity_hash: Bytes::from(identity_hash.clone()),
+            padding: Bytes::from(padding.to_vec()),
             router: RouterId::from(identity_hash),
+            signing_key,
+            static_key,
         })
     }
 
     /// Parse [`RouterIdentity`] from `input`, returning rest of `input` and parsed router identity.
     pub fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterIdentity> {
-        if input.len() < 384 {
+        if input.len() < SERIALIZED_LEN {
             tracing::warn!(
                 target: LOG_TARGET,
                 len = ?input.len(),
@@ -155,20 +167,40 @@ impl RouterIdentity {
         let (rest, sig_key_type) = be_u16(rest)?;
         let (rest, pub_key_type) = be_u16(rest)?;
 
-        let (0x5, 0x4) = (cert_type, cert_len) else {
+        let (KEY_CERTIFICATE, KEY_CERTIFICATE_LEN) = (cert_type, cert_len) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?cert_len,
+                ?cert_type,
+                "unsupported certificate type",
+            );
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         };
 
         let static_key = match pub_key_type {
-            0x0000 => StaticPublicKey::new_elgamal(&initial_bytes[..256]),
-            0x0004 => StaticPublicKey::new_x25519(&initial_bytes[..32]),
-            _ => todo!("unsupported public key type"),
+            KEY_KIND_X25519 => StaticPublicKey::new_x25519(&initial_bytes[..32]),
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "unsupported static key kind",
+                );
+                None
+            }
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
         let signing_key = match sig_key_type {
-            0x0007 => SigningPublicKey::from_bytes(&initial_bytes[384 - 32..384]),
-            _ => todo!("unsupported signing key type"),
+            KEY_KIND_EDDSA_SHA512_ED25519 =>
+                SigningPublicKey::from_bytes(&initial_bytes[384 - 32..384]),
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "unsupported signing key kind",
+                );
+                None
+            }
         }
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
@@ -178,6 +210,7 @@ impl RouterIdentity {
             rest,
             RouterIdentity {
                 static_key,
+                padding: Bytes::from(initial_bytes[32..352].to_vec()),
                 signing_key,
                 identity_hash: identity_hash.clone(),
                 router: RouterId::from(identity_hash),
@@ -192,18 +225,18 @@ impl RouterIdentity {
     }
 
     /// Serialize [`RouterIdentity`] into a byte vector.
-    pub fn serialize(&self) -> Vec<u8> {
-        RouterIdentitySerialized {
-            public_key: self.static_key.to_bytes(),
-            padding: [0u8; 320],
-            signing_key: self.signing_key.to_bytes(),
-            certificate_type: 5u8,
-            certificate_len: 4u16.to_be_bytes(),
-            signing_key_type: 7u16.to_be_bytes(),
-            public_key_type: 4u16.to_be_bytes(),
-        }
-        .as_bytes()
-        .to_vec()
+    pub fn serialize(&self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(SERIALIZED_LEN);
+
+        out.put_slice(self.static_key.as_ref());
+        out.put_slice(&self.padding);
+        out.put_slice(self.signing_key.as_ref());
+        out.put_u8(KEY_CERTIFICATE);
+        out.put_u16(KEY_CERTIFICATE_LEN);
+        out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519);
+        out.put_u16(KEY_KIND_X25519);
+
+        out
     }
 
     /// Get reference to router's static public key.
@@ -228,12 +261,13 @@ impl RouterIdentity {
 
     /// Get serialized length of [`RouterIdentity`].
     pub fn serialized_len(&self) -> usize {
-        core::mem::size_of::<RouterIdentitySerialized>()
+        SERIALIZED_LEN
     }
 
     /// Generate random [`RouterIdentity`].
     #[cfg(test)]
     pub fn random() -> (Self, StaticPrivateKey, SigningPrivateKey) {
+        use crate::runtime::mock::MockRuntime;
         use rand::{thread_rng, RngCore};
 
         let sk = {
@@ -249,7 +283,7 @@ impl RouterIdentity {
             out
         };
 
-        let identity = RouterIdentity::from_keys(sk.clone(), sgk.clone()).unwrap();
+        let identity = RouterIdentity::from_keys::<MockRuntime>(sk.clone(), sgk.clone()).unwrap();
 
         (
             identity,
@@ -266,17 +300,36 @@ mod tests {
 
     #[test]
     fn expected_router_hash() {
-        let router = include_bytes!("../../test-vectors/router1.dat");
+        crate::util::init_logger();
+
+        let router = include_bytes!("../../test-vectors/router5.dat");
         let identity = RouterIdentity::parse(router).unwrap();
 
         assert_eq!(
             base64_encode(&identity.identity_hash),
-            "jLD5rTYg4zg~d4oQ29ogPtGcZPQYM3pHAKY8VHNZv30="
+            "u9QdTy~qBwh8Mrcfrcqvea8MOiNmavLv8Io4XQsMDHg="
+        );
+
+        let serialized = identity.serialize();
+        let parsed = RouterIdentity::parse(&serialized).unwrap();
+        assert_eq!(
+            base64_encode(&parsed.identity_hash),
+            "u9QdTy~qBwh8Mrcfrcqvea8MOiNmavLv8Io4XQsMDHg="
         );
     }
 
     #[test]
     fn too_short_router_identity() {
         assert!(RouterIdentity::parse(vec![1, 2, 3, 4]).is_none());
+    }
+
+    #[test]
+    fn serialize_deserialize() {
+        let (identity, _, _) = RouterIdentity::random();
+        let id = identity.id();
+
+        let serialized = identity.serialize();
+        let parsed = RouterIdentity::parse(&serialized).unwrap();
+        assert_eq!(parsed.id(), id);
     }
 }

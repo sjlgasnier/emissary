@@ -17,8 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
-    error::Error,
+    crypto::{SigningPrivateKey, StaticPrivateKey},
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::{RouterInfo, TransportKind},
@@ -63,35 +62,32 @@ pub struct Router<R: Runtime> {
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
     pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
-        let now = R::time_since_epoch().as_millis() as u64;
-        let local_key = StaticPrivateKey::from(config.static_key.clone());
-        let test = config.signing_key.clone();
-        let local_signing_key = SigningPrivateKey::new(&test).unwrap();
-        let ntcp2_config = match &config.ntcp2_config {
-            None => {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    "no transport enabled, cannot start router",
-                );
-                return Err(Error::InvalidData);
-            }
-            Some(config) => config.clone(),
-        };
-        let i2cp_config = config.i2cp_config.clone();
-        let sam_config = config.samv3_config.clone();
-        let exploratory_config = config.exploratory.clone();
-        let floodfill = config.floodfill;
-        let net_id = config.net_id.unwrap_or(NET_ID);
-        let insecure_tunnels = config.insecure_tunnels;
-        let profile_storage = ProfileStorage::<R>::new(&config.routers, &config.profiles);
-        let local_router_info = RouterInfo::new(now, config);
+        let local_router_info = RouterInfo::new::<R>(&config);
+        let Config {
+            i2cp_config,
+            samv3_config,
+            floodfill,
+            net_id,
+            exploratory,
+            insecure_tunnels,
+            static_key,
+            signing_key,
+            ntcp2_config,
+            routers,
+            profiles,
+            ..
+        } = config;
+
+        let local_key = StaticPrivateKey::from(static_key);
+        let local_signing_key = SigningPrivateKey::new(&signing_key).unwrap();
+        let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
 
         tracing::info!(
             target: LOG_TARGET,
-            local_router_hash = ?base64_encode(local_router_info.identity.hash()),
-            ?net_id,
+            ?local_router_id,
+            net_id = ?net_id.unwrap_or(NET_ID),
             "start emissary",
         );
 
@@ -126,7 +122,7 @@ impl<R: Runtime> Router<R> {
                     local_key,
                     metrics_handle.clone(),
                     profile_storage.clone(),
-                    exploratory_config.into(),
+                    exploratory.into(),
                     insecure_tunnels,
                 );
 
@@ -145,7 +141,7 @@ impl<R: Runtime> Router<R> {
                 profile_storage.clone(),
                 metrics_handle.clone(),
                 exploratory_pool_handle,
-                net_id,
+                net_id.unwrap_or(NET_ID),
                 netdb_msg_rx,
             );
 
@@ -167,7 +163,7 @@ impl<R: Runtime> Router<R> {
             tcp_port,
             udp_port,
             host,
-        }) = sam_config
+        }) = samv3_config
         {
             let sam_server = SamServer::<R>::new(
                 tcp_port,
@@ -183,7 +179,9 @@ impl<R: Runtime> Router<R> {
         }
 
         // initialize and start ntcp2
-        transport_manager.register_transport(TransportKind::Ntcp2, ntcp2_config).await?;
+        if let Some(config) = ntcp2_config {
+            transport_manager.register_transport(TransportKind::Ntcp2, config).await?;
+        }
 
         Ok((
             Self {

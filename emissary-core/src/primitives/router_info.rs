@@ -22,6 +22,7 @@ use crate::{
         router_address::TransportKind, Capabilities, Date, Mapping, RouterAddress, RouterIdentity,
         Str, LOG_TARGET,
     },
+    runtime::Runtime,
     Config,
 };
 
@@ -58,19 +59,33 @@ pub struct RouterInfo {
 }
 
 impl RouterInfo {
-    pub fn new(now: u64, config: Config) -> Self {
+    /// Create new [`RouterInfo`].
+    pub fn new<R: Runtime>(config: &Config) -> Self {
         let Config {
             static_key,
             signing_key,
             ntcp2_config,
             caps,
+            router_info,
             ..
         } = config;
 
-        let identity =
-            RouterIdentity::from_keys(static_key.clone(), signing_key).expect("to succeed");
+        let identity = match router_info {
+            None => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "generating new router identity",
+                );
 
-        let ntcp2_config = ntcp2_config.unwrap();
+                RouterIdentity::from_keys::<R>(static_key.clone(), signing_key.clone())
+                    .expect("to succeed")
+            }
+            Some(router_info) => RouterIdentity::parse(router_info).expect("to succeed"),
+        };
+
+        // TODO: verify that ntcp2 is published
+        // TODO: remove unwrap once ssu2 is implemented
+        let ntcp2_config = ntcp2_config.clone().unwrap();
         let ntcp2_port = ntcp2_config.port;
         let ntcp2_host = ntcp2_config.host;
         let ntcp2_key = ntcp2_config.key;
@@ -85,7 +100,7 @@ impl RouterInfo {
         );
 
         let caps = match caps {
-            Some(caps) => Str::from(caps),
+            Some(caps) => Str::from(caps.clone()),
             None => match config.floodfill {
                 true => Str::from("Xf"),
                 false => Str::from("L"),
@@ -105,22 +120,41 @@ impl RouterInfo {
             identity,
             net_id: config.net_id.unwrap_or(2),
             options,
-            published: Date::new(now),
+            published: Date::new(R::time_since_epoch().as_millis() as u64),
         }
     }
 
     fn parse_frame(input: &[u8]) -> IResult<&[u8], RouterInfo> {
         let (rest, identity) = RouterIdentity::parse_frame(input)?;
         let (rest, published) = Date::parse_frame(rest)?;
-        let (mut rest, num_addresses) = be_u8(rest)?;
-        let mut addresses = HashMap::<TransportKind, RouterAddress>::new();
+        let (rest, num_addresses) = be_u8(rest)?;
+        let (rest, addresses) = (0..num_addresses)
+            .try_fold(
+                (rest, HashMap::<TransportKind, RouterAddress>::new()),
+                |(rest, mut addresses), _| {
+                    let (rest, address) = RouterAddress::parse_frame(rest).ok()?;
 
-        for _ in 0..num_addresses {
-            let (_rest, address) = RouterAddress::parse_frame(rest)?;
+                    // prefer `RouterAddress` which has a socket address specified
+                    match addresses.get(&address.transport) {
+                        None => {
+                            addresses.insert(address.transport, address);
+                        }
+                        Some(old_address) =>
+                            if old_address.socket_address.is_none() {
+                                addresses.insert(address.transport, address);
+                            },
+                    }
 
-            addresses.insert(address.transport, address);
-            rest = _rest;
-        }
+                    Some((rest, addresses))
+                },
+            )
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to parse router addresses",
+                );
+                Err::Error(make_error(input, ErrorKind::Fail))
+            })?;
 
         // ignore `peer_size`
         let (rest, _) = be_u8(rest)?;
@@ -340,7 +374,7 @@ impl RouterInfo {
     ) -> Self {
         use rand_core::RngCore;
 
-        let identity = RouterIdentity::from_keys(static_key, signing_key).expect("to succeed");
+        let identity = RouterIdentity::from_keys::<R>(static_key, signing_key).expect("to succeed");
 
         let ntcp2_port = R::rng().next_u32() as u16;
         let ntcp2_host = format!(
@@ -407,7 +441,7 @@ mod tests {
         // ssu
         assert_eq!(
             router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost,
-            10
+            5
         );
         assert_eq!(
             router_info
@@ -416,7 +450,7 @@ mod tests {
                 .unwrap()
                 .options
                 .get(&Str::from_str("host").unwrap()),
-            Some(&Str::from_str("217.70.194.82").unwrap())
+            Some(&Str::from_str("2.36.209.134").unwrap())
         );
         assert_eq!(
             router_info
@@ -425,37 +459,42 @@ mod tests {
                 .unwrap()
                 .options
                 .get(&Str::from_str("port").unwrap()),
-            Some(&Str::from_str("10994").unwrap())
+            Some(&Str::from_str("23154").unwrap())
         );
 
         // ntcp2
         assert_eq!(
             router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost,
-            14
+            11
         );
-        assert!(router_info
-            .addresses
-            .get(&TransportKind::Ntcp2)
-            .unwrap()
-            .options
-            .get(&Str::from_str("host").unwrap())
-            .is_none());
-        assert!(router_info
-            .addresses
-            .get(&TransportKind::Ntcp2)
-            .unwrap()
-            .options
-            .get(&Str::from_str("port").unwrap())
-            .is_none());
+
+        assert_eq!(
+            router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("2.36.209.134"))
+        );
+        assert_eq!(
+            router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from_str("port").unwrap()),
+            Some(&Str::from_str("1403").unwrap())
+        );
 
         // options
         assert_eq!(
             router_info.options.get(&Str::from_str("router.version").unwrap()),
-            Some(&Str::from_str("0.9.42").unwrap())
+            Some(&Str::from_str("0.9.64").unwrap())
         );
         assert_eq!(
             router_info.options.get(&Str::from_str("caps").unwrap()),
-            Some(&Str::from_str("LU").unwrap())
+            Some(&Str::from_str("NRD").unwrap())
         );
         assert_eq!(
             router_info.options.get(&Str::from_str("netId").unwrap()),
@@ -473,27 +512,8 @@ mod tests {
         // ssu
         assert_eq!(
             router_info.addresses.get(&TransportKind::Ssu2).unwrap().cost,
-            10
+            8,
         );
-        assert_eq!(
-            router_info
-                .addresses
-                .get(&TransportKind::Ssu2)
-                .unwrap()
-                .options
-                .get(&Str::from_str("host").unwrap()),
-            Some(&Str::from_str("68.202.112.209").unwrap())
-        );
-        assert_eq!(
-            router_info
-                .addresses
-                .get(&TransportKind::Ssu2)
-                .unwrap()
-                .options
-                .get(&Str::from_str("port").unwrap()),
-            Some(&Str::from_str("11331").unwrap())
-        );
-
         // ntcp2
         assert_eq!(
             router_info.addresses.get(&TransportKind::Ntcp2).unwrap().cost,
@@ -506,7 +526,7 @@ mod tests {
                 .unwrap()
                 .options
                 .get(&Str::from_str("host").unwrap()),
-            Some(&Str::from_str("68.202.112.209").unwrap())
+            Some(&Str::from_str("64.53.67.11").unwrap())
         );
         assert_eq!(
             router_info
@@ -515,17 +535,17 @@ mod tests {
                 .unwrap()
                 .options
                 .get(&Str::from_str("port").unwrap()),
-            Some(&Str::from_str("11331").unwrap())
+            Some(&Str::from_str("25313").unwrap())
         );
 
         // options
         assert_eq!(
             router_info.options.get(&Str::from_str("router.version").unwrap()),
-            Some(&Str::from_str("0.9.46").unwrap())
+            Some(&Str::from_str("0.9.58").unwrap())
         );
         assert_eq!(
             router_info.options.get(&Str::from_str("caps").unwrap()),
-            Some(&Str::from_str("LR").unwrap())
+            Some(&Str::from_str("XR").unwrap())
         );
         assert_eq!(
             router_info.options.get(&Str::from_str("netId").unwrap()),

@@ -100,6 +100,9 @@ pub struct Config {
     /// NTCP2 configuration.
     pub ntcp2_config: Option<Ntcp2Config>,
 
+    /// Router Info, if it exists.
+    pub router_info: Option<Vec<u8>>,
+
     /// I2CP configuration.
     ///
     /// `None` if I2CP is disabled.

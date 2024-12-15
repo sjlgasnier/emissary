@@ -912,7 +912,6 @@ dependencies = [
  "tracing-subscriber",
  "uint",
  "x25519-dalek",
- "zerocopy",
  "zeroize",
 ]
 

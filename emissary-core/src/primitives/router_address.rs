@@ -157,24 +157,10 @@ impl RouterAddress {
 
                     match (host, port) {
                         (Some(host), Some(port)) => Some(SocketAddr::new(host, port)),
-                        (host, port) => {
-                            tracing::warn!(
-                                ?host,
-                                ?port,
-                                "failed to parse address into `SocketAddr`",
-                            );
-                            None
-                        }
+                        (_, _) => None,
                     }
                 }
-                _ => {
-                    tracing::warn!(
-                        ?maybe_host,
-                        ?maybe_port,
-                        "ntcp2 host/port info not available",
-                    );
-                    None
-                }
+                _ => None,
             }
         };
 

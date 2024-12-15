@@ -101,6 +101,9 @@ pub struct Config {
     /// Base path.
     pub base_path: PathBuf,
 
+    /// Router info.
+    pub router_info: Option<Vec<u8>>,
+
     /// I2CP config.
     pub i2cp_config: Option<emissary_core::I2cpConfig>,
 
@@ -153,6 +156,7 @@ impl From<Config> for emissary_core::Config {
             net_id: val.net_id,
             exploratory: val.exploratory,
             insecure_tunnels: val.insecure_tunnels,
+            router_info: val.router_info,
         }
     }
 }
@@ -231,6 +235,7 @@ impl TryFrom<Option<PathBuf>> for Config {
 
         // try to find `router.toml` and parse it into `EmissaryConfig`
         let router_config = Self::load_router_config(path.clone()).ok();
+        let router_info = Self::load_router_info(path.clone()).ok();
 
         let mut config = Config::new(
             path.clone(),
@@ -239,6 +244,7 @@ impl TryFrom<Option<PathBuf>> for Config {
             ntcp2_key,
             ntcp2_iv,
             router_config,
+            router_info,
         )?;
 
         config.routers = Self::load_router_infos(&path);
@@ -334,6 +340,14 @@ impl Config {
         })
     }
 
+    fn load_router_info(path: PathBuf) -> crate::Result<Vec<u8>> {
+        // parse configuration, if it exists
+        let mut file = fs::File::open(path.join("router.info"))?;
+        let mut contents = Vec::new();
+
+        file.read_to_end(&mut contents).map(|_| contents).map_err(From::from)
+    }
+
     /// Create empty config.
     ///
     /// Creates a default config with NTCP2 enabled.
@@ -392,6 +406,7 @@ impl Config {
             caps: None,
             net_id: None,
             insecure_tunnels: false,
+            router_info: None,
         })
     }
 
@@ -403,6 +418,7 @@ impl Config {
         ntcp2_key: Vec<u8>,
         ntcp2_iv: [u8; 16],
         config: Option<EmissaryConfig>,
+        router_info: Option<Vec<u8>>,
     ) -> crate::Result<Self> {
         let config = match config {
             Some(config) => config,
@@ -461,6 +477,7 @@ impl Config {
             caps: config.caps,
             net_id: config.net_id,
             insecure_tunnels: config.insecure_tunnels,
+            router_info,
         })
     }
 

@@ -314,11 +314,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             "maintain tunnel pool",
         );
 
-        tracing::error!(
-            "num outbound to build = {}",
-            self.calculate_outbound_build_count()
-        );
-
         for _ in 0..self.calculate_outbound_build_count() {
             // attempt to select hops for the outbound tunnel
             //
@@ -521,11 +516,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 }
             }
         }
-
-        tracing::error!(
-            "num inbound to build = {}",
-            self.calculate_inbound_build_count()
-        );
 
         // build one or more inbound tunnels
         for _ in 0..self.calculate_inbound_build_count() {

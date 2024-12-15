@@ -94,6 +94,13 @@ impl<R: Runtime> Ntcp2Transport<R> {
             .expect("to exist")
             .socket_address
             .expect("to exist");
+
+        tracing::info!(
+            target: LOG_TARGET,
+            address = ?socket_address,
+            "starting ntcp2",
+        );
+
         let listener = Ntcp2Listener::new(socket_address).await?;
 
         let session_manager = SessionManager::new(
@@ -132,7 +139,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
     fn connect(&mut self, router: RouterInfo) {
         tracing::trace!(
             target: LOG_TARGET,
-            router = ?router.identity.id(),
+            router_id = %router.identity.id(),
             "negotiate ntcp2 session with router",
         );
 
@@ -145,12 +152,12 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
         }
     }
 
-    fn accept(&mut self, router: &RouterId) {
-        match self.pending_connections.remove(router) {
+    fn accept(&mut self, router_id: &RouterId) {
+        match self.pending_connections.remove(router_id) {
             Some(session) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "ntcp2 session accepted, starting event loop",
                 );
 
@@ -163,7 +170,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "cannot accept non-existent ntcp2 session",
                 );
                 debug_assert!(false);
@@ -171,12 +178,12 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
         }
     }
 
-    fn reject(&mut self, router: &RouterId) {
-        match self.pending_connections.remove(router) {
+    fn reject(&mut self, router_id: &RouterId) {
+        match self.pending_connections.remove(router_id) {
             Some(connection) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "ntcp2 session rejected, closing connection",
                 );
                 self.metrics.counter(NUM_REJECTED).increment(1);
@@ -185,7 +192,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "cannot reject non-existent ntcp2 session",
                 );
                 debug_assert!(false);

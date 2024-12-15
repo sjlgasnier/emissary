@@ -125,7 +125,7 @@ impl TcpStream for TokioTcpStream {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?address,
-                    ?error,
+                    error = ?error.kind(),
                     "failed to connect"
                 );
             })

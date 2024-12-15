@@ -16,10 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    runtime::{Runtime, TcpListener},
-    transports::ntcp2::LOG_TARGET,
-};
+use crate::runtime::{Runtime, TcpListener};
 
 use futures::Stream;
 
@@ -42,11 +39,6 @@ impl<R: Runtime> Ntcp2Listener<R> {
     /// Create new [`Ntcp2Listener`].
     pub async fn new(address: SocketAddr) -> crate::Result<Self> {
         let listener = R::TcpListener::bind(address).await.unwrap();
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            "starting ntcp2 listener",
-        );
 
         Ok(Self { listener })
     }

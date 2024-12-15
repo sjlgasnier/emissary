@@ -30,7 +30,6 @@ siphasher = { version = "1.0.1", default-features = false }
 spin = { version = "0.9.8", default-features = false, features = ["rwlock"], optional = true }
 thingbuf = { version = "0.1.6", default-features = false, features = ["alloc"] }
 uint = { version = "0.9.5", default-features = false }
-zerocopy = { version = "0.7.35", default-features = false, features = ["derive"] }
 zeroize = { version = "1.8.1", default-features = false, features = ["alloc"] }
 
 # workspace dependencies
