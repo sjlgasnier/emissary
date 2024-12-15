@@ -299,13 +299,27 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 "read ntc2 frame",
                             );
 
+                            if let Some(MessageBlock::Termination { reason, .. }) =
+                                messages.iter().find(|message| {
+                                    core::matches!(message, MessageBlock::Termination { .. })
+                                })
+                            {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    router_id = %this.router,
+                                    ?reason,
+                                    "session terminated by remote router",
+                                );
+                                return Poll::Ready(Err(Error::EssentialTaskClosed));
+                            }
+
                             let messages = messages
                                 .into_iter()
                                 .filter_map(|message| match message {
                                     MessageBlock::I2Np { message } => Some(message),
                                     MessageBlock::Padding { .. } => None,
                                     message => {
-                                        tracing::warn!(
+                                        tracing::debug!(
                                             target: LOG_TARGET,
                                             router_id = %this.router,
                                             ?message,
@@ -316,9 +330,13 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 })
                                 .collect::<Vec<_>>();
 
-                            // TODO: no unwraps
-                            // TODO: if call fails, cache the message and break out of the loop
-                            this.subsystem_handle.dispatch_messages(messages).unwrap();
+                            if let Err(error) = this.subsystem_handle.dispatch_messages(messages) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?error,
+                                    "failed to dispatch messages to subsystems",
+                                );
+                            }
                             this.read_state = ReadState::ReadSize { offset: 0usize };
                         }
                     }

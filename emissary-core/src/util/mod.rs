@@ -159,6 +159,7 @@ pub fn shuffle<T>(array: &mut [T], rng: &mut impl RngCore) {
 }
 
 #[cfg(test)]
+#[allow(unused)]
 pub fn init_logger() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

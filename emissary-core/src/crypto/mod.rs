@@ -139,6 +139,7 @@ impl From<[u8; 32]> for StaticPublicKey {
     }
 }
 
+// TODO: remove?
 impl AsRef<[u8]> for StaticPublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
@@ -191,6 +192,7 @@ impl From<[u8; 32]> for StaticPrivateKey {
     }
 }
 
+// TODO: remove
 impl From<Vec<u8>> for StaticPrivateKey {
     fn from(value: Vec<u8>) -> Self {
         let ss: [u8; 32] = value.try_into().expect("valid static private key");
@@ -199,6 +201,7 @@ impl From<Vec<u8>> for StaticPrivateKey {
     }
 }
 
+// TODO: remove?
 impl AsRef<[u8; 32]> for StaticPrivateKey {
     fn as_ref(&self) -> &[u8; 32] {
         match self {

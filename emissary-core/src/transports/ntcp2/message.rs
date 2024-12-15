@@ -25,7 +25,7 @@ use crate::i2np::Message;
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
-    number::complete::{be_u16, be_u32, be_u8},
+    number::complete::{be_u16, be_u32, be_u64, be_u8},
     Err, IResult,
 };
 
@@ -34,6 +34,12 @@ use core::fmt;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2::message";
+
+/// Minimum size for options message.
+const OPTIONS_MIN_SIZE: u16 = 12u16;
+
+/// Minimum size for termination message.
+const TERMINATION_MIN_SIZE: u16 = 9u16;
 
 /// Block format identifier.
 #[derive(Debug)]
@@ -107,7 +113,6 @@ pub enum MessageBlock<'a> {
     },
 
     /// Options update.
-    #[allow(unused)]
     Options {
         /// Requested minimum padding for transfers.
         t_min: u8,
@@ -122,13 +127,16 @@ pub enum MessageBlock<'a> {
         r_max: u8,
 
         /// Maximum dummy traffic router is willing to send.
-        t_dmy: u8,
+        t_dmy: u16,
+
+        /// Requested maximum dummy traffic.
+        r_dmy: u16,
 
         /// Maximum intra-message delay router is willing to insert.
         t_delay: u16,
 
         /// Requested intra-message delay.
-        r_deay: u16,
+        r_delay: u16,
     },
 
     /// Router info update.
@@ -147,7 +155,6 @@ pub enum MessageBlock<'a> {
     },
 
     /// Session termination.
-    #[allow(unused)]
     Termination {
         /// How many valid frames have been received.
         valid_frames: u64,
@@ -174,8 +181,9 @@ impl<'a> fmt::Debug for MessageBlock<'a> {
                 r_min,
                 r_max,
                 t_dmy,
+                r_dmy,
                 t_delay,
-                r_deay,
+                r_delay,
             } => f
                 .debug_struct("MessageBlock::Options")
                 .field("t_min", &t_min)
@@ -183,8 +191,9 @@ impl<'a> fmt::Debug for MessageBlock<'a> {
                 .field("r_min", &r_min)
                 .field("r_max", &r_max)
                 .field("t_dmy", &t_dmy)
+                .field("r_dmy", &r_dmy)
                 .field("t_delay", &t_delay)
-                .field("r_deay", &r_deay)
+                .field("r_deay", &r_delay)
                 .finish(),
             Self::RouterInfo {
                 floodfill_request,
@@ -220,25 +229,52 @@ impl<'a> MessageBlock<'a> {
         Ok((rest, MessageBlock::DateTime { timestamp }))
     }
 
-    /// Parse [`MessageBlock::`].
-    fn parse_options(_: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        todo!("options not supported");
+    /// Parse [`MessageBlock::Options`].
+    fn parse_options(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, t_min) = be_u8(rest)?;
+        let (rest, t_max) = be_u8(rest)?;
+        let (rest, r_min) = be_u8(rest)?;
+        let (rest, r_max) = be_u8(rest)?;
+        let (rest, t_dmy) = be_u16(rest)?;
+        let (rest, r_dmy) = be_u16(rest)?;
+        let (rest, t_delay) = be_u16(rest)?;
+        let (rest, r_delay) = be_u16(rest)?;
+
+        let rest = if size > OPTIONS_MIN_SIZE {
+            let (rest, _) = take(size - OPTIONS_MIN_SIZE)(rest)?;
+            rest
+        } else {
+            rest
+        };
+
+        Ok((
+            rest,
+            MessageBlock::Options {
+                t_min,
+                t_max,
+                r_min,
+                r_max,
+                r_dmy,
+                t_dmy,
+                t_delay,
+                r_delay,
+            },
+        ))
     }
 
     /// Parse [`MessageBlock::RouterInfo`].
     fn parse_router_info(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
         let (rest, size) = be_u16(input)?;
+        if size == 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "received empty `RouterInfo` message",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
         let (rest, flag) = be_u8(rest)?;
         let (rest, router_info) = take(size - 1)(rest)?;
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            block_len = ?size,
-            input_len = ?input.len(),
-            floodfill = ?flag & 1 == 1,
-            "parse router info block",
-        );
-        assert!(flag == 0, "floodfill");
 
         Ok((
             rest,
@@ -258,8 +294,25 @@ impl<'a> MessageBlock<'a> {
     }
 
     /// Parse [`MessageBlock::Termination`].
-    fn parse_termination(_: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        todo!("termination support not implemented");
+    fn parse_termination(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
+        let (rest, size) = be_u16(input)?;
+        let (rest, valid_frames) = be_u64(rest)?;
+        let (rest, reason) = be_u8(rest)?;
+
+        let rest = if size > TERMINATION_MIN_SIZE {
+            let (rest, _) = take(size - TERMINATION_MIN_SIZE)(rest)?;
+            rest
+        } else {
+            rest
+        };
+
+        Ok((
+            rest,
+            MessageBlock::Termination {
+                valid_frames,
+                reason,
+            },
+        ))
     }
 
     /// Parse [`MessageBlock::Padding`].
@@ -330,7 +383,7 @@ impl<'a> MessageBlock<'a> {
         out
     }
 
-    // TODO: zzz
+    // TODO: unnecessary copy
     pub fn new_i2np_message(message: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; message.len() + 1];
 
@@ -340,5 +393,3 @@ impl<'a> MessageBlock<'a> {
         out
     }
 }
-
-// TODO: tests

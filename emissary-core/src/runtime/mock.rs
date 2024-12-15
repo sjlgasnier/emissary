@@ -49,6 +49,15 @@ use std::{
 
 pub struct MockTcpStream(Compat<net::TcpStream>);
 
+impl MockTcpStream {
+    pub fn new(stream: net::TcpStream) -> Self {
+        let stream = TokioAsyncReadCompatExt::compat(stream).into_inner();
+        let stream = TokioAsyncWriteCompatExt::compat_write(stream);
+
+        Self(stream)
+    }
+}
+
 impl AsyncRead for MockTcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,

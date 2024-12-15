@@ -30,12 +30,15 @@ use crate::{
     runtime::Runtime,
     transports::ntcp2::{
         message::MessageBlock,
-        session::{InitiatorOptions, KeyContext, ResponderOptions},
+        options::{InitiatorOptions, ResponderOptions},
+        session::KeyContext,
     },
     Error,
 };
 
-use zerocopy::{AsBytes, FromBytes};
+use bytes::{BufMut, BytesMut};
+use rand_core::RngCore;
+// use zerocopy::{AsBytes, FromBytes};
 use zeroize::Zeroize;
 
 use alloc::{boxed::Box, vec::Vec};
@@ -132,40 +135,32 @@ impl Initiator {
     ///
     /// [1]: [KDF part 1](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1)
     pub fn new<R: Runtime>(
-        state: Vec<u8>,
-        chaining_key: Vec<u8>,
+        state: &[u8],
+        chaining_key: &[u8],
         local_info: Vec<u8>,
         local_static_key: StaticPrivateKey,
         remote_static_key: &StaticPublicKey,
         router_hash: Vec<u8>,
-        iv: Vec<u8>,
-    ) -> crate::Result<(Self, Vec<u8>)> {
+        remote_iv: Vec<u8>,
+        net_id: u8,
+    ) -> crate::Result<(Self, BytesMut)> {
         tracing::trace!(
             target: LOG_TARGET,
             router = ?base64_encode(&router_hash),
             "initiate new connection"
         );
 
-        let chaining_key = chaining_key.clone();
-        let state = Sha256::new().update(&state).update(remote_static_key.to_vec()).finalize();
-
         // generate ephemeral key pair and apply MixHash(epub)
+        let state = Sha256::new().update(state).update(remote_static_key.to_vec()).finalize();
         let sk = EphemeralPrivateKey::new(R::rng());
         let pk = sk.public_key();
         let state = Sha256::new().update(&state).update(&pk).finalize();
 
         // perform dh and return chaining & local key
         let (chaining_key, mut local_key) = {
-            // perform DH
             let mut shared = sk.diffie_hellman(remote_static_key);
-
-            // temp key
-            let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-
-            // output 1
+            let mut temp_key = Hmac::new(chaining_key).update(&shared).finalize();
             let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-
-            // output 2
             let local_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             shared.zeroize();
@@ -175,44 +170,42 @@ impl Initiator {
         };
 
         // encrypt X
-        let mut aes = Aes::new_encryptor(&router_hash, &iv);
+        let mut aes = Aes::new_encryptor(&router_hash, &remote_iv);
         let encrypted_x = aes.encrypt(pk);
 
         // create `SessionRequest` message
-        let mut buffer = alloc::vec![0u8; 96];
+        let mut out = BytesMut::with_capacity(96);
+        let padding = {
+            let mut padding = [0u8; 32];
+            R::rng().fill_bytes(&mut padding);
 
-        // TODO: generate random padding
-        // TODO: request random bytes from runtime
-        let padding = alloc::vec![3u8; 32];
+            padding
+        };
 
         let mut options = InitiatorOptions {
-            id: 2,
-            version: 2,
-            padding_length: 32u16.to_be_bytes(),
-            m3_p2_len: (local_info.len() as u16 + 20u16).to_be_bytes(),
-            reserved1: 0u16.to_be_bytes(),
-            timestamp: (R::time_since_epoch().as_secs() as u32).to_be_bytes(),
-            reserved2: 0u32.to_be_bytes(),
+            network_id: net_id,
+            version: 2u8,
+            padding_length: 32u16,
+            timestamp: R::time_since_epoch().as_secs() as u32,
+            m3_p2_len: local_info.len() as u16 + 20u16,
         }
-        .as_bytes()
-        .to_vec();
-
+        .serialize();
         let tag = ChaChaPoly::new(&local_key).encrypt_with_ad(&state, &mut options)?;
 
         local_key.zeroize();
 
-        buffer[..32].copy_from_slice(&encrypted_x);
-        buffer[32..48].copy_from_slice(&options);
-        buffer[48..64].copy_from_slice(&tag);
-        buffer[64..96].copy_from_slice(&padding);
+        out.put_slice(&encrypted_x);
+        out.put_slice(&options);
+        out.put_slice(&tag);
+        out.put_slice(&padding);
 
         // https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-2-and-message-3-part-1
         let state = {
             // MixHash(encrypted payload)
-            let state = Sha256::new().update(&state).update(&buffer[32..64]).finalize();
+            let state = Sha256::new().update(&state).update(&out[32..64]).finalize();
 
             // MixHash(padding)
-            Sha256::new().update(&state).update(&buffer[64..96]).finalize()
+            Sha256::new().update(&state).update(&out[64..96]).finalize()
         };
 
         Ok((
@@ -227,7 +220,7 @@ impl Initiator {
                     local_static_key,
                 },
             },
-            buffer,
+            out,
         ))
     }
 
@@ -269,11 +262,7 @@ impl Initiator {
             let responder_public = StaticPublicKey::from_bytes(y).ok_or(Error::InvalidData)?;
             let mut shared = ephemeral_key.diffie_hellman(&responder_public);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-
-            // output 1
             let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-
-            // output 2
             let remote_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             ephemeral_key.zeroize();
@@ -294,11 +283,7 @@ impl Initiator {
             let mut options = bytes[32..64].to_vec();
             ChaChaPoly::new(&remote_key).decrypt_with_ad(&state, &mut options)?;
 
-            u16::from_be_bytes(
-                ResponderOptions::ref_from_prefix(&options)
-                    .ok_or(Error::InvalidData)?
-                    .padding_length,
-            ) as usize
+            ResponderOptions::parse(&options).ok_or(Error::InvalidData)?.padding_length as usize
         };
 
         self.state = InitiatorState::SessionCreated {
@@ -322,7 +307,7 @@ impl Initiator {
     /// for the data phase.
     ///
     /// [KDF for data phase](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-data-phase)
-    pub fn finalize(&mut self, padding: &[u8]) -> crate::Result<(KeyContext, Vec<u8>)> {
+    pub fn finalize(&mut self, padding: &[u8]) -> crate::Result<(KeyContext, BytesMut)> {
         let InitiatorState::SessionCreated {
             mut state,
             local_info,
@@ -362,13 +347,7 @@ impl Initiator {
             // Generate a temp key from the chaining key and DH result
             // ck is the chaining key, from the KDF for handshake message 1
             let temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-
-            // Output 1
-            // Set a new chaining key from the temp key
             let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-
-            // Output 2
-            // Generate the cipher key k
             let k = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
             // h from message 3 part 1 is used as the associated data
@@ -382,13 +361,11 @@ impl Initiator {
             let state = Sha256::new().update(&state).update(&message).update(&tag2).finalize();
 
             // create `SessionConfirmed` message
-            let mut total_buffer = alloc::vec![0u8; local_info.len() + 20 + 48];
-
-            total_buffer[..32].copy_from_slice(&s_p_bytes);
-            total_buffer[32..48].copy_from_slice(&tag1);
-            total_buffer[48..48 + local_info.len() + 4].copy_from_slice(&message);
-            total_buffer[48 + local_info.len() + 4..4 + 48 + local_info.len() + 16]
-                .copy_from_slice(&tag2);
+            let mut out = BytesMut::with_capacity(local_info.len() + 20 + 48);
+            out.put_slice(&s_p_bytes);
+            out.put_slice(&tag1);
+            out.put_slice(&message);
+            out.put_slice(&tag2);
 
             // create send and receive keys
             let temp_key = Hmac::new(&chaining_key).update([]).finalize();
@@ -402,7 +379,7 @@ impl Initiator {
             shared.zeroize();
             responder_public.zeroize();
 
-            (KeyContext::new(send_key, receive_key, sip), total_buffer)
+            (KeyContext::new(send_key, receive_key, sip), out)
         };
 
         Ok((key_context, message))

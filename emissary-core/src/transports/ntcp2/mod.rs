@@ -44,6 +44,7 @@ use core::{
 
 mod listener;
 mod message;
+mod options;
 mod session;
 
 /// Logging target for the file.

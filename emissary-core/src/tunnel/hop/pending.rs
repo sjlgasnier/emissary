@@ -738,8 +738,6 @@ mod test {
 
     #[test]
     fn malformed_tunnel_build_reply() {
-        crate::util::init_logger();
-
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
