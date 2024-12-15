@@ -887,6 +887,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.expiring_inbound.remove(&gateway_tunnel_id);
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
+                    self.inbound_tunnels.remove(&gateway_tunnel_id);
                     self.metrics.gauge(NUM_INBOUND_TUNNELS).decrement(1);
 
                     // inform the owner of the tunnel pool that an inbound tunnel has expired
