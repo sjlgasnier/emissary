@@ -33,7 +33,7 @@ pub enum SubsystemKind {
 
 #[derive(Clone)]
 pub enum SubsystemCommand {
-    /// Send I2NP to router.
+    /// Send I2NP message to router.
     SendMessage {
         /// Serialized I2NP message.
         message: Vec<u8>,

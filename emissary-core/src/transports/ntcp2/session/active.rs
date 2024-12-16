@@ -316,7 +316,19 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                             let messages = messages
                                 .into_iter()
                                 .filter_map(|message| match message {
-                                    MessageBlock::I2Np { message } => Some(message),
+                                    MessageBlock::I2Np { message } =>
+                                        if message.is_expired::<R>() {
+                                            tracing::trace!(
+                                                target: LOG_TARGET,
+                                                message_type = ?message.message_type,
+                                                message_id = ?message.message_id,
+                                                expiration = ?message.expiration,
+                                                "discarding expired message",
+                                            );
+                                            None
+                                        } else {
+                                            Some(message)
+                                        },
                                     MessageBlock::Padding { .. } => None,
                                     message => {
                                         tracing::debug!(
