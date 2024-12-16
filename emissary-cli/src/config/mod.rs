@@ -87,17 +87,18 @@ pub struct SamConfig {
 #[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(default)]
-    floodfill: bool,
+    allow_local: bool,
     caps: Option<String>,
-    net_id: Option<u8>,
-    ntcp2: Option<Ntcp2Config>,
-    i2cp: Option<I2cpConfig>,
-    sam: Option<SamConfig>,
     exploratory: Option<ExploratoryConfig>,
     #[serde(default)]
-    insecure_tunnels: bool,
+    floodfill: bool,
+    i2cp: Option<I2cpConfig>,
     #[serde(default)]
-    allow_local: bool,
+    insecure_tunnels: bool,
+    log: Option<String>,
+    net_id: Option<u8>,
+    ntcp2: Option<Ntcp2Config>,
+    sam: Option<SamConfig>,
 }
 
 /// Router configuration.
@@ -122,6 +123,9 @@ pub struct Config {
 
     /// Are tunnels allowed to be insecure.
     pub insecure_tunnels: bool,
+
+    /// Logging targets.
+    pub log: Option<String>,
 
     /// Network ID.
     pub net_id: Option<u8>,
@@ -382,6 +386,7 @@ impl Config {
             net_id: None,
             insecure_tunnels: false,
             allow_local: false,
+            log: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -419,6 +424,7 @@ impl Config {
             insecure_tunnels: false,
             router_info: None,
             allow_local: false,
+            log: None,
         })
     }
 
@@ -453,6 +459,7 @@ impl Config {
                     net_id: None,
                     insecure_tunnels: false,
                     allow_local: false,
+                    log: None,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -493,6 +500,7 @@ impl Config {
             net_id: config.net_id,
             insecure_tunnels: config.insecure_tunnels,
             allow_local: config.allow_local,
+            log: config.log,
             router_info,
         })
     }
@@ -587,6 +595,10 @@ impl Config {
 
         if let Some(net_id) = arguments.net_id {
             self.net_id = Some(net_id);
+        }
+
+        if let Some(log) = &arguments.log {
+            self.log = Some(log.clone());
         }
 
         self.exploratory = match &mut self.exploratory {
@@ -705,6 +717,7 @@ mod tests {
             net_id: None,
             insecure_tunnels: false,
             allow_local: false,
+            log: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

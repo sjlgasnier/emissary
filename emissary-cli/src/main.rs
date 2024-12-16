@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{cli::Arguments, config::Config, error::Error, logger::init_logger};
+use crate::{cli::Arguments, config::Config, error::Error};
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -43,11 +43,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 async fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
 
-    // initialize logger
-    init_logger(arguments.log.clone())?;
+    // initialize logger with any logging directive given as a cli argument
+    let handle = init_logger!(arguments.log.clone());
 
     // parse router config and merge it with cli options
     let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
+
+    // reinitialize the logger with any directives given in the configuration file
+    init_logger!(config.log.clone(), handle);
 
     // try to reseed the router if there aren't enough known routers
     if (config.routers.len() < RESEED_THRESHOLD
