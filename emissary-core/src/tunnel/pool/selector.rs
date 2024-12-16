@@ -668,7 +668,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -690,7 +690,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.16{i}.{}.{}", i + 5, i + 10),
@@ -707,7 +707,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.17{i}.{}.{}", i + 5, i + 10),
@@ -796,7 +796,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -868,7 +868,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.168.{}.{}", i + 5, i + 10),
@@ -886,7 +886,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("172.10.{}.{}", i + 5, i + 10),
@@ -921,7 +921,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.168.{}.{}", i + 5, i + 10),
@@ -939,7 +939,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("172.10.{}.{}", i + 5, i + 10),
@@ -1044,7 +1044,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.168.{}.{}", i + 5, i + 10),
@@ -1062,7 +1062,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("172.10.{}.{}", i + 5, i + 10),
@@ -1100,7 +1100,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.168.{}.{}", i + 5, i + 10),
@@ -1118,7 +1118,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("172.10.{}.{}", i + 5, i + 10),
@@ -1157,7 +1157,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.168.{}.{}", i + 5, i + 10),
@@ -1175,7 +1175,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("172.10.{}.{}", i + 5, i + 10),
@@ -1214,7 +1214,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -1238,7 +1238,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("192.168.{}.{}", i + 5, i + 10),
@@ -1256,7 +1256,7 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
                         format!("172.10.{}.{}", i + 5, i + 10),
@@ -1297,7 +1297,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {

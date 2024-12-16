@@ -1284,8 +1284,8 @@ mod tests {
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -1377,8 +1377,8 @@ mod tests {
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -1464,8 +1464,8 @@ mod tests {
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -1553,8 +1553,8 @@ mod tests {
         );
 
         let (key1, expired_lease_set1) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -1587,8 +1587,8 @@ mod tests {
         };
 
         let (key2, expired_lease_set2) = {
-            let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[2u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -1621,8 +1621,8 @@ mod tests {
         };
 
         let (key3, valid_lease_set) = {
-            let sgk = SigningPrivateKey::new(&[3u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[3u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -1818,7 +1818,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -1909,7 +1909,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -1974,8 +1974,8 @@ mod tests {
         );
 
         let (key, lease_set, expires) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -2176,7 +2176,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2400,8 +2400,8 @@ mod tests {
         );
 
         let (key1, expired_lease_set1) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -2434,8 +2434,8 @@ mod tests {
         };
 
         let (key2, valid_lease_set) = {
-            let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[2u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -2638,7 +2638,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2671,7 +2671,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2855,7 +2855,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("99")),
@@ -2920,8 +2920,8 @@ mod tests {
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
             let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
@@ -3018,7 +3018,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32]),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),

@@ -107,7 +107,7 @@ pub struct SessionManager<R: Runtime> {
     inbound_initial_state: Bytes,
 
     /// Local NTCP2 IV.
-    local_iv: Vec<u8>,
+    local_iv: [u8; 16],
 
     /// Local NTCP2 static key.
     local_key: StaticPrivateKey,
@@ -137,8 +137,8 @@ impl<R: Runtime> SessionManager<R> {
     ///
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
     pub fn new(
-        local_key: Vec<u8>,
-        local_iv: Vec<u8>,
+        local_key: [u8; 32],
+        local_iv: [u8; 16],
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
@@ -211,7 +211,7 @@ impl<R: Runtime> SessionManager<R> {
                 })?;
 
                 (
-                    StaticPublicKey::from_bytes(base64_decode(static_key.as_bytes()).ok_or_else(
+                    StaticPublicKey::from_bytes(&base64_decode(static_key.as_bytes()).ok_or_else(
                         || {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -304,7 +304,7 @@ impl<R: Runtime> SessionManager<R> {
         let chaining_key = self.chaining_key.clone();
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
-        let iv = self.local_iv.clone();
+        let iv = self.local_iv;
         let profile_storage = self.profile_storage.clone();
 
         async move {
@@ -401,13 +401,13 @@ mod tests {
         net_id: u8,
         router_address: Option<RouterAddress>,
         ntcp2_iv: [u8; 16],
-        ntcp2_key: Vec<u8>,
+        ntcp2_key: [u8; 32],
     }
 
     impl Ntcp2Builder {
         fn new() -> Self {
             let ntcp2_key = {
-                let mut local_key = vec![0u8; 32];
+                let mut local_key = [0u8; 32];
                 thread_rng().fill_bytes(&mut local_key);
                 local_key
             };
@@ -441,8 +441,8 @@ mod tests {
         }
 
         fn build(mut self) -> Ntcp2 {
-            let signing_key = SigningPrivateKey::random(&mut thread_rng());
-            let static_key = StaticPrivateKey::new(thread_rng());
+            let signing_key = SigningPrivateKey::random(thread_rng());
+            let static_key = StaticPrivateKey::random(thread_rng());
             let identity = RouterIdentity::from_keys::<MockRuntime>(
                 static_key.as_ref().to_vec(),
                 signing_key.as_ref().to_vec(),
@@ -479,7 +479,7 @@ mod tests {
 
     struct Ntcp2 {
         ntcp2_iv: [u8; 16],
-        ntcp2_key: Vec<u8>,
+        ntcp2_key: [u8; 32],
         router_info: RouterInfo,
         signing_key: SigningPrivateKey,
     }
@@ -489,7 +489,7 @@ mod tests {
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
-            local.ntcp2_iv.to_vec(),
+            local.ntcp2_iv,
             local.signing_key,
             local.router_info,
             SubsystemHandle::new(),
@@ -503,7 +503,7 @@ mod tests {
             .build();
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
-            remote.ntcp2_iv.to_vec(),
+            remote.ntcp2_iv,
             remote.signing_key,
             remote.router_info.clone(),
             SubsystemHandle::new(),
@@ -534,7 +534,7 @@ mod tests {
         let local = Ntcp2Builder::new().with_net_id(128).build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
-            local.ntcp2_iv.to_vec(),
+            local.ntcp2_iv,
             local.signing_key,
             local.router_info,
             SubsystemHandle::new(),
@@ -548,7 +548,7 @@ mod tests {
             .build();
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
-            remote.ntcp2_iv.to_vec(),
+            remote.ntcp2_iv,
             remote.signing_key,
             remote.router_info.clone(),
             SubsystemHandle::new(),
@@ -576,7 +576,7 @@ mod tests {
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
-            local.ntcp2_iv.to_vec(),
+            local.ntcp2_iv,
             local.signing_key,
             local.router_info,
             SubsystemHandle::new(),
@@ -591,7 +591,7 @@ mod tests {
             .build();
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
-            remote.ntcp2_iv.to_vec(),
+            remote.ntcp2_iv,
             remote.signing_key,
             remote.router_info.clone(),
             SubsystemHandle::new(),

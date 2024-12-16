@@ -54,6 +54,9 @@ const LOG_TARGET: &str = "emissary::i2cp::message";
 /// Header is payload size (4 bytes) + message type (1 bytes).
 pub const I2CP_HEADER_SIZE: usize = 5;
 
+/// Signature length.
+const SIGNATURE_LEN: usize = 64usize;
+
 /// Session ID.
 #[derive(Debug)]
 pub enum SessionId {
@@ -454,7 +457,7 @@ impl Message {
         let (rest, destination) = Destination::parse_frame(input.as_ref()).ok()?;
         let (rest, options) = Mapping::parse_multi_frame(rest).ok()?;
         let (rest, date) = Date::parse_frame(rest).ok()?;
-        let (_rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
+        let (_rest, signature) = take::<_, _, ()>(SIGNATURE_LEN)(rest).ok()?;
 
         match destination.verifying_key() {
             None => tracing::debug!(
@@ -463,7 +466,10 @@ impl Message {
                 "no verifying key in destination, cannot verify signature",
             ),
             Some(signing_key) =>
-                if let Err(error) = signing_key.verify(input.as_ref(), signature) {
+                if let Err(error) = signing_key.verify(
+                    &input.as_ref()[..input.as_ref().len() - SIGNATURE_LEN],
+                    signature,
+                ) {
                     tracing::warn!(
                         target: LOG_TARGET,
                         ?error,
@@ -583,7 +589,7 @@ impl Message {
 
                 match key_kind {
                     0x0004 if key_length == 32 => {
-                        keys.push(StaticPrivateKey::from(key.to_vec()));
+                        keys.push(StaticPrivateKey::from_bytes(key)?);
 
                         Some((rest, keys))
                     }
@@ -598,6 +604,13 @@ impl Message {
                 }
             },
         )?;
+
+        if private_keys.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "no encryption keys",
+            );
+        }
 
         Some(Message::CreateLeaseSet2 {
             session_id: SessionId::from(session_id),

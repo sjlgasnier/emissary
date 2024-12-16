@@ -268,7 +268,7 @@ impl Config {
     }
 
     /// Create NTCP2 key and store it on disk.
-    fn create_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
+    fn create_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
         let key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
         let iv = {
             let mut iv = [0u8; 16];
@@ -287,7 +287,7 @@ impl Config {
             file.write_all(combined.as_ref())?;
         }
 
-        Ok((key, iv))
+        Ok((TryInto::<[u8; 32]>::try_into(key).expect("to succeed"), iv))
     }
 
     /// Save key to disk.
@@ -308,7 +308,7 @@ impl Config {
     }
 
     /// Load NTCP2 key and IV from disk.
-    fn load_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
+    fn load_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
         let key_bytes = {
             let mut file = fs::File::open(path.join("ntcp2.keys"))?;
             let mut key_bytes = [0u8; 32 + 16];
@@ -318,7 +318,7 @@ impl Config {
         };
 
         Ok((
-            key_bytes[..32].to_vec(),
+            TryInto::<[u8; 32]>::try_into(&key_bytes[..32]).expect("to succeed"),
             TryInto::<[u8; 16]>::try_into(&key_bytes[32..]).expect("to succeed"),
         ))
     }
@@ -415,7 +415,7 @@ impl Config {
         base_path: PathBuf,
         static_key: Vec<u8>,
         signing_key: Vec<u8>,
-        ntcp2_key: Vec<u8>,
+        ntcp2_key: [u8; 32],
         ntcp2_iv: [u8; 16],
         config: Option<EmissaryConfig>,
         router_info: Option<Vec<u8>>,
@@ -618,7 +618,7 @@ mod tests {
             file.read_exact(&mut contents).unwrap();
 
             (
-                contents[..32].to_vec(),
+                TryInto::<[u8; 32]>::try_into(&contents[..32]).expect("to succeed"),
                 TryInto::<[u8; 16]>::try_into(&contents[32..]).expect("to succeed"),
             )
         };

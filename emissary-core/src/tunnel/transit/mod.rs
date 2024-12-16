@@ -165,9 +165,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
             .find_local_record::<VARIABLE_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        let mut session = self
-            .noise
-            .create_long_inbound_session(EphemeralPublicKey::try_from(&record[PUBLIC_KEY_OFFSET])?);
+        let mut session = self.noise.create_long_inbound_session(
+            EphemeralPublicKey::from_bytes(&record[PUBLIC_KEY_OFFSET]).ok_or(Error::InvalidData)?,
+        );
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
@@ -314,9 +314,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
             .find_local_record::<SHORT_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        let mut session = self.noise.create_short_inbound_session(EphemeralPublicKey::try_from(
-            &record[PUBLIC_KEY_OFFSET],
-        )?);
+        let mut session = self.noise.create_short_inbound_session(
+            EphemeralPublicKey::from_bytes(&record[PUBLIC_KEY_OFFSET]).ok_or(Error::InvalidData)?,
+        );
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
@@ -882,7 +882,7 @@ mod tests {
         let new_pubkey = {
             let mut key_bytes = [0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
-            let key = StaticPrivateKey::from(key_bytes.to_vec());
+            let key = StaticPrivateKey::from_bytes(&key_bytes).unwrap();
 
             key.public()
         };

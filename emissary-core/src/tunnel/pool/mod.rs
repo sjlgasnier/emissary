@@ -694,7 +694,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         )
                         .build();
 
-                    let ephemeral_secret = EphemeralPrivateKey::new(R::rng());
+                    let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
                     let ephemeral_public = ephemeral_secret.public_key();
                     let (key, tag) = self.noise.derive_outbound_garlic_key(
                         self.noise.local_public_key(),
@@ -1189,7 +1189,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -1270,7 +1273,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -1347,7 +1353,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -1441,7 +1450,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -1531,7 +1543,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -1794,7 +1809,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -2046,7 +2064,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -2133,7 +2154,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -2229,7 +2253,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);
@@ -2447,7 +2474,10 @@ mod tests {
             let mut key_bytes = vec![0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
 
-            NoiseContext::new(StaticPrivateKey::from(key_bytes), our_hash.clone())
+            NoiseContext::new(
+                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
+                our_hash.clone(),
+            )
         };
         let handle = MockRuntime::register_metrics(Vec::new());
         let (manager_tx, manager_rx) = mpsc::channel(64);

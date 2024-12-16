@@ -400,10 +400,8 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
 
                         // generate keys and destination
                         let (private_key, signing_key, destination) = {
-                            let mut rng = R::rng();
-
-                            let signing_key = SigningPrivateKey::random(&mut rng);
-                            let private_key = StaticPrivateKey::new(rng);
+                            let signing_key = SigningPrivateKey::random(R::rng());
+                            let private_key = StaticPrivateKey::random(R::rng());
                             let destination = Destination::new::<R>(signing_key.public());
 
                             (private_key, signing_key, destination)

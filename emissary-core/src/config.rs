@@ -63,7 +63,7 @@ pub struct Ntcp2Config {
     pub host: String,
 
     /// NTCP2 key.
-    pub key: Vec<u8>,
+    pub key: [u8; 32],
 
     /// NTCP2 IV.
     pub iv: [u8; 16],

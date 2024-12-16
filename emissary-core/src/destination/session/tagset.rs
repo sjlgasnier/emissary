@@ -395,7 +395,7 @@ impl TagSet {
 
         match mem::replace(&mut self.key_state, KeyState::Poisoned) {
             KeyState::Uninitialized => {
-                let private_key = StaticPrivateKey::new(R::rng());
+                let private_key = StaticPrivateKey::random(R::rng());
                 let public_key = private_key.public();
 
                 self.key_state = KeyState::AwaitingReverseKey {
@@ -426,7 +426,7 @@ impl TagSet {
                 // https://geti2p.net/spec/ecies#dh-ratchet-message-flow
                 match self.tag_set_id % 2 != 0 {
                     true => {
-                        let private_key = StaticPrivateKey::new(R::rng());
+                        let private_key = StaticPrivateKey::random(R::rng());
                         let public_key = private_key.public();
 
                         if send_key_id + 1 > MAX_KEY_ID {
@@ -501,7 +501,7 @@ impl TagSet {
                     reverse_key_requested: true,
                 },
             ) => {
-                let private_key = StaticPrivateKey::new(R::rng());
+                let private_key = StaticPrivateKey::random(R::rng());
                 let public_key = private_key.public();
 
                 self.reinitialize_tag_set(private_key, remote_public_key.clone(), 0u16, 0u16);
@@ -626,7 +626,7 @@ impl TagSet {
                     return Err(SessionError::SessionTerminated);
                 }
 
-                let private_key = StaticPrivateKey::new(R::rng());
+                let private_key = StaticPrivateKey::random(R::rng());
                 let public_key = private_key.public();
 
                 self.reinitialize_tag_set(
@@ -734,8 +734,8 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
 
         // generate tags until the second dh ratchet can be done
         //
@@ -802,8 +802,8 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
 
         // generate tags until the second dh ratchet can be done
         //
@@ -870,8 +870,8 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
 
         // generate tags until the second dh ratchet can be done
         //
@@ -938,7 +938,7 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
     }
 }

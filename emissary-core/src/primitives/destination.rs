@@ -178,10 +178,17 @@ impl Destination {
                 match signing_key_kind {
                     KEY_KIND_EDDSA_SHA512_ED25519 => (
                         rest,
-                        Some(
-                            SigningPublicKey::from_bytes(&initial_bytes[384 - 32..384])
-                                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?,
-                        ),
+                        Some({
+                            // call must succeed as the slice into `initial_bytes`
+                            // and `public_key` are the same size
+                            let public_key = TryInto::<[u8; 32]>::try_into(
+                                initial_bytes[384 - 32..384].to_vec(),
+                            )
+                            .expect("to succeed");
+
+                            SigningPublicKey::from_bytes(&public_key)
+                                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?
+                        }),
                         DESTINATION_WITH_KEY_CERT_LEN,
                     ),
                     key_kind => {
@@ -255,11 +262,11 @@ impl Destination {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::{crypto::SigningPrivateKey, runtime::mock::MockRuntime};
 
     #[test]
     fn serialize_and_parse_destination() {
-        let signing_key = SigningPublicKey::from_private_ed25519(&[0xaa; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0xa; 32]).unwrap().public();
         let destination = Destination::new::<MockRuntime>(signing_key.clone());
 
         let serialized = destination.clone().serialize();
@@ -267,8 +274,8 @@ mod tests {
 
         assert_eq!(parsed.destination_id, destination.destination_id);
         assert_eq!(
-            parsed.verifying_key.unwrap().to_bytes(),
-            destination.verifying_key.unwrap().to_bytes()
+            parsed.verifying_key.unwrap().as_ref(),
+            destination.verifying_key.unwrap().as_ref()
         );
     }
 

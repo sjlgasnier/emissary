@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn syn_flags() {
-        let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
         let destination = Destination::new::<MockRuntime>(signing_key.public());
 
         let (flags, options) = FlagsBuilder::default()
@@ -747,8 +747,8 @@ mod tests {
         let dest = flags.from_included().as_ref().unwrap();
 
         assert_eq!(
-            dest.verifying_key().unwrap().to_bytes(),
-            signing_key.public().to_bytes()
+            dest.verifying_key().unwrap().as_ref(),
+            signing_key.public().as_ref()
         );
         assert_eq!(dest.id(), destination.id());
     }
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn all_flags() {
-        let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
         let destination = Destination::new::<MockRuntime>(signing_key.public());
 
         let (flags, options) = FlagsBuilder::default()
@@ -811,15 +811,15 @@ mod tests {
         let dest = flags.from_included().as_ref().unwrap();
 
         assert_eq!(
-            dest.verifying_key().unwrap().to_bytes(),
-            signing_key.public().to_bytes()
+            dest.verifying_key().unwrap().as_ref(),
+            signing_key.public().as_ref()
         );
         assert_eq!(dest.id(), destination.id());
     }
 
     #[test]
     fn build_syn() {
-        let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let recv_destination_id = DestinationId::random();
         let mut payload = "hello, world".as_bytes();
@@ -868,7 +868,7 @@ mod tests {
 
             let mut copy = serialized.clone();
             copy[signature_offset..signature_offset + SIGNATURE_LEN].copy_from_slice(&[0u8; 64]);
-            verifying_key.verify_new(&copy, signature).unwrap();
+            verifying_key.verify(&copy, signature).unwrap();
         }
     }
 
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn call_build_and_sign_without_signature() {
-        let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let recv_destination_id = DestinationId::random();
         let mut payload = "hello, world".as_bytes();
@@ -933,7 +933,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn call_build_with_signature() {
-        let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let recv_destination_id = DestinationId::random();
         let mut payload = "hello, world".as_bytes();

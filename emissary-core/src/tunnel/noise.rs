@@ -658,10 +658,8 @@ impl NoiseContext {
             chaining_key
         };
         let outbound_state = Sha256::new().update(&chaining_key).finalize();
-        let inbound_state = Sha256::new()
-            .update(&outbound_state)
-            .update(local_key.public().to_bytes())
-            .finalize();
+        let inbound_state =
+            Sha256::new().update(&outbound_state).update(local_key.public()).finalize();
 
         Self {
             local_router_hash,
@@ -688,7 +686,7 @@ impl NoiseContext {
         remote_static: StaticPublicKey,
         hop_role: HopRole,
     ) -> OutboundSession {
-        let local_ephemeral = EphemeralPrivateKey::new(R::rng());
+        let local_ephemeral = EphemeralPrivateKey::random(R::rng());
         let local_ephemeral_public = local_ephemeral.public_key().to_vec();
         let state = {
             let state = Sha256::new()
@@ -815,17 +813,17 @@ mod tests {
 
     #[test]
     fn derive_garlic_keys() {
-        let remote_key = StaticPrivateKey::new(rand::thread_rng());
+        let remote_key = StaticPrivateKey::random(rand::thread_rng());
         let remote_router_id = Bytes::from(RouterId::random().to_vec());
 
-        let local_key = StaticPrivateKey::new(rand::thread_rng());
+        let local_key = StaticPrivateKey::random(rand::thread_rng());
         let local_router_id = Bytes::from(RouterId::random().to_vec());
 
         let remote_noise = NoiseContext::new(remote_key.clone(), remote_router_id);
         let local_noise = NoiseContext::new(local_key, local_router_id);
 
         // derive outbound garlic context
-        let ephemeral_secret = EphemeralPrivateKey::new(rand::thread_rng());
+        let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
         let ephemeral_public = ephemeral_secret.public_key();
         let (local_key, local_state) =
             local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);

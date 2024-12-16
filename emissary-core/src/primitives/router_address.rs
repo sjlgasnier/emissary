@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, StaticPublicKey},
+    crypto::{base64_encode, StaticPrivateKey},
     primitives::{Date, Mapping, Str},
 };
 
@@ -95,9 +95,10 @@ pub struct RouterAddress {
 
 impl RouterAddress {
     /// Create new unpublished [`RouterAddress`].
-    pub fn new_unpublished(static_key: Vec<u8>) -> Self {
-        let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
-        let key = base64_encode(static_key.to_vec());
+    pub fn new_unpublished(key: [u8; 32]) -> Self {
+        let static_key = StaticPrivateKey::from(key).public();
+        // let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
+        let key = base64_encode(&static_key);
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
@@ -113,16 +114,14 @@ impl RouterAddress {
     }
 
     /// Create new unpublished [`RouterAddress`].
-    pub fn new_published(key: Vec<u8>, iv: [u8; 16], port: u16, host: String) -> Self {
+    pub fn new_published(key: [u8; 32], iv: [u8; 16], port: u16, host: String) -> Self {
+        let static_key = StaticPrivateKey::from(key).public();
         // conversion must succeed since `key` is managed by us
-        let static_key = StaticPublicKey::from_private_x25519(&key).expect("to succeed");
+        // let static_key = StaticPublicKey::from_private_x25519(&key).expect("to succeed");
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from("v"), Str::from("2"));
-        options.insert(
-            Str::from("s"),
-            Str::from(base64_encode(static_key.to_vec())),
-        );
+        options.insert(Str::from("s"), Str::from(base64_encode(&static_key)));
         options.insert(Str::from("host"), Str::from(host.clone()));
         options.insert(Str::from("port"), Str::from(port.to_string()));
         options.insert(Str::from("i"), Str::from(base64_encode(iv)));
@@ -213,14 +212,14 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_unpublished() {
-        let serialized = RouterAddress::new_unpublished(vec![1u8; 32]).serialize();
-        let static_key = StaticPublicKey::from_private_x25519(&vec![1u8; 32]).expect("to succeed");
+        let serialized = RouterAddress::new_unpublished([1u8; 32]).serialize();
+        let static_key = StaticPrivateKey::from([1u8; 32]).public();
 
         let address = RouterAddress::parse(&serialized).unwrap();
         assert_eq!(address.cost, 10);
         assert_eq!(
             address.options.get(&Str::from("s")),
-            Some(&Str::from(base64_encode(static_key.to_vec())))
+            Some(&Str::from(base64_encode(&static_key)))
         );
         assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
         assert!(address.options.get(&Str::from("i")).is_none());
@@ -230,14 +229,10 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_published() {
-        let serialized = RouterAddress::new_published(
-            vec![1u8; 32],
-            [0xaa; 16],
-            8888,
-            String::from("127.0.0.1"),
-        )
-        .serialize();
-        let static_key = StaticPublicKey::from_private_x25519(&vec![1u8; 32]).expect("to succeed");
+        let serialized =
+            RouterAddress::new_published([1u8; 32], [0xaa; 16], 8888, String::from("127.0.0.1"))
+                .serialize();
+        let static_key = StaticPrivateKey::from([1u8; 32]).public();
 
         let address = RouterAddress::parse(&serialized).unwrap();
         assert_eq!(address.cost, 10);
@@ -247,7 +242,7 @@ mod tests {
         );
         assert_eq!(
             address.options.get(&Str::from("s")),
-            Some(&Str::from(base64_encode(static_key.to_vec())))
+            Some(&Str::from(base64_encode(&static_key)))
         );
         assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
         assert_eq!(

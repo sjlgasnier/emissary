@@ -105,7 +105,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
         let session_manager = SessionManager::new(
             config.key,
-            config.iv.to_vec(),
+            config.iv,
             local_signing_key,
             local_router_info,
             subsystem_handle,

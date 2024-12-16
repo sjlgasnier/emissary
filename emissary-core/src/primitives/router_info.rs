@@ -36,6 +36,9 @@ use nom::{
 use alloc::{string::ToString, vec, vec::Vec};
 use core::str::FromStr;
 
+/// Signature length.
+const SIGNATURE_LEN: usize = 64usize;
+
 /// Router information
 #[derive(Debug, Clone)]
 pub struct RouterInfo {
@@ -204,14 +207,17 @@ impl RouterInfo {
             },
         };
 
-        identity.signing_key().verify(input, rest).map_err(|error| {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?error,
-                "invalid signature for router info",
-            );
-            Err::Error(make_error(input, ErrorKind::Fail))
-        })?;
+        identity
+            .signing_key()
+            .verify(&input[..input.len() - SIGNATURE_LEN], rest)
+            .map_err(|error| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "invalid signature for router info",
+                );
+                Err::Error(make_error(input, ErrorKind::Fail))
+            })?;
 
         Ok((
             rest,
@@ -324,7 +330,7 @@ impl RouterInfo {
 
             key_bytes
         };
-        let static_key = crate::crypto::StaticPrivateKey::from(raw_static_key.clone());
+        let static_key = crate::crypto::StaticPrivateKey::from_bytes(&raw_static_key).unwrap();
 
         let raw_signing_key = {
             let mut key_bytes = vec![0u8; 32];
@@ -332,7 +338,7 @@ impl RouterInfo {
 
             key_bytes
         };
-        let signing_key = SigningPrivateKey::new(&raw_signing_key).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&raw_signing_key).unwrap();
 
         (
             Self::from_keys::<R>(raw_static_key, raw_signing_key),
@@ -393,7 +399,7 @@ impl RouterInfo {
             R::rng().next_u32() % 256,
         );
         let ntcp2_key = {
-            let mut key_bytes = vec![0u8; 32];
+            let mut key_bytes = [0u8; 32];
             R::rng().fill_bytes(&mut key_bytes);
 
             key_bytes
@@ -584,12 +590,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
-                    vec![1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".to_string(),
-                ),
+                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
             )]),
             options: HashMap::from_iter([(Str::from("caps"), Str::from("L"))]),
             net_id: 2,
@@ -611,12 +612,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
-                    vec![1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".to_string(),
-                ),
+                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
             )]),
             options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
             net_id: 2,
@@ -638,12 +634,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
-                    vec![1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".to_string(),
-                ),
+                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -668,12 +659,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
-                    vec![1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".to_string(),
-                ),
+                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -698,7 +684,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_unpublished(vec![1u8; 32]),
+                RouterAddress::new_unpublished([1u8; 32]),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -723,12 +709,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
-                    vec![1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".to_string(),
-                ),
+                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -754,12 +735,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
-                    vec![1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".to_string(),
-                ),
+                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),

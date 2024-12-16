@@ -307,7 +307,7 @@ impl<R: Runtime> StreamManager<R> {
                     original[signature_start..signature_start + SIGNATURE_LEN]
                         .copy_from_slice(&[0u8; SIGNATURE_LEN]);
 
-                    verifying_key.verify_new(&original, signature).map_err(|error| {
+                    verifying_key.verify(&original, signature).map_err(|error| {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?error,
@@ -932,7 +932,7 @@ mod tests {
         let (_stream, _) = stream1.unwrap();
         let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
@@ -946,7 +946,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_pending_streams_are_pruned() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
@@ -954,7 +954,7 @@ mod tests {
         let mut packets = (0..3)
             .into_iter()
             .map(|stream_id| {
-                let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+                let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
                 let destination = Destination::new::<MockRuntime>(signing_key.public());
                 let packet = PacketBuilder::new(stream_id as u32)
                     .with_synchronize()
@@ -1047,13 +1047,13 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_silent_listener() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
@@ -1123,13 +1123,13 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_non_silent_listener() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
@@ -1194,13 +1194,13 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_persistent_listener() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
@@ -1273,13 +1273,13 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_with_buffered_data_initialized() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
@@ -1414,13 +1414,13 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager1 = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let mut manager2 = {
-            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
@@ -1499,7 +1499,7 @@ mod tests {
         let remote = DestinationId::random();
 
         let mut manager2 = {
-            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
@@ -1550,7 +1550,7 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
@@ -1564,7 +1564,7 @@ mod tests {
             })
             .is_ok());
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1605,7 +1605,7 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
@@ -1619,7 +1619,7 @@ mod tests {
             })
             .is_ok());
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = base64_encode(destination.id().to_vec());
         let packet = PacketBuilder::new(1337u32)
@@ -1667,12 +1667,12 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = base64_encode(destination.id().to_vec());
         let packet = PacketBuilder::new(1337u32)
@@ -1730,12 +1730,12 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1783,13 +1783,13 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager1 = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let mut manager2 = {
-            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
             let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
@@ -1870,7 +1870,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_stream() {
-        let signing_key = SigningPrivateKey::new(&[
+        let signing_key = SigningPrivateKey::from_bytes(&[
             116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
             221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
         ])
@@ -1937,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let signing_key = SigningPrivateKey::new(&[
+        let signing_key = SigningPrivateKey::from_bytes(&[
             116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
             221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
         ])
@@ -2005,7 +2005,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_destination_id() {
-        let signing_key = SigningPrivateKey::new(&[
+        let signing_key = SigningPrivateKey::from_bytes(&[
             116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
             221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
         ])

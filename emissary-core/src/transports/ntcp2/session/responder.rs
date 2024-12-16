@@ -129,7 +129,7 @@ impl Responder {
         chaining_key: &[u8],
         local_router_hash: Vec<u8>,
         local_static_key: StaticPrivateKey,
-        iv: Vec<u8>,
+        iv: [u8; 16],
         message: Vec<u8>,
         net_id: u8,
     ) -> crate::Result<(Self, usize)> {
@@ -146,7 +146,7 @@ impl Responder {
 
         // perform dh and return chaining & local key
         let (chaining_key, mut remote_key, ephemeral_key) = {
-            let epub = StaticPublicKey::from_bytes(x).ok_or(Error::InvalidData)?;
+            let epub = StaticPublicKey::from_bytes(&x).ok_or(Error::InvalidData)?;
             let mut shared = local_static_key.diffie_hellman(&epub);
             let mut temp_key = Hmac::new(chaining_key).update(&shared).finalize();
             let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
@@ -261,7 +261,7 @@ impl Responder {
         let state = Sha256::new().update(&state).update(&padding).finalize();
 
         // generate ephemeral key pair and apply MixHash(epub)
-        let sk = EphemeralPrivateKey::new(R::rng());
+        let sk = EphemeralPrivateKey::random(R::rng());
         let pk = sk.public_key();
         let state = Sha256::new().update(&state).update(&pk).finalize();
 
@@ -273,7 +273,6 @@ impl Responder {
             let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
             let local_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
-            ephemeral_key.zeroize();
             shared.zeroize();
             temp_key.zeroize();
 
@@ -373,8 +372,8 @@ impl Responder {
         // perform diffie-hellman key exchange and derive keys for data phase
         //
         // https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-data-phase
-        let initiator_public = StaticPublicKey::from_bytes(initiator_public[..32].to_vec())
-            .ok_or(Error::InvalidData)?;
+        let initiator_public =
+            StaticPublicKey::from_bytes(&initiator_public[..32]).ok_or(Error::InvalidData)?;
         let mut shared = ephemeral_private.diffie_hellman(&initiator_public);
 
         // MixKey(DH())

@@ -56,7 +56,7 @@ pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterI
     MockRuntime::rng().fill_bytes(&mut static_key_bytes);
     MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-    let sk = StaticPrivateKey::from(static_key_bytes.clone());
+    let sk = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
     let pk = sk.public();
 
     let mut router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);

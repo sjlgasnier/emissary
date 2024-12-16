@@ -251,10 +251,8 @@ impl<R: Runtime> SamSession<R> {
         let (session_destination, dest, privkey, encryption_key, signing_key) = {
             let (encryption_key, signing_key, destination_id, destination) = match destination {
                 DestinationKind::Transient => {
-                    let mut rng = R::rng();
-
-                    let signing_key = SigningPrivateKey::random(&mut rng);
-                    let encryption_key = StaticPrivateKey::new(rng);
+                    let signing_key = SigningPrivateKey::random(R::rng());
+                    let encryption_key = StaticPrivateKey::random(R::rng());
 
                     let destination = Dest::new::<R>(signing_key.public());
                     let destination_id = destination.id();

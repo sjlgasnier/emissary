@@ -41,6 +41,9 @@ pub enum SessionError {
 
     /// State machine has entered an invalid state.
     InvalidState,
+
+    /// Invalid key.
+    InvalidKey,
 }
 
 impl fmt::Display for SessionError {
@@ -51,6 +54,7 @@ impl fmt::Display for SessionError {
             Self::Malformed => write!(f, "malformed message"),
             Self::Chacha => write!(f, "encryption/decryption error"),
             Self::InvalidState => write!(f, "invalid state"),
+            Self::InvalidKey => write!(f, "invalid key"),
         }
     }
 }

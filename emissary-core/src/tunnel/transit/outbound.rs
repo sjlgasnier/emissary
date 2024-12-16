@@ -379,10 +379,10 @@ mod tests {
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
 
-        let obep_key = StaticPrivateKey::new(MockRuntime::rng());
+        let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
 
-        let obgw_key = StaticPrivateKey::new(MockRuntime::rng());
+        let obgw_key = StaticPrivateKey::random(MockRuntime::rng());
         let obgw_router_id = RouterId::random();
 
         let (pending, router_id, mut message) =
@@ -418,8 +418,10 @@ mod tests {
 
             // create tunnel session
             let mut obep_session = obep_noise.create_short_inbound_session(
-                EphemeralPublicKey::try_from(pending.hops()[0].outbound_session().ephemeral_key())
-                    .unwrap(),
+                EphemeralPublicKey::from_bytes(
+                    pending.hops()[0].outbound_session().ephemeral_key(),
+                )
+                .unwrap(),
             );
 
             let router_id = Into::<Vec<u8>>::into(obep_router_id.clone());

@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
-    error::TunnelError,
+    error::{Error, TunnelError},
     i2np::{
         garlic::{
             DeliveryInstructions as CloveDeliveryInstructions, GarlicMessage, GarlicMessageBlock,
@@ -29,7 +29,6 @@ use crate::{
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::noise::NoiseContext,
-    Error,
 };
 
 use rand_core::RngCore;
@@ -126,7 +125,7 @@ impl<R: Runtime> GarlicHandler<R> {
         // derive cipher key and associated data and decrypt the garlic message
         let message = {
             let (mut cipher_key, associated_data) = self.noise.derive_inbound_garlic_key(
-                EphemeralPublicKey::try_from(&payload[4..36]).expect("valid public key"),
+                EphemeralPublicKey::from_bytes(&payload[4..36]).ok_or(Error::InvalidData)?,
             );
 
             let mut message = payload[36..].to_vec();
@@ -230,10 +229,10 @@ mod tests {
 
     #[test]
     fn serialize_deserialize() {
-        let remote_key = StaticPrivateKey::new(rand::thread_rng());
+        let remote_key = StaticPrivateKey::random(rand::thread_rng());
         let remote_router_id = Bytes::from(RouterId::random().to_vec());
 
-        let local_key = StaticPrivateKey::new(rand::thread_rng());
+        let local_key = StaticPrivateKey::random(rand::thread_rng());
         let local_router_id = Bytes::from(RouterId::random().to_vec());
 
         let mut garlic = GarlicHandler::<MockRuntime>::new(
@@ -295,7 +294,7 @@ mod tests {
 
         // derive outbound garlic context
         let local_noise = NoiseContext::new(local_key, local_router_id);
-        let ephemeral_secret = EphemeralPrivateKey::new(rand::thread_rng());
+        let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
         let ephemeral_public = ephemeral_secret.public_key();
         let (local_key, local_state) =
             local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);

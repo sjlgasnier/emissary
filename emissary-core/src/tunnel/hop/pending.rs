@@ -252,7 +252,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         )
                         .build();
 
-                    let ephemeral_secret = EphemeralPrivateKey::new(R::rng());
+                    let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
                     let ephemeral_public = ephemeral_secret.public_key();
                     let (key, tag) =
                         noise.derive_outbound_garlic_key(first_hop_static_key, ephemeral_secret);
@@ -662,7 +662,7 @@ mod test {
 
             let new_record = record[..].to_vec();
 
-            let pk = EphemeralPublicKey::try_from(&new_record[16..48]).unwrap();
+            let pk = EphemeralPublicKey::from_bytes(&new_record[16..48]).unwrap();
 
             let mut session = noise.create_short_inbound_session(pk);
             let decrypted_record = session.decrypt_build_record(record[48..].to_vec()).unwrap();

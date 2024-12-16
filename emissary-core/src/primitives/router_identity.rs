@@ -117,8 +117,10 @@ pub struct RouterIdentity {
 impl RouterIdentity {
     /// Create new [`RouterIdentity`] from keys.
     pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> crate::Result<Self> {
-        let static_key = StaticPrivateKey::from(static_key).public();
-        let signing_key = SigningPrivateKey::new(&signing_key).ok_or(Error::InvalidData)?.public();
+        let static_key =
+            StaticPrivateKey::from_bytes(&static_key).ok_or(Error::InvalidData)?.public();
+        let signing_key =
+            SigningPrivateKey::from_bytes(&signing_key).ok_or(Error::InvalidData)?.public();
         let padding = {
             let mut padding = [0u8; 320];
             R::rng().fill_bytes(&mut padding);
@@ -178,7 +180,7 @@ impl RouterIdentity {
         };
 
         let static_key = match pub_key_type {
-            KEY_KIND_X25519 => StaticPublicKey::new_x25519(&initial_bytes[..32]),
+            KEY_KIND_X25519 => StaticPublicKey::from_bytes(&initial_bytes[..32]),
             kind => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -191,8 +193,16 @@ impl RouterIdentity {
         .ok_or(Err::Error(make_error(input, ErrorKind::Fail)))?;
 
         let signing_key = match sig_key_type {
-            KEY_KIND_EDDSA_SHA512_ED25519 =>
-                SigningPublicKey::from_bytes(&initial_bytes[384 - 32..384]),
+            KEY_KIND_EDDSA_SHA512_ED25519 => Some({
+                // call must succeed as the slice into `initial_bytes`
+                // and `public_key` are the same size
+                let public_key =
+                    TryInto::<[u8; 32]>::try_into(initial_bytes[384 - 32..384].to_vec())
+                        .expect("to succeed");
+
+                SigningPublicKey::from_bytes(&public_key)
+                    .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?
+            }),
             kind => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -287,8 +297,8 @@ impl RouterIdentity {
 
         (
             identity,
-            StaticPrivateKey::from(sk),
-            SigningPrivateKey::new(&sgk).unwrap(),
+            StaticPrivateKey::from_bytes(&sk).unwrap(),
+            SigningPrivateKey::from_bytes(&sgk).unwrap(),
         )
     }
 }

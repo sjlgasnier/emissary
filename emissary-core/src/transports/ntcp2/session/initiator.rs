@@ -151,7 +151,7 @@ impl Initiator {
 
         // generate ephemeral key pair and apply MixHash(epub)
         let state = Sha256::new().update(state).update(remote_static_key.to_vec()).finalize();
-        let sk = EphemeralPrivateKey::new(R::rng());
+        let sk = EphemeralPrivateKey::random(R::rng());
         let pk = sk.public_key();
         let state = Sha256::new().update(&state).update(&pk).finalize();
 
@@ -258,7 +258,7 @@ impl Initiator {
         // perform dh between local and remote ephemeral public keys
         // and generate new chaining key & remote key
         let (chaining_key, remote_key, responder_public) = {
-            let responder_public = StaticPublicKey::from_bytes(y).ok_or(Error::InvalidData)?;
+            let responder_public = StaticPublicKey::from_bytes(&y).ok_or(Error::InvalidData)?;
             let mut shared = ephemeral_key.diffie_hellman(&responder_public);
             let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
             let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
@@ -376,7 +376,6 @@ impl Initiator {
 
             chaining_key.zeroize();
             shared.zeroize();
-            responder_public.zeroize();
 
             (KeyContext::new(send_key, receive_key, sip), out)
         };

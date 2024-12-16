@@ -816,7 +816,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle,
             tp_handle,
@@ -839,7 +839,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle,
             tp_handle,
@@ -865,7 +865,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle,
             tp_handle,
@@ -897,7 +897,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle.clone(),
             tp_handle,
@@ -941,7 +941,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle,
             tp_handle,
@@ -961,7 +961,7 @@ mod tests {
         });
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle.clone(),
             tp_handle,
@@ -1014,7 +1014,7 @@ mod tests {
         });
         let mut destination = Destination::<MockRuntime>::new(
             DestinationId::random(),
-            StaticPrivateKey::new(MockRuntime::rng()),
+            StaticPrivateKey::random(MockRuntime::rng()),
             Bytes::new(),
             netdb_handle.clone(),
             tp_handle,

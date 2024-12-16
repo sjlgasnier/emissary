@@ -78,8 +78,9 @@ impl<R: Runtime> Router<R> {
             ..
         } = config;
 
-        let local_key = StaticPrivateKey::from(static_key);
-        let local_signing_key = SigningPrivateKey::new(&signing_key).unwrap();
+        let local_key = StaticPrivateKey::from_bytes(&static_key).expect("valid encryption key");
+        let local_signing_key =
+            SigningPrivateKey::from_bytes(&signing_key).expect("valid signing key");
         let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();

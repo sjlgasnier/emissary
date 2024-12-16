@@ -348,10 +348,17 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                             take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
                         let (_, signing_key) = take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
 
+                        // conversions are expected succeed since the client is interacting with
+                        // a local router and would only crash their onw router if they provided
+                        // invalid keying material
                         DestinationKind::Persistent {
                             destination,
-                            private_key: Box::new(StaticPrivateKey::from(private_key.to_vec())),
-                            signing_key: Box::new(SigningPrivateKey::new(signing_key).ok_or(())?),
+                            private_key: Box::new(
+                                StaticPrivateKey::from_bytes(private_key).expect("to succeed"),
+                            ),
+                            signing_key: Box::new(
+                                SigningPrivateKey::from_bytes(signing_key).expect("to succeed"),
+                            ),
                         }
                     }
                     None => {
@@ -668,10 +675,8 @@ mod tests {
 
         // persistent
         let privkey = {
-            let mut rng = MockRuntime::rng();
-
-            let signing_key = SigningPrivateKey::random(&mut rng);
-            let encryption_key = StaticPrivateKey::new(rng);
+            let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+            let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
 
             let destination = Destination::new::<MockRuntime>(signing_key.public());
 
@@ -717,7 +722,7 @@ mod tests {
     #[test]
     fn parse_stream_connect() {
         let destination = {
-            let signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
+            let signing_key = SigningPrivateKey::random(MockRuntime::rng());
             base64_encode(Destination::new::<MockRuntime>(signing_key.public()).serialize())
         };
 
@@ -891,10 +896,8 @@ mod tests {
         // session with persistent destination
         {
             let privkey = {
-                let mut rng = MockRuntime::rng();
-
-                let signing_key = SigningPrivateKey::random(&mut rng);
-                let encryption_key = StaticPrivateKey::new(rng);
+                let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+                let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
 
                 let destination = Destination::new::<MockRuntime>(signing_key.public());
 
@@ -1008,10 +1011,8 @@ mod tests {
         // session with persistent destination
         {
             let privkey = {
-                let mut rng = MockRuntime::rng();
-
-                let signing_key = SigningPrivateKey::random(&mut rng);
-                let encryption_key = StaticPrivateKey::new(rng);
+                let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+                let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
 
                 let destination = Destination::new::<MockRuntime>(signing_key.public());
 
@@ -1063,8 +1064,8 @@ mod tests {
     #[test]
     fn parse_datagram() {
         let destination = {
-            let mut rng = MockRuntime::rng();
-            let signing_key = SigningPrivateKey::random(&mut rng);
+            let rng = MockRuntime::rng();
+            let signing_key = SigningPrivateKey::random(rng);
 
             Destination::new::<MockRuntime>(signing_key.public())
         };
