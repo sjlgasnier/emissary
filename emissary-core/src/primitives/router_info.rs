@@ -423,7 +423,12 @@ impl RouterInfo {
             iv_bytes
         };
 
-        let ntcp2 = RouterAddress::new_published(ntcp2_key, ntcp2_iv, ntcp2_port, ntcp2_host);
+        let ntcp2 = RouterAddress::new_published(
+            ntcp2_key,
+            ntcp2_iv,
+            ntcp2_port,
+            ntcp2_host.parse().unwrap(),
+        );
         let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
         let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
         let router_version = Mapping::new(
@@ -602,7 +607,12 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
+                RouterAddress::new_published(
+                    [1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".parse().unwrap(),
+                ),
             )]),
             options: HashMap::from_iter([(Str::from("caps"), Str::from("L"))]),
             net_id: 2,
@@ -624,7 +634,12 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
+                RouterAddress::new_published(
+                    [1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".parse().unwrap(),
+                ),
             )]),
             options: HashMap::from_iter([(Str::from("netId"), Str::from("2"))]),
             net_id: 2,
@@ -646,7 +661,12 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
+                RouterAddress::new_published(
+                    [1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".parse().unwrap(),
+                ),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -671,7 +691,12 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
+                RouterAddress::new_published(
+                    [1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".parse().unwrap(),
+                ),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -721,7 +746,12 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
+                RouterAddress::new_published(
+                    [1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".parse().unwrap(),
+                ),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -747,7 +777,12 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published([1u8; 32], [2u8; 16], 8888, "127.0.0.1".to_string()),
+                RouterAddress::new_published(
+                    [1u8; 32],
+                    [2u8; 16],
+                    8888,
+                    "127.0.0.1".parse().unwrap(),
+                ),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -776,9 +811,10 @@ mod tests {
             net_id: None,
             exploratory: None,
             insecure_tunnels: false,
+            allow_local: false,
             ntcp2_config: Some(Ntcp2Config {
                 port: 8888,
-                host: Some(String::from("8.8.8.8")),
+                host: Some("8.8.8.8".parse().unwrap()),
                 published: true,
                 key: [0xaa; 32],
                 iv: [0xbb; 16],
@@ -814,6 +850,7 @@ mod tests {
             net_id: None,
             exploratory: None,
             insecure_tunnels: false,
+            allow_local: false,
             ntcp2_config: Some(Ntcp2Config {
                 port: 8888,
                 host: None,
@@ -846,9 +883,10 @@ mod tests {
             net_id: None,
             exploratory: None,
             insecure_tunnels: false,
+            allow_local: false,
             ntcp2_config: Some(Ntcp2Config {
                 port: 8888,
-                host: Some(String::from("8.8.8.8")),
+                host: Some("8.8.8.8".parse().unwrap()),
                 published: false,
                 key: [0xaa; 32],
                 iv: [0xbb; 16],
@@ -878,6 +916,7 @@ mod tests {
             net_id: None,
             exploratory: None,
             insecure_tunnels: false,
+            allow_local: false,
             ntcp2_config: Some(Ntcp2Config {
                 port: 8888,
                 host: None,

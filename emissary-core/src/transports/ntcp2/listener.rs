@@ -20,6 +20,7 @@ use crate::{
     error::Error,
     runtime::{Runtime, TcpListener},
     transports::ntcp2::LOG_TARGET,
+    util::is_global,
 };
 
 use futures::Stream;
@@ -30,18 +31,20 @@ use core::{
     task::{Context, Poll},
 };
 
-// TODO: fix listen address
 // TODO: support both ipv4 and ipv6
 
 /// NTCP2 listener.
 pub struct Ntcp2Listener<R: Runtime> {
+    /// Allow local addresses.
+    allow_local: bool,
+
     /// TCP Listener.
     listener: R::TcpListener,
 }
 
 impl<R: Runtime> Ntcp2Listener<R> {
     /// Create new [`Ntcp2Listener`].
-    pub async fn new(address: SocketAddr) -> crate::Result<Self> {
+    pub async fn new(address: SocketAddr, allow_local: bool) -> crate::Result<Self> {
         let listener = match R::TcpListener::bind(address).await {
             Some(listener) => listener,
             None => {
@@ -59,7 +62,16 @@ impl<R: Runtime> Ntcp2Listener<R> {
             }
         };
 
-        Ok(Self { listener })
+        Ok(Self {
+            allow_local,
+            listener,
+        })
+    }
+
+    /// Get local address of the TCP listener.
+    #[cfg(test)]
+    pub fn local_address(&self) -> SocketAddr {
+        self.listener.local_address().expect("to succeed")
     }
 }
 
@@ -67,10 +79,22 @@ impl<R: Runtime> Stream for Ntcp2Listener<R> {
     type Item = R::TcpStream;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.listener.poll_accept(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(stream)) => Poll::Ready(Some(stream)),
+        loop {
+            match self.listener.poll_accept(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((stream, address))) => match address {
+                    SocketAddr::V4(address) if !is_global(*address.ip()) && !self.allow_local => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?address,
+                            "incoming connection from local address but local addresses were disabled",
+                        );
+                        continue;
+                    }
+                    _ => return Poll::Ready(Some(stream)),
+                },
+            }
         }
     }
 }

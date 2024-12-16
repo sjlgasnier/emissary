@@ -29,10 +29,7 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::ToString, vec::Vec};
 use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -113,13 +110,13 @@ impl RouterAddress {
     }
 
     /// Create new unpublished [`RouterAddress`].
-    pub fn new_published(key: [u8; 32], iv: [u8; 16], port: u16, host: String) -> Self {
+    pub fn new_published(key: [u8; 32], iv: [u8; 16], port: u16, host: Ipv4Addr) -> Self {
         let static_key = StaticPrivateKey::from(key).public();
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from("v"), Str::from("2"));
         options.insert(Str::from("s"), Str::from(base64_encode(&static_key)));
-        options.insert(Str::from("host"), Str::from(host.clone()));
+        options.insert(Str::from("host"), Str::from(host.to_string()));
         options.insert(Str::from("port"), Str::from(port.to_string()));
         options.insert(Str::from("i"), Str::from(base64_encode(iv)));
 
@@ -128,10 +125,7 @@ impl RouterAddress {
             expires: Date::new(0),
             transport: TransportKind::Ntcp2,
             options,
-            socket_address: Some(SocketAddr::new(
-                host.parse::<IpAddr>().expect("valid address"),
-                port,
-            )),
+            socket_address: Some(SocketAddr::new(IpAddr::V4(host), port)),
         }
     }
 
@@ -227,7 +221,7 @@ mod tests {
     #[test]
     fn serialize_deserialize_published() {
         let serialized =
-            RouterAddress::new_published([1u8; 32], [0xaa; 16], 8888, String::from("127.0.0.1"))
+            RouterAddress::new_published([1u8; 32], [0xaa; 16], 8888, "127.0.0.1".parse().unwrap())
                 .serialize();
         let static_key = StaticPrivateKey::from([1u8; 32]).public();
 

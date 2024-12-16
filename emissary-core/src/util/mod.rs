@@ -26,6 +26,7 @@ use rand_core::RngCore;
 
 use core::{
     future::Future,
+    net::Ipv4Addr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -164,4 +165,18 @@ pub fn init_logger() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+}
+
+/// Check if an address is globally routable.
+pub fn is_global(address: Ipv4Addr) -> bool {
+    !((address >= Ipv4Addr::new(240, 0, 0, 0) && address <= Ipv4Addr::new(255, 255, 255, 254))
+        || address.is_private()
+        || (address >= Ipv4Addr::new(100, 64, 0, 0)
+            && address <= Ipv4Addr::new(100, 127, 255, 255))
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || address.is_documentation()
+        || (address >= Ipv4Addr::new(198, 18, 0, 0) && address <= Ipv4Addr::new(198, 19, 255, 255))
+        || address.is_broadcast())
 }

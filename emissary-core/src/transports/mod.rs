@@ -260,6 +260,9 @@ impl<R: Runtime> Stream for TransportService<R> {
 /// together with enabled, lower-level transports and polling for polling those
 /// transports so that they can make progress.
 pub struct TransportManager<R: Runtime> {
+    /// Allow local addresses.
+    allow_local: bool,
+
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
@@ -298,10 +301,12 @@ impl<R: Runtime> TransportManager<R> {
         local_router_info: RouterInfo,
         profile_storage: ProfileStorage<R>,
         metrics_handle: R::MetricsHandle,
+        allow_local: bool,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
 
         Self {
+            allow_local,
             cmd_rx,
             cmd_tx,
             local_router_info,
@@ -362,6 +367,7 @@ impl<R: Runtime> TransportManager<R> {
         self.transports.push(Box::new(
             Ntcp2Transport::new(
                 config,
+                self.allow_local,
                 self.local_signing_key.clone(),
                 self.local_router_info.clone(),
                 self.subsystem_handle.clone(),

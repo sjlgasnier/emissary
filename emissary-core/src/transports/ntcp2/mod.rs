@@ -81,6 +81,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
     /// Create new [`Ntcp2Transport`].
     pub async fn new(
         config: Ntcp2Config,
+        allow_local: bool,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
@@ -95,7 +96,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
             .socket_address
             .expect("to exist");
 
-        let listener = Ntcp2Listener::new(socket_address).await?;
+        let listener = Ntcp2Listener::new(socket_address, allow_local).await?;
 
         let session_manager = SessionManager::new(
             config.key,
@@ -104,6 +105,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
             local_router_info,
             subsystem_handle,
             profile_storage,
+            allow_local,
         )?;
 
         tracing::info!(

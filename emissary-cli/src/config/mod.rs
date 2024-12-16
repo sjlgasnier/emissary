@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -67,7 +68,7 @@ struct ExploratoryConfig {
 #[derive(Debug, Serialize, Deserialize)]
 struct Ntcp2Config {
     port: u16,
-    host: Option<String>,
+    host: Option<Ipv4Addr>,
     published: Option<bool>,
 }
 
@@ -95,30 +96,47 @@ struct EmissaryConfig {
     exploratory: Option<ExploratoryConfig>,
     #[serde(default)]
     insecure_tunnels: bool,
+    #[serde(default)]
+    allow_local: bool,
 }
 
 /// Router configuration.
 pub struct Config {
+    /// Allow local addresses.
+    pub allow_local: bool,
+
     /// Base path.
     pub base_path: PathBuf,
 
-    /// Router info.
-    pub router_info: Option<Vec<u8>>,
-
-    /// I2CP config.
-    pub i2cp_config: Option<emissary_core::I2cpConfig>,
-
-    /// NTCP2 config.
-    pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
+    /// Router capabilities.
+    pub caps: Option<String>,
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<emissary_core::ExploratoryConfig>,
 
-    /// Router info.
-    pub routers: Vec<Vec<u8>>,
+    /// Should the node be run as a floodfill router.
+    pub floodfill: bool,
+
+    /// I2CP config.
+    pub i2cp_config: Option<emissary_core::I2cpConfig>,
+
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
+
+    /// Network ID.
+    pub net_id: Option<u8>,
+
+    /// NTCP2 config.
+    pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
 
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
+
+    /// Router info.
+    pub router_info: Option<Vec<u8>>,
+
+    /// Router info.
+    pub routers: Vec<Vec<u8>>,
 
     /// SAMv3 config.
     pub sam_config: Option<emissary_core::SamConfig>,
@@ -128,36 +146,25 @@ pub struct Config {
 
     /// Static key.
     pub static_key: Vec<u8>,
-
-    /// Should the node be run as a floodfill router.
-    pub floodfill: bool,
-
-    /// Router capabilities.
-    pub caps: Option<String>,
-
-    /// Network ID.
-    pub net_id: Option<u8>,
-
-    /// Are tunnels allowed to be insecure.
-    pub insecure_tunnels: bool,
 }
 
 impl From<Config> for emissary_core::Config {
     fn from(val: Config) -> Self {
         emissary_core::Config {
-            static_key: val.static_key,
-            signing_key: val.signing_key,
-            ntcp2_config: val.ntcp2_config,
-            i2cp_config: val.i2cp_config,
-            routers: val.routers,
-            profiles: val.profiles,
-            samv3_config: val.sam_config,
-            floodfill: val.floodfill,
+            allow_local: val.allow_local,
             caps: val.caps,
-            net_id: val.net_id,
             exploratory: val.exploratory,
+            floodfill: val.floodfill,
+            i2cp_config: val.i2cp_config,
             insecure_tunnels: val.insecure_tunnels,
+            net_id: val.net_id,
+            ntcp2_config: val.ntcp2_config,
+            profiles: val.profiles,
             router_info: val.router_info,
+            routers: val.routers,
+            samv3_config: val.sam_config,
+            signing_key: val.signing_key,
+            static_key: val.static_key,
         }
     }
 }
@@ -374,6 +381,7 @@ impl Config {
             caps: None,
             net_id: None,
             insecure_tunnels: false,
+            allow_local: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -392,7 +400,7 @@ impl Config {
             exploratory: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
-                host: Some(String::from("127.0.0.1")),
+                host: Some("127.0.0.1".parse().expect("valid address")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
                 published: false,
@@ -410,6 +418,7 @@ impl Config {
             net_id: None,
             insecure_tunnels: false,
             router_info: None,
+            allow_local: false,
         })
     }
 
@@ -443,6 +452,7 @@ impl Config {
                     caps: None,
                     net_id: None,
                     insecure_tunnels: false,
+                    allow_local: false,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -482,6 +492,7 @@ impl Config {
             caps: config.caps,
             net_id: config.net_id,
             insecure_tunnels: config.insecure_tunnels,
+            allow_local: config.allow_local,
             router_info,
         })
     }
@@ -564,6 +575,12 @@ impl Config {
             }
         }
 
+        if let Some(true) = arguments.allow_local {
+            if !self.allow_local {
+                self.allow_local = true;
+            }
+        }
+
         if let Some(ref caps) = arguments.caps {
             self.caps = Some(caps.clone());
         }
@@ -609,10 +626,7 @@ mod tests {
         assert_eq!(config.static_key.len(), 32);
         assert_eq!(config.signing_key.len(), 32);
         assert_eq!(config.ntcp2_config.as_ref().unwrap().port, 8888);
-        assert_eq!(
-            config.ntcp2_config.as_ref().unwrap().host,
-            Some(String::from("127.0.0.1"))
-        );
+        assert_eq!(config.ntcp2_config.as_ref().unwrap().host, None,);
 
         let (key, iv) = {
             let mut path = dir.path().to_owned();
@@ -690,6 +704,7 @@ mod tests {
             caps: None,
             net_id: None,
             insecure_tunnels: false,
+            allow_local: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

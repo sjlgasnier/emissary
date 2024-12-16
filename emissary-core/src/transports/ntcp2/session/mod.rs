@@ -35,6 +35,7 @@ use crate::{
         base64_decode, sha256::Sha256, siphash::SipHash, SigningPrivateKey, StaticPrivateKey,
         StaticPublicKey,
     },
+    error::Error,
     primitives::{RouterInfo, Str, TransportKind},
     profile::ProfileStorage,
     runtime::{Runtime, TcpStream},
@@ -42,14 +43,13 @@ use crate::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
         SubsystemHandle,
     },
-    util::{AsyncReadExt, AsyncWriteExt},
-    Error,
+    util::{is_global, AsyncReadExt, AsyncWriteExt},
 };
 
 use bytes::Bytes;
 
 use alloc::{vec, vec::Vec};
-use core::{future::Future, str::FromStr};
+use core::{future::Future, net::IpAddr, str::FromStr};
 
 mod active;
 mod initiator;
@@ -100,6 +100,9 @@ impl KeyContext {
 ///
 /// Responsible for creating context for inbound and outboudn NTCP2 sessions.
 pub struct SessionManager<R: Runtime> {
+    /// Allow local addresses.
+    allow_local: bool,
+
     /// Chaining key.
     chaining_key: Bytes,
 
@@ -143,6 +146,7 @@ impl<R: Runtime> SessionManager<R> {
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
         profile_storage: ProfileStorage<R>,
+        allow_local: bool,
     ) -> crate::Result<Self> {
         let local_key = StaticPrivateKey::from(local_key);
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
@@ -154,6 +158,7 @@ impl<R: Runtime> SessionManager<R> {
             .finalize();
 
         Ok(Self {
+            allow_local,
             chaining_key: Bytes::from(chaining_key),
             inbound_initial_state: Bytes::from(inbound_initial_state),
             local_iv,
@@ -183,6 +188,7 @@ impl<R: Runtime> SessionManager<R> {
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
+        let allow_local = self.allow_local;
         let mut subsystem_handle = self.subsystem_handle.clone();
 
         async move {
@@ -209,6 +215,18 @@ impl<R: Runtime> SessionManager<R> {
                     tracing::debug!(target: LOG_TARGET, "router doesn't have socket address");
                     Error::InvalidData
                 })?;
+
+                match socket_address.ip() {
+                    IpAddr::V4(address) if !is_global(address) && !allow_local => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?address,
+                            "tried to dial local address but local addresses were disabled",
+                        );
+                        return Err(Error::InvalidData);
+                    }
+                    _ => {}
+                }
 
                 (
                     StaticPublicKey::from_bytes(&base64_decode(static_key.as_bytes()).ok_or_else(
@@ -390,8 +408,9 @@ mod tests {
             Runtime,
         },
         subsystem::SubsystemHandle,
-        transports::ntcp2::session::SessionManager,
+        transports::ntcp2::{listener::Ntcp2Listener, session::SessionManager},
     };
+    use futures::StreamExt;
     use hashbrown::HashMap;
     use rand::{thread_rng, RngCore};
     use std::time::Duration;
@@ -435,7 +454,7 @@ mod tests {
                 self.ntcp2_key.clone(),
                 self.ntcp2_iv,
                 port,
-                "127.0.0.1".to_string(),
+                "127.0.0.1".parse().unwrap(),
             ));
             self
         }
@@ -494,6 +513,7 @@ mod tests {
             local.router_info,
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
         )
         .unwrap();
 
@@ -508,6 +528,7 @@ mod tests {
             remote.router_info.clone(),
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
         )
         .unwrap();
 
@@ -539,6 +560,7 @@ mod tests {
             local.router_info,
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
         )
         .unwrap();
 
@@ -553,6 +575,7 @@ mod tests {
             remote.router_info.clone(),
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
         )
         .unwrap();
 
@@ -581,6 +604,7 @@ mod tests {
             local.router_info,
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
         )
         .unwrap();
 
@@ -596,6 +620,7 @@ mod tests {
             remote.router_info.clone(),
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
         )
         .unwrap();
 
@@ -612,5 +637,78 @@ mod tests {
 
         assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
         assert!(handle.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn dialer_local_addresses_disabled() {
+        let local = Ntcp2Builder::new().build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            false,
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_net_id(128)
+            .with_router_address(listener.local_addr().unwrap().port())
+            .build();
+        let remote_manager = SessionManager::new(
+            remote.ntcp2_key,
+            remote.ntcp2_iv,
+            remote.signing_key,
+            remote.router_info.clone(),
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        )
+        .unwrap();
+
+        tokio::spawn(async move {
+            let stream = MockTcpStream::new(
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            );
+            remote_manager.accept_session(stream).await.unwrap();
+        });
+
+        assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn listener_local_addresses_disabled() {
+        crate::util::init_logger();
+
+        let local = Ntcp2Builder::new().build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        )
+        .unwrap();
+
+        let mut listener = Ntcp2Listener::<MockRuntime>::new("127.0.0.1:0".parse().unwrap(), false)
+            .await
+            .unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_net_id(128)
+            .with_router_address(listener.local_address().port())
+            .build();
+
+        tokio::spawn(async move { while let Some(_) = listener.next().await {} });
+
+        assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
     }
 }

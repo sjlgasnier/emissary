@@ -93,6 +93,10 @@ pub struct Arguments {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub floodfill: Option<bool>,
 
+    /// Allow local addresses.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub allow_local: Option<bool>,
+
     /// Router capabilities
     #[arg(long)]
     pub caps: Option<String>,

@@ -137,7 +137,12 @@ impl TcpStream for AsyncStdTcpStream {
     }
 }
 
-pub struct AsyncStdTcpListener(BoxStream<'static, async_std::io::Result<net::TcpStream>>);
+pub struct AsyncStdTcpListener(
+    (
+        SocketAddr,
+        BoxStream<'static, async_std::io::Result<net::TcpStream>>,
+    ),
+);
 
 impl TcpListener<AsyncStdTcpStream> for AsyncStdTcpListener {
     // TODO: can be made sync with `socket2`
@@ -153,24 +158,40 @@ impl TcpListener<AsyncStdTcpStream> for AsyncStdTcpListener {
                 );
             })
             .ok()
-            .map(|listener| AsyncStdTcpListener(Box::pin(listener.into_incoming())))
+            .map(|listener| {
+                let address = listener.local_addr().expect("to succeed");
+
+                AsyncStdTcpListener((address, Box::pin(listener.into_incoming())))
+            })
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<AsyncStdTcpStream>> {
-        match futures::ready!(self.0.poll_next_unpin(cx)) {
-            Some(Ok(stream)) => return Poll::Ready(Some(AsyncStdTcpStream(stream))),
-            Some(Err(error)) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to accept connection",
-                );
-                return Poll::Ready(None);
-            }
-            None => {
-                return Poll::Ready(None);
+    fn poll_accept(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<(AsyncStdTcpStream, SocketAddr)>> {
+        loop {
+            match futures::ready!(self.0 .1.poll_next_unpin(cx)) {
+                Some(Ok(stream)) => match stream.local_addr() {
+                    Ok(address) => return Poll::Ready(Some((AsyncStdTcpStream(stream), address))),
+                    Err(_) => continue,
+                },
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to accept connection",
+                    );
+                    return Poll::Ready(None);
+                }
+                None => {
+                    return Poll::Ready(None);
+                }
             }
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        Some(self.0 .0)
     }
 }
 

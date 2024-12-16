@@ -38,7 +38,7 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatE
 
 use std::{
     collections::HashMap,
-    future::{pending, Future},
+    future::Future,
     io::Write,
     net::SocketAddr,
     pin::{pin, Pin},
@@ -119,16 +119,22 @@ impl crate::runtime::TcpStream for MockTcpStream {
     }
 }
 
-#[derive(Debug)]
-pub struct MockTcpListener {}
+pub struct MockTcpListener(net::TcpListener);
 
 impl TcpListener<MockTcpStream> for MockTcpListener {
-    fn bind(_: SocketAddr) -> impl Future<Output = Option<Self>> {
-        pending()
+    async fn bind(address: SocketAddr) -> Option<Self> {
+        net::TcpListener::bind(&address).await.ok().map(MockTcpListener)
     }
 
-    fn poll_accept(&mut self, _: &mut Context<'_>) -> Poll<Option<MockTcpStream>> {
-        Poll::Pending
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<(MockTcpStream, SocketAddr)>> {
+        match futures::ready!(self.0.poll_accept(cx)) {
+            Err(_) => Poll::Ready(None),
+            Ok((stream, address)) => Poll::Ready(Some((MockTcpStream::new(stream), address))),
+        }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
     }
 }
 

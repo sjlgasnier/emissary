@@ -249,7 +249,7 @@ impl<R: Runtime> Future for SamServer<R> {
             match this.listener.poll_accept(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(stream)) => {
+                Poll::Ready(Some((stream, _))) => {
                     this.pending_inbound_connections.push(PendingSamConnection::new(stream));
                 }
             }

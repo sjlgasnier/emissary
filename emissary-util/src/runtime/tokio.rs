@@ -153,11 +153,15 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
             .map(TokioTcpListener)
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<(TokioTcpStream, SocketAddr)>> {
         match futures::ready!(self.0.poll_accept(cx)) {
             Err(_) => Poll::Ready(None),
-            Ok((stream, _)) => Poll::Ready(Some(TokioTcpStream::new(stream))),
+            Ok((stream, address)) => Poll::Ready(Some((TokioTcpStream::new(stream), address))),
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
     }
 }
 

@@ -16,6 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use core::net::Ipv4Addr;
+
 use crate::{primitives::Str, profile::Profile, tunnel::TunnelPoolConfig};
 
 use alloc::{string::String, vec::Vec};
@@ -60,7 +62,7 @@ pub struct Ntcp2Config {
     pub port: u16,
 
     /// NTCP2 listen address.
-    pub host: Option<String>,
+    pub host: Option<Ipv4Addr>,
 
     /// Should NTCP2 be published in router info.
     pub published: bool,
@@ -94,46 +96,49 @@ pub struct SamConfig {
 
 /// Router configuration.
 pub struct Config {
-    /// Router static key.
-    pub static_key: Vec<u8>,
+    /// Allow local addresses.
+    pub allow_local: bool,
 
-    /// Router signing key.
-    pub signing_key: Vec<u8>,
+    /// Router capabilities.
+    pub caps: Option<String>,
 
-    /// NTCP2 configuration.
-    pub ntcp2_config: Option<Ntcp2Config>,
+    /// Exploratory tunnel pool config.
+    pub exploratory: Option<ExploratoryConfig>,
 
-    /// Router Info, if it exists.
-    pub router_info: Option<Vec<u8>>,
+    /// Should the node be run as a floodfill router.
+    pub floodfill: bool,
 
     /// I2CP configuration.
     ///
     /// `None` if I2CP is disabled.
     pub i2cp_config: Option<I2cpConfig>,
 
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
+
+    /// Network ID.
+    pub net_id: Option<u8>,
+
+    /// NTCP2 configuration.
+    pub ntcp2_config: Option<Ntcp2Config>,
+
+    /// Known router profiles.
+    pub profiles: Vec<(String, Profile)>,
+
+    /// Router Info, if it exists.
+    pub router_info: Option<Vec<u8>>,
+
+    /// Known routers.
+    pub routers: Vec<Vec<u8>>,
+
     /// SAMv3 configuration.
     ///
     /// `None` if SAMv3 is disabled.
     pub samv3_config: Option<SamConfig>,
 
-    /// Known routers.
-    pub routers: Vec<Vec<u8>>,
+    /// Router signing key.
+    pub signing_key: Vec<u8>,
 
-    /// Known router profiles.
-    pub profiles: Vec<(String, Profile)>,
-
-    /// Should the node be run as a floodfill router.
-    pub floodfill: bool,
-
-    /// Router capabilities.
-    pub caps: Option<String>,
-
-    /// Network ID.
-    pub net_id: Option<u8>,
-
-    /// Exploratory tunnel pool config.
-    pub exploratory: Option<ExploratoryConfig>,
-
-    /// Are tunnels allowed to be insecure.
-    pub insecure_tunnels: bool,
+    /// Router static key.
+    pub static_key: Vec<u8>,
 }

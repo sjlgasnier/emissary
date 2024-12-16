@@ -75,6 +75,7 @@ impl<R: Runtime> Router<R> {
             ntcp2_config,
             routers,
             profiles,
+            allow_local,
             ..
         } = config;
 
@@ -109,6 +110,7 @@ impl<R: Runtime> Router<R> {
             local_router_info.clone(),
             profile_storage.clone(),
             metrics_handle.clone(),
+            allow_local,
         );
 
         // initialize and start tunnel manager

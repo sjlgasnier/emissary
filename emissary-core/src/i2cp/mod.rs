@@ -133,7 +133,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
 
                     return Poll::Ready(());
                 }
-                Poll::Ready(Some(mut stream)) => {
+                Poll::Ready(Some((mut stream, _))) => {
                     tracing::trace!(
                         target: LOG_TARGET,
                         "incoming connection, read protocol byte",

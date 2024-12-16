@@ -61,7 +61,8 @@ pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + Sized + 'sta
 
 pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>>;
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<(TcpStream, SocketAddr)>>;
+    fn local_address(&self) -> Option<SocketAddr>;
 }
 
 pub trait UdpSocket: Unpin + Send + Sized {
