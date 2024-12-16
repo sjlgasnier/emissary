@@ -34,7 +34,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
 };
 
@@ -95,9 +95,8 @@ pub struct RouterAddress {
 
 impl RouterAddress {
     /// Create new unpublished [`RouterAddress`].
-    pub fn new_unpublished(key: [u8; 32]) -> Self {
+    pub fn new_unpublished(key: [u8; 32], port: u16) -> Self {
         let static_key = StaticPrivateKey::from(key).public();
-        // let static_key = StaticPublicKey::from_private_x25519(&static_key).unwrap();
         let key = base64_encode(&static_key);
 
         let mut options = HashMap::<Str, Str>::new();
@@ -108,7 +107,7 @@ impl RouterAddress {
             cost: 10,
             expires: Date::new(0),
             transport: TransportKind::Ntcp2,
-            socket_address: None,
+            socket_address: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)),
             options,
         }
     }
@@ -116,8 +115,6 @@ impl RouterAddress {
     /// Create new unpublished [`RouterAddress`].
     pub fn new_published(key: [u8; 32], iv: [u8; 16], port: u16, host: String) -> Self {
         let static_key = StaticPrivateKey::from(key).public();
-        // conversion must succeed since `key` is managed by us
-        // let static_key = StaticPublicKey::from_private_x25519(&key).expect("to succeed");
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from("v"), Str::from("2"));
@@ -212,7 +209,7 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_unpublished() {
-        let serialized = RouterAddress::new_unpublished([1u8; 32]).serialize();
+        let serialized = RouterAddress::new_unpublished([1u8; 32], 8888).serialize();
         let static_key = StaticPrivateKey::from([1u8; 32]).public();
 
         let address = RouterAddress::parse(&serialized).unwrap();

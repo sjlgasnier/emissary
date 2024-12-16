@@ -68,6 +68,7 @@ struct ExploratoryConfig {
 struct Ntcp2Config {
     port: u16,
     host: Option<String>,
+    published: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -361,6 +362,7 @@ impl Config {
             ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
                 host: None,
+                published: Some(false),
             }),
             i2cp: Some(I2cpConfig { port: 7654 }),
             sam: Some(SamConfig {
@@ -390,9 +392,10 @@ impl Config {
             exploratory: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
-                host: String::from("127.0.0.1"),
+                host: Some(String::from("127.0.0.1")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
+                published: false,
             }),
             i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
             sam_config: Some(emissary_core::SamConfig {
@@ -428,6 +431,7 @@ impl Config {
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
+                        published: Some(false),
                     }),
                     i2cp: Some(I2cpConfig { port: 7654 }),
                     sam: Some(SamConfig {
@@ -461,7 +465,8 @@ impl Config {
             }),
             ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
-                host: config.host.unwrap_or(String::from("127.0.0.1")),
+                host: config.host,
+                published: config.published.unwrap_or(false),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
@@ -606,7 +611,7 @@ mod tests {
         assert_eq!(config.ntcp2_config.as_ref().unwrap().port, 8888);
         assert_eq!(
             config.ntcp2_config.as_ref().unwrap().host,
-            String::from("127.0.0.1")
+            Some(String::from("127.0.0.1"))
         );
 
         let (key, iv) = {
@@ -677,6 +682,7 @@ mod tests {
             ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
+                published: None,
             }),
             i2cp: Some(I2cpConfig { port: 0u16 }),
             sam: None,

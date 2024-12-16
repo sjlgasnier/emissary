@@ -60,7 +60,10 @@ pub struct Ntcp2Config {
     pub port: u16,
 
     /// NTCP2 listen address.
-    pub host: String,
+    pub host: Option<String>,
+
+    /// Should NTCP2 be published in router info.
+    pub published: bool,
 
     /// NTCP2 key.
     pub key: [u8; 32],

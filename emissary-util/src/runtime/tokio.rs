@@ -145,7 +145,7 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?address,
-                    ?error,
+                    error = ?error.kind(),
                     "failed to bind"
                 );
             })

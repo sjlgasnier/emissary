@@ -458,7 +458,7 @@ mod tests {
                     TransportKind::Ntcp2,
                     self.router_address
                         .take()
-                        .unwrap_or(RouterAddress::new_unpublished(self.ntcp2_key.clone())),
+                        .unwrap_or(RouterAddress::new_unpublished(self.ntcp2_key.clone(), 8888)),
                 )]),
                 options: HashMap::from_iter([
                     (Str::from("netId"), Str::from(self.net_id.to_string())),

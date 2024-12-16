@@ -1818,7 +1818,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -1909,7 +1909,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2176,7 +2176,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2638,7 +2638,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2671,7 +2671,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2855,7 +2855,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("99")),
@@ -3018,7 +3018,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),

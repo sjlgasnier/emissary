@@ -95,12 +95,6 @@ impl<R: Runtime> Ntcp2Transport<R> {
             .socket_address
             .expect("to exist");
 
-        tracing::info!(
-            target: LOG_TARGET,
-            address = ?socket_address,
-            "starting ntcp2",
-        );
-
         let listener = Ntcp2Listener::new(socket_address).await?;
 
         let session_manager = SessionManager::new(
@@ -112,10 +106,10 @@ impl<R: Runtime> Ntcp2Transport<R> {
             profile_storage,
         )?;
 
-        tracing::trace!(
+        tracing::info!(
             target: LOG_TARGET,
             listen_address = ?socket_address,
-            "starting ntcp2 transport",
+            "starting ntcp2",
         );
 
         Ok(Ntcp2Transport {
