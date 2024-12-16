@@ -204,6 +204,16 @@ impl<R: Runtime> OutboundEndpoint<R> {
                     )?,
                 };
 
+                if message.expiration < R::time_since_epoch() {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        message_id = ?message.message_id,
+                        message_type = ?message.message_type,
+                        "dropping expired i2np message",
+                    );
+                    return None;
+                }
+
                 match delivery_instructions {
                     OwnedDeliveryInstructions::Local => {
                         tracing::warn!(
@@ -483,5 +493,238 @@ mod tests {
         tunnel.routing_table.send_message(router_id, message).unwrap();
         assert!(manager_rx.try_recv().is_ok());
         assert!(transit_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn expired_unfragmented_message() {
+        let (_tx, rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
+        let router_id = RouterId::from(vec![1, 2, 3, 4]);
+        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+
+        let obep_key = StaticPrivateKey::random(MockRuntime::rng());
+        let obep_router_id = RouterId::random();
+
+        let obgw_key = StaticPrivateKey::random(MockRuntime::rng());
+        let obgw_router_id = RouterId::random();
+
+        let (pending, router_id, mut message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: vec![(
+                        Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+                        obep_key.public(),
+                    )],
+                    noise: NoiseContext::new(
+                        obgw_key,
+                        Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                    ),
+                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway: TunnelId::random(),
+                        tunnel_id: TunnelId::random(),
+                        router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(router_id, obep_router_id);
+
+        // build 1-hop tunnel
+        let (obep_keys, obgw) = {
+            let obep_noise = NoiseContext::new(
+                obep_key.clone(),
+                Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+            );
+
+            // create tunnel session
+            let mut obep_session = obep_noise.create_short_inbound_session(
+                EphemeralPublicKey::from_bytes(
+                    pending.hops()[0].outbound_session().ephemeral_key(),
+                )
+                .unwrap(),
+            );
+
+            let router_id = Into::<Vec<u8>>::into(obep_router_id.clone());
+            let (idx, record) = message.payload[1..]
+                .chunks_mut(218)
+                .enumerate()
+                .find(|(_, chunk)| &chunk[..16] == &router_id[..16])
+                .unwrap();
+            let _decrypted_record = obep_session.decrypt_build_record(record[48..].to_vec());
+            obep_session.create_tunnel_keys(HopRole::OutboundEndpoint).unwrap();
+
+            record[48] = 0x00;
+            record[49] = 0x00;
+            record[201] = 0x00;
+
+            obep_session.encrypt_build_records(&mut message.payload, idx).unwrap();
+            let keys = obep_session.finalize().unwrap();
+
+            let msg = MessageBuilder::standard()
+                .with_message_type(MessageType::OutboundTunnelBuildReply)
+                .with_message_id(MockRuntime::rng().next_u32())
+                .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(5))
+                .with_payload(&message.payload)
+                .build();
+            let message = Message::parse_standard(&msg).unwrap();
+
+            (
+                keys,
+                pending.try_build_tunnel::<MockRuntime>(message).unwrap(),
+            )
+        };
+
+        let message = MessageBuilder::standard()
+            .with_expiration(MockRuntime::time_since_epoch() - Duration::from_secs(5))
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(MockRuntime::rng().next_u32())
+            .with_payload(&vec![1, 2, 3, 4])
+            .build();
+
+        let (_to_router, mut messages) = obgw.send_to_router(obep_router_id.clone(), message);
+        let message = messages.next().expect("to exist");
+
+        let message = Message::parse_short(&message).unwrap();
+        let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
+
+        let mut tunnel = OutboundEndpoint::<MockRuntime>::new(
+            TunnelId::random(),
+            TunnelId::random(),
+            RouterId::random(),
+            obep_keys,
+            routing_table,
+            MockRuntime::register_metrics(vec![]),
+            rx,
+        );
+        assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_fragmented_message() {
+        crate::util::init_logger();
+
+        let (_tx, rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
+        let router_id = RouterId::from(vec![1, 2, 3, 4]);
+        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+
+        let obep_key = StaticPrivateKey::random(MockRuntime::rng());
+        let obep_router_id = RouterId::random();
+
+        let obgw_key = StaticPrivateKey::random(MockRuntime::rng());
+        let obgw_router_id = RouterId::random();
+
+        let (pending, router_id, mut message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: vec![(
+                        Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+                        obep_key.public(),
+                    )],
+                    noise: NoiseContext::new(
+                        obgw_key,
+                        Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                    ),
+                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway: TunnelId::random(),
+                        tunnel_id: TunnelId::random(),
+                        router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(router_id, obep_router_id);
+
+        // build 1-hop tunnel
+        let (obep_keys, obgw) = {
+            let obep_noise = NoiseContext::new(
+                obep_key.clone(),
+                Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+            );
+
+            // create tunnel session
+            let mut obep_session = obep_noise.create_short_inbound_session(
+                EphemeralPublicKey::from_bytes(
+                    pending.hops()[0].outbound_session().ephemeral_key(),
+                )
+                .unwrap(),
+            );
+
+            let router_id = Into::<Vec<u8>>::into(obep_router_id.clone());
+            let (idx, record) = message.payload[1..]
+                .chunks_mut(218)
+                .enumerate()
+                .find(|(_, chunk)| &chunk[..16] == &router_id[..16])
+                .unwrap();
+            let _decrypted_record = obep_session.decrypt_build_record(record[48..].to_vec());
+            obep_session.create_tunnel_keys(HopRole::OutboundEndpoint).unwrap();
+
+            record[48] = 0x00;
+            record[49] = 0x00;
+            record[201] = 0x00;
+
+            obep_session.encrypt_build_records(&mut message.payload, idx).unwrap();
+            let keys = obep_session.finalize().unwrap();
+
+            let msg = MessageBuilder::standard()
+                .with_message_type(MessageType::OutboundTunnelBuildReply)
+                .with_message_id(MockRuntime::rng().next_u32())
+                .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(5))
+                .with_payload(&message.payload)
+                .build();
+            let message = Message::parse_standard(&msg).unwrap();
+
+            (
+                keys,
+                pending.try_build_tunnel::<MockRuntime>(message).unwrap(),
+            )
+        };
+
+        // message expires in one second
+        let message = MessageBuilder::standard()
+            .with_expiration(MockRuntime::time_since_epoch() + Duration::from_secs(1))
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(MockRuntime::rng().next_u32())
+            .with_payload(&vec![0xaa; 2048])
+            .build();
+
+        let mut tunnel = OutboundEndpoint::<MockRuntime>::new(
+            TunnelId::random(),
+            TunnelId::random(),
+            RouterId::random(),
+            obep_keys,
+            routing_table,
+            MockRuntime::register_metrics(vec![]),
+            rx,
+        );
+
+        let (_to_router, messages) = obgw.send_to_router(obep_router_id.clone(), message);
+        let messages = messages.collect::<Vec<_>>();
+        assert_eq!(messages.len(), 3);
+
+        // send first two fragments and verify there's no output
+        for i in 0..2 {
+            let message = Message::parse_short(&messages[i]).unwrap();
+            let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
+
+            assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
+        }
+
+        // sleep for two seconds and allow the fragments to expire
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // send third message and verify there's no output because the fragments were expired
+        let message = Message::parse_short(&messages[2]).unwrap();
+        let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
+
+        assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
     }
 }

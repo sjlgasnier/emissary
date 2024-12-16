@@ -358,6 +358,7 @@ pub enum Error {
     Missing,
     Session(SessionError),
     NetworkMismatch,
+    Expired,
 }
 
 impl fmt::Display for Error {
@@ -383,6 +384,7 @@ impl fmt::Display for Error {
             Self::Missing => write!(f, "value missing"),
             Self::Session(error) => write!(f, "session error: {error}"),
             Self::NetworkMismatch => write!(f, "network mismatch"),
+            Self::Expired => write!(f, "message has expired"),
         }
     }
 }

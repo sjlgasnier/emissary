@@ -22,7 +22,7 @@ use crate::{
         sha256::Sha256,
         EphemeralPrivateKey,
     },
-    error::TunnelError,
+    error::{Error, TunnelError},
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBlock, GarlicMessageBuilder},
         tunnel::build::short,
@@ -34,7 +34,6 @@ use crate::{
         outbound::OutboundTunnel, ReceiverKind, Tunnel, TunnelBuildParameters, TunnelBuilder,
         TunnelDirection, TunnelHop, TunnelInfo,
     },
-    Error,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};

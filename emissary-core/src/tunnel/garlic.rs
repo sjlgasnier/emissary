@@ -147,59 +147,72 @@ impl<R: Runtime> GarlicHandler<R> {
                     expiration,
                     delivery_instructions,
                     message_body,
-                } => match delivery_instructions {
-                    CloveDeliveryInstructions::Local => Some(DeliveryInstructions::Local {
-                        message: Message {
-                            message_type,
-                            message_id: *message_id,
-                            expiration,
-                            payload: message_body.to_vec(),
-                        },
-                    }),
-                    CloveDeliveryInstructions::Router { hash } =>
-                        Some(DeliveryInstructions::Router {
-                            router: RouterId::from(hash),
-                            message: MessageBuilder::short()
+                } => {
+                    if expiration < R::time_since_epoch() {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?message_id,
+                            ?message_type,
+                            ?delivery_instructions,
+                            "dropping expired i2np message",
+                        );
+                        return None;
+                    }
+
+                    match delivery_instructions {
+                        CloveDeliveryInstructions::Local => Some(DeliveryInstructions::Local {
+                            message: Message {
+                                message_type,
+                                message_id: *message_id,
+                                expiration,
+                                payload: message_body.to_vec(),
+                            },
+                        }),
+                        CloveDeliveryInstructions::Router { hash } =>
+                            Some(DeliveryInstructions::Router {
+                                router: RouterId::from(hash),
+                                message: MessageBuilder::short()
+                                    .with_message_type(message_type)
+                                    .with_message_id(message_id)
+                                    .with_expiration(expiration)
+                                    .with_payload(message_body)
+                                    .build(),
+                            }),
+                        CloveDeliveryInstructions::Tunnel { hash, tunnel_id } => {
+                            let message = MessageBuilder::standard()
                                 .with_message_type(message_type)
                                 .with_message_id(message_id)
                                 .with_expiration(expiration)
                                 .with_payload(message_body)
-                                .build(),
-                        }),
-                    CloveDeliveryInstructions::Tunnel { hash, tunnel_id } => {
-                        let message = MessageBuilder::standard()
-                            .with_message_type(message_type)
-                            .with_message_id(message_id)
-                            .with_expiration(expiration)
-                            .with_payload(message_body)
-                            .build();
+                                .build();
 
-                        let message = TunnelGateway {
-                            tunnel_id: tunnel_id.into(),
-                            payload: &message,
+                            let message = TunnelGateway {
+                                tunnel_id: tunnel_id.into(),
+                                payload: &message,
+                            }
+                            .serialize();
+
+                            Some(DeliveryInstructions::Tunnel {
+                                tunnel: TunnelId::from(tunnel_id),
+                                router: RouterId::from(hash),
+                                message: MessageBuilder::short()
+                                    .with_message_type(MessageType::TunnelGateway)
+                                    .with_message_id(R::rng().next_u32())
+                                    .with_expiration(expiration)
+                                    .with_payload(&message)
+                                    .build(),
+                            })
                         }
-                        .serialize();
-
-                        Some(DeliveryInstructions::Tunnel {
-                            tunnel: TunnelId::from(tunnel_id),
-                            router: RouterId::from(hash),
-                            message: MessageBuilder::short()
-                                .with_message_type(MessageType::TunnelGateway)
-                                .with_message_id(R::rng().next_u32())
-                                .with_expiration(expiration)
-                                .with_payload(&message)
-                                .build(),
-                        })
+                        CloveDeliveryInstructions::Destination { hash } => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?hash,
+                                "ignoring destination",
+                            );
+                            None
+                        }
                     }
-                    CloveDeliveryInstructions::Destination { hash } => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?hash,
-                            "ignoring destination",
-                        );
-                        None
-                    }
-                },
+                }
                 block => {
                     tracing::trace!(
                         target: LOG_TARGET,
@@ -226,6 +239,7 @@ mod tests {
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use rand_core::RngCore;
+    use std::time::Duration;
 
     #[test]
     fn serialize_deserialize() {
@@ -360,5 +374,84 @@ mod tests {
             }
             _ => panic!("invalid delivery type"),
         }
+    }
+
+    #[test]
+    fn expired_garlic_clove() {
+        let remote_key = StaticPrivateKey::random(rand::thread_rng());
+        let remote_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let local_key = StaticPrivateKey::random(rand::thread_rng());
+        let local_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let mut garlic = GarlicHandler::<MockRuntime>::new(
+            NoiseContext::new(remote_key.clone(), remote_router_id),
+            MockRuntime::register_metrics(vec![]),
+        );
+
+        // construct garlic message
+        let message_id_1 = MessageId::from(MockRuntime::rng().next_u32());
+        let message_id_2 = MessageId::from(MockRuntime::rng().next_u32());
+
+        let router_delivery_router = RouterId::random();
+
+        let mut message = GarlicMessageBuilder::default()
+            .with_date_time(MockRuntime::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::Data,
+                message_id_1,
+                MockRuntime::time_since_epoch() - Duration::from_secs(5),
+                CloveDeliveryInstructions::Local,
+                &vec![1, 1, 1, 1],
+            )
+            .with_garlic_clove(
+                MessageType::Data,
+                message_id_2,
+                MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                CloveDeliveryInstructions::Router {
+                    hash: &router_delivery_router.to_vec(),
+                },
+                &vec![2, 2, 2, 2],
+            )
+            .build();
+
+        let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+        // derive outbound garlic context
+        let local_noise = NoiseContext::new(local_key, local_router_id);
+        let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
+        let ephemeral_public = ephemeral_secret.public_key();
+        let (local_key, local_state) =
+            local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
+
+        ChaChaPoly::new(&local_key)
+            .encrypt_with_ad_new(&local_state, &mut message)
+            .unwrap();
+
+        out.put_u32(message.len() as u32 + 32);
+        out.put_slice(&ephemeral_public.to_vec());
+        out.put_slice(&message);
+
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: MockRuntime::rng().next_u32(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: out.to_vec(),
+        };
+
+        let mut blocks = garlic.handle_message(message).unwrap();
+
+        match blocks.next().unwrap() {
+            DeliveryInstructions::Router { router, message } => {
+                assert_eq!(router, router_delivery_router);
+
+                let message = Message::parse_short(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Data);
+                assert_eq!(message.message_id, *message_id_2);
+                assert_eq!(message.payload, vec![2, 2, 2, 2]);
+            }
+            _ => panic!("invalid delivery type"),
+        }
+        assert!(blocks.next().is_none());
     }
 }
