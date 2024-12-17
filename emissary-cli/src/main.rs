@@ -16,12 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{cli::Arguments, config::Config, error::Error};
+use crate::{cli::Arguments, config::Config, error::Error, signal::SignalHandler};
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::router::Router;
+use emissary_core::router::{Router, RouterEvent};
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
+use futures::StreamExt;
 
 use std::{fs::File, io::Write};
 
@@ -29,6 +30,7 @@ mod cli;
 mod config;
 mod error;
 mod logger;
+mod signal;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -42,6 +44,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
+    let mut handler = SignalHandler::new();
 
     // initialize logger with any logging directive given as a cli argument
     let handle = init_logger!(arguments.log.clone());
@@ -100,13 +103,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let path = config.base_path.clone();
-    let (router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
+    let (mut router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
 
     // TODO: ugly
     let mut file = File::create(path.join("router.info"))?;
     file.write_all(&local_router_info)?;
 
-    let _ = router.await;
-
-    Ok(())
+    loop {
+        tokio::select! {
+            _ = handler.next() => {
+                router.shutdown();
+            }
+            event = router.next() => match event {
+                None => return Ok(()),
+                Some(RouterEvent::Shutdown) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        "emissary shut down",
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    }
 }

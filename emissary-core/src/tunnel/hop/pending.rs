@@ -448,6 +448,7 @@ mod test {
         i2np::tunnel::gateway::TunnelGateway,
         primitives::MessageId,
         runtime::mock::MockRuntime,
+        shutdown::ShutdownContext,
         tunnel::{
             garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler},
             hop::inbound::InboundTunnel,
@@ -525,7 +526,7 @@ mod test {
         let handle = MockRuntime::register_metrics(vec![]);
 
         let (hops, mut transit_managers): (
-            Vec<(Bytes, StaticPublicKey)>,
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<(
                 GarlicHandler<MockRuntime>,
                 TransitTunnelManager<MockRuntime>,
@@ -536,11 +537,13 @@ mod test {
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk),
+                    (router_hash, pk, shutdown_ctx),
                     (
                         GarlicHandler::new(noise_context.clone(), handle.clone()),
                         TransitTunnelManager::new(
@@ -548,6 +551,7 @@ mod test {
                             routing_table,
                             transit_rx,
                             handle.clone(),
+                            shutdown_handle,
                         ),
                     ),
                 )
@@ -558,6 +562,10 @@ mod test {
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let _gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
         let TunnelPoolBuildParameters {
             context_handle: handle,
             ..

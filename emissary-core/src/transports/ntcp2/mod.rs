@@ -111,6 +111,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         tracing::info!(
             target: LOG_TARGET,
             listen_address = ?socket_address,
+            ?allow_local,
             "starting ntcp2",
         );
 

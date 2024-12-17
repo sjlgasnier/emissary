@@ -97,7 +97,7 @@ impl<R: Runtime> InboundGateway<R> {
             "tunnel gateway",
         );
 
-        match Message::parse_standard(&tunnel_gateway.payload) {
+        match Message::parse_standard(tunnel_gateway.payload) {
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,

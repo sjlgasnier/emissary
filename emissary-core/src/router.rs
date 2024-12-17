@@ -24,17 +24,17 @@ use crate::{
     profile::ProfileStorage,
     runtime::Runtime,
     sam::SamServer,
+    shutdown::ShutdownContext,
     subsystem::SubsystemKind,
     transports::TransportManager,
     tunnel::{TunnelManager, TunnelManagerHandle},
     Config, I2cpConfig, SamConfig,
 };
 
-use futures::FutureExt;
+use futures::{FutureExt, Stream};
 
 use alloc::vec::Vec;
 use core::{
-    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -45,11 +45,25 @@ const LOG_TARGET: &str = "emissary::router";
 /// Default network ID.
 const NET_ID: u8 = 2u8;
 
+/// How many times [`Router::shutdown()`] needs to be called until the router is shutdown
+/// immediately, cancelling graceful shutdown.
+const IMMEDIATE_SHUTDOWN_COUNT: usize = 2usize;
+
+/// Events emitted by [`Router`].
 #[derive(Debug)]
-pub enum RouterEvent {}
+pub enum RouterEvent {
+    /// Router has been shut down.
+    Shutdown,
+}
 
 /// Router.
 pub struct Router<R: Runtime> {
+    /// Shutdown context.
+    shutdown_context: ShutdownContext<R>,
+
+    /// Number of times shutdown has been requested.
+    shutdown_count: usize,
+
     /// Transport manager
     ///
     /// Polls both NTCP2 and SSU2 transports.
@@ -86,11 +100,18 @@ impl<R: Runtime> Router<R> {
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
 
+        // create router shutdown context and allocate handle `TransitTunnelManager`
+        //
+        // `TransitTunnelManager` can take up to 10 minutes to shut down, depending on the age
+        // of the newest transit tunnel
+        let mut shutdown_context = ShutdownContext::<R>::new();
+        let transit_shutdown_handle = shutdown_context.handle();
+
         tracing::info!(
             target: LOG_TARGET,
             ?local_router_id,
             net_id = ?net_id.unwrap_or(NET_ID),
-            "start emissary",
+            "starting emissary",
         );
 
         // collect metrics from all subsystems, register them and acquire metrics handle
@@ -127,6 +148,7 @@ impl<R: Runtime> Router<R> {
                     profile_storage.clone(),
                     exploratory.into(),
                     insecure_tunnels,
+                    transit_shutdown_handle,
                 );
 
             R::spawn(tunnel_manager);
@@ -188,18 +210,53 @@ impl<R: Runtime> Router<R> {
 
         Ok((
             Self {
+                shutdown_context,
+                shutdown_count: 0usize,
                 transport_manager,
                 _tunnel_manager_handle: tunnel_manager_handle,
             },
             serialized_router_info,
         ))
     }
+
+    /// Shut down the router.
+    ///
+    /// The first request to shutdown the router starts a graceful shutdown and TOOD
+    pub fn shutdown(&mut self) {
+        self.shutdown_count += 1;
+
+        if self.shutdown_count == 1 {
+            tracing::info!(
+                target: LOG_TARGET,
+                "starting graceful shutdown",
+            );
+            self.shutdown_context.shutdown();
+        } else {
+            tracing::info!(
+                target: LOG_TARGET,
+                "shutting down router",
+            );
+        }
+    }
 }
 
-impl<R: Runtime> Future for Router<R> {
-    type Output = ();
+impl<R: Runtime> Stream for Router<R> {
+    type Item = RouterEvent;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.transport_manager.poll_unpin(cx)
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.shutdown_count >= IMMEDIATE_SHUTDOWN_COUNT {
+            return Poll::Ready(Some(RouterEvent::Shutdown));
+        }
+
+        if self.shutdown_context.poll_unpin(cx).is_ready() {
+            return Poll::Ready(Some(RouterEvent::Shutdown));
+        }
+
+        match self.transport_manager.poll_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(()) => return Poll::Ready(None),
+        }
+
+        Poll::Pending
     }
 }

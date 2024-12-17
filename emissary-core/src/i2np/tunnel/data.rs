@@ -120,8 +120,8 @@ impl<'a> EncryptedTunnelData<'a> {
     pub fn xor(&self) -> [u8; AES256_IV_LEN] {
         let mut result = [0u8; AES256_IV_LEN];
 
-        for i in 0..AES256_IV_LEN {
-            result[i] = self.iv[i] ^ self.ciphertext[i];
+        for (i, item) in result.iter_mut().enumerate().take(AES256_IV_LEN) {
+            *item = self.iv[i] ^ self.ciphertext[i];
         }
 
         result

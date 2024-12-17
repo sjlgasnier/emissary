@@ -21,6 +21,7 @@ use crate::{
     i2np::{tunnel::gateway, Message, MessageType},
     primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
+    shutdown::ShutdownContext,
     tunnel::{
         garlic::DeliveryInstructions,
         hop::{
@@ -100,6 +101,9 @@ pub struct TestTransitTunnelManager {
 
     /// Routing table.
     routing_table: RoutingTable,
+
+    /// Shutdown context.
+    _shutdown_ctx: ShutdownContext<MockRuntime>,
 }
 
 impl fmt::Debug for TestTransitTunnelManager {
@@ -117,6 +121,7 @@ impl TestTransitTunnelManager {
         let (message_tx, message_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
+        let mut _shutdown_ctx = ShutdownContext::<MockRuntime>::new();
 
         Self {
             garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![])),
@@ -125,13 +130,15 @@ impl TestTransitTunnelManager {
                 routing_table.clone(),
                 transit_rx,
                 MockRuntime::register_metrics(vec![]),
+                _shutdown_ctx.handle(),
             ),
             message_rx,
             public_key,
             router_hash: router_hash.clone(),
+            router_info,
             router: RouterId::from(router_hash),
             routing_table,
-            router_info,
+            _shutdown_ctx,
         }
     }
 

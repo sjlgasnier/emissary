@@ -16,41 +16,37 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(clippy::wrong_self_convention)]
-#![allow(clippy::manual_async_fn)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::enum_variant_names)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::assign_op_pattern)]
-#![allow(clippy::new_ret_no_self)]
-#![allow(clippy::module_inception)]
+use futures::Stream;
+use tokio::sync::mpsc::{channel, Receiver};
 
-extern crate alloc;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-pub type Result<T> = core::result::Result<T, Error>;
+/// SIGINT signal handler.
+pub struct SignalHandler {
+    rx: Receiver<()>,
+}
 
-pub use config::{Config, ExploratoryConfig, I2cpConfig, Ntcp2Config, SamConfig};
-pub use error::Error;
-pub use profile::Profile;
+impl SignalHandler {
+    /// Create new [`SignalHandler`].
+    pub fn new() -> Self {
+        let (tx, rx) = channel(16);
 
-mod bloom;
-mod config;
-mod crypto;
-mod destination;
-mod error;
-mod i2cp;
-mod netdb;
-mod profile;
-mod sam;
-mod shutdown;
-mod subsystem;
-mod transports;
-mod tunnel;
-mod util;
+        ctrlc::set_handler(move || {
+            let _ = tx.try_send(());
+        })
+        .expect("to succeed");
 
-pub mod i2np;
-pub mod primitives;
-pub mod protocol;
-pub mod router;
-pub mod runtime;
+        Self { rx }
+    }
+}
+
+impl Stream for SignalHandler {
+    type Item = ();
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}

@@ -32,6 +32,7 @@ tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 x25519-dalek = { workspace = true, features = ["getrandom", "static_secrets"] }
+ctrlc = "3.4.5"
 
 [dev-dependencies]
 tempfile = "3.10.1"

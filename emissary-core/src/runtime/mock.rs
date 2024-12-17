@@ -207,7 +207,8 @@ impl Gauge for MockMetricsGauge {
     fn decrement(&mut self, value: usize) {
         GAUGES.with(|v| {
             let mut inner = v.write();
-            *inner.entry(self.name).or_default() -= value;
+            let entry = inner.entry(self.name).or_default();
+            *entry = value.saturating_sub(value);
         });
     }
 }
