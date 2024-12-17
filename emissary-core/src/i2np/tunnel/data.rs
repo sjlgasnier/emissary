@@ -62,6 +62,9 @@ const LAST_FRAGMENT: u8 = 0x01;
 /// Maximum size for `TunnelData` message.
 const TUNNEL_DATA_LEN: usize = 1028usize;
 
+/// Tunnel data payload length.
+const TUNNEL_DATA_PAYLOAD_LEN: usize = 1008usize;
+
 /// Encrypted tunnel data.
 pub struct EncryptedTunnelData<'a> {
     /// Tunnel ID.
@@ -81,7 +84,7 @@ impl<'a> EncryptedTunnelData<'a> {
     pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], EncryptedTunnelData<'a>> {
         let (rest, tunnel_id) = be_u32(input)?;
         let (rest, iv) = take(AES256_IV_LEN)(rest)?;
-        let (rest, ciphertext) = take(rest.len())(rest)?;
+        let (rest, ciphertext) = take(TUNNEL_DATA_PAYLOAD_LEN)(rest)?;
 
         Ok((
             rest,
@@ -111,6 +114,17 @@ impl<'a> EncryptedTunnelData<'a> {
     /// Get reference to ciphertext ([`TunnelData`]).
     pub fn ciphertext(&self) -> &[u8] {
         self.ciphertext
+    }
+
+    /// Get XOR of IV and ciphertext's first block.
+    pub fn xor(&self) -> [u8; AES256_IV_LEN] {
+        let mut result = [0u8; AES256_IV_LEN];
+
+        for i in 0..AES256_IV_LEN {
+            result[i] = self.iv[i] ^ self.ciphertext[i];
+        }
+
+        result
     }
 }
 

@@ -359,6 +359,8 @@ pub enum Error {
     Session(SessionError),
     NetworkMismatch,
     Expired,
+    Routing(RoutingError),
+    Duplicate,
 }
 
 impl fmt::Display for Error {
@@ -385,6 +387,8 @@ impl fmt::Display for Error {
             Self::Session(error) => write!(f, "session error: {error}"),
             Self::NetworkMismatch => write!(f, "network mismatch"),
             Self::Expired => write!(f, "message has expired"),
+            Self::Routing(error) => write!(f, "{error}"),
+            Self::Duplicate => write!(f, "duplicate message"),
         }
     }
 }
@@ -404,6 +408,12 @@ impl From<chacha20poly1305::Error> for Error {
 impl From<Error> for SessionError {
     fn from(_: Error) -> Self {
         SessionError::Chacha
+    }
+}
+
+impl From<RoutingError> for Error {
+    fn from(value: RoutingError) -> Self {
+        Error::Routing(value)
     }
 }
 

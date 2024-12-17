@@ -34,6 +34,7 @@ pub use config::{Config, ExploratoryConfig, I2cpConfig, Ntcp2Config, SamConfig};
 pub use error::Error;
 pub use profile::Profile;
 
+mod bloom;
 mod config;
 mod crypto;
 mod destination;

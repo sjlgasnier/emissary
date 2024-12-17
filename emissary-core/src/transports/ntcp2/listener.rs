@@ -25,6 +25,7 @@ use crate::{
 
 use futures::Stream;
 
+use alloc::{format, string::String};
 use core::{
     net::SocketAddr,
     pin::Pin,
