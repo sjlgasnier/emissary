@@ -243,7 +243,10 @@ impl Runtime for NoopRuntime {
         NoopJoinSet(task::JoinSet::<T>::new())
     }
 
-    fn register_metrics(_metrics: Vec<crate::runtime::MetricType>) -> Self::MetricsHandle {
+    fn register_metrics(
+        _metrics: Vec<crate::runtime::MetricType>,
+        _: Option<u16>,
+    ) -> Self::MetricsHandle {
         NoopMetricsHandle {}
     }
 

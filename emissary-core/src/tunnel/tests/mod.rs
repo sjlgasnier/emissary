@@ -124,12 +124,12 @@ impl TestTransitTunnelManager {
         let mut _shutdown_ctx = ShutdownContext::<MockRuntime>::new();
 
         Self {
-            garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![])),
+            garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![], None)),
             manager: TransitTunnelManager::<MockRuntime>::new(
                 noise,
                 routing_table.clone(),
                 transit_rx,
-                MockRuntime::register_metrics(vec![]),
+                MockRuntime::register_metrics(vec![], None),
                 _shutdown_ctx.handle(),
             ),
             message_rx,

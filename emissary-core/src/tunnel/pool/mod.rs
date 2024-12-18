@@ -1194,7 +1194,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
@@ -1278,7 +1278,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
@@ -1358,7 +1358,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
@@ -1455,7 +1455,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
@@ -1548,7 +1548,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table =
@@ -1814,7 +1814,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table =
@@ -2069,7 +2069,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
@@ -2159,7 +2159,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
@@ -2258,7 +2258,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table =
@@ -2479,7 +2479,7 @@ mod tests {
                 our_hash.clone(),
             )
         };
-        let handle = MockRuntime::register_metrics(Vec::new());
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table =

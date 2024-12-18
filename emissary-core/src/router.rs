@@ -101,6 +101,7 @@ impl<R: Runtime> Router<R> {
             routers,
             profiles,
             allow_local,
+            metrics_server_port,
             ..
         } = config;
 
@@ -131,7 +132,7 @@ impl<R: Runtime> Router<R> {
             let metrics = TunnelManager::<R>::metrics(metrics);
             let metrics = NetDb::<R>::metrics(metrics);
 
-            R::register_metrics(metrics)
+            R::register_metrics(metrics, metrics_server_port)
         };
 
         // create transport manager and initialize & start enabled transports

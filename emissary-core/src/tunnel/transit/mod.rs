@@ -673,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tunnel_build_request_participant() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -731,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tunnel_build_request_ibgw() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<(
@@ -804,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tunnel_build_request_obep() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn local_record_not_found() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, _transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -963,7 +963,7 @@ mod tests {
 
     #[test]
     fn invalid_public_key_used() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (mut hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_shutting_down_tunnel_rejected() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
@@ -1124,7 +1124,7 @@ mod tests {
     async fn transit_manager_exits_after_all_tunnels_have_expired() {
         crate::util::init_logger();
 
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (router_hash, _pk, noise_context, _) = make_router(true);
         let (transit_tx, transit_rx) = channel(16);
         let (manager_tx, _manager_rx) = channel(16);

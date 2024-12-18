@@ -251,7 +251,7 @@ mod tests {
 
         let mut garlic = GarlicHandler::<MockRuntime>::new(
             NoiseContext::new(remote_key.clone(), remote_router_id),
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
         );
 
         // construct garlic message
@@ -386,7 +386,7 @@ mod tests {
 
         let mut garlic = GarlicHandler::<MockRuntime>::new(
             NoiseContext::new(remote_key.clone(), remote_router_id),
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
         );
 
         // construct garlic message

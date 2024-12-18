@@ -98,6 +98,7 @@ struct EmissaryConfig {
     log: Option<String>,
     net_id: Option<u8>,
     ntcp2: Option<Ntcp2Config>,
+    prometheus_port: Option<u16>,
     sam: Option<SamConfig>,
 }
 
@@ -136,6 +137,9 @@ pub struct Config {
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
 
+    /// Prometheus port.
+    pub prometheus_port: Option<u16>,
+
     /// Router info.
     pub router_info: Option<Vec<u8>>,
 
@@ -169,6 +173,7 @@ impl From<Config> for emissary_core::Config {
             samv3_config: val.sam_config,
             signing_key: val.signing_key,
             static_key: val.static_key,
+            metrics_server_port: val.prometheus_port,
         }
     }
 }
@@ -387,6 +392,7 @@ impl Config {
             insecure_tunnels: false,
             allow_local: false,
             log: None,
+            prometheus_port: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -460,6 +466,7 @@ impl Config {
                     insecure_tunnels: false,
                     allow_local: false,
                     log: None,
+                    prometheus_port: None,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -502,6 +509,7 @@ impl Config {
             allow_local: config.allow_local,
             log: config.log,
             router_info,
+            prometheus_port: config.prometheus_port,
         })
     }
 
@@ -587,6 +595,10 @@ impl Config {
             if !self.allow_local {
                 self.allow_local = true;
             }
+        }
+
+        if let Some(port) = arguments.prometheus_port {
+            self.prometheus_port = Some(port);
         }
 
         if let Some(ref caps) = arguments.caps {
@@ -718,6 +730,7 @@ mod tests {
             insecure_tunnels: false,
             allow_local: false,
             log: None,
+            prometheus_port: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

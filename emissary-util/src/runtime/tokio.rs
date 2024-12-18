@@ -343,9 +343,16 @@ impl RuntimeT for Runtime {
         TokioJoinSet(task::JoinSet::<T>::new(), None)
     }
 
-    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
-        let builder = PrometheusBuilder::new()
-            .with_http_listener("0.0.0.0:12842".parse::<SocketAddr>().expect(""));
+    fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle {
+        let address = format!("0.0.0.0:{}", port.unwrap_or(12842));
+        let builder =
+            PrometheusBuilder::new().with_http_listener(address.parse::<SocketAddr>().expect(""));
+
+        tracing::info!(
+            target: LOG_TARGET,
+            ?address,
+            "starting prometheus server",
+        );
 
         metrics
             .into_iter()

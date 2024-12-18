@@ -344,7 +344,7 @@ impl Runtime for MockRuntime {
     }
 
     /// Register `metrics` and return handle for registering metrics.
-    fn register_metrics(_: Vec<crate::runtime::MetricType>) -> Self::MetricsHandle {
+    fn register_metrics(_: Vec<crate::runtime::MetricType>, _: Option<u16>) -> Self::MetricsHandle {
         MockMetricsHandle {}
     }
 

@@ -270,7 +270,7 @@ mod tests {
         let (ibgw_router_hash, ibgw_public_key, ibgw_noise, ibgw_router_info) = make_router(false);
         let mut ibgw_garlic = GarlicHandler::<MockRuntime>::new(
             ibgw_noise.clone(),
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
         );
         let (_ibep_router_hash, _ibep_public_key, ibep_noise, ibep_router_info) =
             make_router(false);
@@ -361,7 +361,7 @@ mod tests {
             RouterId::random(),
             ibgw_keys,
             routing_table,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             msg_rx,
         );
 
@@ -388,7 +388,7 @@ mod tests {
         let (ibgw_router_hash, ibgw_public_key, ibgw_noise, ibgw_router_info) = make_router(false);
         let mut ibgw_garlic = GarlicHandler::<MockRuntime>::new(
             ibgw_noise.clone(),
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
         );
         let (_ibep_router_hash, _ibep_public_key, ibep_noise, ibep_router_info) =
             make_router(false);
@@ -479,7 +479,7 @@ mod tests {
             RouterId::random(),
             ibgw_keys,
             routing_table,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             msg_rx,
         );
 

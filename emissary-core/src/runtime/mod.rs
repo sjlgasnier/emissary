@@ -182,7 +182,10 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T>;
 
     /// Register `metrics` and return handle for registering metrics.
-    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle;
+    ///
+    /// An optional port can be specified for the metrics server and if none is specified, the
+    /// runtime will bind to a default port or ignore it alltogether if it doesn't need it.
+    fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle;
 
     /// Return future which blocks for `duration` before returning.
     fn delay(duration: Duration) -> impl Future<Output = ()> + Send;

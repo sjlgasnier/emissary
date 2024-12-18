@@ -523,7 +523,7 @@ mod test {
 
     #[tokio::test]
     async fn create_inbound_tunnel() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,

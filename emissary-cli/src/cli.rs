@@ -105,6 +105,10 @@ pub struct Arguments {
     #[arg(long)]
     pub net_id: Option<u8>,
 
+    /// Prometheus port.
+    #[arg(long)]
+    pub prometheus_port: Option<u16>,
+
     /// Tunnel options.
     #[clap(flatten)]
     pub tunnel: TunnelOptions,

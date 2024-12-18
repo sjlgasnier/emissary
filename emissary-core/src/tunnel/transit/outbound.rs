@@ -483,7 +483,7 @@ mod tests {
             RouterId::random(),
             obep_keys,
             routing_table,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             rx,
         );
 
@@ -597,7 +597,7 @@ mod tests {
             RouterId::random(),
             obep_keys,
             routing_table,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             rx,
         );
         assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
@@ -702,7 +702,7 @@ mod tests {
             RouterId::random(),
             obep_keys,
             routing_table,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             rx,
         );
 

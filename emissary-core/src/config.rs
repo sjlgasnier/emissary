@@ -116,6 +116,9 @@ pub struct Config {
     /// Are tunnels allowed to be insecure.
     pub insecure_tunnels: bool,
 
+    /// Metrics server port.
+    pub metrics_server_port: Option<u16>,
+
     /// Network ID.
     pub net_id: Option<u8>,
 
