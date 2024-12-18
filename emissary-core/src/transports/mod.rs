@@ -19,18 +19,18 @@
 use crate::{
     crypto::SigningPrivateKey,
     error::ChannelError,
-    primitives::{RouterId, RouterInfo, TransportKind},
+    primitives::{RouterId, RouterInfo},
     profile::ProfileStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
-    transports::{metrics::*, ntcp2::Ntcp2Transport},
-    Ntcp2Config,
+    transports::metrics::*,
 };
 
 use futures::{Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use ntcp2::Ntcp2Context;
 use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -43,6 +43,8 @@ use core::{
 mod metrics;
 mod ntcp2;
 mod ssu2;
+
+pub use ntcp2::Ntcp2Transport;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::transport-manager";
@@ -71,7 +73,7 @@ pub enum TransportEvent {
 
 // TODO: `poll_progress()` - only poll pending streams
 // TODO: `poll()` - poll pending streams and listener
-pub trait Transport: Stream + Unpin {
+pub trait Transport: Stream + Unpin + Send {
     /// Connect to `router`.
     //
     // TODO: how to signal preference for transport?
@@ -350,34 +352,17 @@ impl<R: Runtime> TransportManager<R> {
         }
     }
 
-    /// Register enabled transport
-    ///
-    /// The number of transports is fixed and the initialization order is important.
-    //
-    // TODO: this is not correct, fix when ssu2 is implemented
-    pub async fn register_transport(
-        &mut self,
-        kind: TransportKind,
-        config: Ntcp2Config,
-    ) -> crate::Result<()> {
-        let TransportKind::Ntcp2 = kind else {
-            panic!("only ntcp2 is supported");
-        };
-
-        self.transports.push(Box::new(
-            Ntcp2Transport::new(
-                config,
-                self.allow_local,
-                self.local_signing_key.clone(),
-                self.local_router_info.clone(),
-                self.subsystem_handle.clone(),
-                self.profile_storage.clone(),
-                self.metrics_handle.clone(),
-            )
-            .await?,
-        ));
-
-        Ok(())
+    /// Register NTCP2 as an active transport.
+    pub fn register_ntcp2(&mut self, context: Ntcp2Context<R>) {
+        self.transports.push(Box::new(Ntcp2Transport::new(
+            context,
+            self.allow_local,
+            self.local_signing_key.clone(),
+            self.local_router_info.clone(),
+            self.subsystem_handle.clone(),
+            self.profile_storage.clone(),
+            self.metrics_handle.clone(),
+        )))
     }
 }
 

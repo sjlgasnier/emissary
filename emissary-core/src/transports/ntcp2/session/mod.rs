@@ -147,7 +147,7 @@ impl<R: Runtime> SessionManager<R> {
         subsystem_handle: SubsystemHandle,
         profile_storage: ProfileStorage<R>,
         allow_local: bool,
-    ) -> crate::Result<Self> {
+    ) -> Self {
         let local_key = StaticPrivateKey::from(local_key);
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
         let chaining_key = state.clone();
@@ -157,7 +157,7 @@ impl<R: Runtime> SessionManager<R> {
             .update(local_key.public().to_vec())
             .finalize();
 
-        Ok(Self {
+        Self {
             allow_local,
             chaining_key: Bytes::from(chaining_key),
             inbound_initial_state: Bytes::from(inbound_initial_state),
@@ -168,7 +168,7 @@ impl<R: Runtime> SessionManager<R> {
             outbound_initial_state: Bytes::from(outbound_initial_state),
             profile_storage,
             subsystem_handle,
-        })
+        }
     }
 
     /// Create new [`Handshaker`] for initiator (Alice).
@@ -405,8 +405,8 @@ mod tests {
         },
         profile::ProfileStorage,
         runtime::{
-            mock::{MockRuntime, MockTcpStream},
-            Runtime,
+            mock::{MockRuntime, MockTcpListener, MockTcpStream},
+            Runtime, TcpListener as _,
         },
         subsystem::{InnerSubsystemEvent, SubsystemCommand, SubsystemHandle},
         transports::ntcp2::{listener::Ntcp2Listener, session::SessionManager},
@@ -516,8 +516,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote = Ntcp2Builder::new()
@@ -531,8 +530,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let handle =
             tokio::spawn(
@@ -563,8 +561,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote = Ntcp2Builder::new()
@@ -578,8 +575,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let handle = tokio::spawn(async move {
             let stream = MockTcpStream::new(
@@ -607,8 +603,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote = Ntcp2Builder::new()
@@ -623,8 +618,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let handle = tokio::spawn(async move {
             let stream = MockTcpStream::new(
@@ -652,8 +646,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             false,
-        )
-        .unwrap();
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote = Ntcp2Builder::new()
@@ -668,8 +661,7 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         tokio::spawn(async move {
             let stream = MockTcpStream::new(
@@ -696,12 +688,10 @@ mod tests {
             SubsystemHandle::new(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
-        let mut listener = Ntcp2Listener::<MockRuntime>::new("127.0.0.1:0".parse().unwrap(), false)
-            .await
-            .unwrap();
+        let listener = MockTcpListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = Ntcp2Listener::<MockRuntime>::new(listener, false);
         let remote = Ntcp2Builder::new()
             .with_net_id(128)
             .with_router_address(listener.local_address().port())
@@ -733,8 +723,7 @@ mod tests {
             local_handle,
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote = Ntcp2Builder::new()
@@ -757,8 +746,7 @@ mod tests {
             remote_handle.clone(),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
-        )
-        .unwrap();
+        );
 
         let handle =
             tokio::spawn(

@@ -17,24 +17,25 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    config::{Config, I2cpConfig, SamConfig},
     crypto::{SigningPrivateKey, StaticPrivateKey},
     i2cp::I2cpServer,
     netdb::NetDb,
-    primitives::{RouterInfo, TransportKind},
+    primitives::RouterInfo,
     profile::ProfileStorage,
     runtime::Runtime,
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
-    transports::TransportManager,
+    transports::{Ntcp2Transport, TransportManager},
     tunnel::{TunnelManager, TunnelManagerHandle},
-    Config, I2cpConfig, SamConfig,
 };
 
 use futures::{FutureExt, Stream};
 
 use alloc::vec::Vec;
 use core::{
+    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -69,14 +70,25 @@ pub struct Router<R: Runtime> {
     /// Polls both NTCP2 and SSU2 transports.
     transport_manager: TransportManager<R>,
 
+    /// Protocol address information.
+    address_info: ProtocolAddressInfo,
+
     /// Handle to [`TunnelManager`].
     _tunnel_manager_handle: TunnelManagerHandle,
 }
 
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
-    pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
-        let local_router_info = RouterInfo::new::<R>(&config);
+    pub async fn new(mut config: Config) -> crate::Result<(Self, Vec<u8>)> {
+        // attempt to initialize the ntcp2 transport from the config
+        //
+        // this is done prior to constructing local router info case `config.ntcp1_config` contained
+        // an unspecified porrt so the listener can be bound to the listen address the correct port
+        // can be for the ntcp2's `RouterAddress`
+        let (ntcp2_context, ntcp2_address) =
+            Ntcp2Transport::<R>::initialize(config.ntcp2_config.take()).await?;
+
+        let local_router_info = RouterInfo::new::<R>(&config, ntcp2_address);
         let Config {
             i2cp_config,
             samv3_config,
@@ -86,7 +98,6 @@ impl<R: Runtime> Router<R> {
             insecure_tunnels,
             static_key,
             signing_key,
-            ntcp2_config,
             routers,
             profiles,
             allow_local,
@@ -203,9 +214,8 @@ impl<R: Runtime> Router<R> {
             R::spawn(sam_server)
         }
 
-        // initialize and start ntcp2
-        if let Some(config) = ntcp2_config {
-            transport_manager.register_transport(TransportKind::Ntcp2, config).await?;
+        if let Some(context) = ntcp2_context {
+            transport_manager.register_ntcp2(context);
         }
 
         Ok((

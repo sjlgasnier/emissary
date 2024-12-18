@@ -17,13 +17,13 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    config::Config,
     crypto::SigningPrivateKey,
     primitives::{
         router_address::TransportKind, Capabilities, Date, Mapping, RouterAddress, RouterIdentity,
         Str, LOG_TARGET,
     },
     runtime::Runtime,
-    Config, Ntcp2Config,
 };
 
 use hashbrown::HashMap;
@@ -63,11 +63,12 @@ pub struct RouterInfo {
 
 impl RouterInfo {
     /// Create new [`RouterInfo`].
-    pub fn new<R: Runtime>(config: &Config) -> Self {
+    ///
+    /// `ntcp2` is `Some` if NTCP has been enabled.
+    pub fn new<R: Runtime>(config: &Config, ntcp2: Option<RouterAddress>) -> Self {
         let Config {
             static_key,
             signing_key,
-            ntcp2_config,
             caps,
             router_info,
             ..
@@ -84,27 +85,6 @@ impl RouterInfo {
                     .expect("to succeed")
             }
             Some(router_info) => RouterIdentity::parse(router_info).expect("to succeed"),
-        };
-
-        // TODO: remove unwrap once ssu2 is implemented
-        let Ntcp2Config {
-            port,
-            host,
-            published,
-            key,
-            iv,
-        } = ntcp2_config.clone().expect("to exist");
-
-        let ntcp2 = match (published, host) {
-            (true, Some(host)) => RouterAddress::new_published(key, iv, port, host),
-            (true, None) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "ntcp2 requested to be published but no host provided",
-                );
-                RouterAddress::new_unpublished(key, port)
-            }
-            (_, _) => RouterAddress::new_unpublished(key, port),
         };
 
         let net_id = Mapping::new(
@@ -130,7 +110,7 @@ impl RouterInfo {
         let options = Mapping::into_hashmap(vec![net_id, caps_mapping, router_version]);
 
         RouterInfo {
-            addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2)]),
+            addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2.expect("to eixst"))]),
             capabilities: Capabilities::parse(&caps).expect("to succeed"),
             identity,
             net_id: config.net_id.unwrap_or(2),
@@ -794,143 +774,5 @@ mod tests {
         .serialize(&sgk);
 
         assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
-    }
-
-    #[test]
-    fn publish_ntcp() {
-        let config = Config {
-            static_key: vec![1u8; 32],
-            signing_key: vec![2u8; 32],
-            router_info: None,
-            i2cp_config: None,
-            samv3_config: None,
-            routers: Vec::new(),
-            profiles: Vec::new(),
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            exploratory: None,
-            insecure_tunnels: false,
-            allow_local: false,
-            ntcp2_config: Some(Ntcp2Config {
-                port: 8888,
-                host: Some("8.8.8.8".parse().unwrap()),
-                published: true,
-                key: [0xaa; 32],
-                iv: [0xbb; 16],
-            }),
-        };
-        let info = RouterInfo::new::<MockRuntime>(&config);
-        let address = info.addresses.get(&TransportKind::Ntcp2).unwrap();
-
-        assert_eq!(
-            address.options.get(&Str::from("host")),
-            Some(&Str::from("8.8.8.8"))
-        );
-        assert_eq!(
-            address.options.get(&Str::from("port")),
-            Some(&Str::from("8888"))
-        );
-        assert!(address.options.get(&Str::from("i")).is_some());
-        assert!(address.socket_address.is_some());
-    }
-
-    #[test]
-    fn dont_publish_ntcp() {
-        let config = Config {
-            static_key: vec![1u8; 32],
-            signing_key: vec![2u8; 32],
-            router_info: None,
-            i2cp_config: None,
-            samv3_config: None,
-            routers: Vec::new(),
-            profiles: Vec::new(),
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            exploratory: None,
-            insecure_tunnels: false,
-            allow_local: false,
-            ntcp2_config: Some(Ntcp2Config {
-                port: 8888,
-                host: None,
-                published: false,
-                key: [0xaa; 32],
-                iv: [0xbb; 16],
-            }),
-        };
-        let info = RouterInfo::new::<MockRuntime>(&config);
-        let address = info.addresses.get(&TransportKind::Ntcp2).unwrap();
-
-        assert!(address.options.get(&Str::from("host")).is_none());
-        assert!(address.options.get(&Str::from("port")).is_none());
-        assert!(address.options.get(&Str::from("i")).is_none());
-        assert!(address.socket_address.is_some());
-    }
-
-    #[test]
-    fn dont_publish_ntcp_host_specified() {
-        let config = Config {
-            static_key: vec![1u8; 32],
-            signing_key: vec![2u8; 32],
-            router_info: None,
-            i2cp_config: None,
-            samv3_config: None,
-            routers: Vec::new(),
-            profiles: Vec::new(),
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            exploratory: None,
-            insecure_tunnels: false,
-            allow_local: false,
-            ntcp2_config: Some(Ntcp2Config {
-                port: 8888,
-                host: Some("8.8.8.8".parse().unwrap()),
-                published: false,
-                key: [0xaa; 32],
-                iv: [0xbb; 16],
-            }),
-        };
-        let info = RouterInfo::new::<MockRuntime>(&config);
-        let address = info.addresses.get(&TransportKind::Ntcp2).unwrap();
-
-        assert!(address.options.get(&Str::from("host")).is_none());
-        assert!(address.options.get(&Str::from("port")).is_none());
-        assert!(address.options.get(&Str::from("i")).is_none());
-        assert!(address.socket_address.is_some());
-    }
-
-    #[test]
-    fn publish_ntcp_but_no_host() {
-        let config = Config {
-            static_key: vec![1u8; 32],
-            signing_key: vec![2u8; 32],
-            router_info: None,
-            i2cp_config: None,
-            samv3_config: None,
-            routers: Vec::new(),
-            profiles: Vec::new(),
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            exploratory: None,
-            insecure_tunnels: false,
-            allow_local: false,
-            ntcp2_config: Some(Ntcp2Config {
-                port: 8888,
-                host: None,
-                published: true,
-                key: [0xaa; 32],
-                iv: [0xbb; 16],
-            }),
-        };
-        let info = RouterInfo::new::<MockRuntime>(&config);
-        let address = info.addresses.get(&TransportKind::Ntcp2).unwrap();
-
-        assert!(address.options.get(&Str::from("host")).is_none());
-        assert!(address.options.get(&Str::from("port")).is_none());
-        assert!(address.options.get(&Str::from("i")).is_none());
-        assert!(address.socket_address.is_some());
     }
 }

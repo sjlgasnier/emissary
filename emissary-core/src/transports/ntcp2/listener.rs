@@ -17,7 +17,6 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    error::Error,
     runtime::{Runtime, TcpListener},
     transports::ntcp2::LOG_TARGET,
     util::is_global,
@@ -25,7 +24,6 @@ use crate::{
 
 use futures::Stream;
 
-use alloc::{format, string::String};
 use core::{
     net::SocketAddr,
     pin::Pin,
@@ -44,29 +42,12 @@ pub struct Ntcp2Listener<R: Runtime> {
 }
 
 impl<R: Runtime> Ntcp2Listener<R> {
-    /// Create new [`Ntcp2Listener`].
-    pub async fn new(address: SocketAddr, allow_local: bool) -> crate::Result<Self> {
-        let listener = match R::TcpListener::bind(address).await {
-            Some(listener) => listener,
-            None => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    ?address,
-                    "failed to bind to address, binding to 0.0.0.0",
-                );
-
-                R::TcpListener::bind(
-                    format!("0.0.0.0:{}", address.port()).parse().expect("to succeed"),
-                )
-                .await
-                .ok_or(Error::Custom(String::from("failed to bind to 0.0.0.0")))?
-            }
-        };
-
-        Ok(Self {
+    /// Create new [`Ntcp2Listener`] from a TCP listener.
+    pub fn new(listener: R::TcpListener, allow_local: bool) -> Self {
+        Self {
             allow_local,
             listener,
-        })
+        }
     }
 
     /// Get local address of the TCP listener.
