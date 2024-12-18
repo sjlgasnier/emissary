@@ -18,7 +18,7 @@
 
 use crate::{
     config::Config,
-    crypto::SigningPrivateKey,
+    crypto::{SigningPrivateKey, StaticPrivateKey},
     primitives::{
         router_address::TransportKind, Capabilities, Date, Mapping, RouterAddress, RouterIdentity,
         Str, LOG_TARGET,
@@ -65,13 +65,14 @@ impl RouterInfo {
     /// Create new [`RouterInfo`].
     ///
     /// `ntcp2` is `Some` if NTCP has been enabled.
-    pub fn new<R: Runtime>(config: &Config, ntcp2: Option<RouterAddress>) -> Self {
+    pub fn new<R: Runtime>(
+        config: &Config,
+        ntcp2: Option<RouterAddress>,
+        static_key: &StaticPrivateKey,
+        signing_key: &SigningPrivateKey,
+    ) -> Self {
         let Config {
-            static_key,
-            signing_key,
-            caps,
-            router_info,
-            ..
+            caps, router_info, ..
         } = config;
 
         let identity = match router_info {
@@ -81,8 +82,7 @@ impl RouterInfo {
                     "generating new router identity",
                 );
 
-                RouterIdentity::from_keys::<R>(static_key.clone(), signing_key.clone())
-                    .expect("to succeed")
+                RouterIdentity::from_keys::<R>(&static_key, &signing_key).expect("to succeed")
             }
             Some(router_info) => RouterIdentity::parse(router_info).expect("to succeed"),
         };
@@ -372,7 +372,10 @@ impl RouterInfo {
     ) -> Self {
         use rand_core::RngCore;
 
-        let identity = RouterIdentity::from_keys::<R>(static_key, signing_key).expect("to succeed");
+        let static_key = StaticPrivateKey::from_bytes(&static_key).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&signing_key).unwrap();
+        let identity =
+            RouterIdentity::from_keys::<R>(&static_key, &signing_key).expect("to succeed");
 
         let ntcp2_port = R::rng().next_u32() as u16;
         let ntcp2_host = format!(

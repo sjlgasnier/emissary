@@ -151,8 +151,8 @@ pub struct Config {
     pub samv3_config: Option<SamConfig>,
 
     /// Router signing key.
-    pub signing_key: Vec<u8>,
+    pub signing_key: Option<[u8; 32]>,
 
     /// Router static key.
-    pub static_key: Vec<u8>,
+    pub static_key: Option<[u8; 32]>,
 }

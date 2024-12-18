@@ -276,6 +276,12 @@ impl SigningPrivateKey {
     }
 }
 
+impl From<[u8; 32]> for SigningPrivateKey {
+    fn from(value: [u8; 32]) -> Self {
+        SigningPrivateKey::Ed25519(ed25519_dalek::SigningKey::from(value))
+    }
+}
+
 impl AsRef<[u8]> for SigningPrivateKey {
     fn as_ref(&self) -> &[u8] {
         match self {

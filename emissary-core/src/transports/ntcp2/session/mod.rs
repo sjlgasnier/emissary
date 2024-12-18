@@ -464,11 +464,8 @@ mod tests {
         fn build(mut self) -> Ntcp2 {
             let signing_key = SigningPrivateKey::random(thread_rng());
             let static_key = StaticPrivateKey::random(thread_rng());
-            let identity = RouterIdentity::from_keys::<MockRuntime>(
-                static_key.as_ref().to_vec(),
-                signing_key.as_ref().to_vec(),
-            )
-            .unwrap();
+            let identity =
+                RouterIdentity::from_keys::<MockRuntime>(&static_key, &signing_key).unwrap();
             let router_info = RouterInfo {
                 identity,
                 published: Date::new(

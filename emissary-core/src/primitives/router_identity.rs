@@ -21,7 +21,6 @@ use crate::{
         base64_decode, base64_encode, sha256::Sha256, SigningPrivateKey, SigningPublicKey,
         StaticPrivateKey, StaticPublicKey,
     },
-    error::Error,
     primitives::LOG_TARGET,
     runtime::Runtime,
 };
@@ -116,11 +115,10 @@ pub struct RouterIdentity {
 
 impl RouterIdentity {
     /// Create new [`RouterIdentity`] from keys.
-    pub fn from_keys<R: Runtime>(static_key: Vec<u8>, signing_key: Vec<u8>) -> crate::Result<Self> {
-        let static_key =
-            StaticPrivateKey::from_bytes(&static_key).ok_or(Error::InvalidData)?.public();
-        let signing_key =
-            SigningPrivateKey::from_bytes(&signing_key).ok_or(Error::InvalidData)?.public();
+    pub fn from_keys<R: Runtime>(
+        static_key: &StaticPrivateKey,
+        signing_key: &SigningPrivateKey,
+    ) -> crate::Result<Self> {
         let padding = {
             let mut padding = [0u8; 320];
             R::rng().fill_bytes(&mut padding);
@@ -131,9 +129,9 @@ impl RouterIdentity {
         let identity_hash = {
             let mut out = BytesMut::with_capacity(SERIALIZED_LEN);
 
-            out.put_slice(static_key.as_ref());
+            out.put_slice(static_key.public().as_ref());
             out.put_slice(&padding);
-            out.put_slice(signing_key.as_ref());
+            out.put_slice(signing_key.public().as_ref());
             out.put_u8(KEY_CERTIFICATE);
             out.put_u16(KEY_CERTIFICATE_LEN);
             out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519);
@@ -146,8 +144,8 @@ impl RouterIdentity {
             identity_hash: Bytes::from(identity_hash.clone()),
             padding: Bytes::from(padding.to_vec()),
             router: RouterId::from(identity_hash),
-            signing_key,
-            static_key,
+            signing_key: signing_key.public(),
+            static_key: static_key.public(),
         })
     }
 
@@ -281,25 +279,21 @@ impl RouterIdentity {
         use rand::{thread_rng, RngCore};
 
         let sk = {
-            let mut out = vec![0u8; 32];
+            let mut out = [0u8; 32];
             thread_rng().fill_bytes(&mut out);
 
-            out
+            StaticPrivateKey::from(out)
         };
         let sgk = {
-            let mut out = vec![0u8; 32];
+            let mut out = [0u8; 32];
             thread_rng().fill_bytes(&mut out);
 
-            out
+            SigningPrivateKey::from(out)
         };
 
-        let identity = RouterIdentity::from_keys::<MockRuntime>(sk.clone(), sgk.clone()).unwrap();
+        let identity = RouterIdentity::from_keys::<MockRuntime>(&sk, &sgk).unwrap();
 
-        (
-            identity,
-            StaticPrivateKey::from_bytes(&sk).unwrap(),
-            SigningPrivateKey::from_bytes(&sgk).unwrap(),
-        )
+        (identity, sk, sgk)
     }
 }
 

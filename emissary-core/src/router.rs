@@ -32,6 +32,7 @@ use crate::{
 };
 
 use futures::{FutureExt, Stream};
+use rand_core::RngCore;
 
 use alloc::vec::Vec;
 use core::{
@@ -88,7 +89,26 @@ impl<R: Runtime> Router<R> {
         let (ntcp2_context, ntcp2_address) =
             Ntcp2Transport::<R>::initialize(config.ntcp2_config.take()).await?;
 
-        let local_router_info = RouterInfo::new::<R>(&config, ntcp2_address);
+        // create static/signing keypairs for the router
+        //
+        // if caller didn't supply keys, generate transient keypair
+        let local_static_key = StaticPrivateKey::from(config.static_key.unwrap_or_else(|| {
+            let mut key = [0u8; 32];
+            R::rng().fill_bytes(&mut key);
+            key
+        }));
+        let local_signing_key = SigningPrivateKey::from(config.signing_key.unwrap_or_else(|| {
+            let mut key = [0u8; 32];
+            R::rng().fill_bytes(&mut key);
+            key
+        }));
+
+        let local_router_info = RouterInfo::new::<R>(
+            &config,
+            ntcp2_address,
+            &local_static_key,
+            &local_signing_key,
+        );
         let Config {
             i2cp_config,
             samv3_config,
@@ -96,8 +116,6 @@ impl<R: Runtime> Router<R> {
             net_id,
             exploratory,
             insecure_tunnels,
-            static_key,
-            signing_key,
             routers,
             profiles,
             allow_local,
@@ -109,9 +127,6 @@ impl<R: Runtime> Router<R> {
             ..
         } = config;
 
-        let local_key = StaticPrivateKey::from_bytes(&static_key).expect("valid encryption key");
-        let local_signing_key =
-            SigningPrivateKey::from_bytes(&signing_key).expect("valid signing key");
         let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
@@ -166,7 +181,7 @@ impl<R: Runtime> Router<R> {
                 TunnelManager::<R>::new(
                     transport_service,
                     local_router_info.clone(),
-                    local_key,
+                    local_static_key,
                     metrics_handle.clone(),
                     profile_storage.clone(),
                     exploratory.into(),
