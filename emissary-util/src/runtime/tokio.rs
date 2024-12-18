@@ -344,6 +344,15 @@ impl RuntimeT for Runtime {
     }
 
     fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle {
+        if metrics.is_empty() {
+            tracing::info!(
+                target: LOG_TARGET,
+                "disabling metrics server",
+            );
+
+            return TokioMetricsHandle {};
+        }
+
         let address = format!("0.0.0.0:{}", port.unwrap_or(12842));
         let builder =
             PrometheusBuilder::new().with_http_listener(address.parse::<SocketAddr>().expect(""));

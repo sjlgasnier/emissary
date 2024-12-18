@@ -84,6 +84,21 @@ pub struct SamConfig {
     host: Option<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    disable_metrics: bool,
+    metrics_server_port: Option<u16>,
+}
+
+impl From<MetricsConfig> for emissary_core::MetricsConfig {
+    fn from(value: MetricsConfig) -> Self {
+        emissary_core::MetricsConfig {
+            disable_metrics: value.disable_metrics,
+            metrics_server_port: value.metrics_server_port,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(default)]
@@ -96,9 +111,9 @@ struct EmissaryConfig {
     #[serde(default)]
     insecure_tunnels: bool,
     log: Option<String>,
+    metrics: Option<MetricsConfig>,
     net_id: Option<u8>,
     ntcp2: Option<Ntcp2Config>,
-    prometheus_port: Option<u16>,
     sam: Option<SamConfig>,
 }
 
@@ -128,6 +143,9 @@ pub struct Config {
     /// Logging targets.
     pub log: Option<String>,
 
+    /// Metrics configuration.
+    pub metrics: Option<MetricsConfig>,
+
     /// Network ID.
     pub net_id: Option<u8>,
 
@@ -136,9 +154,6 @@ pub struct Config {
 
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
-
-    /// Prometheus port.
-    pub prometheus_port: Option<u16>,
 
     /// Router info.
     pub router_info: Option<Vec<u8>>,
@@ -173,7 +188,7 @@ impl From<Config> for emissary_core::Config {
             samv3_config: val.sam_config,
             signing_key: val.signing_key,
             static_key: val.static_key,
-            metrics_server_port: val.prometheus_port,
+            metrics: val.metrics.map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -374,25 +389,28 @@ impl Config {
         let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
 
         let config = EmissaryConfig {
+            allow_local: false,
+            caps: None,
             exploratory: None,
-            ntcp2: Some(Ntcp2Config {
-                port: 8888u16,
-                host: None,
-                published: Some(false),
-            }),
+            floodfill: false,
             i2cp: Some(I2cpConfig { port: 7654 }),
             sam: Some(SamConfig {
                 tcp_port: 7656,
                 udp_port: 7655,
                 host: None,
             }),
-            floodfill: false,
-            caps: None,
-            net_id: None,
             insecure_tunnels: false,
-            allow_local: false,
             log: None,
-            prometheus_port: None,
+            metrics: Some(MetricsConfig {
+                disable_metrics: false,
+                metrics_server_port: None,
+            }),
+            net_id: None,
+            ntcp2: Some(Ntcp2Config {
+                port: 8888u16,
+                host: None,
+                published: Some(false),
+            }),
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -405,10 +423,19 @@ impl Config {
         );
 
         Ok(Self {
+            allow_local: false,
             base_path,
-            routers: Vec::new(),
-            profiles: Vec::new(),
+            caps: None,
             exploratory: None,
+            floodfill: false,
+            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            insecure_tunnels: false,
+            log: None,
+            metrics: Some(MetricsConfig {
+                disable_metrics: false,
+                metrics_server_port: None,
+            }),
+            net_id: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
                 host: Some("127.0.0.1".parse().expect("valid address")),
@@ -416,21 +443,16 @@ impl Config {
                 iv: ntcp2_iv,
                 published: false,
             }),
-            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            profiles: Vec::new(),
+            router_info: None,
+            routers: Vec::new(),
             sam_config: Some(emissary_core::SamConfig {
                 tcp_port: 7656u16,
                 udp_port: 7655u16,
                 host: String::from("127.0.0.1"),
             }),
-            static_key,
             signing_key,
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            insecure_tunnels: false,
-            router_info: None,
-            allow_local: false,
-            log: None,
+            static_key,
         })
     }
 
@@ -448,25 +470,28 @@ impl Config {
             Some(config) => config,
             None => {
                 let config = EmissaryConfig {
+                    allow_local: false,
+                    caps: None,
                     exploratory: None,
+                    floodfill: false,
+                    i2cp: Some(I2cpConfig { port: 7654 }),
+                    insecure_tunnels: false,
+                    log: None,
+                    metrics: Some(MetricsConfig {
+                        disable_metrics: false,
+                        metrics_server_port: None,
+                    }),
+                    net_id: None,
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
                         published: Some(false),
                     }),
-                    i2cp: Some(I2cpConfig { port: 7654 }),
                     sam: Some(SamConfig {
                         tcp_port: 7656,
                         udp_port: 7655,
                         host: None,
                     }),
-                    floodfill: false,
-                    caps: None,
-                    net_id: None,
-                    insecure_tunnels: false,
-                    allow_local: false,
-                    log: None,
-                    prometheus_port: None,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -478,15 +503,21 @@ impl Config {
         };
 
         Ok(Self {
+            allow_local: config.allow_local,
             base_path,
-            routers: Vec::new(),
-            profiles: Vec::new(),
+            caps: config.caps,
             exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
                 inbound_len: config.inbound_len,
                 inbound_count: config.inbound_count,
                 outbound_len: config.outbound_len,
                 outbound_count: config.outbound_count,
             }),
+            floodfill: config.floodfill,
+            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            insecure_tunnels: config.insecure_tunnels,
+            log: config.log,
+            metrics: config.metrics,
+            net_id: config.net_id,
             ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
                 host: config.host,
@@ -494,22 +525,16 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            profiles: Vec::new(),
+            router_info,
+            routers: Vec::new(),
             sam_config: config.sam.map(|config| emissary_core::SamConfig {
                 tcp_port: config.tcp_port,
                 udp_port: config.udp_port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
-            static_key,
             signing_key,
-            floodfill: config.floodfill,
-            caps: config.caps,
-            net_id: config.net_id,
-            insecure_tunnels: config.insecure_tunnels,
-            allow_local: config.allow_local,
-            log: config.log,
-            router_info,
-            prometheus_port: config.prometheus_port,
+            static_key,
         })
     }
 
@@ -597,8 +622,22 @@ impl Config {
             }
         }
 
-        if let Some(port) = arguments.prometheus_port {
-            self.prometheus_port = Some(port);
+        match (
+            arguments.metrics.disable_metrics,
+            arguments.metrics.metrics_server_port,
+        ) {
+            (Some(true), _) => {
+                self.metrics = Some(MetricsConfig {
+                    disable_metrics: true,
+                    metrics_server_port: None,
+                });
+            }
+            (Some(false), Some(port)) =>
+                self.metrics = Some(MetricsConfig {
+                    disable_metrics: false,
+                    metrics_server_port: Some(port),
+                }),
+            _ => {}
         }
 
         if let Some(ref caps) = arguments.caps {
@@ -730,7 +769,7 @@ mod tests {
             insecure_tunnels: false,
             allow_local: false,
             log: None,
-            prometheus_port: None,
+            metrics: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

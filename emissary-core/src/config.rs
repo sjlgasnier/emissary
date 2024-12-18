@@ -94,7 +94,18 @@ pub struct SamConfig {
     pub host: String,
 }
 
+/// Metrics configuration.
+#[derive(Default, Debug, Clone)]
+pub struct MetricsConfig {
+    /// Disable metrics server.
+    pub disable_metrics: bool,
+
+    /// Port where the metrics server should be bound to.
+    pub metrics_server_port: Option<u16>,
+}
+
 /// Router configuration.
+#[derive(Default)]
 pub struct Config {
     /// Allow local addresses.
     pub allow_local: bool,
@@ -116,8 +127,8 @@ pub struct Config {
     /// Are tunnels allowed to be insecure.
     pub insecure_tunnels: bool,
 
-    /// Metrics server port.
-    pub metrics_server_port: Option<u16>,
+    /// Metrics configuration.
+    pub metrics: MetricsConfig,
 
     /// Network ID.
     pub net_id: Option<u8>,

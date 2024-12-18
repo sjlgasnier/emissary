@@ -67,6 +67,18 @@ pub struct ReseedOptions {
     pub force_reseed: Option<bool>,
 }
 
+/// Metrics options.
+#[derive(Args)]
+pub struct MetricsOptions {
+    /// Metrics server port.
+    #[arg(long)]
+    pub metrics_server_port: Option<u16>,
+
+    /// Disable metrics.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_metrics: Option<bool>,
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Arguments {
@@ -105,10 +117,6 @@ pub struct Arguments {
     #[arg(long)]
     pub net_id: Option<u8>,
 
-    /// Prometheus port.
-    #[arg(long)]
-    pub prometheus_port: Option<u16>,
-
     /// Tunnel options.
     #[clap(flatten)]
     pub tunnel: TunnelOptions,
@@ -116,4 +124,8 @@ pub struct Arguments {
     /// Reseed options.
     #[clap(flatten)]
     pub reseed: ReseedOptions,
+
+    /// Metrics options.
+    #[clap(flatten)]
+    pub metrics: MetricsOptions,
 }

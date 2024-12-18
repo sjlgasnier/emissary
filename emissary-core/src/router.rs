@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    config::{Config, I2cpConfig, SamConfig},
+    config::{Config, I2cpConfig, MetricsConfig, SamConfig},
     crypto::{SigningPrivateKey, StaticPrivateKey},
     i2cp::I2cpServer,
     netdb::NetDb,
@@ -101,7 +101,11 @@ impl<R: Runtime> Router<R> {
             routers,
             profiles,
             allow_local,
-            metrics_server_port,
+            metrics:
+                MetricsConfig {
+                    disable_metrics,
+                    metrics_server_port,
+                },
             ..
         } = config;
 
@@ -127,12 +131,19 @@ impl<R: Runtime> Router<R> {
         );
 
         // collect metrics from all subsystems, register them and acquire metrics handle
-        let metrics_handle = {
-            let metrics = TransportManager::<R>::metrics(Vec::new());
-            let metrics = TunnelManager::<R>::metrics(metrics);
-            let metrics = NetDb::<R>::metrics(metrics);
+        //
+        // if metrics are disabled, call `R::register_metrics()` with an empty vector which makes
+        // the runtime not start the metrics server and return a handle which doesn't update any
+        // metirics
+        let metrics_handle = match disable_metrics {
+            true => R::register_metrics(Vec::new(), None),
+            false => {
+                let metrics = TransportManager::<R>::metrics(Vec::new());
+                let metrics = TunnelManager::<R>::metrics(metrics);
+                let metrics = NetDb::<R>::metrics(metrics);
 
-            R::register_metrics(metrics, metrics_server_port)
+                R::register_metrics(metrics, metrics_server_port)
+            }
         };
 
         // create transport manager and initialize & start enabled transports
