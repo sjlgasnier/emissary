@@ -78,6 +78,7 @@ pub trait UdpSocket: Unpin + Send + Sized {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Option<(usize, SocketAddr)>>;
+    fn local_address(&self) -> Option<SocketAddr>;
 }
 
 pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {

@@ -212,6 +212,10 @@ impl UdpSocket for TokioUdpSocket {
             }
         }
     }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
+    }
 }
 
 pub struct TokioJoinSet<T>(task::JoinSet<T>, Option<Waker>);

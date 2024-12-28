@@ -115,6 +115,10 @@ impl UdpSocket for NoopUdpSocket {
     ) -> Poll<Option<(usize, SocketAddr)>> {
         Poll::Pending
     }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        None
+    }
 }
 
 pub struct NoopMetricsCounter {}

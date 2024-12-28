@@ -907,6 +907,7 @@ dependencies = [
  "data-encoding",
  "ecb",
  "ed25519-dalek",
+ "emissary-util",
  "ethbloom",
  "flate2",
  "futures-channel",
@@ -930,6 +931,7 @@ dependencies = [
  "tracing-subscriber",
  "uint",
  "x25519-dalek",
+ "yosemite 0.3.0",
  "zeroize",
 ]
 
@@ -2780,7 +2782,7 @@ dependencies = [
  "sha2",
  "tokio",
  "util",
- "yosemite",
+ "yosemite 0.2.0",
 ]
 
 [[package]]
@@ -3495,6 +3497,21 @@ name = "yosemite"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45ea22dddf68d3e49dfe17ee45a362b1fa57214cebfab47208861490b00d0efe"
+dependencies = [
+ "futures",
+ "nom",
+ "rand",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "yosemite"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e88cd3105328a0bf1e0041377a8c33daae21662e9cb96c4dc33778062f16e1af"
 dependencies = [
  "futures",
  "nom",

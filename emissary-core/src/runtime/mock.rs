@@ -169,6 +169,10 @@ impl UdpSocket for MockUdpSocket {
             }
         }
     }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
+    }
 }
 
 thread_local! {

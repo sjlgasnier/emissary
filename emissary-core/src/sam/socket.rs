@@ -144,7 +144,7 @@ impl<R: Runtime> Stream for SamSocket<R> {
                             Ok(command) => {
                                 this.read_offset = 0usize;
 
-                                match SamCommand::parse(command) {
+                                match SamCommand::parse::<R>(command) {
                                     Some(command) => return Poll::Ready(Some(command)),
                                     None => tracing::warn!(
                                         target: LOG_TARGET,

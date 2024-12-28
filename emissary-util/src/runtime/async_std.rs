@@ -198,12 +198,14 @@ impl TcpListener<AsyncStdTcpStream> for AsyncStdTcpListener {
 pub struct AsyncStdUdpSocket {
     dgram_tx: Sender<(Vec<u8>, SocketAddr)>,
     dgram_rx: Receiver<(Vec<u8>, SocketAddr)>,
+    local_address: Option<SocketAddr>,
 }
 
 impl AsyncStdUdpSocket {
     fn new(socket: net::UdpSocket) -> Self {
         let (send_tx, mut send_rx): (Sender<(Vec<u8>, SocketAddr)>, _) = channel(2048);
         let (mut recv_tx, recv_rx) = channel(2048);
+        let local_address = socket.local_addr().ok();
 
         async_std::task::spawn(async move {
             let mut buffer = vec![0u8; 0xffff];
@@ -250,6 +252,7 @@ impl AsyncStdUdpSocket {
         Self {
             dgram_tx: send_tx,
             dgram_rx: recv_rx,
+            local_address,
         }
     }
 }
@@ -307,6 +310,10 @@ impl UdpSocket for AsyncStdUdpSocket {
                     Poll::Ready(Some((datagram.len(), from)))
                 },
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.local_address
     }
 }
 
@@ -474,9 +481,14 @@ impl RuntimeT for Runtime {
         AsyncStdJoinSet(FuturesJoinSet::<T>::new(), None)
     }
 
-    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
-        let builder = PrometheusBuilder::new()
-            .with_http_listener("0.0.0.0:12842".parse::<SocketAddr>().expect(""));
+    fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle {
+        if metrics.is_empty() {
+            return AsyncStdMetricsHandle {};
+        }
+
+        let builder = PrometheusBuilder::new().with_http_listener(
+            format!("0.0.0.0:{}", port.unwrap_or(12842)).parse::<SocketAddr>().expect(""),
+        );
 
         metrics
             .into_iter()

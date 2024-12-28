@@ -22,7 +22,7 @@ use crate::{
     primitives::{Lease, TunnelId},
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamVersion, SessionKind},
+        parser::{DestinationContext, SamVersion, SessionKind},
         session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
@@ -52,8 +52,8 @@ pub struct SamSessionContext<R: Runtime> {
     /// Session options.
     pub options: HashMap<String, String>,
 
-    /// Destination kind.
-    pub destination: DestinationKind,
+    /// Destination context.
+    pub destination: DestinationContext,
 
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
@@ -96,8 +96,8 @@ enum PendingSessionState<R: Runtime> {
         /// Session options.
         options: HashMap<String, String>,
 
-        /// Destination kind.
-        destination: DestinationKind,
+        /// Destination context.
+        destination: DestinationContext,
 
         /// Negotiated version.
         version: SamVersion,
@@ -131,8 +131,8 @@ enum PendingSessionState<R: Runtime> {
         /// Session options.
         options: HashMap<String, String>,
 
-        /// Destination kind.
-        destination: DestinationKind,
+        /// Destination context.
+        destination: DestinationContext,
 
         /// Negotiated version.
         version: SamVersion,
@@ -174,7 +174,7 @@ impl<R: Runtime> PendingSamSession<R> {
     /// Create new [`PendingSamSession`].
     pub fn new(
         socket: SamSocket<R>,
-        destination: DestinationKind,
+        destination: DestinationContext,
         session_id: Arc<str>,
         session_kind: SessionKind,
         options: HashMap<String, String>,

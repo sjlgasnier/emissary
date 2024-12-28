@@ -22,7 +22,7 @@ use crate::{
     primitives::Destination,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamCommand, SamVersion, SessionKind},
+        parser::{DestinationContext, SamCommand, SamVersion, SessionKind},
         socket::SamSocket,
     },
 };
@@ -57,8 +57,8 @@ pub enum ConnectionKind<R: Runtime> {
         /// SAMv3 socket associated with the session.
         socket: SamSocket<R>,
 
-        /// Destination kind.
-        destination: DestinationKind,
+        /// Destination context.
+        destination: DestinationContext,
 
         /// Negotiated version.
         version: SamVersion,

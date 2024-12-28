@@ -25,7 +25,7 @@ use crate::{
     protocol::Protocol,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SessionKind},
+        parser::{DestinationContext, SessionKind},
         pending::session::SamSessionContext,
         protocol::{
             datagram::DatagramManager,
@@ -249,22 +249,12 @@ impl<R: Runtime> SamSession<R> {
         } = context;
 
         let (session_destination, dest, privkey, encryption_key, signing_key) = {
-            let (encryption_key, signing_key, destination_id, destination) = match destination {
-                DestinationKind::Transient => {
-                    let signing_key = SigningPrivateKey::random(R::rng());
-                    let encryption_key = StaticPrivateKey::random(R::rng());
-
-                    let destination = Dest::new::<R>(signing_key.public());
-                    let destination_id = destination.id();
-
-                    (encryption_key, signing_key, destination_id, destination)
-                }
-                DestinationKind::Persistent {
-                    destination,
-                    private_key,
-                    signing_key,
-                } => (*private_key, *signing_key, destination.id(), destination),
-            };
+            let DestinationContext {
+                destination,
+                private_key,
+                signing_key,
+            } = destination;
+            let destination_id = destination.id();
 
             // from specification:
             //
@@ -275,14 +265,14 @@ impl<R: Runtime> SamSession<R> {
             let privkey = {
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
-                out.put_slice(encryption_key.as_ref());
-                out.put_slice(signing_key.as_ref());
+                out.put_slice((*private_key).as_ref());
+                out.put_slice((*signing_key).as_ref());
 
                 base64_encode(out)
             };
 
             // create leaseset for the destination and store it in `NetDb`
-            let public_key = encryption_key.public();
+            let public_key = private_key.public();
             let local_leaseset = Bytes::from(
                 LeaseSet2 {
                     header: LeaseSet2Header {
@@ -298,7 +288,7 @@ impl<R: Runtime> SamSession<R> {
 
             let mut session_destination = Destination::new(
                 destination_id.clone(),
-                encryption_key.clone(),
+                *private_key.clone(),
                 local_leaseset.clone(),
                 netdb_handle,
                 tunnel_pool_handle,
@@ -319,7 +309,7 @@ impl<R: Runtime> SamSession<R> {
                 session_destination,
                 destination,
                 privkey,
-                encryption_key,
+                private_key,
                 signing_key,
             )
         };
@@ -333,20 +323,20 @@ impl<R: Runtime> SamSession<R> {
                 dest.clone(),
                 datagram_tx,
                 options.clone(),
-                signing_key.clone(),
+                *signing_key.clone(),
                 session_kind,
             ),
             dest: dest.clone(),
             destination: session_destination,
-            encryption_key,
+            encryption_key: *encryption_key,
             options,
             pending_outbound: HashMap::new(),
             receiver,
             session_id,
             session_kind,
-            signing_key: signing_key.clone(),
+            signing_key: *signing_key.clone(),
             socket,
-            stream_manager: StreamManager::new(dest, signing_key),
+            stream_manager: StreamManager::new(dest, *signing_key),
         }
     }
 
@@ -355,7 +345,7 @@ impl<R: Runtime> SamSession<R> {
     /// TODO: more documentation
     fn on_stream_connect(
         &mut self,
-        socket: SamSocket<R>,
+        mut socket: SamSocket<R>,
         destination: Dest,
         options: HashMap<String, String>,
     ) {
@@ -369,6 +359,20 @@ impl<R: Runtime> SamSession<R> {
 
             return drop(socket);
         };
+
+        if destination.id() == self.dest.id() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "tried to open connection to self",
+            );
+
+            R::spawn(async move {
+                let _ = socket
+                    .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
+                    .await;
+            });
+            return;
+        }
 
         tracing::info!(
             target: LOG_TARGET,

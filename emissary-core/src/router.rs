@@ -51,6 +51,16 @@ const NET_ID: u8 = 2u8;
 /// immediately, cancelling graceful shutdown.
 const IMMEDIATE_SHUTDOWN_COUNT: usize = 2usize;
 
+/// Protocol address information.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ProtocolAddressInfo {
+    /// Socket address of the SAMv3 TCP listener.
+    pub sam_tcp: Option<SocketAddr>,
+
+    /// Socket address of the SAMv3 UDP socket.
+    pub sam_udp: Option<SocketAddr>,
+}
+
 /// Events emitted by [`Router`].
 #[derive(Debug)]
 pub enum RouterEvent {
@@ -130,6 +140,7 @@ impl<R: Runtime> Router<R> {
         let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
+        let mut address_info = ProtocolAddressInfo::default();
 
         // create router shutdown context and allocate handle `TransitTunnelManager`
         //
@@ -238,6 +249,9 @@ impl<R: Runtime> Router<R> {
             )
             .await?;
 
+            address_info.sam_tcp = sam_server.tcp_local_address();
+            address_info.sam_udp = sam_server.udp_local_address();
+
             R::spawn(sam_server)
         }
 
@@ -247,6 +261,7 @@ impl<R: Runtime> Router<R> {
 
         Ok((
             Self {
+                address_info,
                 shutdown_context,
                 shutdown_count: 0usize,
                 transport_manager,
@@ -274,6 +289,11 @@ impl<R: Runtime> Router<R> {
                 "shutting down router",
             );
         }
+    }
+
+    /// Get reference to [`ProtocolAddressInfo`].
+    pub fn protocol_address_info(&self) -> &ProtocolAddressInfo {
+        &self.address_info
     }
 }
 
