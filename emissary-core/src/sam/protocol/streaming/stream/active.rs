@@ -52,7 +52,7 @@ use core::{
 const LOG_TARGET: &str = "emissary::streaming::active";
 
 /// Read buffer size.
-const READ_BUFFER_SIZE: usize = 8192;
+const READ_BUFFER_SIZE: usize = 16384;
 
 /// Initial ACK delay.
 const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
@@ -89,6 +89,9 @@ const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
 
 /// Threshold for stopping exponential growth of the window size.
 const EXP_GROWTH_STOP_THRESHOLD: usize = 64;
+
+/// MTU size.
+const MTU_SIZE: usize = 1812;
 
 /// Measured RTT.
 #[derive(Debug, Copy, Clone)]
@@ -752,7 +755,7 @@ impl<R: Runtime> Stream<R> {
         let sent = R::now();
 
         let packets = self.read_buffer[..offset]
-            .chunks(256)
+            .chunks(MTU_SIZE)
             .map(|chunk| {
                 let seq_nro = {
                     let seq_nro = self.next_seq_nro;
@@ -2107,9 +2110,9 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; 256]);
-                data.extend_from_slice(&vec![2u8; 256]);
-                data.extend_from_slice(&vec![3u8; 256]);
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![2u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![3u8; MTU_SIZE]);
 
                 data
             })
@@ -2125,7 +2128,7 @@ mod tests {
             .expect("to succeed");
 
         let packet = Packet::parse(&first_packet).unwrap();
-        assert_eq!(packet.payload, vec![1u8; 256]);
+        assert_eq!(packet.payload, vec![1u8; MTU_SIZE]);
         assert_eq!(stream.window_size, 1);
         assert_eq!(stream.unacked.len(), INITIAL_WINDOW_SIZE);
         assert_eq!(stream.pending.len(), 2);
@@ -2151,7 +2154,7 @@ mod tests {
         assert_ne!(*stream.rto, INITIAL_RTO);
 
         // send more data
-        client.write_all(&vec![4u8; 256]).await.unwrap();
+        client.write_all(&vec![4u8; MTU_SIZE]).await.unwrap();
 
         // verify the other two packets are sent now that window size is 2
         let future = async {
@@ -2172,10 +2175,10 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(2), future).await.expect("no timeout");
 
         let first = Packet::parse(&packets[0].1).unwrap();
-        assert_eq!(first.payload, vec![2u8; 256]);
+        assert_eq!(first.payload, vec![2u8; MTU_SIZE]);
 
         let second = Packet::parse(&packets[1].1).unwrap();
-        assert_eq!(second.payload, vec![3u8; 256]);
+        assert_eq!(second.payload, vec![3u8; MTU_SIZE]);
 
         assert!(stream.pending.is_empty());
         assert_eq!(stream.unacked.len(), 2);
@@ -2208,7 +2211,7 @@ mod tests {
             .expect("to succeed");
 
         let third = Packet::parse(&third_packet).unwrap();
-        assert_eq!(third.payload, vec![4u8; 256]);
+        assert_eq!(third.payload, vec![4u8; MTU_SIZE]);
     }
 
     #[tokio::test]
@@ -2236,11 +2239,11 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; 256]);
-                data.extend_from_slice(&vec![2u8; 256]);
-                data.extend_from_slice(&vec![3u8; 256]);
-                data.extend_from_slice(&vec![4u8; 256]);
-                data.extend_from_slice(&vec![5u8; 256]);
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![2u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![3u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![4u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![5u8; MTU_SIZE]);
 
                 data
             })
@@ -2349,12 +2352,12 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![6u8; 256]);
-                data.extend_from_slice(&vec![7u8; 256]);
-                data.extend_from_slice(&vec![8u8; 256]);
-                data.extend_from_slice(&vec![9u8; 256]);
-                data.extend_from_slice(&vec![0xau8; 256]);
-                data.extend_from_slice(&vec![0xbu8; 256]);
+                data.extend_from_slice(&vec![6u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![7u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![8u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![9u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![0xau8; MTU_SIZE]);
+                data.extend_from_slice(&vec![0xbu8; MTU_SIZE]);
 
                 data
             })
@@ -2417,8 +2420,8 @@ mod tests {
         let first_missing = Packet::parse(&packets[0].1).unwrap();
         let second_missing = Packet::parse(&packets[1].1).unwrap();
 
-        assert_eq!(first_missing.payload, vec![8u8; 256]);
-        assert_eq!(second_missing.payload, vec![0xau8; 256]);
+        assert_eq!(first_missing.payload, vec![8u8; MTU_SIZE]);
+        assert_eq!(second_missing.payload, vec![0xau8; MTU_SIZE]);
         assert_eq!(stream.window_size, 66);
     }
 
@@ -2707,11 +2710,11 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; 256]);
-                data.extend_from_slice(&vec![2u8; 256]);
-                data.extend_from_slice(&vec![3u8; 256]);
-                data.extend_from_slice(&vec![4u8; 256]);
-                data.extend_from_slice(&vec![5u8; 256]);
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![2u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![3u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![4u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![5u8; MTU_SIZE]);
 
                 data
             })
@@ -2729,7 +2732,7 @@ mod tests {
 
             let packet = Packet::parse(&packet).unwrap();
 
-            assert_eq!(packet.payload, vec![i as u8; 256]);
+            assert_eq!(packet.payload, vec![i as u8; MTU_SIZE]);
 
             tokio::time::sleep(Duration::from_secs(2)).await;
 
