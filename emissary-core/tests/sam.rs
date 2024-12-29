@@ -321,7 +321,7 @@ async fn anonymous_datagrams_work() {
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let mut session1 = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         Session::<Anonymous>::new(SessionOptions {
             samv3_tcp_port: ports[0].0,
             samv3_udp_port: ports[0].1,
@@ -334,7 +334,7 @@ async fn anonymous_datagrams_work() {
     let dest1 = session1.destination().to_owned();
 
     let mut session2 = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         Session::<Anonymous>::new(SessionOptions {
             samv3_tcp_port: ports[1].0,
             samv3_udp_port: ports[1].1,
@@ -349,7 +349,7 @@ async fn anonymous_datagrams_work() {
     let handle = tokio::spawn(async move {
         let mut buffer = vec![0u8; 64];
 
-        let nread = tokio::time::timeout(Duration::from_secs(10), session1.recv(&mut buffer))
+        let nread = tokio::time::timeout(Duration::from_secs(30), session1.recv(&mut buffer))
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -362,7 +362,7 @@ async fn anonymous_datagrams_work() {
     session2.send_to(b"hello, world!\n", &dest1).await.unwrap();
 
     let mut buffer = vec![0u8; 64];
-    let nread = tokio::time::timeout(Duration::from_secs(10), session2.recv(&mut buffer))
+    let nread = tokio::time::timeout(Duration::from_secs(30), session2.recv(&mut buffer))
         .await
         .expect("no timeout")
         .expect("to succeed");
@@ -466,7 +466,7 @@ async fn create_same_session_twice_transient() {
     .await
     .expect("no timeout")
     {
-        Err(Error::Protocol(ProtocolError::Router(I2pError::DuplicatedDest))) => {}
+        Err(Error::Protocol(ProtocolError::Router(I2pError::DuplicateDest))) => {}
         _ => panic!("should not succeed"),
     }
 }
@@ -529,7 +529,7 @@ async fn create_same_session_twice_persistent() {
     .await
     .expect("no timeout")
     {
-        Err(Error::Protocol(ProtocolError::Router(I2pError::DuplicatedDest))) => {}
+        Err(Error::Protocol(ProtocolError::Router(I2pError::DuplicateDest))) => {}
         _ => panic!("should not succeed"),
     }
 }

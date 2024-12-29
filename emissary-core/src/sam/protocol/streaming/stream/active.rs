@@ -17,8 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::SigningPrivateKey,
     error::StreamingError,
-    primitives::DestinationId,
+    primitives::{Destination, DestinationId},
     runtime::{AsyncRead, AsyncWrite, Instant, Runtime},
     sam::protocol::streaming::{
         config::StreamConfig,
@@ -227,6 +228,9 @@ pub enum StreamKind {
 
 /// Context needed to initialize [`Stream`].
 pub struct StreamContext {
+    /// Local destination.
+    pub destination: Destination,
+
     /// RX channel for receiving [`Packet`]s from the network.
     pub cmd_rx: Receiver<Vec<u8>>,
 
@@ -241,6 +245,9 @@ pub struct StreamContext {
 
     /// ID of the remote destination.
     pub remote: DestinationId,
+
+    /// Signing key.
+    pub signing_key: SigningPrivateKey,
 }
 
 /// Pending outbound packet.
@@ -446,6 +453,9 @@ pub struct Stream<R: Runtime> {
     /// RX channel for receiving [`Packet`]s from the network.
     cmd_rx: Receiver<Vec<u8>>,
 
+    /// Local destination.
+    destination: Destination,
+
     /// TX channel for sending [`Packet`]s to the network.
     event_tx: Sender<(DestinationId, Vec<u8>)>,
 
@@ -457,9 +467,6 @@ pub struct Stream<R: Runtime> {
 
     /// Next sequence number.
     next_seq_nro: u32,
-
-    /// Pending (unACKed) outbound packets.
-    unacked: BTreeMap<u32, PendingPacket<R>>,
 
     /// Pending (unsent) outbound packets.
     pending: BTreeMap<u32, PendingPacket<R>>,
@@ -479,17 +486,23 @@ pub struct Stream<R: Runtime> {
     /// RTO.
     rto: Rto,
 
-    /// RTT.
-    rtt: Rtt,
-
     /// RTO timer.
     rto_timer: Option<BoxFuture<'static, ()>>,
+
+    /// RTT.
+    rtt: Rtt,
 
     /// Send stream ID (selected by us).
     send_stream_id: u32,
 
+    /// Signing key.
+    signing_key: SigningPrivateKey,
+
     /// Underlying TCP stream used to communicate with the client.
     stream: R::TcpStream,
+
+    /// Pending (unACKed) outbound packets.
+    unacked: BTreeMap<u32, PendingPacket<R>>,
 
     /// Window size.
     window_size: usize,
@@ -513,6 +526,8 @@ impl<R: Runtime> Stream<R> {
             cmd_rx,
             event_tx,
             recv_stream_id,
+            signing_key,
+            destination,
         } = context;
 
         let (send_stream_id, initial_message, highest_ack) = match state {
@@ -520,9 +535,11 @@ impl<R: Runtime> Stream<R> {
                 let send_stream_id = R::rng().next_u32();
                 let packet = PacketBuilder::new(send_stream_id)
                     .with_send_stream_id(recv_stream_id)
+                    .with_from_included(destination.clone())
                     .with_seq_nro(0)
                     .with_synchronize()
-                    .build();
+                    .with_signature()
+                    .build_and_sign(&signing_key);
 
                 event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
 
@@ -583,21 +600,23 @@ impl<R: Runtime> Stream<R> {
 
         Self {
             cmd_rx,
+            destination,
             event_tx,
             inbound_context: InboundContext::new(highest_ack),
             local,
             next_seq_nro: 1u32,
-            unacked: BTreeMap::new(),
             pending: BTreeMap::new(),
             read_buffer: vec![0u8; READ_BUFFER_SIZE],
             read_state: SocketState::ReadMessage,
-            rto: Rto::new(),
-            rtt: Rtt::new(),
-            rto_timer: None,
             recv_stream_id,
             remote,
+            rto: Rto::new(),
+            rto_timer: None,
+            rtt: Rtt::new(),
             send_stream_id,
+            signing_key,
             stream,
+            unacked: BTreeMap::new(),
             window_size: INITIAL_WINDOW_SIZE,
             write_state: match initial_message {
                 None => WriteState::GetMessage,
@@ -686,7 +705,9 @@ impl<R: Runtime> Stream<R> {
                 .with_send_stream_id(self.recv_stream_id)
                 .with_seq_nro(0)
                 .with_synchronize()
-                .build();
+                .with_from_included(self.destination.clone())
+                .with_signature()
+                .build_and_sign(&self.signing_key);
 
             self.event_tx.try_send((self.remote.clone(), packet.to_vec())).unwrap();
         }
@@ -1099,6 +1120,9 @@ mod tests {
     impl StreamBuilder {
         pub async fn build_stream() -> (Stream<MockRuntime>, Self) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            let destination_id = destination.id();
 
             let address = listener.local_addr().unwrap();
             let (stream1, stream2) =
@@ -1113,11 +1137,13 @@ mod tests {
                     stream2.unwrap(),
                     None,
                     StreamContext {
+                        destination,
                         cmd_rx,
                         event_tx,
-                        local: DestinationId::random(),
+                        local: destination_id,
                         recv_stream_id: 1337u32,
                         remote: DestinationId::random(),
+                        signing_key,
                     },
                     Default::default(),
                     StreamKind::Inbound { payload: vec![] },

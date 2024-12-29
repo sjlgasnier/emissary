@@ -235,57 +235,23 @@ impl<R: Runtime> StreamManager<R> {
             ..
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
 
-        // if this is a syn-ack for an outbound stream, initialize state
-        // for a new stream future and spawn it in the background
-        if let Some(PendingOutboundStream {
-            destination_id,
-            silent,
-            socket,
-            ..
-        }) = self.pending_outbound.remove(&send_stream_id)
-        {
-            tracing::trace!(
-                target: LOG_TARGET,
-                local = %self.destination_id,
-                ?recv_stream_id,
-                ?send_stream_id,
-                "outbound stream accepted",
-            );
-
-            self.spawn_stream(
-                SocketKind::Accept {
-                    socket: socket.into_inner(),
-                    silent,
-                },
-                recv_stream_id,
-                destination_id.clone(),
-                StreamKind::Outbound { send_stream_id },
-            );
-
-            return Ok(());
-        }
-
-        let signature = flags.signature().ok_or(StreamingError::SignatureMissing)?;
-        let destination =
-            flags.from_included().as_ref().ok_or(StreamingError::DestinationMissing)?;
-
-        // verify that the nacks field contains local destination id for replay protection
-        if nacks.len() == 8 {
-            let destination_id = nacks
-                .into_iter()
-                .fold(BytesMut::with_capacity(32), |mut acc, x| {
-                    acc.put_slice(&x.to_be_bytes());
-                    acc
-                })
-                .freeze()
-                .to_vec();
-
-            if destination_id != self.destination_id.to_vec() {
-                return Err(StreamingError::ReplayProtectionCheckFailed);
-            }
-        }
-
         // verify signature
+        let signature = flags.signature().ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "signature missing from syn packet",
+            );
+
+            StreamingError::SignatureMissing
+        })?;
+        let destination = flags.from_included().as_ref().ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "destination missing from syn packet",
+            );
+            StreamingError::DestinationMissing
+        })?;
+
         {
             match destination.verifying_key() {
                 None => {
@@ -320,6 +286,58 @@ impl<R: Runtime> StreamManager<R> {
             }
         }
 
+        // if this is a syn-ack for an outbound stream, initialize state
+        // for a new stream future and spawn it in the background
+        if let Some(PendingOutboundStream {
+            destination_id,
+            silent,
+            socket,
+            ..
+        }) = self.pending_outbound.remove(&send_stream_id)
+        {
+            tracing::trace!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                ?recv_stream_id,
+                ?send_stream_id,
+                "outbound stream accepted",
+            );
+
+            self.spawn_stream(
+                SocketKind::Accept {
+                    socket: socket.into_inner(),
+                    silent,
+                },
+                recv_stream_id,
+                destination_id.clone(),
+                StreamKind::Outbound { send_stream_id },
+            );
+
+            return Ok(());
+        }
+
+        // verify that the nacks field contains local destination id for replay protection
+        if nacks.len() != 8 {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "destination id for replay protection not set",
+            );
+            return Err(StreamingError::ReplayProtectionCheckFailed);
+        }
+
+        let destination_id = nacks
+            .into_iter()
+            .fold(BytesMut::with_capacity(32), |mut acc, x| {
+                acc.put_slice(&x.to_be_bytes());
+                acc
+            })
+            .freeze()
+            .to_vec();
+
+        if destination_id != self.destination_id.to_vec() {
+            return Err(StreamingError::ReplayProtectionCheckFailed);
+        }
+
         tracing::info!(
             target: LOG_TARGET,
             local = %self.destination_id,
@@ -350,8 +368,13 @@ impl<R: Runtime> StreamManager<R> {
                 // create new pending stream and send syn-ack for it
                 let destination_id = destination.id();
 
-                let (pending, packet) =
-                    PendingStream::new(destination_id.clone(), recv_stream_id, payload.to_vec());
+                let (pending, packet) = PendingStream::new(
+                    self.destination.clone(),
+                    destination_id.clone(),
+                    recv_stream_id,
+                    payload.to_vec(),
+                    &self.signing_key,
+                );
                 let _ = self.outbound_tx.try_send((destination_id.clone(), packet));
 
                 self.pending_inbound.insert(recv_stream_id, pending);
@@ -386,11 +409,13 @@ impl<R: Runtime> StreamManager<R> {
         // when it starts and uses that for sending
         let (tx, rx) = channel(STREAM_CHANNEL_SIZE);
         let context = StreamContext {
+            destination: self.destination.clone(),
             cmd_rx: rx,
             event_tx: self.outbound_tx.clone(),
             local: self.destination_id.clone(),
             recv_stream_id,
             remote: destination_id.clone(),
+            signing_key: self.signing_key.clone(),
         };
 
         // if the socket wasn't configured to be silent, send the remote's destination
@@ -1869,6 +1894,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signature_missing_inbound_stream() {
+        let mut manager = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // build syn packet without signature
+        let payload = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+
+            PacketBuilder::new(1337u32)
+                .with_synchronize()
+                .with_send_stream_id(0u32)
+                .with_replay_protection(&manager.destination.id())
+                .with_from_included(destination)
+                .with_payload(b"hello, world\n")
+                .build()
+                .to_vec()
+        };
+
+        assert_eq!(
+            manager.on_packet(I2cpPayload {
+                dst_port: 0,
+                payload,
+                protocol: Protocol::Streaming,
+                src_port: 0
+            }),
+            Err(StreamingError::SignatureMissing),
+        );
+    }
+
+    #[tokio::test]
+    async fn destination_missing() {
+        let mut manager = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // build syn packet without replay protection
+        let packet = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+
+            PacketBuilder::new(1337u32)
+                .with_send_stream_id(0u32)
+                .with_synchronize()
+                .with_signature()
+                .with_from_included(destination.clone())
+                .build_and_sign(&signing_key)
+        };
+
+        assert_eq!(
+            manager.on_packet(I2cpPayload {
+                dst_port: 0,
+                payload: packet.to_vec(),
+                protocol: Protocol::Streaming,
+                src_port: 0
+            }),
+            Err(StreamingError::ReplayProtectionCheckFailed),
+        );
+    }
+
+    #[tokio::test]
     async fn inbound_stream() {
         let signing_key = SigningPrivateKey::from_bytes(&[
             116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
@@ -2005,50 +2096,32 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_destination_id() {
-        let signing_key = SigningPrivateKey::from_bytes(&[
-            116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
-            221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
-        ])
-        .unwrap();
-        let destination = Destination::new::<MockRuntime>(signing_key.public());
-        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
+        let mut manager = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
 
-        let payload = vec![
-            0, 0, 0, 0, 7, 170, 162, 225, 0, 0, 0, 0, 0, 0, 0, 0, 8, 92, 237, 165, 51, 230, 31, 2,
-            219, 176, 105, 43, 109, 206, 122, 239, 241, 221, 135, 206, 60, 147, 145, 41, 155, 120,
-            133, 180, 145, 4, 26, 107, 40, 9, 4, 169, 1, 201, 127, 213, 228, 57, 98, 56, 202, 186,
-            4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107,
-            167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46,
-            112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93,
-            127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224,
-            232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56,
-            202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97,
-            227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192,
-            50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101,
-            93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46,
-            224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57,
-            98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217,
-            232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78,
-            254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167,
-            187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112,
-            10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127,
-            213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232,
-            108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202,
-            186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227,
-            107, 167, 187, 30, 101, 93, 25, 140, 66, 230, 135, 216, 58, 4, 196, 109, 50, 64, 50,
-            20, 213, 102, 99, 242, 187, 7, 216, 187, 137, 158, 228, 199, 195, 182, 38, 53, 40, 227,
-            5, 0, 4, 0, 7, 0, 0, 7, 20, 182, 215, 224, 75, 178, 60, 111, 31, 179, 197, 227, 223,
-            204, 20, 139, 51, 220, 96, 129, 16, 67, 235, 112, 185, 5, 108, 37, 55, 24, 251, 233,
-            175, 88, 10, 18, 128, 227, 33, 34, 87, 15, 141, 210, 183, 58, 42, 184, 148, 221, 156,
-            78, 128, 175, 18, 79, 142, 32, 0, 13, 28, 247, 4, 222, 7,
-        ];
+        let packet = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+
+            PacketBuilder::new(1337u32)
+                .with_send_stream_id(0u32)
+                .with_replay_protection(&DestinationId::random())
+                .with_synchronize()
+                .with_signature()
+                .with_from_included(destination.clone())
+                .build_and_sign(&signing_key)
+                .to_vec()
+        };
 
         assert_eq!(
             manager.on_packet(I2cpPayload {
                 src_port: 13u16,
                 dst_port: 37u16,
                 protocol: Protocol::Streaming,
-                payload,
+                payload: packet,
             }),
             Err(StreamingError::ReplayProtectionCheckFailed)
         );
