@@ -17,12 +17,13 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::StaticPrivateKey,
+    crypto::{base32_encode, StaticPrivateKey},
     destination::session::{SessionManager, SessionManagerEvent},
     error::{Error, QueryError},
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType, ReplyType as LookupReplyType},
+            search_reply::DatabaseSearchReply,
             store::{
                 DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
                 ReplyType,
@@ -31,7 +32,7 @@ use crate::{
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
-    primitives::{DestinationId, Lease, LeaseSet2, TunnelId},
+    primitives::{DestinationId, Lease, LeaseSet2, RouterId, TunnelId},
     runtime::{Instant, JoinSet, Runtime},
     tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
@@ -315,7 +316,7 @@ impl<R: Runtime> Destination<R> {
             tracing::debug!(
                 target: LOG_TARGET,
                 local = %self.destination_id,
-                reomte = %destination_id,
+                remote = %destination_id,
                 ?error,
                 "failed to send message to tunnel",
             );
@@ -348,10 +349,89 @@ impl<R: Runtime> Destination<R> {
     fn decrypt_message(&mut self, message: Message) -> crate::Result<Vec<Vec<u8>>> {
         tracing::trace!(
             target: LOG_TARGET,
+            local = %self.destination_id,
             message_id = ?message.message_id,
-            "garlic message",
+            message_type = ?message.message_type,
+            "inbound message to destination",
         );
-        debug_assert_eq!(message.message_type, MessageType::Garlic);
+
+        match message.message_type {
+            MessageType::DatabaseStore => {
+                let DatabaseStore { key, payload, .. } =
+                    DatabaseStore::<R>::parse(&message.payload).ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "received malformed database store",
+                        );
+                        Error::InvalidData
+                    })?;
+
+                if core::matches!(payload, DatabaseStorePayload::RouterInfo { .. }) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        "unexpected router info database store",
+                    );
+                    return Err(Error::InvalidData);
+                }
+
+                match self.pending_storage_verifications.remove(&key) {
+                    None => tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        key = ?base32_encode(key),
+                        "unexpected lease set database store",
+                    ),
+                    Some(_) => tracing::info!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        "lease set storage verified",
+                    ),
+                }
+
+                return Ok(Vec::new());
+            }
+            MessageType::DatabaseSearchReply => {
+                let DatabaseSearchReply { from, key, .. } =
+                    DatabaseSearchReply::parse(&message.payload).ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "received malformed database search reply",
+                        );
+                        Error::InvalidData
+                    })?;
+
+                match self.pending_storage_verifications.remove(&key) {
+                    None => tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        key = ?base32_encode(key),
+                        floodfill = %RouterId::from(from),
+                        "unexpected database search reply",
+                    ),
+                    Some(_) => tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        "lease set storage failed",
+                    ),
+                }
+
+                return Ok(Vec::new());
+            }
+            MessageType::Garlic => {}
+            _ => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    message_type = ?message.message_type,
+                    message_id = ?message.message_id,
+                    "unsupported message type for destination",
+                );
+                return Err(Error::NotSupported);
+            }
+        }
 
         if message.payload.len() <= 12 {
             tracing::warn!(
@@ -523,11 +603,6 @@ impl<R: Runtime> Destination<R> {
                         tunnel_id: gateway_tunnel_id,
                         router_id: gateway_router_id.clone(),
                     })
-                    .with_reply_type(ReplyType::Tunnel {
-                        reply_token: R::rng().next_u32(),
-                        tunnel_id: gateway_tunnel_id,
-                        router_id: gateway_router_id.clone(),
-                    })
                     .build();
 
             // TODO: garlic encrypt
@@ -565,13 +640,13 @@ impl<R: Runtime> Destination<R> {
             // TODO: garlic encrypt
             let message = MessageBuilder::standard()
                 .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::DatabaseStore)
+                .with_message_type(MessageType::DatabaseLookup)
                 .with_message_id(R::rng().next_u32())
                 .with_payload(&message)
                 .build();
 
             // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
+            let _ = tunnel_sender.send_to_router(gateway, floodfills[1].clone(), message).await;
         })
     }
 }
@@ -632,7 +707,7 @@ impl<R: Runtime> Stream for Destination<R> {
                             target: LOG_TARGET,
                             local = %self.destination_id,
                             ?error,
-                            "failed to decrypt garlic message",
+                            "failed to handle inbound message",
                         ),
                         Ok(messages) if !messages.is_empty() =>
                             return Poll::Ready(Some(DestinationEvent::Messages { messages })),
@@ -805,9 +880,12 @@ impl Stream for LeaseSetPublishTimer {
 mod tests {
     use super::*;
     use crate::{
-        primitives::{RouterId, TunnelId},
+        crypto::SigningPrivateKey,
+        i2np::database::lookup::DatabaseLookup,
+        netdb::NetDbAction,
+        primitives::{Destination as Dest, LeaseSet2Header, RouterId, TunnelId},
         runtime::{mock::MockRuntime, Runtime},
-        tunnel::TunnelPoolConfig,
+        tunnel::{TunnelMessage, TunnelPoolConfig},
     };
 
     #[tokio::test]
@@ -1054,5 +1132,287 @@ mod tests {
             DestinationEvent::CreateLeaseSet { .. } => {}
             _ => panic!("invalid event"),
         }
+    }
+
+    #[tokio::test]
+    async fn lease_set_storage_verified() {
+        crate::util::init_logger();
+
+        let (netdb_handle, rx) = NetDbHandle::create();
+        let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+            num_inbound: 3usize,
+            ..Default::default()
+        });
+        let destination_id = DestinationId::random();
+        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+        let dest = Dest::new::<MockRuntime>(signing_key.public());
+        let mut destination = Destination::<MockRuntime>::new(
+            destination_id.clone(),
+            encryption_key.clone(),
+            Bytes::new(),
+            netdb_handle.clone(),
+            tp_handle,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        // set lease set timer to a more sensible value
+        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
+            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
+        };
+
+        // add one outbound tunnel
+        tp_tx
+            .send(TunnelPoolEvent::OutboundTunnelBuilt {
+                tunnel_id: TunnelId::random(),
+            })
+            .await
+            .unwrap();
+
+        // issue events for three new inbound tunnels
+        for _ in 0..3 {
+            tp_tx
+                .send(TunnelPoolEvent::InboundTunnelBuilt {
+                    tunnel_id: TunnelId::random(),
+                    lease: Lease {
+                        router_id: RouterId::random(),
+                        tunnel_id: TunnelId::random(),
+                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            DestinationEvent::CreateLeaseSet { leases } => {
+                let lease_set = Bytes::from(
+                    LeaseSet2 {
+                        header: LeaseSet2Header {
+                            destination: dest.clone(),
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
+                            expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                        },
+                        public_keys: vec![encryption_key.public()],
+                        leases,
+                    }
+                    .serialize(&signing_key),
+                );
+
+                destination.publish_lease_set(Bytes::from(destination_id.to_vec()), lease_set);
+            }
+            _ => panic!("invalid event"),
+        }
+
+        tokio::spawn(async move {
+            let floodfills = vec![RouterId::random(), RouterId::random(), RouterId::random()];
+            let mut lease_set = Option::<Bytes>::None;
+            let mut key = Option::<Bytes>::None;
+
+            loop {
+                tokio::select! {
+                    event = rx.recv() => match event.unwrap() {
+                        NetDbAction::GetClosestFloodfills { tx, .. } => {
+                            tx.send(floodfills.clone()).unwrap();
+                        }
+                        _ => panic!("invalid event"),
+                    },
+                    message = tm_rx.recv() => match message.unwrap() {
+                        TunnelMessage::RouterDelivery { message, .. } => {
+                            let message = Message::parse_standard(&message).unwrap();
+
+                            match message.message_type {
+                                MessageType::DatabaseStore => {
+                                    let DatabaseStore {
+                                        reply,
+                                        key: store_key,
+                                        ..
+                                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+
+                                    assert!(std::matches!(reply, ReplyType::Tunnel { .. }));
+
+                                    key = Some(store_key);
+                                    lease_set = Some(DatabaseStore::<MockRuntime>::extract_raw_lease_set(&message.payload));
+                                }
+                                MessageType::DatabaseLookup => {
+                                    let DatabaseLookup {
+                                        key: lookup_key,
+                                        ..
+                                    } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                                    assert_eq!(key.as_ref().unwrap(), &lookup_key);
+
+                                    let message =
+                                        DatabaseStoreBuilder::new(
+                                            key.clone().unwrap(),
+                                            DatabaseStoreKind::LeaseSet2 { lease_set: lease_set.clone().unwrap() })
+                                        .build();
+
+                                    tp_tx.send(TunnelPoolEvent::Message { message: Message {
+                                            message_type: MessageType::DatabaseStore,
+                                            message_id: MockRuntime::rng().next_u32(),
+                                            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                                            payload: message.to_vec(),
+                                    }}).await.unwrap();
+                                }
+                                _ => panic!("invalid message type"),
+                            }
+                        }
+                        _ => panic!("invalid message type"),
+                    }
+                }
+            }
+        });
+
+        match tokio::time::timeout(Duration::from_secs(15), destination.next()).await {
+            Err(_) => {}
+            res => tracing::warn!("unexpected result = {res:?}"),
+        }
+        assert!(destination.pending_storage_verifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lease_set_storage_verification_failure() {
+        crate::util::init_logger();
+
+        let (netdb_handle, rx) = NetDbHandle::create();
+        let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+            num_inbound: 3usize,
+            ..Default::default()
+        });
+        let destination_id = DestinationId::random();
+        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+        let dest = Dest::new::<MockRuntime>(signing_key.public());
+        let mut destination = Destination::<MockRuntime>::new(
+            destination_id.clone(),
+            encryption_key.clone(),
+            Bytes::new(),
+            netdb_handle.clone(),
+            tp_handle,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        // set lease set timer to a more sensible value
+        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
+            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
+        };
+
+        // add one outbound tunnel
+        tp_tx
+            .send(TunnelPoolEvent::OutboundTunnelBuilt {
+                tunnel_id: TunnelId::random(),
+            })
+            .await
+            .unwrap();
+
+        // issue events for three new inbound tunnels
+        for _ in 0..3 {
+            tp_tx
+                .send(TunnelPoolEvent::InboundTunnelBuilt {
+                    tunnel_id: TunnelId::random(),
+                    lease: Lease {
+                        router_id: RouterId::random(),
+                        tunnel_id: TunnelId::random(),
+                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            DestinationEvent::CreateLeaseSet { leases } => {
+                let lease_set = Bytes::from(
+                    LeaseSet2 {
+                        header: LeaseSet2Header {
+                            destination: dest.clone(),
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
+                            expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                        },
+                        public_keys: vec![encryption_key.public()],
+                        leases,
+                    }
+                    .serialize(&signing_key),
+                );
+
+                destination.publish_lease_set(Bytes::from(destination_id.to_vec()), lease_set);
+            }
+            _ => panic!("invalid event"),
+        }
+
+        tokio::spawn(async move {
+            let floodfills = vec![RouterId::random(), RouterId::random(), RouterId::random()];
+            let mut key = Option::<Bytes>::None;
+
+            loop {
+                tokio::select! {
+                    event = rx.recv() => match event.unwrap() {
+                        NetDbAction::GetClosestFloodfills { tx, .. } => {
+                            tx.send(floodfills.clone()).unwrap();
+                        }
+                        _ => panic!("invalid event"),
+                    },
+                    message = tm_rx.recv() => match message.unwrap() {
+                        TunnelMessage::RouterDelivery { message, router_id, .. } => {
+                            let message = Message::parse_standard(&message).unwrap();
+
+                            match message.message_type {
+                                MessageType::DatabaseStore => {
+                                    let DatabaseStore {
+                                        reply,
+                                        key: store_key,
+                                        ..
+                                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+
+                                    assert!(std::matches!(reply, ReplyType::Tunnel { .. }));
+
+                                    key = Some(store_key);
+                                }
+                                MessageType::DatabaseLookup => {
+                                    let DatabaseLookup {
+                                        key: lookup_key,
+                                        ..
+                                    } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                                    assert_eq!(key.as_ref().unwrap(), &lookup_key);
+
+                                    let message = DatabaseSearchReply {
+                                        from: router_id.to_vec(),
+                                        key: lookup_key,
+                                        routers: vec![RouterId::random(), RouterId::random(), RouterId::random()],
+                                    }.serialize();
+
+                                    tp_tx.send(TunnelPoolEvent::Message { message: Message {
+                                            message_type: MessageType::DatabaseSearchReply,
+                                            message_id: MockRuntime::rng().next_u32(),
+                                            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                                            payload: message.to_vec(),
+                                    }}).await.unwrap();
+                                }
+                                _ => panic!("invalid message type"),
+                            }
+                        }
+                        _ => panic!("invalid message type"),
+                    }
+                }
+            }
+        });
+
+        match tokio::time::timeout(Duration::from_secs(15), destination.next()).await {
+            Err(_) => {}
+            res => tracing::warn!("unexpected result = {res:?}"),
+        }
+        assert!(destination.pending_storage_verifications.is_empty());
     }
 }
