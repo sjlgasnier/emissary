@@ -140,12 +140,11 @@ impl<R: Runtime> TransportService<R> {
     /// via [`TransportService::poll_next()`].
     pub fn connect(&mut self, router: &RouterId) -> Result<(), ()> {
         if self.routers.contains_key(router) {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 ?router,
                 "tried to dial an already-connected router",
             );
-            debug_assert!(false);
 
             self.pending_events.push_back(InnerSubsystemEvent::ConnectionFailure {
                 router: router.clone(),

@@ -29,6 +29,7 @@ use crate::{
                 ReplyType,
             },
         },
+        delivery_status::DeliveryStatus,
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
@@ -420,6 +421,26 @@ impl<R: Runtime> Destination<R> {
 
                 return Ok(Vec::new());
             }
+            MessageType::DeliveryStatus => {
+                let DeliveryStatus { message_id, .. } = DeliveryStatus::parse(&message.payload)
+                    .ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "received malformed delivery status",
+                        );
+                        Error::InvalidData
+                    })?;
+
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    token = %message_id,
+                    "delivery status",
+                );
+
+                return Ok(Vec::new());
+            }
             MessageType::Garlic => {}
             _ => {
                 tracing::warn!(
@@ -513,6 +534,7 @@ impl<R: Runtime> Destination<R> {
     pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
         let netdb_handle = self.netdb_handle.clone();
         let tunnel_sender = self.tunnel_pool_handle.sender().clone();
+        let local = self.destination_id.clone();
 
         // store our new lease set proactively to `SessionManager` so it can be given to all active
         // session right away while publishing the new lease set to NetDb in the background
@@ -581,6 +603,7 @@ impl<R: Runtime> Destination<R> {
                     None => {
                         tracing::warn!(
                             target: LOG_TARGET,
+                            %local,
                             "failed to contact netdb after three retries, aborting lease set publish",
                         );
                         debug_assert!(false);
@@ -589,17 +612,21 @@ impl<R: Runtime> Destination<R> {
                 }
             };
 
+            // create database store and send it to a floodfill router over
+            // one of the destination's outbound tunnels
+            let reply_token = R::rng().next_u32();
+
             tracing::trace!(
                 target: LOG_TARGET,
+                %local,
+                %reply_token,
                 "publish local lease set",
             );
 
-            // create database store and send it to a floodfill router over
-            // one of the destination's outbound tunnels
             let message =
                 DatabaseStoreBuilder::new(key.clone(), DatabaseStoreKind::LeaseSet2 { lease_set })
                     .with_reply_type(ReplyType::Tunnel {
-                        reply_token: R::rng().next_u32(),
+                        reply_token,
                         tunnel_id: gateway_tunnel_id,
                         router_id: gateway_router_id.clone(),
                     })
@@ -620,6 +647,7 @@ impl<R: Runtime> Destination<R> {
             if floodfills.len() == 1 {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    %local,
                     "not enough floodfills to verify lease set storage",
                 );
                 return;
@@ -1234,10 +1262,23 @@ mod tests {
                                         ..
                                     } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
 
-                                    assert!(std::matches!(reply, ReplyType::Tunnel { .. }));
-
                                     key = Some(store_key);
                                     lease_set = Some(DatabaseStore::<MockRuntime>::extract_raw_lease_set(&message.payload));
+
+                                    match reply {
+                                        ReplyType::Tunnel { reply_token, .. } => {
+                                            tp_tx.send(TunnelPoolEvent::Message { message: Message {
+                                                    message_type: MessageType::DeliveryStatus,
+                                                    message_id: MockRuntime::rng().next_u32(),
+                                                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                                                    payload: DeliveryStatus {
+                                                        message_id: reply_token,
+                                                        timestamp: MockRuntime::time_since_epoch(),
+                                                    }.serialize().to_vec()
+                                            }}).await.unwrap();
+                                        }
+                                        _ => panic!("invalid reply type"),
+                                    }
                                 }
                                 MessageType::DatabaseLookup => {
                                     let DatabaseLookup {
@@ -1375,9 +1416,22 @@ mod tests {
                                         ..
                                     } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
 
-                                    assert!(std::matches!(reply, ReplyType::Tunnel { .. }));
-
                                     key = Some(store_key);
+
+                                    match reply {
+                                        ReplyType::Tunnel { reply_token, .. } => {
+                                            tp_tx.send(TunnelPoolEvent::Message { message: Message {
+                                                    message_type: MessageType::DeliveryStatus,
+                                                    message_id: MockRuntime::rng().next_u32(),
+                                                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                                                    payload: DeliveryStatus {
+                                                        message_id: reply_token,
+                                                        timestamp: MockRuntime::time_since_epoch(),
+                                                    }.serialize().to_vec()
+                                            }}).await.unwrap();
+                                        }
+                                        _ => panic!("invalid reply type"),
+                                    }
                                 }
                                 MessageType::DatabaseLookup => {
                                     let DatabaseLookup {

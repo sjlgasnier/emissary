@@ -28,6 +28,8 @@ use crate::{
                 ReplyType as StoreReplyType,
             },
         },
+        delivery_status::DeliveryStatus,
+        tunnel::gateway::TunnelGateway,
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
@@ -633,12 +635,70 @@ impl<R: Runtime> NetDb<R> {
         );
         self.profile_storage.add_router(router_info);
 
-        if let StoreReplyType::None = reply {
-            tracing::trace!(
-                target: LOG_TARGET,
-                "reply type is `None`, don't flood the router info",
-            );
-            return;
+        match reply {
+            StoreReplyType::None => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    "reply type is `None`, don't flood the router info",
+                );
+                return;
+            }
+            StoreReplyType::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::standard()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &TunnelGateway {
+                            tunnel_id,
+                            payload: &message,
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
+            StoreReplyType::Router {
+                reply_token,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
         }
 
         let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
@@ -703,12 +763,70 @@ impl<R: Runtime> NetDb<R> {
 
         self.lease_sets.insert(key.clone(), (raw_lease_set.clone(), expires));
 
-        if let StoreReplyType::None = reply {
-            tracing::trace!(
-                target: LOG_TARGET,
-                "reply type is `None`, don't flood the lease set",
-            );
-            return;
+        match reply {
+            StoreReplyType::None => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    "reply type is `None`, don't flood the router info",
+                );
+                return;
+            }
+            StoreReplyType::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::standard()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &TunnelGateway {
+                            tunnel_id,
+                            payload: &message,
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
+            StoreReplyType::Router {
+                reply_token,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
         }
 
         let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
@@ -1472,7 +1590,7 @@ mod tests {
             }
             _ => false,
         }));
-        assert_eq!(netdb.floodfills.len(), 3);
+        assert_eq!(netdb.floodfills.len(), 4);
         assert!(netdb
             .floodfills
             .values()
@@ -1813,7 +1931,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -1854,15 +1972,22 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 2);
-                    true
-                }
-                _ => false,
-            }));
+            assert!(
+                netdb.floodfills.iter().all(|(router_id, state)| match state {
+                    FloodfillState::Dialing { pending_messages } => {
+                        if netdb.profile_storage.is_floodfill(router_id) {
+                            assert_eq!(pending_messages.len(), 2);
+                        } else {
+                            assert_eq!(pending_messages.len(), 1);
+                        }
+
+                        true
+                    }
+                    _ => false,
+                })
+            );
         }
 
         // store non-expiring lease set and verify floodfills are pending
@@ -1889,15 +2014,21 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 3);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 6);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 3);
-                    true
-                }
-                _ => false,
-            }));
+            assert!(
+                netdb.floodfills.iter().all(|(router_id, state)| match state {
+                    FloodfillState::Dialing { pending_messages } => {
+                        if netdb.profile_storage.is_floodfill(router_id) {
+                            assert_eq!(pending_messages.len(), 3);
+                        } else {
+                            assert_eq!(pending_messages.len(), 1);
+                        }
+                        true
+                    }
+                    _ => false,
+                })
+            );
         }
 
         // poll netdb until it does its maintenance
@@ -1992,7 +2123,7 @@ mod tests {
             }
             _ => false,
         }));
-        assert_eq!(netdb.floodfills.len(), 3);
+        assert_eq!(netdb.floodfills.len(), 4);
         assert!(netdb
             .floodfills
             .values()
@@ -2634,7 +2765,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -2675,15 +2806,21 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 2);
-                    true
-                }
-                _ => false,
-            }));
+            assert!(
+                netdb.floodfills.iter().all(|(router_id, state)| match state {
+                    FloodfillState::Dialing { pending_messages } => {
+                        if netdb.profile_storage.is_floodfill(router_id) {
+                            assert_eq!(pending_messages.len(), 2);
+                        } else {
+                            assert_eq!(pending_messages.len(), 1);
+                        }
+                        true
+                    }
+                    _ => false,
+                })
+            );
         }
 
         // wait for 10 seconds so the first lease set expires
@@ -2853,7 +2990,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -2893,15 +3030,21 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.floodfills.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 2);
-                    true
-                }
-                _ => false,
-            }));
+            assert!(
+                netdb.floodfills.iter().all(|(router_id, state)| match state {
+                    FloodfillState::Dialing { pending_messages } => {
+                        if netdb.profile_storage.is_floodfill(router_id) {
+                            assert_eq!(pending_messages.len(), 2);
+                        } else {
+                            assert_eq!(pending_messages.len(), 1);
+                        }
+                        true
+                    }
+                    _ => false,
+                })
+            );
         }
 
         // wait for 10 seconds so the first lease set expires
