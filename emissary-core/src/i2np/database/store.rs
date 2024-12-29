@@ -312,7 +312,7 @@ impl<R: Runtime> DatabaseStore<R> {
     }
 
     /// Extract raw payload from [`DatabaseStore`] message.
-    fn extraw_raw_data_payload(input: &[u8]) -> Bytes {
+    fn extraw_raw_data_payload(input: &[u8], router_info: bool) -> Bytes {
         let (rest, _) = take::<_, _, ()>(DATABASE_KEY_SIZE)(input).expect("to succeed");
         let (rest, _) = be_u8::<_, ()>(rest).expect("to succeed");
         let (rest, reply_token) = be_u32::<_, ()>(rest).expect("to succeed");
@@ -327,23 +327,30 @@ impl<R: Runtime> DatabaseStore<R> {
             }
         };
 
-        BytesMut::from(rest).freeze()
+        if router_info {
+            let (rest, size) = be_u16::<_, ()>(rest).expect("to succeed");
+            let (_, data) = take::<_, _, ()>(size)(rest).expect("to succeed");
+
+            BytesMut::from(data).freeze()
+        } else {
+            BytesMut::from(rest).freeze()
+        }
     }
 
     /// Extract raw, unserialized [`LeaseSet`] from `input`.
     ///
-    /// Caller is expected to ensure that `input` it is a valid [`DatabaseStore`] that contains
+    /// Caller is expected to ensure that `input` is a valid [`DatabaseStore`] that contains
     /// a valid [`LeaseSet2`].
     pub fn extract_raw_lease_set(input: &[u8]) -> Bytes {
-        Self::extraw_raw_data_payload(input)
+        Self::extraw_raw_data_payload(input, false)
     }
 
     /// Extract raw, unserialized [`RouterInfo`] from `input`.
     ///
-    /// Caller is expected to ensure that `input` it is a valid [`DatabaseStore`] that contains
+    /// Caller is expected to ensure that `input` is a valid [`DatabaseStore`] that contains
     /// a valid [`RouterInfo`].
     pub fn extract_raw_router_info(input: &[u8]) -> Bytes {
-        Self::extraw_raw_data_payload(input)
+        Self::extraw_raw_data_payload(input, true)
     }
 }
 

@@ -50,6 +50,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -75,11 +76,108 @@ const LOG_TARGET: &str = "emissary::netdb";
 /// `NetDb` query timeout.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Router info republish timeout.
+const ROUTER_INFO_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
 /// [`NetDb`] maintenance interval.
 const NETDB_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Maximum router hashes to include into [`DatabaseSearchReply`].
 const SEARCH_REPLY_MAX_ROUTERS: usize = 16usize;
+
+/// Local router info publisher.
+///
+/// Publishes the router info of the local router first when the router boots up and after that
+/// periodically (1h) to prevent the router from disappearing from the global NetDb.
+///
+/// [`RouterInfoPublisher`] implements `Future` which fires periodically and instructs [`NetDb`] to
+/// call [`RouterInfoPublisher::publish()`] to get a `DatabaseStore` message and a `RouterId` of a
+/// floodfill to whom the message should be sent.
+pub struct RouterInfoPublisher<R> {
+    /// Local router ID.
+    router_id: RouterId,
+
+    /// Serialized [`RouterId`] of the local router.
+    serialized_router_id: Bytes,
+
+    /// Serialized [`RouterInfo`] of the local router.
+    serialized_router_info: Bytes,
+
+    /// Republish timer.
+    timer: BoxFuture<'static, ()>,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> RouterInfoPublisher<R> {
+    /// Create new [`RouterInfoPublisher`].
+    fn new(router_id: RouterId, serialized_router_info: Bytes) -> Self {
+        let serialized_router_id = Bytes::from(router_id.to_vec());
+
+        // gzip-compress the serialized router info, as required by the spec
+        //
+        // call is expected to succeed as the router info is created by emissary
+        let serialized_router_info =
+            Bytes::from(R::gzip_compress(serialized_router_info).expect("to succeed"));
+
+        Self {
+            router_id,
+            serialized_router_id,
+            serialized_router_info,
+            timer: Box::pin(R::delay(Duration::from_secs(10))),
+            _runtime: Default::default(),
+        }
+    }
+
+    /// Publish local router info to global NetDb.
+    ///
+    /// Fetches the closest floodfill to our key from `dht` and returns a DatabaseStore message
+    /// which [`NetDb`] needs to send to the selected floofill. Returns also the reply token that
+    /// was used in the DatabaseStore message, allowing [`NetDb`] to associate the response with the
+    /// router info publish.
+    ///
+    /// Returns `None` if there are no floodfills.
+    fn publish(&self) -> (u32, Vec<u8>) {
+        let reply_token = R::rng().next_u32();
+        let message = DatabaseStoreBuilder::new(
+            self.serialized_router_id.clone(),
+            DatabaseStoreKind::RouterInfo {
+                router_info: self.serialized_router_info.clone(),
+            },
+        )
+        .with_reply_type(StoreReplyType::Router {
+            reply_token,
+            router_id: self.router_id.clone(),
+        })
+        .build();
+
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseStore)
+            .with_message_id(R::rng().next_u32())
+            .with_payload(&message)
+            .build();
+
+        (reply_token, message)
+    }
+}
+
+impl<R: Runtime> Future for RouterInfoPublisher<R> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        futures::ready!(self.timer.poll_unpin(cx));
+
+        // reset timer and poll it to register it into the executor
+        {
+            self.timer = Box::pin(R::delay(ROUTER_INFO_REPUBLISH_TIMEOUT));
+            let _ = self.timer.poll_unpin(cx);
+        }
+
+        Poll::Ready(())
+    }
+}
 
 /// Tunnel selector.
 ///
@@ -244,25 +342,28 @@ pub struct NetDb<R: Runtime> {
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
-    /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
-    netdb_msg_rx: mpsc::Receiver<Message>,
-
     // Network ID.
     net_id: u8,
+
+    /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
+    netdb_msg_rx: mpsc::Receiver<Message>,
 
     /// Active inbound tunhnels
     outbound_tunnels: TunnelSelector<TunnelId>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// Query timers.
     query_timers: R::JoinSet<Bytes>,
+
+    /// Local router info publishers.
+    router_info_publishers: RouterInfoPublisher<R>,
 
     /// Serialized [`RouterInfo`]s received via `DatabaseStore` messages.
     ///
     /// This contains entries only if `floodfill` is true.
     router_infos: HashMap<Bytes, (Bytes, Duration)>,
-
-    /// Profile storage.
-    profile_storage: ProfileStorage<R>,
 
     /// Transport service.
     service: TransportService<R>,
@@ -279,6 +380,7 @@ impl<R: Runtime> NetDb<R> {
         exploratory_pool_handle: TunnelPoolHandle,
         net_id: u8,
         netdb_msg_rx: mpsc::Receiver<Message>,
+        local_router_info: Bytes,
     ) -> (Self, NetDbHandle) {
         let floodfills = profile_storage
             .get_router_ids(Bucket::Any, |_, info, _| info.is_floodfill())
@@ -310,13 +412,17 @@ impl<R: Runtime> NetDb<R> {
                 handle_rx,
                 inbound_tunnels: TunnelSelector::new(),
                 lease_sets: HashMap::new(),
-                local_router_id,
+                local_router_id: local_router_id.clone(),
                 maintenance_timer: Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL)),
                 metrics,
                 netdb_msg_rx,
                 net_id,
                 outbound_tunnels: TunnelSelector::new(),
                 query_timers: R::join_set(),
+                router_info_publishers: RouterInfoPublisher::new(
+                    local_router_id,
+                    local_router_info,
+                ),
                 router_infos: HashMap::new(),
                 profile_storage,
                 service,
@@ -525,6 +631,7 @@ impl<R: Runtime> NetDb<R> {
                 Duration::from_millis(*router_info.published.date()),
             ),
         );
+        self.profile_storage.add_router(router_info);
 
         if let StoreReplyType::None = reply {
             tracing::trace!(
@@ -539,7 +646,7 @@ impl<R: Runtime> NetDb<R> {
             tracing::debug!(
                 target: LOG_TARGET,
                 %router_id,
-                "cannot flood router inof, no floodfills",
+                "cannot flood router info, no floodfills",
             );
             return;
         }
@@ -1235,6 +1342,29 @@ impl<R: Runtime> Future for NetDb<R> {
             let _ = self.maintenance_timer.poll_unpin(cx);
         }
 
+        if self.router_info_publishers.poll_unpin(cx).is_ready() {
+            let key = Bytes::from(self.local_router_id.to_vec());
+
+            match self.dht.closest(key, 1usize).collect::<Vec<_>>().pop() {
+                None => tracing::warn!(
+                    target: LOG_TARGET,
+                    "unable to publish router info, no floodfills",
+                ),
+                Some(floodfill) => {
+                    let (reply_token, message) = self.router_info_publishers.publish();
+
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %floodfill,
+                        %reply_token,
+                        "publish local router info",
+                    );
+
+                    self.send_message(&[floodfill], MessageKind::NonExpiring { message });
+                }
+            }
+        }
+
         Poll::Pending
     }
 }
@@ -1281,6 +1411,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
@@ -1374,6 +1505,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
@@ -1461,6 +1593,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
@@ -1550,6 +1683,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key1, expired_lease_set1) = {
@@ -1799,6 +1933,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -1890,6 +2025,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -1971,6 +2107,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set, expires) = {
@@ -2075,6 +2212,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -2157,6 +2295,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -2262,6 +2401,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -2324,6 +2464,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         // set timer to a shorter timeout and poll netdb until it sends a router exploration
@@ -2397,6 +2538,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key1, expired_lease_set1) = {
@@ -2620,6 +2762,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key1, expiring_router_info) = {
@@ -2837,6 +2980,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -2917,6 +3061,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
@@ -2999,6 +3144,7 @@ mod tests {
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -3052,5 +3198,44 @@ mod tests {
             .floodfills
             .values()
             .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+    }
+
+    #[tokio::test]
+    async fn local_router_info_published() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add floodfill to router storage
+        let info = RouterInfo::floodfill::<MockRuntime>();
+        let floodfill = info.identity.id();
+        storage.add_router(info);
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        assert!(std::matches!(
+            netdb.floodfills.get(&floodfill),
+            Some(FloodfillState::Disconnected)
+        ));
+
+        // poll netdb until the initial publish timeout is over
+        assert!(tokio::time::timeout(Duration::from_secs(20), &mut netdb).await.is_err());
+
+        match netdb.floodfills.get(&floodfill).expect("to exist") {
+            FloodfillState::Dialing { pending_messages } => {
+                assert_eq!(pending_messages.len(), 1);
+            }
+            _ => panic!("invalid state"),
+        }
     }
 }

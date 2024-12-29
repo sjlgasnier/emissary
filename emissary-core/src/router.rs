@@ -31,6 +31,7 @@ use crate::{
     tunnel::{TunnelManager, TunnelManagerHandle},
 };
 
+use bytes::Bytes;
 use futures::{FutureExt, Stream};
 use rand_core::RngCore;
 
@@ -217,6 +218,7 @@ impl<R: Runtime> Router<R> {
                 exploratory_pool_handle,
                 net_id.unwrap_or(NET_ID),
                 netdb_msg_rx,
+                Bytes::from(serialized_router_info.clone()),
             );
 
             R::spawn(netdb);

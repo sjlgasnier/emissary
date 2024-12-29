@@ -142,7 +142,7 @@ async fn streaming_works() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -231,7 +231,7 @@ async fn repliable_datagrams_work() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -319,7 +319,7 @@ async fn anonymous_datagrams_work() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(60),
@@ -614,7 +614,7 @@ async fn stream_lots_of_data() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
