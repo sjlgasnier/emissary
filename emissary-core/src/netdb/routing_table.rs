@@ -92,12 +92,12 @@ impl<R: Runtime> RoutingTable<R> {
         self.buckets[*index].entry(key)
     }
 
-    /// Add floodfill router to [`RoutingTable`].
-    pub fn add_floodfill(&mut self, router_id: RouterId) {
+    /// Add router to [`RoutingTable`].
+    pub fn add_router(&mut self, router_id: RouterId) {
         tracing::trace!(
             target: LOG_TARGET,
             %router_id,
-            "add floodfill router",
+            "add router",
         );
 
         match self.entry(Key::from(router_id.clone())) {
@@ -119,6 +119,9 @@ impl<R: Runtime> RoutingTable<R> {
             ),
         }
     }
+
+    /// Remove router from [`RoutingTable`].
+    pub fn remove_router(&mut self, _router_id: RouterId) {}
 
     /// Get `limit` many floodfills closest to `target` from the k-buckets.
     pub fn closest<'a, K: Clone + 'a>(

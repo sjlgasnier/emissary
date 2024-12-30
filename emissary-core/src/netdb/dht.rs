@@ -42,13 +42,13 @@ impl<R: Runtime> Dht<R> {
     /// Create new [`Dht`].
     pub fn new(
         local_router_id: RouterId,
-        floodfills: HashSet<RouterId>,
+        routers: HashSet<RouterId>,
         metrics: R::MetricsHandle,
     ) -> Self {
         let mut routing_table = RoutingTable::new(Key::from(local_router_id));
 
-        floodfills.into_iter().for_each(|router_id| {
-            routing_table.add_floodfill(router_id);
+        routers.into_iter().for_each(|router_id| {
+            routing_table.add_router(router_id);
         });
 
         Self {
@@ -65,12 +65,18 @@ impl<R: Runtime> Dht<R> {
             .to_string()
     }
 
-    /// Insert new floodfill into [`Dht`].
-    pub fn add_floodfill(&mut self, router_id: RouterId) {
-        self.routing_table.add_floodfill(router_id);
+    /// Insert new router into [`Dht`].
+    pub fn add_router(&mut self, router_id: RouterId) {
+        self.routing_table.add_router(router_id);
     }
 
-    /// Get `limit` many floodfills clost to `key`.
+    /// Remove router from [`Dht`].
+    #[allow(unused)]
+    pub fn remove_router(&mut self, router_id: RouterId) {
+        self.routing_table.remove_router(router_id);
+    }
+
+    /// Get `limit` many routers clost to `key`.
     pub fn closest(
         &mut self,
         key: impl AsRef<[u8]>,
@@ -82,7 +88,7 @@ impl<R: Runtime> Dht<R> {
         self.routing_table.closest(target, limit)
     }
 
-    /// Get closest floodfills to `key`.
+    /// Get closest routers to `key`.
     pub fn closest_with_ignore<'a>(
         &'a mut self,
         key: impl AsRef<[u8]>,

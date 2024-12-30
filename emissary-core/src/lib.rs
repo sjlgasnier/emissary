@@ -25,6 +25,7 @@
 #![allow(clippy::assign_op_pattern)]
 #![allow(clippy::new_ret_no_self)]
 #![allow(clippy::module_inception)]
+#![allow(clippy::option_map_unit_fn)]
 
 extern crate alloc;
 

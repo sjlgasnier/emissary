@@ -84,8 +84,8 @@ const ROUTER_INFO_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// [`NetDb`] maintenance interval.
 const NETDB_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Maximum router hashes to include into [`DatabaseSearchReply`].
-const SEARCH_REPLY_MAX_ROUTERS: usize = 16usize;
+/// Number of router hashes to include into [`DatabaseSearchReply`].
+const SEARCH_REPLY_NUM_ROUTERS: usize = 5usize;
 
 /// Local router info publisher.
 ///
@@ -257,30 +257,26 @@ impl MessageKind {
     }
 }
 
-/// Floodfill state.
-enum FloodfillState {
-    /// FloodFill is connected.
+/// Routere state.
+enum RouterState {
+    /// Router is connected.
     Connected,
 
-    /// FloodFill is being dialed.
+    /// Router is being dialed.
     Dialing {
         /// Pending messages.
         pending_messages: Vec<MessageKind>,
     },
-
-    /// Floodfill is disconnected.
-    Disconnected,
 }
 
-impl fmt::Debug for FloodfillState {
+impl fmt::Debug for RouterState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Connected => f.debug_struct("FloodfillState::Connected").finish(),
+            Self::Connected => f.debug_struct("RouterState::Connected").finish(),
             Self::Dialing { pending_messages } => f
-                .debug_struct("FloodfillState::Dialing")
+                .debug_struct("RouterState::Dialing")
                 .field("num_pending", &pending_messages.len())
                 .finish(),
-            Self::Disconnected => f.debug_struct("FloodfillState::Disconnected").finish(),
         }
     }
 }
@@ -294,8 +290,10 @@ enum QueryKind {
     },
 
     /// Router exploration.
-    #[allow(unused)]
     Exploration,
+
+    /// Router info lookup.
+    Router,
 }
 
 impl fmt::Debug for QueryKind {
@@ -303,6 +301,7 @@ impl fmt::Debug for QueryKind {
         match self {
             Self::Leaseset { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
             Self::Exploration => f.debug_struct("QueryKind::Exploration").finish(),
+            Self::Router => f.debug_struct("QueryKind::Router").finish(),
         }
     }
 }
@@ -312,8 +311,15 @@ pub struct NetDb<R: Runtime> {
     /// Active queries.
     active: HashMap<Bytes, QueryKind>,
 
-    /// Kademlia DHT implementation.
-    dht: Dht<R>,
+    /// DHT of floodfills.
+    floodfill_dht: Dht<R>,
+
+    /// DHT of non-floodfill routers.
+    ///
+    /// Available only if the router is acting as a floodfill router.
+    ///
+    /// Used to answer router exploration queries.
+    router_dht: Option<Dht<R>>,
 
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
@@ -321,8 +327,8 @@ pub struct NetDb<R: Runtime> {
     /// Has the router been configured to act as a floodfill router.
     floodfill: bool,
 
-    /// Connected floodfills.
-    floodfills: HashMap<RouterId, FloodfillState>,
+    /// Connected routers.
+    routers: HashMap<RouterId, RouterState>,
 
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<NetDbAction, NetDbActionRecycle>,
@@ -389,6 +395,17 @@ impl<R: Runtime> NetDb<R> {
             .into_iter()
             .collect::<HashSet<_>>();
 
+        let router_dht = floodfill.then(|| {
+            Dht::new(
+                local_router_id.clone(),
+                profile_storage
+                    .get_router_ids(Bucket::Any, |_, info, _| !info.is_floodfill())
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                metrics.clone(),
+            )
+        });
+
         metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
 
         tracing::info!(
@@ -403,19 +420,20 @@ impl<R: Runtime> NetDb<R> {
         (
             Self {
                 active: HashMap::new(),
-                dht: Dht::new(local_router_id.clone(), floodfills.clone(), metrics.clone()),
+                floodfill_dht: Dht::new(
+                    local_router_id.clone(),
+                    floodfills.clone(),
+                    metrics.clone(),
+                ),
+                router_dht,
                 exploratory_pool_handle,
                 floodfill,
-                floodfills: HashMap::from_iter(
-                    floodfills
-                        .into_iter()
-                        .map(|router_id| (router_id, FloodfillState::Disconnected)),
-                ),
+                routers: HashMap::new(),
                 handle_rx,
                 inbound_tunnels: TunnelSelector::new(),
                 lease_sets: HashMap::new(),
                 local_router_id: local_router_id.clone(),
-                maintenance_timer: Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL)),
+                maintenance_timer: Box::pin(R::delay(Duration::from_secs(5))),
                 metrics,
                 netdb_msg_rx,
                 net_id,
@@ -440,22 +458,27 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle established connection to `router`.
     fn on_connection_established(&mut self, router_id: RouterId) {
-        // did the floodfill already exist in `floodfills`
-        let did_exist = self.floodfills.contains_key(&router_id);
+        let is_floodfill = self.profile_storage.is_floodfill(&router_id);
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            ?is_floodfill,
+            "connection established",
+        );
 
         // send any pending messages to the connected router
         //
         // if the message was of the expiring kind (flooding) and the payload inside the i2np
         // message has expired, the message is skipped
-        if let Some(FloodfillState::Dialing { pending_messages }) =
-            self.floodfills.remove(&router_id)
-        {
+        if let Some(RouterState::Dialing { pending_messages }) = self.routers.remove(&router_id) {
             let now = R::time_since_epoch();
 
             tracing::trace!(
                 target: LOG_TARGET,
                 floodfill = %router_id,
-                "floodfill with pending messages connected",
+                num_pending = ?pending_messages.len(),
+                "router with pending messages connected",
             );
 
             pending_messages.into_iter().for_each(|message| {
@@ -466,7 +489,7 @@ impl<R: Runtime> NetDb<R> {
                         tracing::debug!(
                             target: LOG_TARGET,
                             ?expires,
-                            "message has expired, will not flood",
+                            "message has expired, will not send",
                         );
                         None
                     }
@@ -485,36 +508,19 @@ impl<R: Runtime> NetDb<R> {
             });
         }
 
-        // non-floodfills must not be stored into `floodfills`
-        //
-        // the router must exist in `profile_storage` as connection was established to them
-        if !self.profile_storage.is_floodfill(&router_id) {
-            return;
+        if is_floodfill {
+            self.floodfill_dht.add_router(router_id.clone());
+            self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+        } else {
+            self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
         }
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            %router_id,
-            "floodfill connected",
-        );
-
-        if !did_exist {
-            tracing::debug!(
-                target: LOG_TARGET,
-                %router_id,
-                "new floodfill connected",
-            );
-            self.metrics.counter(NUM_FLOODFILLS).increment(1);
-        }
-
-        self.dht.add_floodfill(router_id.clone());
-        self.floodfills.insert(router_id, FloodfillState::Connected);
-        self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+        self.routers.insert(router_id, RouterState::Connected);
     }
 
     /// Handle closed connection to `router`.
     fn on_connection_closed(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
+        match self.routers.remove(&router_id) {
             None => tracing::trace!(
                 target: LOG_TARGET,
                 %router_id,
@@ -526,8 +532,6 @@ impl<R: Runtime> NetDb<R> {
                     %router_id,
                     "floodfill disconnected",
                 );
-
-                self.floodfills.remove(&router_id);
                 self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
             }
         }
@@ -535,27 +539,25 @@ impl<R: Runtime> NetDb<R> {
 
     // Handle connection failure to `router_id`.
     fn on_connection_failure(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
-            Some(FloodfillState::Dialing { pending_messages }) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    num_pending_messages = ?pending_messages.len(),
-                    "failed to establish connection",
-                );
-                self.floodfills.insert(router_id, FloodfillState::Disconnected);
-            }
-            Some(_) => {
-                self.floodfills.insert(router_id, FloodfillState::Disconnected);
-            }
-            None => {}
+        match self.routers.remove(&router_id) {
+            Some(RouterState::Dialing { pending_messages }) => tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                num_pending_messages = ?pending_messages.len(),
+                "failed to establish connection",
+            ),
+            _ => tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                "failed to establish connection",
+            ),
         }
     }
 
     /// Flood `message` to `routers`.
     fn send_message(&mut self, routers: &[RouterId], message: MessageKind) {
-        routers.iter().for_each(|router_id| match self.floodfills.get_mut(router_id) {
-            None | Some(FloodfillState::Disconnected) => match self.service.connect(router_id) {
+        routers.iter().for_each(|router_id| match self.routers.get_mut(router_id) {
+            None => match self.service.connect(router_id) {
                 Err(error) => tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
@@ -563,18 +565,23 @@ impl<R: Runtime> NetDb<R> {
                     "failed to connect to router",
                 ),
                 Ok(()) => {
-                    self.floodfills.insert(
+                    tracing::debug!(target: LOG_TARGET, %router_id, "staring to dial router");
+
+                    self.routers.insert(
                         router_id.clone(),
-                        FloodfillState::Dialing {
+                        RouterState::Dialing {
                             pending_messages: vec![message.clone()],
                         },
                     );
                 }
             },
-            Some(FloodfillState::Dialing { pending_messages }) => {
+            Some(RouterState::Dialing { pending_messages }) => {
+                tracing::debug!(target: LOG_TARGET, %router_id, "router is already being dialed");
                 pending_messages.push(message.clone());
             }
-            Some(FloodfillState::Connected) =>
+            Some(RouterState::Connected) => {
+                tracing::debug!(target: LOG_TARGET, %router_id, "router is connected, send message");
+
                 if let Err(error) = self.service.send(router_id, message.clone().into_inner()) {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -582,7 +589,8 @@ impl<R: Runtime> NetDb<R> {
                         ?error,
                         "failed to send message to router",
                     );
-                },
+                }
+            }
         });
     }
 
@@ -602,6 +610,14 @@ impl<R: Runtime> NetDb<R> {
                 local_net_id = ?self.net_id,
                 remote_net_id = ?router_info.net_id(),
                 "invalid network id, ignoring router info store",
+            );
+            return;
+        }
+
+        if router_id == self.local_router_id {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "local router id, ignoring router info store",
             );
             return;
         }
@@ -634,6 +650,7 @@ impl<R: Runtime> NetDb<R> {
             ),
         );
         self.profile_storage.add_router(router_info);
+        self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
 
         match reply {
             StoreReplyType::None => {
@@ -701,7 +718,7 @@ impl<R: Runtime> NetDb<R> {
             }
         }
 
-        let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
         if floodfills.is_empty() {
             tracing::debug!(
                 target: LOG_TARGET,
@@ -829,7 +846,7 @@ impl<R: Runtime> NetDb<R> {
             }
         }
 
-        let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
         if floodfills.is_empty() {
             tracing::debug!(
                 target: LOG_TARGET,
@@ -881,8 +898,8 @@ impl<R: Runtime> NetDb<R> {
                 //
                 // the reply list is limited to 16 floodfills
                 let routers = self
-                    .dht
-                    .closest_with_ignore(&key, SEARCH_REPLY_MAX_ROUTERS, &ignore)
+                    .floodfill_dht
+                    .closest_with_ignore(&key, SEARCH_REPLY_NUM_ROUTERS, &ignore)
                     .collect::<Vec<_>>();
 
                 (
@@ -984,8 +1001,8 @@ impl<R: Runtime> NetDb<R> {
                 //
                 // the reply list is limited to 16 floodfills
                 let routers = self
-                    .dht
-                    .closest_with_ignore(&key, SEARCH_REPLY_MAX_ROUTERS, &ignore)
+                    .floodfill_dht
+                    .closest_with_ignore(&key, SEARCH_REPLY_NUM_ROUTERS, &ignore)
                     .collect::<Vec<_>>();
 
                 (
@@ -1064,6 +1081,69 @@ impl<R: Runtime> NetDb<R> {
         }
     }
 
+    /// Handle router exploration lookup.
+    fn on_router_exploration(
+        &mut self,
+        key: Bytes,
+        reply_type: ReplyType,
+        ignore: HashSet<RouterId>,
+    ) {
+        let Some(dht) = self.router_dht.as_mut() else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "ignore router exploration, not a floodfill",
+            );
+            return;
+        };
+
+        let routers = dht
+            .closest_with_ignore(&key, SEARCH_REPLY_NUM_ROUTERS, &ignore)
+            .collect::<Vec<_>>();
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            num_routers = ?routers.len(),
+            "send router exploration reply",
+        );
+
+        let message = Message {
+            message_type: MessageType::DatabaseSearchReply,
+            message_id: R::rng().next_u32(),
+            expiration: R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: DatabaseSearchReply {
+                from: self.local_router_id.to_vec(),
+                key: key.clone(),
+                routers,
+            }
+            .serialize()
+            .to_vec(),
+        };
+
+        let (router_id, message) = match reply_type {
+            ReplyType::Tunnel {
+                tunnel_id,
+                router_id,
+            } => (
+                router_id,
+                MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(R::rng().next_u32())
+                    .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_payload(
+                        &TunnelGateway {
+                            tunnel_id,
+                            payload: &message.serialize_standard(),
+                        }
+                        .serialize(),
+                    )
+                    .build(),
+            ),
+            ReplyType::Router { router_id } => (router_id, message.serialize_short()),
+        };
+
+        self.send_message(&[router_id], MessageKind::NonExpiring { message });
+    }
+
     /// Handle I2NP message.
     fn on_message(&mut self, message: Message) -> crate::Result<()> {
         self.metrics.counter(NUM_NETDB_MESSAGES).increment(1);
@@ -1107,11 +1187,41 @@ impl<R: Runtime> NetDb<R> {
                         ) => {
                             tracing::trace!(
                                 target: LOG_TARGET,
-                                id = ?lease_set.header.destination.id(),
-                                "leaseset reply received",
+                                destination_id = %lease_set.header.destination.id(),
+                                "lease set query reply received",
                             );
 
                             let _ = tx.send(Ok(lease_set));
+                        }
+                        (DatabaseStorePayload::RouterInfo { router_info }, QueryKind::Router) => {
+                            let router_id = router_info.identity.id();
+
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "router info query reply received",
+                            );
+
+                            if router_info.net_id() != self.net_id {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    local_net_id = ?self.net_id,
+                                    remote_net_id = ?router_info.net_id(),
+                                    "invalid network id, ignoring router info query reply",
+                                );
+                                return Ok(());
+                            }
+
+                            if router_id == self.local_router_id {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    "local router id, ignoring router info query reply",
+                                );
+                                return Ok(());
+                            }
+
+                            self.profile_storage.add_router(router_info);
+                            self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
                         }
                         (payload, query) => tracing::warn!(
                             target: LOG_TARGET,
@@ -1141,6 +1251,7 @@ impl<R: Runtime> NetDb<R> {
                 match lookup {
                     LookupType::Leaseset => self.on_lease_set_lookup(key, reply, ignore),
                     LookupType::Router => self.on_router_info_lookup(key, reply, ignore),
+                    LookupType::Exploration => self.on_router_exploration(key, reply, ignore),
                     kind => tracing::warn!(
                         target: LOG_TARGET,
                         ?kind,
@@ -1153,8 +1264,8 @@ impl<R: Runtime> NetDb<R> {
                 "ignoring database lookup, not a floodfill",
             ),
             MessageType::DatabaseSearchReply => {
-                let DatabaseSearchReply { key, .. } = DatabaseSearchReply::parse(&message.payload)
-                    .ok_or_else(|| {
+                let DatabaseSearchReply { key, routers, from } =
+                    DatabaseSearchReply::parse(&message.payload).ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,
                             "malformed database search reply",
@@ -1164,12 +1275,65 @@ impl<R: Runtime> NetDb<R> {
 
                 match self.active.remove(&key) {
                     None => {}
-                    Some(QueryKind::Exploration) => {}
-                    Some(kind) => tracing::warn!(
+                    Some(QueryKind::Exploration) => {
+                        let router_id = RouterId::from(from);
+
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            num_routers = ?routers.len(),
+                            "router exploration succeeded, send database lookups",
+                        );
+
+                        // filter out routers we already know about and send database lookup queries
+                        // for the rest of routers
+                        routers
+                            .into_iter()
+                            .filter(|router_id| {
+                                self.profile_storage.get(&router_id).is_none()
+                                    && router_id != &self.local_router_id
+                            })
+                            .map(|router_id| {
+                                (
+                                    Bytes::from(router_id.to_vec()),
+                                    MessageBuilder::short()
+                                        .with_message_type(MessageType::DatabaseLookup)
+                                        .with_message_id(R::rng().next_u32())
+                                        .with_expiration(
+                                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                                        )
+                                        .with_payload(
+                                            &DatabaseLookupBuilder::new(
+                                                Bytes::from(router_id.to_vec()),
+                                                LookupType::Router,
+                                            )
+                                            .with_reply_type(ReplyType::Router {
+                                                router_id: self.local_router_id.clone(),
+                                            })
+                                            .build(),
+                                        )
+                                        .build(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .for_each(|(key, message)| {
+                                self.active.insert(key.clone(), QueryKind::Router);
+                                self.query_timers.push(async move {
+                                    R::delay(QUERY_TIMEOUT).await;
+                                    key
+                                });
+                                self.send_message(
+                                    &[router_id.clone()],
+                                    MessageKind::NonExpiring { message },
+                                );
+                            });
+                    }
+                    Some(kind) => tracing::debug!(
                         target: LOG_TARGET,
                         key = ?base32_encode(key),
                         ?kind,
-                        "unhanled query kind for database search reply",
+                        "database lookup failed",
                     ),
                 }
             }
@@ -1189,7 +1353,7 @@ impl<R: Runtime> NetDb<R> {
         key: Bytes,
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
     ) {
-        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 5usize).collect::<Vec<_>>();
 
         tracing::debug!(
             target: LOG_TARGET,
@@ -1285,7 +1449,7 @@ impl<R: Runtime> NetDb<R> {
         tx: oneshot::Sender<Vec<(RouterId, StaticPublicKey)>>,
     ) {
         let floodfills = self
-            .dht
+            .floodfill_dht
             .closest(&key, 3usize)
             .collect::<Vec<_>>()
             .into_iter()
@@ -1346,7 +1510,7 @@ impl<R: Runtime> NetDb<R> {
             key.freeze()
         };
 
-        let floodfills = self.dht.closest(&key, 1usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 1usize).collect::<Vec<_>>();
         let Some(floodfill) = floodfills.first() else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -1354,6 +1518,12 @@ impl<R: Runtime> NetDb<R> {
             );
             return;
         };
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %floodfill,
+            "send router exploration query",
+        );
 
         let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Exploration)
             .with_reply_type(ReplyType::Router {
@@ -1368,6 +1538,11 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(&message)
             .build();
 
+        self.active.insert(key.clone(), QueryKind::Exploration);
+        self.query_timers.push(async move {
+            R::delay(QUERY_TIMEOUT).await;
+            key
+        });
         self.send_message(&[floodfill.clone()], MessageKind::NonExpiring { message });
     }
 }
@@ -1466,7 +1641,11 @@ impl<R: Runtime> Future for NetDb<R> {
 
                             let _ = tx.send(Err(QueryError::Timeout));
                         }
-                        QueryKind::Exploration => {}
+                        kind => tracing::debug!(
+                            target: LOG_TARGET,
+                            ?kind,
+                            "query timed out",
+                        ),
                     },
                     None => tracing::trace!(
                         target: LOG_TARGET,
@@ -1488,7 +1667,7 @@ impl<R: Runtime> Future for NetDb<R> {
         if self.router_info_publishers.poll_unpin(cx).is_ready() {
             let key = Bytes::from(self.local_router_id.to_vec());
 
-            match self.dht.closest(key, 1usize).collect::<Vec<_>>().pop() {
+            match self.floodfill_dht.closest(key, 1usize).collect::<Vec<_>>().pop() {
                 None => tracing::warn!(
                     target: LOG_TARGET,
                     "unable to publish router info, no floodfills",
@@ -1615,11 +1794,11 @@ mod tests {
             }
             _ => false,
         }));
-        assert_eq!(netdb.floodfills.len(), 4);
+        assert_eq!(netdb.routers.len(), 4);
         assert!(netdb
-            .floodfills
+            .routers
             .values()
-            .all(|state| std::matches!(state, FloodfillState::Dialing { .. })));
+            .all(|state| std::matches!(state, RouterState::Dialing { .. })));
     }
 
     #[tokio::test]
@@ -1703,11 +1882,7 @@ mod tests {
             .is_ok());
         assert!(netdb.lease_sets.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -1793,11 +1968,7 @@ mod tests {
             .is_ok());
         assert!(netdb.lease_sets.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -1956,7 +2127,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 4);
+            assert_eq!(netdb.routers.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -1964,8 +2135,8 @@ mod tests {
                 }
                 _ => false,
             }));
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
+            assert!(netdb.routers.values().all(|state| match state {
+                RouterState::Dialing { pending_messages } => {
                     assert_eq!(pending_messages.len(), 1);
                     true
                 }
@@ -1997,22 +2168,20 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 5);
+            assert_eq!(netdb.routers.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(
-                netdb.floodfills.iter().all(|(router_id, state)| match state {
-                    FloodfillState::Dialing { pending_messages } => {
-                        if netdb.profile_storage.is_floodfill(router_id) {
-                            assert_eq!(pending_messages.len(), 2);
-                        } else {
-                            assert_eq!(pending_messages.len(), 1);
-                        }
-
-                        true
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 2);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
                     }
-                    _ => false,
-                })
-            );
+
+                    true
+                }
+                _ => false,
+            }));
         }
 
         // store non-expiring lease set and verify floodfills are pending
@@ -2039,21 +2208,19 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 3);
-            assert_eq!(netdb.floodfills.len(), 6);
+            assert_eq!(netdb.routers.len(), 6);
             assert!(rx.try_recv().is_err());
-            assert!(
-                netdb.floodfills.iter().all(|(router_id, state)| match state {
-                    FloodfillState::Dialing { pending_messages } => {
-                        if netdb.profile_storage.is_floodfill(router_id) {
-                            assert_eq!(pending_messages.len(), 3);
-                        } else {
-                            assert_eq!(pending_messages.len(), 1);
-                        }
-                        true
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 3);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
                     }
-                    _ => false,
-                })
-            );
+                    true
+                }
+                _ => false,
+            }));
         }
 
         // poll netdb until it does its maintenance
@@ -2148,11 +2315,11 @@ mod tests {
             }
             _ => false,
         }));
-        assert_eq!(netdb.floodfills.len(), 4);
+        assert_eq!(netdb.routers.len(), 4);
         assert!(netdb
-            .floodfills
+            .routers
             .values()
-            .all(|state| std::matches!(state, FloodfillState::Dialing { .. })));
+            .all(|state| std::matches!(state, RouterState::Dialing { .. })));
     }
 
     #[tokio::test]
@@ -2230,11 +2397,7 @@ mod tests {
             .is_ok());
         assert!(netdb.router_infos.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -2628,10 +2791,10 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), &mut netdb).await.unwrap_err();
 
         let selected_floofill = netdb
-            .floodfills
+            .routers
             .iter()
             .find(|(_, state)| match state {
-                FloodfillState::Dialing { pending_messages } if pending_messages.len() == 1 => true,
+                RouterState::Dialing { pending_messages } if pending_messages.len() == 1 => true,
                 _ => false,
             })
             .unwrap()
@@ -2790,7 +2953,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 4);
+            assert_eq!(netdb.routers.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -2798,8 +2961,8 @@ mod tests {
                 }
                 _ => false,
             }));
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
+            assert!(netdb.routers.values().all(|state| match state {
+                RouterState::Dialing { pending_messages } => {
                     assert_eq!(pending_messages.len(), 1);
                     true
                 }
@@ -2831,21 +2994,19 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 5);
+            assert_eq!(netdb.routers.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(
-                netdb.floodfills.iter().all(|(router_id, state)| match state {
-                    FloodfillState::Dialing { pending_messages } => {
-                        if netdb.profile_storage.is_floodfill(router_id) {
-                            assert_eq!(pending_messages.len(), 2);
-                        } else {
-                            assert_eq!(pending_messages.len(), 1);
-                        }
-                        true
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 2);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
                     }
-                    _ => false,
-                })
-            );
+                    true
+                }
+                _ => false,
+            }));
         }
 
         // wait for 10 seconds so the first lease set expires
@@ -3015,7 +3176,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 4);
+            assert_eq!(netdb.routers.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -3023,8 +3184,8 @@ mod tests {
                 }
                 _ => false,
             }));
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
+            assert!(netdb.routers.values().all(|state| match state {
+                RouterState::Dialing { pending_messages } => {
                     assert_eq!(pending_messages.len(), 1);
                     true
                 }
@@ -3055,21 +3216,19 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 5);
+            assert_eq!(netdb.routers.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(
-                netdb.floodfills.iter().all(|(router_id, state)| match state {
-                    FloodfillState::Dialing { pending_messages } => {
-                        if netdb.profile_storage.is_floodfill(router_id) {
-                            assert_eq!(pending_messages.len(), 2);
-                        } else {
-                            assert_eq!(pending_messages.len(), 1);
-                        }
-                        true
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 2);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
                     }
-                    _ => false,
-                })
-            );
+                    true
+                }
+                _ => false,
+            }));
         }
 
         // wait for 10 seconds so the first lease set expires
@@ -3196,11 +3355,7 @@ mod tests {
             .is_ok());
         assert!(netdb.router_infos.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -3279,11 +3434,7 @@ mod tests {
             .is_ok());
         assert_eq!(netdb.lease_sets.len(), 1);
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -3361,11 +3512,7 @@ mod tests {
             .is_ok());
         assert_eq!(netdb.router_infos.len(), 1);
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -3391,16 +3538,13 @@ mod tests {
             Bytes::from(vec![1, 2, 3, 4]),
         );
 
-        assert!(std::matches!(
-            netdb.floodfills.get(&floodfill),
-            Some(FloodfillState::Disconnected)
-        ));
+        assert!(std::matches!(netdb.routers.get(&floodfill), None));
 
         // poll netdb until the initial publish timeout is over
         assert!(tokio::time::timeout(Duration::from_secs(20), &mut netdb).await.is_err());
 
-        match netdb.floodfills.get(&floodfill).expect("to exist") {
-            FloodfillState::Dialing { pending_messages } => {
+        match netdb.routers.get(&floodfill).expect("to exist") {
+            RouterState::Dialing { pending_messages } => {
                 assert_eq!(pending_messages.len(), 1);
             }
             _ => panic!("invalid state"),
