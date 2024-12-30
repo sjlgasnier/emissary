@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base32_encode, StaticPrivateKey},
+    crypto::{base32_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPrivateKey},
     destination::session::{SessionManager, SessionManagerEvent},
     error::{Error, QueryError},
     i2np::{
@@ -30,15 +30,16 @@ use crate::{
             },
         },
         delivery_status::DeliveryStatus,
+        garlic::{DeliveryInstructions, GarlicMessageBuilder},
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
-    primitives::{DestinationId, Lease, LeaseSet2, RouterId, TunnelId},
+    primitives::{DestinationId, Lease, LeaseSet2, MessageId, RouterId, TunnelId},
     runtime::{Instant, JoinSet, Runtime},
-    tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
+    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
@@ -151,6 +152,9 @@ pub struct Destination<R: Runtime> {
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
 
+    /// Noise context.
+    noise: NoiseContext,
+
     /// Active outbound tunnels.
     outbound_tunnels: Vec<TunnelId>,
 
@@ -200,6 +204,7 @@ impl<R: Runtime> Destination<R> {
             inbound_tunnels,
             lease_set: lease_set.clone(),
             lease_set_publish_timer: LeaseSetPublishTimer::new::<R>(),
+            noise: NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
             netdb_handle,
             outbound_tunnels,
             pending_inbound: Vec::new(),
@@ -535,6 +540,7 @@ impl<R: Runtime> Destination<R> {
         let netdb_handle = self.netdb_handle.clone();
         let tunnel_sender = self.tunnel_pool_handle.sender().clone();
         let local = self.destination_id.clone();
+        let noise = self.noise.clone();
 
         // store our new lease set proactively to `SessionManager` so it can be given to all active
         // session right away while publishing the new lease set to NetDb in the background
@@ -592,7 +598,7 @@ impl<R: Runtime> Destination<R> {
                                 floodfills = Some(queried);
                                 break;
                             }
-                            Err(_) => return,
+                            Err(_) => R::delay(NETDB_BACKOFF_TIMEOUT).await,
                         },
                         Err(_) => R::delay(NETDB_BACKOFF_TIMEOUT).await,
                     }
@@ -632,16 +638,43 @@ impl<R: Runtime> Destination<R> {
                     })
                     .build();
 
-            // TODO: garlic encrypt
+            let mut message = GarlicMessageBuilder::default()
+                .with_date_time(R::time_since_epoch().as_secs() as u32)
+                .with_garlic_clove(
+                    MessageType::DatabaseStore,
+                    MessageId::from(R::rng().next_u32()),
+                    R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    DeliveryInstructions::Local,
+                    &message,
+                )
+                .build();
+
+            let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
+            let ephemeral_public = ephemeral_secret.public_key();
+            let (garlic_key, garlic_tag) =
+                noise.derive_outbound_garlic_key(floodfills[0].1.clone(), ephemeral_secret);
+
+            // message length + poly13055 tg + ephemeral key + garlic message length
+            let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+            // encryption must succeed since the parameters are managed by us
+            ChaChaPoly::new(&garlic_key)
+                .encrypt_with_ad_new(&garlic_tag, &mut message)
+                .expect("to succeed");
+
+            out.put_u32(message.len() as u32 + 32);
+            out.put_slice(&ephemeral_public.to_vec());
+            out.put_slice(&message);
+
             let message = MessageBuilder::standard()
                 .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::DatabaseStore)
+                .with_message_type(MessageType::Garlic)
                 .with_message_id(R::rng().next_u32())
-                .with_payload(&message)
+                .with_payload(&out)
                 .build();
 
             // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].clone(), message).await;
+            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].0.clone(), message).await;
 
             // verify there's at least one other floodfill before proceeding to storage verification
             if floodfills.len() == 1 {
@@ -665,16 +698,43 @@ impl<R: Runtime> Destination<R> {
                 })
                 .build();
 
-            // TODO: garlic encrypt
+            let mut message = GarlicMessageBuilder::default()
+                .with_date_time(R::time_since_epoch().as_secs() as u32)
+                .with_garlic_clove(
+                    MessageType::DatabaseLookup,
+                    MessageId::from(R::rng().next_u32()),
+                    R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    DeliveryInstructions::Local,
+                    &message,
+                )
+                .build();
+
+            let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
+            let ephemeral_public = ephemeral_secret.public_key();
+            let (garlic_key, garlic_tag) =
+                noise.derive_outbound_garlic_key(floodfills[1].1.clone(), ephemeral_secret);
+
+            // message length + poly13055 tg + ephemeral key + garlic message length
+            let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+            // encryption must succeed since the parameters are managed by us
+            ChaChaPoly::new(&garlic_key)
+                .encrypt_with_ad_new(&garlic_tag, &mut message)
+                .expect("to succeed");
+
+            out.put_u32(message.len() as u32 + 32);
+            out.put_slice(&ephemeral_public.to_vec());
+            out.put_slice(&message);
+
             let message = MessageBuilder::standard()
                 .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::DatabaseLookup)
+                .with_message_type(MessageType::Garlic)
                 .with_message_id(R::rng().next_u32())
-                .with_payload(&message)
+                .with_payload(&out)
                 .build();
 
             // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[1].clone(), message).await;
+            let _ = tunnel_sender.send_to_router(gateway, floodfills[1].0.clone(), message).await;
         })
     }
 }
@@ -913,8 +973,12 @@ mod tests {
         netdb::NetDbAction,
         primitives::{Destination as Dest, LeaseSet2Header, RouterId, TunnelId},
         runtime::{mock::MockRuntime, Runtime},
-        tunnel::{TunnelMessage, TunnelPoolConfig},
+        tunnel::{
+            DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler, TunnelMessage,
+            TunnelPoolConfig,
+        },
     };
+    use std::collections::VecDeque;
 
     #[tokio::test]
     async fn query_lease_set_found() {
@@ -1164,8 +1228,6 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_storage_verified() {
-        crate::util::init_logger();
-
         let (netdb_handle, rx) = NetDbHandle::create();
         let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
             num_inbound: 3usize,
@@ -1238,7 +1300,19 @@ mod tests {
         }
 
         tokio::spawn(async move {
-            let floodfills = vec![RouterId::random(), RouterId::random(), RouterId::random()];
+            let (floodfills, mut garlics): (Vec<_>, HashMap<_, _>) = (0..3)
+                .map(|_| {
+                    let router_id = RouterId::random();
+                    let key = StaticPrivateKey::random(MockRuntime::rng());
+                    let garlic = GarlicHandler::<MockRuntime>::new(
+                        NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
+                        MockRuntime::register_metrics(vec![], None),
+                    );
+
+                    ((router_id.clone(), key.public()), (router_id, garlic))
+                })
+                .unzip();
+
             let mut lease_set = Option::<Bytes>::None;
             let mut key = Option::<Bytes>::None;
 
@@ -1251,8 +1325,21 @@ mod tests {
                         _ => panic!("invalid event"),
                     },
                     message = tm_rx.recv() => match message.unwrap() {
-                        TunnelMessage::RouterDelivery { message, .. } => {
+                        TunnelMessage::RouterDelivery { message, router_id, .. } => {
                             let message = Message::parse_standard(&message).unwrap();
+                            assert_eq!(message.message_type, MessageType::Garlic);
+
+                            let GarlicDeliveryInstructions::Local { message } = garlics
+                                .get_mut(&router_id)
+                                .unwrap()
+                                .handle_message(message)
+                                .unwrap()
+                                .filter(|message| std::matches!(message, GarlicDeliveryInstructions::Local { .. }))
+                                .collect::<VecDeque<_>>()
+                                .pop_front()
+                                .expect("to exist") else {
+                                    panic!("invalid type");
+                                };
 
                             match message.message_type {
                                 MessageType::DatabaseStore => {
@@ -1319,8 +1406,6 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_storage_verification_failure() {
-        crate::util::init_logger();
-
         let (netdb_handle, rx) = NetDbHandle::create();
         let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
             num_inbound: 3usize,
@@ -1393,7 +1478,18 @@ mod tests {
         }
 
         tokio::spawn(async move {
-            let floodfills = vec![RouterId::random(), RouterId::random(), RouterId::random()];
+            let (floodfills, mut garlics): (Vec<_>, HashMap<_, _>) = (0..3)
+                .map(|_| {
+                    let router_id = RouterId::random();
+                    let key = StaticPrivateKey::random(MockRuntime::rng());
+                    let garlic = GarlicHandler::<MockRuntime>::new(
+                        NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
+                        MockRuntime::register_metrics(vec![], None),
+                    );
+
+                    ((router_id.clone(), key.public()), (router_id, garlic))
+                })
+                .unzip();
             let mut key = Option::<Bytes>::None;
 
             loop {
@@ -1407,6 +1503,20 @@ mod tests {
                     message = tm_rx.recv() => match message.unwrap() {
                         TunnelMessage::RouterDelivery { message, router_id, .. } => {
                             let message = Message::parse_standard(&message).unwrap();
+                            assert_eq!(message.message_type, MessageType::Garlic);
+
+                            let GarlicDeliveryInstructions::Local { message } = garlics
+                                .get_mut(&router_id)
+                                .unwrap()
+                                .handle_message(message)
+                                .unwrap()
+                                .filter(|message| std::matches!(message, GarlicDeliveryInstructions::Local { .. }))
+                                .collect::<VecDeque<_>>()
+                                .pop_front()
+                                .expect("to exist") else {
+                                    panic!("invalid type");
+                                };
+
 
                             match message.message_type {
                                 MessageType::DatabaseStore => {

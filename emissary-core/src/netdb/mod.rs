@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::base32_encode,
+    crypto::{base32_encode, StaticPublicKey},
     error::{Error, QueryError},
     i2np::{
         database::{
@@ -1279,8 +1279,33 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Get `RouterId`'s of the floodfills closest to `key`.
-    fn on_get_closest_floodfills(&mut self, key: Bytes, tx: oneshot::Sender<Vec<RouterId>>) {
-        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+    fn on_get_closest_floodfills(
+        &mut self,
+        key: Bytes,
+        tx: oneshot::Sender<Vec<(RouterId, StaticPublicKey)>>,
+    ) {
+        let floodfills = self
+            .dht
+            .closest(&key, 3usize)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|router_id| {
+                self.profile_storage
+                    .get(&router_id)
+                    .map(|router_info| (router_id, router_info.identity.static_key().clone()))
+            })
+            .collect::<Vec<_>>();
+
+        if floodfills.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                key = ?base32_encode(&key),
+                "no floodfills available",
+            );
+
+            return drop(tx);
+        }
+
         let _ = tx.send(floodfills);
     }
 

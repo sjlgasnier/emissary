@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::StaticPublicKey,
     error::{ChannelError, QueryError},
     primitives::{LeaseSet2, RouterId},
 };
@@ -58,7 +59,7 @@ pub enum NetDbAction {
         key: Bytes,
 
         /// Oneshot sender used to send the result to caller.
-        tx: oneshot::Sender<Vec<RouterId>>,
+        tx: oneshot::Sender<Vec<(RouterId, StaticPublicKey)>>,
     },
 
     /// Dummy value.
@@ -103,11 +104,13 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
-    /// Get `RouterId`'s of the floodfills closest to `key`.
+    /// Get `RouterId`'s and encryption public keys of the floodfills closest to `key`.
+    ///
+    /// Return channel is dropped by [`NetDb`] if there are no floodfills available.
     pub fn get_closest_floodfills(
         &self,
         key: Bytes,
-    ) -> Result<oneshot::Receiver<Vec<RouterId>>, ChannelError> {
+    ) -> Result<oneshot::Receiver<Vec<(RouterId, StaticPublicKey)>>, ChannelError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx

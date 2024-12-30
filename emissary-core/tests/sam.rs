@@ -79,7 +79,7 @@ async fn generate_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -125,7 +125,7 @@ async fn streaming_works() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -210,7 +210,7 @@ async fn repliable_datagrams_work() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -298,7 +298,7 @@ async fn anonymous_datagrams_work() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -385,7 +385,7 @@ async fn open_stream_to_self() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -430,7 +430,7 @@ async fn create_same_session_twice_transient() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -482,7 +482,7 @@ async fn create_same_session_twice_persistent() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -545,7 +545,7 @@ async fn duplicate_session_id() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -597,7 +597,7 @@ async fn stream_lots_of_data() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i == 0, net_id, router_infos.clone()).await;
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });

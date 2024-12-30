@@ -28,10 +28,8 @@ use crate::{
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::{
-        garlic::{DeliveryInstructions, GarlicHandler},
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
-        noise::NoiseContext,
         pool::{ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters},
         routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
@@ -65,7 +63,9 @@ mod tests;
 #[cfg(test)]
 pub use pool::TunnelMessage;
 
+pub use garlic::{DeliveryInstructions, GarlicHandler};
 pub use handle::TunnelManagerHandle;
+pub use noise::NoiseContext;
 pub use pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
 
 /// Logging target for the file.
