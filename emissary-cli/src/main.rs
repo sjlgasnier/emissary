@@ -56,8 +56,7 @@ async fn main() -> anyhow::Result<()> {
     init_logger!(config.log.clone(), handle);
 
     // try to reseed the router if there aren't enough known routers
-    if (config.routers.len() < RESEED_THRESHOLD
-        && !arguments.reseed.disable_reseed.unwrap_or(false))
+    if (config.routers.len() < RESEED_THRESHOLD && !config.reseed.disable)
         || arguments.reseed.force_reseed.unwrap_or(false)
     {
         tracing::info!(
@@ -68,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
             "reseed router"
         );
 
-        match Reseeder::reseed(arguments.reseed.reseed_hosts).await {
+        match Reseeder::reseed(config.reseed.hosts.clone()).await {
             Ok(routers) => {
                 tracing::debug!(
                     target: LOG_TARGET,

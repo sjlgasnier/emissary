@@ -54,8 +54,8 @@ pub struct ReseedOptions {
     /// Comma-separated list of reseed hosts
     ///
     /// Example:
-    ///   --reseed-hosts https://host1.com https://host2.com https://host3.com
-    #[arg(long, value_delimiter = ' ', num_args = 1.., value_name = "HOST")]
+    ///   --reseed-hosts https://host1.com,https://host2.com,https://host3.com
+    #[arg(long, value_delimiter = ',', num_args = 1.., value_name = "HOST")]
     pub reseed_hosts: Option<Vec<String>>,
 
     /// Don't reseed the routere even if there aren't enough routers

@@ -32,28 +32,13 @@ use std::{
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Profile {
-    /// Last activity as seconds since UNIX epoch.
     last_activity: Option<u64>,
-
-    /// Number of accepted tunnels.
     num_accepted: Option<usize>,
-
-    /// Number of successful connections.
     num_connection: Option<usize>,
-
-    /// Number of dial failures.
     num_dial_failures: Option<usize>,
-
-    /// Number of rejected tunnels.
     num_rejected: Option<usize>,
-
-    /// Number of test failures for tunnels where the router was a selected hop.
     num_test_failures: Option<usize>,
-
-    /// Number of test successes for tunnels where the router was a selected hop.
     num_test_successes: Option<usize>,
-
-    /// Number of tunnel build request timeouts where this router was a selected hop.
     num_unaswered: Option<usize>,
 }
 
@@ -82,6 +67,12 @@ pub struct SamConfig {
     tcp_port: u16,
     udp_port: u16,
     host: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReseedConfig {
+    pub disable: bool,
+    pub hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -114,6 +105,7 @@ struct EmissaryConfig {
     metrics: Option<MetricsConfig>,
     net_id: Option<u8>,
     ntcp2: Option<Ntcp2Config>,
+    reseed: Option<ReseedConfig>,
     sam: Option<SamConfig>,
 }
 
@@ -154,6 +146,9 @@ pub struct Config {
 
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
+
+    /// Reseed config.
+    pub reseed: ReseedConfig,
 
     /// Router info.
     pub router_info: Option<Vec<u8>>,
@@ -394,11 +389,6 @@ impl Config {
             exploratory: None,
             floodfill: false,
             i2cp: Some(I2cpConfig { port: 7654 }),
-            sam: Some(SamConfig {
-                tcp_port: 7656,
-                udp_port: 7655,
-                host: None,
-            }),
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
@@ -411,6 +401,12 @@ impl Config {
                 host: None,
                 published: Some(false),
             }),
+            sam: Some(SamConfig {
+                tcp_port: 7656,
+                udp_port: 7655,
+                host: None,
+            }),
+            reseed: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -444,6 +440,10 @@ impl Config {
                 published: false,
             }),
             profiles: Vec::new(),
+            reseed: ReseedConfig {
+                hosts: None,
+                disable: false,
+            },
             router_info: None,
             routers: Vec::new(),
             sam_config: Some(emissary_core::SamConfig {
@@ -487,6 +487,7 @@ impl Config {
                         host: None,
                         published: Some(false),
                     }),
+                    reseed: None,
                     sam: Some(SamConfig {
                         tcp_port: 7656,
                         udp_port: 7655,
@@ -526,6 +527,10 @@ impl Config {
                 iv: ntcp2_iv,
             }),
             profiles: Vec::new(),
+            reseed: config.reseed.unwrap_or(ReseedConfig {
+                hosts: None,
+                disable: false,
+            }),
             router_info,
             routers: Vec::new(),
             sam_config: config.sam.map(|config| emissary_core::SamConfig {
@@ -652,6 +657,17 @@ impl Config {
             self.log = Some(log.clone());
         }
 
+        if let Some(true) = arguments.reseed.disable_reseed {
+            self.reseed = ReseedConfig {
+                hosts: None,
+                disable: true,
+            };
+        }
+
+        if let Some(hosts) = &arguments.reseed.reseed_hosts {
+            self.reseed.hosts = Some(hosts.clone());
+        }
+
         self.exploratory = match &mut self.exploratory {
             None => Some(emissary_core::ExploratoryConfig {
                 inbound_len: arguments.tunnel.exploratory_inbound_len,
@@ -755,21 +771,22 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
+            allow_local: false,
+            caps: None,
             exploratory: None,
+            floodfill: false,
+            i2cp: Some(I2cpConfig { port: 0u16 }),
+            insecure_tunnels: false,
+            log: None,
+            metrics: None,
+            net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
                 published: None,
             }),
-            i2cp: Some(I2cpConfig { port: 0u16 }),
+            reseed: None,
             sam: None,
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            insecure_tunnels: false,
-            allow_local: false,
-            log: None,
-            metrics: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
