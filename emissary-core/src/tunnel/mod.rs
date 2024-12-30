@@ -42,7 +42,7 @@ use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,

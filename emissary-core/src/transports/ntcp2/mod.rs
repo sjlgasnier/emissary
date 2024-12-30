@@ -37,7 +37,7 @@ use crate::{
 use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 use core::{
     net::SocketAddr,
     pin::Pin,

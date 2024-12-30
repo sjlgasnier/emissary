@@ -82,7 +82,7 @@ impl RouterInfo {
                     "generating new router identity",
                 );
 
-                RouterIdentity::from_keys::<R>(&static_key, &signing_key).expect("to succeed")
+                RouterIdentity::from_keys::<R>(static_key, signing_key).expect("to succeed")
             }
             Some(router_info) => RouterIdentity::parse(router_info).expect("to succeed"),
         };

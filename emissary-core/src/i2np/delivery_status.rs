@@ -45,7 +45,7 @@ impl DeliveryStatus {
             rest,
             Self {
                 message_id,
-                timestamp: Duration::from_millis(timestamp as u64),
+                timestamp: Duration::from_millis(timestamp),
             },
         ))
     }

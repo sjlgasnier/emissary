@@ -16,17 +16,18 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::runtime::{JoinSet, Runtime};
+
 use futures::{FutureExt, StreamExt};
 use futures_channel::oneshot::{channel, Receiver, Sender};
 
+use alloc::vec::Vec;
 use core::{
     future::Future,
     mem,
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-
-use crate::runtime::{JoinSet, Runtime};
 
 /// Handle given to subsystems which notifies them when the router needs to shut down.
 ///
