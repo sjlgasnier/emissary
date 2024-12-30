@@ -52,7 +52,7 @@ use core::{
 const LOG_TARGET: &str = "emissary::streaming::active";
 
 /// Read buffer size.
-const READ_BUFFER_SIZE: usize = 16384;
+const READ_BUFFER_SIZE: usize = 0xffff;
 
 /// Initial ACK delay.
 const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
@@ -279,6 +279,9 @@ enum WriteState {
         message: Vec<u8>,
     },
 
+    /// Socket has been closed.
+    Closed,
+
     /// [`WriteState`] has been poisoned.
     Poisoned,
 }
@@ -293,6 +296,9 @@ enum SocketState {
         /// Offset into read buffer.
         offset: usize,
     },
+
+    /// Socket has been closed.
+    Closed,
 }
 
 /// Inbound context.
@@ -453,6 +459,9 @@ impl<R: Runtime> Future for InboundContext<R> {
 /// Implements a `Future` which returns the send stream ID after the virtual stream has been shut
 /// down, either by the client or by the remote participant.
 pub struct Stream<R: Runtime> {
+    /// Close requested.
+    close_requested: bool,
+
     /// RX channel for receiving [`Packet`]s from the network.
     cmd_rx: Receiver<Vec<u8>>,
 
@@ -602,6 +611,7 @@ impl<R: Runtime> Stream<R> {
         };
 
         Self {
+            close_requested: false,
             cmd_rx,
             destination,
             event_tx,
@@ -748,6 +758,16 @@ impl<R: Runtime> Stream<R> {
             self.inbound_context.handle_packet(seq_nro, payload.to_vec())?;
         }
 
+        if self.close_requested && self.unacked.is_empty() && self.pending.is_empty() {
+            tracing::trace!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                "shutting down stream",
+            );
+            return Err(StreamingError::Closed);
+        }
+
         Ok(())
     }
 
@@ -869,6 +889,83 @@ impl<R: Runtime> Stream<R> {
             }
         }
     }
+
+    /// Client has closed down the socket.
+    fn shutdown(&mut self) {
+        tracing::info!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            num_pending = ?self.pending.len(),
+            num_unacked = ?self.unacked.len(),
+            "shutdown stream",
+        );
+
+        self.write_state = WriteState::Closed;
+        self.read_state = SocketState::Closed;
+        self.close_requested = true;
+
+        let seq_nro = {
+            let seq_nro = self.next_seq_nro;
+            self.next_seq_nro += 1;
+            seq_nro
+        };
+
+        let packet = PacketBuilder::new(self.send_stream_id)
+            .with_send_stream_id(self.recv_stream_id)
+            .with_ack_through(self.inbound_context.seq_nro)
+            .with_seq_nro(seq_nro)
+            .with_from_included(self.destination.clone())
+            .with_close()
+            .with_signature()
+            .build_and_sign(&self.signing_key)
+            .to_vec();
+
+        if self.window_size.saturating_sub(self.unacked.len()) == 0 {
+            tracing::info!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                "postponing `CLOSE`, send window is full",
+            );
+
+            self.pending.insert(
+                seq_nro,
+                PendingPacket::<R> {
+                    sent: R::now(),
+                    seq_nro,
+                    packet,
+                },
+            );
+        } else {
+            match self.event_tx.try_send((self.remote.clone(), packet.clone())) {
+                Err(_) => {
+                    self.pending.insert(
+                        seq_nro,
+                        PendingPacket::<R> {
+                            sent: R::now(),
+                            seq_nro,
+                            packet,
+                        },
+                    );
+                }
+                Ok(()) => {
+                    self.unacked.insert(
+                        seq_nro,
+                        PendingPacket::<R> {
+                            sent: R::now(),
+                            seq_nro,
+                            packet,
+                        },
+                    );
+                }
+            }
+
+            if self.rto_timer.is_none() {
+                self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
+            }
+        }
+    }
 }
 
 impl<R: Runtime> Future for Stream<R> {
@@ -921,14 +1018,9 @@ impl<R: Runtime> Future for Stream<R> {
                             this.write_state = WriteState::WriteMessage { offset, message };
                             break;
                         }
-                        Poll::Ready(Err(_)) => return Poll::Ready(this.recv_stream_id),
-                        Poll::Ready(Ok(0)) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                "wrote zero bytes to socket",
-                            );
-
-                            return Poll::Ready(this.recv_stream_id);
+                        Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) => {
+                            this.shutdown();
+                            continue;
                         }
                         Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
                             true => {
@@ -942,6 +1034,30 @@ impl<R: Runtime> Future for Stream<R> {
                             }
                         },
                     },
+                WriteState::Closed => match this.cmd_rx.poll_recv(cx) {
+                    Poll::Pending => {
+                        this.write_state = WriteState::Closed;
+                        break;
+                    }
+                    Poll::Ready(None) => return Poll::Ready(this.recv_stream_id),
+                    Poll::Ready(Some(message)) => match this.on_packet(message) {
+                        Err(StreamingError::Closed | StreamingError::SequenceNumberTooHigh) =>
+                            return Poll::Ready(this.recv_stream_id),
+                        Err(error) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                local = %this.local,
+                                remote = %this.remote,
+                                ?error,
+                                "failed to handle packet"
+                            );
+                            this.write_state = WriteState::Closed;
+                        }
+                        Ok(()) => {
+                            this.write_state = WriteState::Closed;
+                        }
+                    },
+                },
                 WriteState::Poisoned => {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -958,7 +1074,7 @@ impl<R: Runtime> Future for Stream<R> {
         loop {
             match this.read_state {
                 // if there are pending messages from previous reads, the socket shouldn't be read
-                SocketState::ReadMessage => match this.pending.is_empty() {
+                SocketState::ReadMessage | SocketState::Closed => match this.pending.is_empty() {
                     false => {
                         let outstanding = this.unacked.len();
                         let available = this.window_size.saturating_sub(outstanding);
@@ -970,6 +1086,8 @@ impl<R: Runtime> Future for Stream<R> {
 
                         tracing::info!(
                             target: LOG_TARGET,
+                            local = %this.local,
+                            remote = %this.remote,
                             window_size = this.window_size,
                             num_unacked = ?this.unacked.len(),
                             num_pending = ?this.pending.len(),
@@ -1006,38 +1124,24 @@ impl<R: Runtime> Future for Stream<R> {
                             this.rto_timer = Some(Box::pin(R::delay(*this.rto)));
                         }
                     }
-                    true => match Pin::new(&mut this.stream)
-                        .as_mut()
-                        .poll_read(cx, &mut this.read_buffer)
-                    {
-                        Poll::Pending => {
-                            this.read_state = SocketState::ReadMessage;
-                            break;
-                        }
-                        Poll::Ready(Err(error)) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                ?error,
-                                local = %this.local,
-                                remote = %this.remote,
-                                "socket error",
-                            );
-                            return Poll::Ready(this.recv_stream_id);
-                        }
-                        Poll::Ready(Ok(nread)) => {
-                            if nread == 0 {
-                                tracing::debug!(
-                                    target: LOG_TARGET,
-                                    local = %this.local,
-                                    remote = %this.remote,
-                                    "read zero bytes from socket",
-                                );
-                                return Poll::Ready(this.recv_stream_id);
+                    true if !core::matches!(this.read_state, SocketState::Closed) =>
+                        match Pin::new(&mut this.stream)
+                            .as_mut()
+                            .poll_read(cx, &mut this.read_buffer)
+                        {
+                            Poll::Pending => {
+                                this.read_state = SocketState::ReadMessage;
+                                break;
                             }
-
-                            this.read_state = SocketState::SendMessage { offset: nread };
-                        }
-                    },
+                            Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) => {
+                                this.shutdown();
+                                continue;
+                            }
+                            Poll::Ready(Ok(nread)) => {
+                                this.read_state = SocketState::SendMessage { offset: nread };
+                            }
+                        },
+                    true => break,
                 },
                 SocketState::SendMessage { offset } => {
                     this.packetize(offset);
@@ -2685,6 +2789,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_closes_socket_with_pending_data() {
+        crate::util::init_logger();
+
         let (
             stream,
             StreamBuilder {
@@ -2706,24 +2812,21 @@ mod tests {
         // ignore syn
         let _ = event_rx.recv().await.unwrap();
 
-        // send five packets
+        // send 20 packets
         client
             .write_all(&{
-                let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
-                data.extend_from_slice(&vec![2u8; MTU_SIZE]);
-                data.extend_from_slice(&vec![3u8; MTU_SIZE]);
-                data.extend_from_slice(&vec![4u8; MTU_SIZE]);
-                data.extend_from_slice(&vec![5u8; MTU_SIZE]);
-
-                data
+                (1..=20).fold(Vec::new(), |mut data, i| {
+                    data.extend_from_slice(&vec![i as u8; MTU_SIZE]);
+                    data
+                })
             })
             .await
             .unwrap();
 
+        tokio::time::sleep(Duration::from_secs(5)).await;
         drop(client);
 
-        for i in 1..=5 {
+        for i in 1..=20 {
             let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("no timeout")
@@ -2734,7 +2837,7 @@ mod tests {
 
             assert_eq!(packet.payload, vec![i as u8; MTU_SIZE]);
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             let _ = cmd_tx
                 .send(
@@ -2747,6 +2850,25 @@ mod tests {
                 )
                 .await;
         }
+
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+
+        let packet = Packet::parse(&packet).unwrap();
+        let _ = cmd_tx
+            .send(
+                PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .with_close()
+                    .build()
+                    .to_vec(),
+            )
+            .await;
 
         let _ = tokio::time::timeout(Duration::from_secs(5), handle)
             .await
