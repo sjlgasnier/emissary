@@ -357,15 +357,7 @@ impl<'a> MessageBlock<'a> {
 
     /// Try to parse `input` into an NTCP message block
     pub fn parse(input: &'a [u8]) -> Option<MessageBlock<'a>> {
-        let (rest, parsed) = MessageBlock::parse_inner(input).ok()?;
-
-        if !rest.is_empty() {
-            tracing::warn!(
-                target: LOG_TARGET,
-                bytes_left = ?rest.len(),
-                "more bytes left in ntcp2 message",
-            );
-        }
+        let (_rest, parsed) = MessageBlock::parse_inner(input).ok()?;
 
         Some(parsed)
     }

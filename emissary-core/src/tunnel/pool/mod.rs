@@ -680,6 +680,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     let expiration = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
 
                     let mut message = GarlicMessageBuilder::default()
+                        .with_date_time(R::time_since_epoch().as_secs() as u32)
                         .with_garlic_clove(
                             MessageType::Data,
                             message_id,

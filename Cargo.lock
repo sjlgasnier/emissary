@@ -931,7 +931,7 @@ dependencies = [
  "tracing-subscriber",
  "uint",
  "x25519-dalek",
- "yosemite 0.3.0",
+ "yosemite",
  "zeroize",
 ]
 
@@ -2782,7 +2782,7 @@ dependencies = [
  "sha2",
  "tokio",
  "util",
- "yosemite 0.2.0",
+ "yosemite",
 ]
 
 [[package]]
@@ -3490,21 +3490,6 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
-]
-
-[[package]]
-name = "yosemite"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45ea22dddf68d3e49dfe17ee45a362b1fa57214cebfab47208861490b00d0efe"
-dependencies = [
- "futures",
- "nom",
- "rand",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

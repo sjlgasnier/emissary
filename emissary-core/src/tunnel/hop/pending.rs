@@ -242,6 +242,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                 },
                 TunnelDirection::Inbound => {
                     let mut message = GarlicMessageBuilder::default()
+                        .with_date_time(R::time_since_epoch().as_secs() as u32)
                         .with_garlic_clove(
                             MessageType::ShortTunnelBuild,
                             message_id,
