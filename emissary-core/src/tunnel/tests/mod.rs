@@ -307,7 +307,6 @@ pub fn build_inbound_tunnel(
     assert_eq!(message.message_id, message_id.into());
     assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
     assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
-    assert_eq!(message.payload[0], 4u8);
     assert_eq!(message.payload[1..].len() % 218, 0);
 
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(

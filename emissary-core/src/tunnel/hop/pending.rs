@@ -45,10 +45,14 @@ use core::{iter, marker::PhantomData, num::NonZeroUsize, time::Duration};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::pending";
 
-/// How many build records should a `ShortTunnelBuildRequest` contain.
+/// How many records fit into a single [`TunnelData`] without having to fragment the tunnel build
+/// request.
 ///
-/// This includes the actual build request records and any fake records.
-const NUM_BUILD_RECORDS: usize = 4;
+/// Used to clamp down the amount of fake records for inbound tunnel builds.
+const UNFRAGMENTED_MAX_RECORDS: usize = 4usize;
+
+/// Maximum build records.
+const MAX_BUILD_RECORDS: usize = 8usize;
 
 /// How long is reply waited for a build request until it's considered expired.
 const TUNNEL_BUILD_EXPIRATION: Duration = Duration::from_secs(10);
@@ -60,6 +64,9 @@ const SHORT_RECORD_LEN: usize = 218;
 pub struct PendingTunnel<T: Tunnel> {
     /// Pending tunnel hops.
     hops: VecDeque<TunnelHop>,
+
+    /// Number of build records (real and fake).
+    num_records: usize,
 
     /// Message receiver for the tunnel.
     receiver: ReceiverKind,
@@ -97,7 +104,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             receiver,
         } = parameters;
 
-        if hops.len() > NUM_BUILD_RECORDS {
+        if hops.len() > MAX_BUILD_RECORDS {
             return Err(TunnelError::TooManyHops(hops.len()));
         }
 
@@ -128,6 +135,20 @@ impl<T: Tunnel> PendingTunnel<T> {
         let build_expiration = time_now + TUNNEL_BUILD_EXPIRATION;
         let num_hops =
             NonZeroUsize::new(hops.len()).ok_or(TunnelError::NotEnoughHops(hops.len()))?;
+
+        // calculate record count for the tunnel build message
+        //
+        // if the build request doesn't consume all available record slots, a random number of fake
+        // records are added to each tunnel build message
+        //
+        // for inbound builds (sent though an outbound tunnel), if the caller requested fewer than
+        // [`UNFRAGMENTED_MAX_RECORDS`] many hops, the fake record count is clamped down to
+        // [`UNFRAGMENTED_MAX_RECORDS`] to prevent the build message from getting fragmented
+        let num_records = match T::direction() {
+            TunnelDirection::Inbound if hops.len() < UNFRAGMENTED_MAX_RECORDS =>
+                (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, UNFRAGMENTED_MAX_RECORDS),
+            _ => (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, MAX_BUILD_RECORDS),
+        };
 
         // save the first hop's static key in case this is an inbound tunnel build so that the
         // tunnel build message can be garlic-encrypted, preventing OBEP from reading the message
@@ -207,7 +228,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                     })
             })
             .chain(
-                (0..NUM_BUILD_RECORDS - num_hops.get())
+                (0..num_records - num_hops.get())
                     .map(|_| short::TunnelBuildRecordBuilder::random(&mut R::rng())),
             )
             .collect::<Vec<_>>();
@@ -228,9 +249,10 @@ impl<T: Tunnel> PendingTunnel<T> {
         Ok((
             Self {
                 hops: tunnel_hops,
+                num_records,
                 receiver,
-                tunnel_id,
                 _tunnel: Default::default(),
+                tunnel_id,
             },
             RouterId::from(router_hashes[0].clone().to_vec()),
             match T::direction() {
@@ -359,7 +381,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             }
         };
 
-        if payload.len() != (NUM_BUILD_RECORDS * SHORT_RECORD_LEN + 1) {
+        if payload.len() != (self.num_records * SHORT_RECORD_LEN + 1) {
             tracing::warn!(
                 target: LOG_TARGET,
                 tunnel = %self.tunnel_id,
@@ -499,7 +521,6 @@ mod test {
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(message.payload[0], 4u8);
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
@@ -596,7 +617,6 @@ mod test {
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(message.payload[0], 4u8);
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
@@ -652,7 +672,6 @@ mod test {
 
         assert_eq!(parsed_message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(payload[0], 4u8);
         assert_eq!(payload[1..].len() % 218, 0);
 
         fn find_own_record<'a>(
@@ -775,7 +794,6 @@ mod test {
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(message.payload[0], 4u8);
 
         // set random data as payload which causes the length check to fail
         message.message_type = MessageType::OutboundTunnelBuildReply;
@@ -786,5 +804,64 @@ mod test {
             Error::Tunnel(TunnelError::InvalidMessage) => {}
             _ => panic!("invalid error"),
         }
+    }
+
+    #[tokio::test]
+    async fn create_long_outobound_tunnel() {
+        let (hops, mut transit_managers): (
+            Vec<(Bytes, StaticPublicKey)>,
+            Vec<TestTransitTunnelManager>,
+        ) = (0..8)
+            .map(|i| {
+                let manager = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
+
+                ((manager.router_hash(), manager.public_key()), manager)
+            })
+            .unzip();
+
+        let (local_hash, _, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, next_router, message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+        assert_eq!(message.payload[0], 8u8);
+        assert_eq!(message.payload[1..].len() % 218, 0);
+
+        let message = hops.iter().zip(transit_managers.iter_mut()).fold(
+            message,
+            |acc, ((_, _), transit_manager)| {
+                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                Message::parse_short(&message).unwrap()
+            },
+        );
+        assert_eq!(message.message_type, MessageType::TunnelGateway);
+
+        let TunnelGateway {
+            tunnel_id: recv_tunnel_id,
+            payload,
+        } = TunnelGateway::parse(&message.payload).unwrap();
+
+        assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
+
+        let message = Message::parse_standard(&payload).unwrap();
+        assert!(pending_tunnel.try_build_tunnel::<MockRuntime>(message).is_ok());
     }
 }

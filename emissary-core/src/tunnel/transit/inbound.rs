@@ -311,7 +311,6 @@ mod tests {
         };
 
         assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
-        assert_eq!(message.payload[0], 4u8);
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         // build 1-hop tunnel
@@ -429,7 +428,6 @@ mod tests {
         };
 
         assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
-        assert_eq!(message.payload[0], 4u8);
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         // build 1-hop tunnel

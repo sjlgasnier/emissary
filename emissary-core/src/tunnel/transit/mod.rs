@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
-    error::{RejectionReason, TunnelError},
+    error::TunnelError,
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBuilder},
         tunnel::{
@@ -154,8 +154,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
     }
 
     /// Handle variable tunnel build request.
-    ///
-    /// Only OBEP is supported, for any other hop the message is dropped.
     pub fn handle_variable_tunnel_build(
         &mut self,
         message: Message,
@@ -193,22 +191,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
         let next_tunnel_id = build_record.next_tunnel_id();
         let next_message_id = build_record.next_message_id();
         let next_router = build_record.next_router();
-
-        if role != HopRole::OutboundEndpoint {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?role,
-                %tunnel_id,
-                %next_tunnel_id,
-                %next_message_id,
-                %next_router,
-                "variable tunnel build only supported for outbound endpoint",
-            );
-
-            return Err(Error::Tunnel(TunnelError::MessageRejected(
-                RejectionReason::NotSupported,
-            )));
-        }
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -317,7 +299,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
         }
 
         let message = MessageBuilder::short()
-            .with_message_type(MessageType::VariableTunnelBuildReply)
+            .with_message_type(match role {
+                HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
+                HopRole::InboundGateway | HopRole::Participant => MessageType::VariableTunnelBuild,
+            })
             .with_message_id(next_message_id)
             .with_expiration(expiration)
             .with_payload(&payload)
