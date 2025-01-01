@@ -17,24 +17,19 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base64_encode,
-        chachapoly::{ChaCha, ChaChaPoly},
-        sha256::Sha256,
-        EphemeralPublicKey, StaticPublicKey,
-    },
-    error::{RejectionReason, RoutingError, TunnelError},
+    crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
+    error::TunnelError,
     i2np::{
-        garlic::GarlicMessage,
+        garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBuilder},
         tunnel::{
             build::{short, variable},
-            data::EncryptedTunnelData,
             gateway::TunnelGateway,
         },
-        HopRole, Message, MessageBuilder, MessageType,
+        HopRole, Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{RouterId, TunnelId},
     runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
+    shutdown::ShutdownHandle,
     tunnel::{
         metrics::*,
         noise::{NoiseContext, TunnelKeys},
@@ -44,13 +39,11 @@ use crate::{
     Error,
 };
 
-use bytes::Bytes;
-use futures::StreamExt;
-use hashbrown::HashMap;
-use rand_core::RngCore;
-use thingbuf::mpsc::{channel, Receiver};
+use bytes::{BufMut, BytesMut};
+use futures::{FutureExt, StreamExt};
+use thingbuf::mpsc::Receiver;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
     ops::{Range, RangeFrom},
@@ -103,9 +96,6 @@ pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
     ) -> Self;
-
-    /// Get role of the transit tunnel hop.
-    fn role(&self) -> HopRole;
 }
 
 /// Transit tunnel manager.
@@ -122,6 +112,9 @@ pub struct TransitTunnelManager<R: Runtime> {
     /// Routing table.
     routing_table: RoutingTable,
 
+    /// Shutdown handle.
+    shutdown_handle: ShutdownHandle,
+
     /// Active transit tunnels.
     tunnels: R::JoinSet<TunnelId>,
 }
@@ -133,12 +126,14 @@ impl<R: Runtime> TransitTunnelManager<R> {
         routing_table: RoutingTable,
         message_rx: Receiver<Message>,
         metrics_handle: R::MetricsHandle,
+        shutdown_handle: ShutdownHandle,
     ) -> Self {
         Self {
             message_rx,
             metrics_handle,
             noise,
             routing_table,
+            shutdown_handle,
             tunnels: R::join_set(),
         }
     }
@@ -153,14 +148,12 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 payload[1..]
                     .chunks_mut(RECORD_SIZE)
                     .enumerate()
-                    .find(|(i, chunk)| &chunk[..16] == &self.noise.local_router_hash()[..16])
+                    .find(|(_, chunk)| chunk[..16] == self.noise.local_router_hash()[..16])
             })
             .flatten()
     }
 
     /// Handle variable tunnel build request.
-    ///
-    /// Only OBEP is supported, for any other hop the message is dropped.
     pub fn handle_variable_tunnel_build(
         &mut self,
         message: Message,
@@ -172,13 +165,13 @@ impl<R: Runtime> TransitTunnelManager<R> {
             ..
         } = message;
 
-        let (record_idx, mut record) = self
+        let (_, record) = self
             .find_local_record::<VARIABLE_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        let mut session = self
-            .noise
-            .create_long_inbound_session(EphemeralPublicKey::try_from(&record[PUBLIC_KEY_OFFSET])?);
+        let mut session = self.noise.create_long_inbound_session(
+            EphemeralPublicKey::from_bytes(&record[PUBLIC_KEY_OFFSET]).ok_or(Error::InvalidData)?,
+        );
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
@@ -199,22 +192,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
         let next_message_id = build_record.next_message_id();
         let next_router = build_record.next_router();
 
-        if role != HopRole::OutboundEndpoint {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?role,
-                %tunnel_id,
-                %next_tunnel_id,
-                %next_message_id,
-                %next_router,
-                "variable tunnel build only supported for outbound endpoint",
-            );
-
-            return Err(Error::Tunnel(TunnelError::MessageRejected(
-                RejectionReason::NotSupported,
-            )));
-        }
-
         tracing::trace!(
             target: LOG_TARGET,
             ?role,
@@ -225,26 +202,48 @@ impl<R: Runtime> TransitTunnelManager<R> {
             "variable tunnel build request",
         );
 
-        // try to insert transit tunnel into routing table, allocating it a channel
+        // check if the tunnel can be accepted
         //
-        // if the tunnel already exists in the routing table, the build request is rejected
-        match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
-            Err(error) => {
-                tracing::warn!(
+        // all transit tunnel build requests are rejected if the tunnel is shutting
+        //
+        // if the router is active, check if a new receiver can be added to routing table and if so,
+        // create new receiver for the transit tunnel and add it to routing table
+        let maybe_receiver = match self.shutdown_handle.is_shutting_down() {
+            true => {
+                tracing::debug!(
                     target: LOG_TARGET,
+                    ?role,
                     %tunnel_id,
-                    ?error,
-                    "tunnel already exists in routing table, rejecting",
+                    "router shutting down, rejecting transit tunnel",
                 );
+
+                None
+            }
+            false => match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
+                Ok(receiver) => Some(receiver),
+                Err(error) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %tunnel_id,
+                        ?error,
+                        "tunnel already exists in routing table, rejecting",
+                    );
+                    None
+                }
+            },
+        };
+
+        match maybe_receiver {
+            None => {
                 self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
 
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
                 record[511] = 0x30; // reject
 
-                session.encrypt_build_record(&mut record)?;
+                session.encrypt_build_record(record)?;
             }
-            Ok(receiver) => {
+            Some(receiver) => {
                 self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
                 self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
 
@@ -252,7 +251,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 record[49] = 0x00;
                 record[511] = 0x00; // accept
 
-                session.encrypt_build_record(&mut record)?;
+                session.encrypt_build_record(record)?;
 
                 // start tunnel event loop
                 //
@@ -300,7 +299,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
         }
 
         let message = MessageBuilder::short()
-            .with_message_type(MessageType::VariableTunnelBuildReply)
+            .with_message_type(match role {
+                HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
+                HopRole::InboundGateway | HopRole::Participant => MessageType::VariableTunnelBuild,
+            })
             .with_message_id(next_message_id)
             .with_expiration(expiration)
             .with_payload(&payload)
@@ -315,19 +317,19 @@ impl<R: Runtime> TransitTunnelManager<R> {
         message: Message,
     ) -> crate::Result<(RouterId, Vec<u8>)> {
         let Message {
-            message_type,
             message_id,
             expiration,
             mut payload,
+            ..
         } = message;
 
         let (record_idx, record) = self
             .find_local_record::<SHORT_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        let mut session = self.noise.create_short_inbound_session(EphemeralPublicKey::try_from(
-            &record[PUBLIC_KEY_OFFSET],
-        )?);
+        let mut session = self.noise.create_short_inbound_session(
+            EphemeralPublicKey::from_bytes(&record[PUBLIC_KEY_OFFSET]).ok_or(Error::InvalidData)?,
+        );
         let decrypted_record =
             session.decrypt_build_record(record[RECORD_START_OFFSET].to_vec())?;
 
@@ -353,21 +355,50 @@ impl<R: Runtime> TransitTunnelManager<R> {
             %tunnel_id,
             %next_tunnel_id,
             %next_message_id,
-            ?next_router,
+            %next_router,
             "short tunnel build request",
         );
 
-        // try to insert transit tunnel into routing table, allocating it a channel
+        // check if the tunnel can be accepted
         //
-        // if the tunnel already exists in the routing table, the build request is rejected
-        match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
-            Err(error) => {
-                tracing::warn!(
+        // all transit tunnel build requests are rejected if the tunnel is shutting
+        //
+        // if the router is active, check if a new receiver can be added to routing table and if so,
+        // create new receiver for the transit tunnel and add it to routing table
+        let maybe_receiver = match self.shutdown_handle.is_shutting_down() {
+            true => {
+                tracing::debug!(
                     target: LOG_TARGET,
+                    ?role,
                     %tunnel_id,
-                    ?error,
-                    "tunnel already exists in routing table, rejecting",
+                    "router shutting down, rejecting transit tunnel",
                 );
+
+                None
+            }
+            false => match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
+                Ok(receiver) => Some(receiver),
+                Err(error) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %tunnel_id,
+                        ?error,
+                        "tunnel already exists in routing table, rejecting",
+                    );
+                    None
+                }
+            },
+        };
+
+        // create tunnel build reply, either accept or reject, depending on whether the tunnel could
+        // be accepted or not
+        //
+        // if assigned role is OBEP, generate keys for garlic-encrypting the TBRM
+        //
+        // if the tunnel is accepted, an event loop for the tunnel is started right away since we
+        // won't know if another participant of the tunnel rejected the tunnel or not
+        let (garlic_key, garlic_tag) = match maybe_receiver {
+            None => {
                 self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
 
                 record[48] = 0x00; // no options
@@ -376,8 +407,20 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
                 session.create_tunnel_keys(role)?;
                 session.encrypt_build_records(&mut payload, record_idx)?;
+
+                match role {
+                    HopRole::OutboundEndpoint => {
+                        let tunnel_keys = session.finalize()?;
+
+                        (
+                            Some(tunnel_keys.garlic_key()),
+                            Some(tunnel_keys.garlic_tag()),
+                        )
+                    }
+                    _ => (None, None),
+                }
             }
-            Ok(receiver) => {
+            Some(receiver) => {
                 self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
                 self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
 
@@ -393,36 +436,52 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 // an accepted tunnel must be maintained for 10 minutes as we won't know
                 // if another participant of the tunnel rejected it
                 match role {
-                    HopRole::InboundGateway => self.tunnels.push(InboundGateway::<R>::new(
-                        tunnel_id,
-                        next_tunnel_id,
-                        next_router.clone(),
-                        session.finalize()?,
-                        self.routing_table.clone(),
-                        self.metrics_handle.clone(),
-                        receiver,
-                    )),
-                    HopRole::Participant => self.tunnels.push(Participant::<R>::new(
-                        tunnel_id,
-                        next_tunnel_id,
-                        next_router.clone(),
-                        session.finalize()?,
-                        self.routing_table.clone(),
-                        self.metrics_handle.clone(),
-                        receiver,
-                    )),
-                    HopRole::OutboundEndpoint => self.tunnels.push(OutboundEndpoint::<R>::new(
-                        tunnel_id,
-                        next_tunnel_id,
-                        next_router.clone(),
-                        session.finalize()?,
-                        self.routing_table.clone(),
-                        self.metrics_handle.clone(),
-                        receiver,
-                    )),
+                    HopRole::InboundGateway => {
+                        self.tunnels.push(InboundGateway::<R>::new(
+                            tunnel_id,
+                            next_tunnel_id,
+                            next_router.clone(),
+                            session.finalize()?,
+                            self.routing_table.clone(),
+                            self.metrics_handle.clone(),
+                            receiver,
+                        ));
+
+                        (None, None)
+                    }
+                    HopRole::Participant => {
+                        self.tunnels.push(Participant::<R>::new(
+                            tunnel_id,
+                            next_tunnel_id,
+                            next_router.clone(),
+                            session.finalize()?,
+                            self.routing_table.clone(),
+                            self.metrics_handle.clone(),
+                            receiver,
+                        ));
+
+                        (None, None)
+                    }
+                    HopRole::OutboundEndpoint => {
+                        let tunnel_keys = session.finalize()?;
+                        let garlic_key = tunnel_keys.garlic_key();
+                        let garlic_tag = tunnel_keys.garlic_tag();
+
+                        self.tunnels.push(OutboundEndpoint::<R>::new(
+                            tunnel_id,
+                            next_tunnel_id,
+                            next_router.clone(),
+                            tunnel_keys,
+                            self.routing_table.clone(),
+                            self.metrics_handle.clone(),
+                            receiver,
+                        ));
+
+                        (Some(garlic_key), Some(garlic_tag))
+                    }
                 }
             }
-        }
+        };
 
         match role {
             // IBGWs and participants just forward the build request as-is to the next hop
@@ -439,23 +498,49 @@ impl<R: Runtime> TransitTunnelManager<R> {
             // OBEP wraps the `OutboundBuildTunnelReply` in a `TunnelGateway` in order for
             // the recipient IBGW to be able to forward the tunnel build reply correctly
             HopRole::OutboundEndpoint => {
-                // TODO: garlic encrypt
-                let msg = MessageBuilder::standard()
-                    .with_message_type(MessageType::OutboundTunnelBuildReply)
+                // garlic tag and key must exist since this is a response for an OBEP
+                let garlic_key = garlic_key.expect("to exist");
+                let garlic_tag = garlic_tag.expect("to exist");
+
+                let mut message = GarlicMessageBuilder::default()
+                    .with_date_time(R::time_since_epoch().as_secs() as u32)
+                    .with_garlic_clove(
+                        MessageType::OutboundTunnelBuildReply,
+                        next_message_id,
+                        R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                        DeliveryInstructions::Local,
+                        &payload,
+                    )
+                    .build();
+
+                // message length + poly13055 tag + garlic tag + garlic message length
+                let mut out = BytesMut::with_capacity(message.len() + 16 + 8 + 4);
+
+                // encryption must succeed since the parameters are managed by us
+                ChaChaPoly::new(&garlic_key)
+                    .encrypt_with_ad_new(&garlic_tag, &mut message)
+                    .expect("to succeed");
+
+                out.put_u32(message.len() as u32 + 8);
+                out.put_slice(&garlic_tag);
+                out.put_slice(&message);
+
+                let message = MessageBuilder::standard()
+                    .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_message_type(MessageType::Garlic)
                     .with_message_id(next_message_id)
-                    .with_expiration(expiration)
-                    .with_payload(&payload)
+                    .with_payload(&out)
                     .build();
 
                 let msg = TunnelGateway {
-                    tunnel_id: next_tunnel_id.into(),
-                    payload: &msg,
+                    tunnel_id: next_tunnel_id,
+                    payload: &message,
                 }
                 .serialize();
 
                 let message = MessageBuilder::short()
                     .with_message_type(MessageType::TunnelGateway)
-                    .with_message_id(R::rng().next_u32())
+                    .with_message_id(next_message_id)
                     .with_expiration(expiration)
                     .with_payload(&msg)
                     .build();
@@ -504,6 +589,24 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
             }
         }
 
+        if self.shutdown_handle.poll_unpin(cx).is_ready() {
+            tracing::info!(
+                target: LOG_TARGET,
+                "graceful shutdown requested",
+            );
+
+            if self.tunnels.is_empty() {
+                self.shutdown_handle.shutdown();
+                return Poll::Ready(());
+            } else {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    num_tunnels = ?self.tunnels.len(),
+                    "waiting for transit tunnels to expire",
+                );
+            }
+        }
+
         while let Poll::Ready(event) = self.tunnels.poll_next_unpin(cx) {
             match event {
                 None => return Poll::Ready(()),
@@ -515,6 +618,15 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                     );
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).decrement(1);
+
+                    if self.tunnels.is_empty() && self.shutdown_handle.is_shutting_down() {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            "shutting down",
+                        );
+                        self.shutdown_handle.shutdown();
+                        return Poll::Ready(());
+                    }
                 }
             }
         }
@@ -527,55 +639,64 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::StaticPrivateKey,
+        crypto::{StaticPrivateKey, StaticPublicKey},
         primitives::MessageId,
         runtime::mock::MockRuntime,
+        shutdown::ShutdownContext,
         tunnel::{
+            garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler},
             hop::{
                 inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel,
                 ReceiverKind, TunnelBuildParameters, TunnelInfo,
             },
-            pool::{
-                TunnelPool, TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle,
-            },
+            pool::TunnelPoolBuildParameters,
             tests::make_router,
         },
     };
-    use thingbuf::mpsc::{channel, Sender};
+    use bytes::Bytes;
+    use rand_core::RngCore;
+    use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn accept_tunnel_build_request_participant() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
-            Vec<(Bytes, StaticPublicKey)>,
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk),
+                    (router_hash, pk, shutdown_ctx),
                     TransitTunnelManager::new(
                         noise_context,
                         routing_table,
                         transit_rx,
                         handle.clone(),
+                        shutdown_handle,
                     ),
                 )
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
@@ -596,42 +717,54 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tunnel_build_request_ibgw() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
-            Vec<(Bytes, StaticPublicKey)>,
-            Vec<TransitTunnelManager<MockRuntime>>,
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
+            Vec<(
+                GarlicHandler<MockRuntime>,
+                TransitTunnelManager<MockRuntime>,
+            )>,
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk),
-                    TransitTunnelManager::new(
-                        noise_context,
-                        routing_table,
-                        transit_rx,
-                        handle.clone(),
+                    (router_hash, pk, shutdown_ctx),
+                    (
+                        GarlicHandler::new(noise_context.clone(), handle.clone()),
+                        TransitTunnelManager::new(
+                            noise_context,
+                            routing_table,
+                            transit_rx,
+                            handle.clone(),
+                            shutdown_handle,
+                        ),
                     ),
                 )
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let TunnelPoolBuildParameters {
-            context,
             context_handle: handle,
             ..
         } = TunnelPoolBuildParameters::new(Default::default());
-        let (tx, rx) = channel(64);
+        let (_tx, rx) = channel(64);
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
                 noise: local_noise,
@@ -647,46 +780,58 @@ mod tests {
             })
             .unwrap();
 
-        assert!(transit_managers[0].handle_short_tunnel_build(message).is_ok());
+        let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
+
+        assert!(transit_managers[0].1.handle_short_tunnel_build(message).is_ok());
     }
 
     #[tokio::test]
     async fn accept_tunnel_build_request_obep() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
-            Vec<(Bytes, StaticPublicKey)>,
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk),
+                    (router_hash, pk, shutdown_ctx),
                     TransitTunnelManager::new(
                         noise_context,
                         routing_table,
                         transit_rx,
                         handle.clone(),
+                        shutdown_handle,
                     ),
                 )
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
 
-        let (pending_tunnel, next_router, message) =
+        let (pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
-                    noise: local_noise,
+                    noise: local_noise.clone(),
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
                         gateway,
@@ -708,9 +853,8 @@ mod tests {
 
         let Message {
             message_type,
-            message_id,
-            expiration,
             payload,
+            ..
         } = Message::parse_short(&msg).unwrap();
 
         assert_eq!(message_type, MessageType::TunnelGateway);
@@ -721,51 +865,52 @@ mod tests {
         } = TunnelGateway::parse(&payload).unwrap();
 
         assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
+        let message = Message::parse_standard(&payload).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
 
-        let Some(Message {
-            message_type: MessageType::OutboundTunnelBuildReply,
-            message_id,
-            expiration,
-            payload,
-        }) = Message::parse_standard(&payload)
-        else {
-            panic!("invalid message");
-        };
+        pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
     }
 
     #[test]
     fn local_record_not_found() {
-        let handle = MockRuntime::register_metrics(vec![]);
-        let (hops, mut transit_managers): (
-            Vec<(Bytes, StaticPublicKey)>,
+        let handle = MockRuntime::register_metrics(vec![], None);
+        let (hops, _transit_managers): (
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk),
+                    (router_hash, pk, shutdown_ctx),
                     TransitTunnelManager::new(
                         noise_context,
                         routing_table,
                         transit_rx,
                         handle.clone(),
+                        shutdown_handle,
                     ),
                 )
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
@@ -784,13 +929,16 @@ mod tests {
         // make new router which is not part of the tunnel build request
         let (_, _, noise, _) = make_router(true);
         let (transit_tx, transit_rx) = channel(16);
-        let (manager_tx, manager_rx) = channel(16);
+        let (manager_tx, _manager_rx) = channel(16);
         let routing_table = RoutingTable::new(RouterId::from(&local_hash), manager_tx, transit_tx);
+        let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+        let shutdown_handle = shutdown_ctx.handle();
         let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
             noise,
             routing_table,
             transit_rx,
             handle.clone(),
+            shutdown_handle,
         );
 
         match transit_manager.handle_short_tunnel_build(message).unwrap_err() {
@@ -801,32 +949,35 @@ mod tests {
 
     #[test]
     fn invalid_public_key_used() {
-        let handle = MockRuntime::register_metrics(vec![]);
+        let handle = MockRuntime::register_metrics(vec![], None);
         let (mut hops, mut transit_managers): (
-            Vec<(Bytes, StaticPublicKey)>,
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
             .map(|(router_hash, pk, noise_context, _)| {
                 let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, manager_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
                 let routing_table =
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk),
+                    (router_hash, pk, shutdown_ctx),
                     TransitTunnelManager::new(
                         noise_context,
                         routing_table,
                         transit_rx,
                         handle.clone(),
+                        shutdown_handle,
                     ),
                 )
             })
             .unzip();
 
-        let (local_hash, local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -835,13 +986,17 @@ mod tests {
         let new_pubkey = {
             let mut key_bytes = [0u8; 32];
             MockRuntime::rng().fill_bytes(&mut key_bytes);
-            let key = StaticPrivateKey::from(key_bytes.to_vec());
+            let key = StaticPrivateKey::from_bytes(&key_bytes).unwrap();
 
             key.public()
         };
         hops[0].1 = new_pubkey;
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
 
-        let (pending_tunnel, next_router, message) =
+        let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
@@ -861,5 +1016,133 @@ mod tests {
             Error::Chacha20Poly1305(_) => {}
             error => panic!("invalid error: {error:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn router_shutting_down_tunnel_rejected() {
+        let handle = MockRuntime::register_metrics(vec![], None);
+        let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
+        let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
+        let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+
+        for i in 0..3 {
+            let (router_hash, pk, noise_context, _) = make_router(true);
+
+            let (transit_tx, transit_rx) = channel(16);
+            let (manager_tx, _manager_rx) = channel(16);
+            let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+            let mut shutdown_handle = shutdown_ctx.handle();
+
+            if i % 2 == 0 {
+                shutdown_ctx.shutdown();
+                tokio::time::timeout(Duration::from_secs(2), &mut shutdown_handle)
+                    .await
+                    .expect("no timeout");
+            }
+
+            let routing_table =
+                RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
+            hops.push((router_hash, pk));
+            ctxs.push(shutdown_ctx);
+            transit_managers.push(TransitTunnelManager::new(
+                noise_context,
+                routing_table,
+                transit_rx,
+                handle.clone(),
+                shutdown_handle,
+            ));
+        }
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, _next_router, message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    noise: local_noise.clone(),
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        let message = (0..transit_managers.len() - 1).fold(message, |message, i| {
+            let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
+
+            Message::parse_short(&msg).unwrap()
+        });
+
+        let (_, msg) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
+
+        let Message {
+            message_type,
+            payload,
+            ..
+        } = Message::parse_short(&msg).unwrap();
+
+        assert_eq!(message_type, MessageType::TunnelGateway);
+
+        let TunnelGateway {
+            tunnel_id: recv_tunnel_id,
+            payload,
+        } = TunnelGateway::parse(&payload).unwrap();
+
+        assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
+        let message = Message::parse_standard(&payload).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(Error::Tunnel(TunnelError::TunnelRejected(_))) => {}
+            _ => panic!("invalid error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transit_manager_exits_after_all_tunnels_have_expired() {
+        crate::util::init_logger();
+
+        let handle = MockRuntime::register_metrics(vec![], None);
+        let (router_hash, _pk, noise_context, _) = make_router(true);
+        let (transit_tx, transit_rx) = channel(16);
+        let (manager_tx, _manager_rx) = channel(16);
+        let routing_table = RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+        let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+        let shutdown_handle = shutdown_ctx.handle();
+
+        let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
+            noise_context,
+            routing_table,
+            transit_rx,
+            handle.clone(),
+            shutdown_handle,
+        );
+
+        let handle = tokio::spawn(async move {
+            transit_manager.tunnels.push(async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                TunnelId::random()
+            });
+
+            let _ = (&mut transit_manager).await;
+        });
+
+        shutdown_ctx.shutdown();
+
+        // wait for 5 seconds and verify the operation times out because the transit tunnel expires
+        // in 10 seconds
+        assert!(tokio::time::timeout(Duration::from_secs(5), &mut shutdown_ctx).await.is_err());
+
+        // wait until the transit tunnel expires and transit tunnel manager exits
+        assert!(tokio::time::timeout(Duration::from_secs(10), &mut shutdown_ctx).await.is_ok());
+        assert!(handle.await.is_ok());
     }
 }

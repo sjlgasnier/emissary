@@ -98,10 +98,8 @@ impl InboundTunnel {
                     Error::Tunnel(TunnelError::InvalidMessage)
                 },
             )?;
-        let checksum = Sha256::new()
-            .update(&ciphertext[4 + padding_end.0 + 1..])
-            .update(&iv)
-            .finalize();
+        let checksum =
+            Sha256::new().update(&ciphertext[4 + padding_end.0 + 1..]).update(iv).finalize();
 
         if ciphertext[..4] != checksum[..4] {
             tracing::warn!(
@@ -134,7 +132,7 @@ impl InboundTunnel {
     }
 
     /// Handle tunnel data.
-    pub fn handle_tunnel_data<'a>(
+    pub fn handle_tunnel_data(
         &mut self,
         message: &Message,
     ) -> crate::Result<impl Iterator<Item = Message>> {
@@ -162,13 +160,13 @@ impl InboundTunnel {
 
         let (iv, ciphertext) =
             self.hops.iter().rev().fold((iv, ciphertext), |(iv, message), hop| {
-                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                 let iv = aes.decrypt(&iv);
 
-                let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                let mut aes = cbc::Aes::new_decryptor(hop.key_context.layer_key(), &iv);
                 let ciphertext = aes.decrypt(message);
 
-                let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                 let iv = aes.decrypt(iv);
 
                 (iv, ciphertext)
@@ -178,7 +176,7 @@ impl InboundTunnel {
         let payload_start = self.find_payload_start(&ciphertext, &iv)?;
 
         // parse messages and fragments and return an iterator of ready messages
-        let messages = TunnelData::parse(&ciphertext[payload_start..].to_vec())
+        let messages = TunnelData::parse(&ciphertext[payload_start..])
             .ok_or_else(|| {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -197,7 +195,7 @@ impl InboundTunnel {
                 {
                     match delivery_instructions {
                         DeliveryInstructions::Local =>
-                            return Message::parse_standard(&message.message),
+                            return Message::parse_standard(message.message),
                         delivery_instructions => {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -318,7 +316,7 @@ impl Future for InboundTunnel {
                     ),
                     Ok(messages) => messages.for_each(|message| {
                         if let Err(error) = self.handle.route_message(message) {
-                            tracing::error!(
+                            tracing::debug!(
                                 target: LOG_TARGET,
                                 tunnel = %self.tunnel_id,
                                 ?error,

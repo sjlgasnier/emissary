@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::StaticPublicKey,
     error::{ChannelError, QueryError},
     primitives::{LeaseSet2, RouterId},
 };
@@ -58,7 +59,7 @@ pub enum NetDbAction {
         key: Bytes,
 
         /// Oneshot sender used to send the result to caller.
-        tx: oneshot::Sender<Vec<RouterId>>,
+        tx: oneshot::Sender<Vec<(RouterId, StaticPublicKey)>>,
     },
 
     /// Dummy value.
@@ -103,11 +104,13 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
-    /// Get `RouterId`'s of the floodfills closest to `key`.
+    /// Get `RouterId`'s and encryption public keys of the floodfills closest to `key`.
+    ///
+    /// Return channel is dropped by [`NetDb`] if there are no floodfills available.
     pub fn get_closest_floodfills(
         &self,
         key: Bytes,
-    ) -> Result<oneshot::Receiver<Vec<RouterId>>, ChannelError> {
+    ) -> Result<oneshot::Receiver<Vec<(RouterId, StaticPublicKey)>>, ChannelError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx
@@ -131,7 +134,7 @@ mod tests {
 
     #[test]
     fn send_leaseset_query() {
-        let (tx, mut rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
+        let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
         assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
@@ -146,7 +149,7 @@ mod tests {
 
     #[test]
     fn channel_full() {
-        let (tx, mut rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
+        let (tx, _rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
         for _ in 0..5 {

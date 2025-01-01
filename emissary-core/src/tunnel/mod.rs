@@ -17,32 +17,30 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    bloom::BloomFilter,
     crypto::StaticPrivateKey,
-    i2np::{Message, MessageType},
-    primitives::{MessageId, RouterId, RouterInfo, TunnelId},
+    error::Error,
+    i2np::{tunnel::data::EncryptedTunnelData, Message, MessageType},
+    primitives::{RouterId, RouterInfo},
     profile::ProfileStorage,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
+    shutdown::ShutdownHandle,
     subsystem::SubsystemEvent,
     transports::TransportService,
     tunnel::{
-        garlic::{DeliveryInstructions, GarlicHandler},
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
-        noise::NoiseContext,
-        pool::{
-            ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters,
-            TunnelPoolContext,
-        },
+        pool::{ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters},
         routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
 };
 
-use futures::StreamExt;
-use hashbrown::{HashMap, HashSet};
+use futures::{future::BoxFuture, FutureExt, StreamExt};
+use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -65,7 +63,9 @@ mod tests;
 #[cfg(test)]
 pub use pool::TunnelMessage;
 
+pub use garlic::{DeliveryInstructions, GarlicHandler};
 pub use handle::TunnelManagerHandle;
+pub use noise::NoiseContext;
 pub use pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
 
 /// Logging target for the file.
@@ -76,6 +76,9 @@ const DEFAULT_CHANNEL_SIZE: usize = 512;
 
 /// Tunnel expiration, 10 minutes.
 const TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60);
+
+/// Bloom filter decay interval.
+const BLOOM_FILTER_DECAY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Router state.
 #[derive(Debug)]
@@ -92,6 +95,12 @@ pub enum RouterState {
 
 /// Tunnel manager.
 pub struct TunnelManager<R: Runtime> {
+    /// Bloom filter for incoming `TunnelData` messages.
+    bloom_filter: BloomFilter,
+
+    /// Bloom filter decay timer.
+    bloom_filter_timer: BoxFuture<'static, ()>,
+
     /// RX channel for receiving tunneling-related commands from other subsystems.
     command_rx: Receiver<TunnelManagerCommand, CommandRecycle>,
 
@@ -113,17 +122,8 @@ pub struct TunnelManager<R: Runtime> {
     /// Noise context for tunnels.
     noise: NoiseContext,
 
-    /// Pending inbound tunnels.
-    pending_inbound: HashSet<MessageId>,
-
-    /// Pending outbound tunnels.
-    pending_outbound: HashSet<TunnelId>,
-
     /// Local router info.
     router_info: RouterInfo,
-
-    /// Router storage.
-    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -148,6 +148,7 @@ impl<R: Runtime> TunnelManager<R> {
         profile_storage: ProfileStorage<R>,
         exploratory_config: TunnelPoolConfig,
         insecure_tunnels: bool,
+        transit_shutdown_handle: ShutdownHandle,
     ) -> (
         Self,
         TunnelManagerHandle,
@@ -178,6 +179,7 @@ impl<R: Runtime> TunnelManager<R> {
             routing_table.clone(),
             transit_rx,
             metrics_handle.clone(),
+            transit_shutdown_handle,
         ));
 
         // start exploratory tunnel pool
@@ -210,6 +212,8 @@ impl<R: Runtime> TunnelManager<R> {
 
         (
             Self {
+                bloom_filter: BloomFilter::default(),
+                bloom_filter_timer: Box::pin(R::delay(BLOOM_FILTER_DECAY_INTERVAL)),
                 command_rx,
                 exploratory_selector,
                 garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
@@ -217,11 +221,8 @@ impl<R: Runtime> TunnelManager<R> {
                 metrics_handle: metrics_handle.clone(),
                 netdb_tx,
                 noise,
-                pending_inbound: HashSet::new(),
-                pending_outbound: HashSet::new(),
                 router_info,
                 routers: HashMap::new(),
-                profile_storage,
                 routing_table,
                 service,
             },
@@ -252,7 +253,7 @@ impl<R: Runtime> TunnelManager<R> {
     fn send_message(&mut self, router_id: &RouterId, message: Vec<u8>) {
         match self.routers.get_mut(router_id) {
             Some(RouterState::Connected) => {
-                if let Err(error) = self.service.send(&router_id, message) {
+                if let Err(error) = self.service.send(router_id, message) {
                     tracing::error!(
                         target: LOG_TARGET,
                         %router_id,
@@ -288,7 +289,15 @@ impl<R: Runtime> TunnelManager<R> {
                         "start dialing router",
                     );
 
-                    self.service.connect(&router_id);
+                    if let Err(error) = self.service.connect(router_id) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?error,
+                            "failed to dial router",
+                        );
+                    }
+
                     self.routers.insert(
                         router_id.clone(),
                         RouterState::Dialing {
@@ -300,33 +309,41 @@ impl<R: Runtime> TunnelManager<R> {
         }
     }
 
-    /// Handle established connection to `router`.
+    /// Handle established connection to router identified by `router_id`.
     ///
-    /// Store `router` into `routers` and send any pending messages to `router`.
-    fn on_connection_established(&mut self, router: RouterId) {
+    /// Store `router` into `routers` and send any pending messages to router identified by
+    /// `router_id`.
+    fn on_connection_established(&mut self, router_id: RouterId) {
         tracing::trace!(
             target: LOG_TARGET,
-            %router,
+            %router_id,
             "connection established",
         );
 
-        match self.routers.remove(&router) {
+        match self.routers.remove(&router_id) {
             Some(RouterState::Dialing { pending_messages }) if !pending_messages.is_empty() => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    ?router,
+                    %router_id,
                     "router with pending messages connected",
                 );
 
                 for message in pending_messages {
-                    self.service.send(&router, message);
+                    if let Err(error) = self.service.send(&router_id, message) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?error,
+                            "failed to send message to router",
+                        );
+                    }
                 }
             }
             Some(RouterState::Dialing { .. }) | None => {}
             state => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    ?router,
+                    %router_id,
                     ?state,
                     "invalid state for connected router",
                 );
@@ -334,7 +351,7 @@ impl<R: Runtime> TunnelManager<R> {
             }
         }
 
-        self.routers.insert(router.clone(), RouterState::Connected);
+        self.routers.insert(router_id, RouterState::Connected);
     }
 
     /// Handle closed connection to `router`.
@@ -370,20 +387,55 @@ impl<R: Runtime> TunnelManager<R> {
     ///
     /// Decrypt the payload, return I2NP messages inside the garlic cloves
     /// and process them individually.
-    fn on_garlic(&mut self, message: Message) {
+    fn on_garlic(&mut self, message: Message) -> crate::Result<()> {
         self.garlic.handle_message(message).map(|messages| {
             messages.for_each(|delivery_instructions| match delivery_instructions {
-                DeliveryInstructions::Local { message } => self.on_message(message),
-                DeliveryInstructions::Router { router, message } =>
-                    self.send_message(&router, message),
+                DeliveryInstructions::Local { message } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        "garlic message for local delivery",
+                    );
+
+                    if let Err(error) = self.on_message(message) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to route tunnel message encapsulated within a garlic message",
+                        );
+                    }
+                }
+                DeliveryInstructions::Router { router, message } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        router_id = %router,
+                        "garlic message for router delivery",
+                    );
+
+                    self.send_message(&router, message);
+                }
                 DeliveryInstructions::Tunnel {
                     router,
                     tunnel,
                     message,
-                } => self.send_message(&router, message),
-                DeliveryInstructions::Destination => unreachable!(),
+                } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        router_id = %router,
+                        tunnel_id = %tunnel,
+                        "garlic message for tunnel delivery",
+                    );
+
+                    self.send_message(&router, message);
+                }
+                DeliveryInstructions::Destination => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "garlic message for destination",
+                    );
+                    debug_assert!(false);
+                }
             })
-        });
+        })
     }
 
     /// Create new [`TunnelPool`] for a client destination.
@@ -414,25 +466,40 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     /// Handle received message from one of the open connections.
-    fn on_message(&mut self, message: Message) {
+    fn on_message(&mut self, message: Message) -> crate::Result<()> {
         self.metrics_handle.counter(NUM_TUNNEL_MESSAGES).increment(1);
 
+        // feed tunnel data into a decaying bloom filter to ensure it's unique
+        //
+        // TODO: disabled for now, causes tunnel test failures with i2pd
+        // if core::matches!(message.message_type, MessageType::TunnelData) {
+        if false {
+            let xor = EncryptedTunnelData::parse(&message.payload).ok_or(Error::InvalidData)?.xor();
+
+            if !self.bloom_filter.insert(&xor) {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    message_id = ?message.message_id,
+                    "ignoring, duplicate tunnel data message",
+                );
+                return Err(Error::Duplicate);
+            }
+        }
+
         match message.message_type {
-            MessageType::DeliveryStatus
-            | MessageType::TunnelData
+            MessageType::TunnelData
             | MessageType::TunnelGateway
             | MessageType::VariableTunnelBuild
             | MessageType::ShortTunnelBuild
             | MessageType::OutboundTunnelBuildReply
             | MessageType::TunnelBuild =>
-                if let Err(error) = self.routing_table.route_message(message) {
-                    tracing::error!(target: LOG_TARGET, ?error, "failed to route message");
-                },
+                self.routing_table.route_message(message).map_err(From::from),
             MessageType::Garlic => self.on_garlic(message),
             MessageType::TunnelBuildReply
             | MessageType::Data
             | MessageType::VariableTunnelBuildReply => unimplemented!(),
-            MessageType::DatabaseStore
+            MessageType::DeliveryStatus
+            | MessageType::DatabaseStore
             | MessageType::DatabaseLookup
             | MessageType::DatabaseSearchReply => {
                 if let Err(error) = self.netdb_tx.try_send(message) {
@@ -442,6 +509,8 @@ impl<R: Runtime> TunnelManager<R> {
                         "failed to forward message to netdb",
                     );
                 }
+
+                Ok(())
             }
         }
     }
@@ -456,7 +525,14 @@ impl<R: Runtime> Future for TunnelManager<R> {
                 None => return Poll::Ready(()),
                 Some(RoutingKind::External { router_id, message }) =>
                     self.send_message(&router_id, message),
-                Some(RoutingKind::Internal { message }) => self.on_message(message),
+                Some(RoutingKind::Internal { message }) =>
+                    if let Err(error) = self.on_message(message) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to handle internal tunnel message",
+                        );
+                    },
             }
         }
 
@@ -468,7 +544,15 @@ impl<R: Runtime> Future for TunnelManager<R> {
                 Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
                     self.on_connection_closed(&router),
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
-                    messages.into_iter().for_each(|message| self.on_message(message)),
+                    messages.into_iter().for_each(|message| {
+                        if let Err(error) = self.on_message(message) {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "failed to handle external tunnel message",
+                            );
+                        }
+                    }),
                 Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
                     self.on_connection_failure(&router),
                 Poll::Ready(Some(SubsystemEvent::Dummy)) => unreachable!(),
@@ -481,10 +565,19 @@ impl<R: Runtime> Future for TunnelManager<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TunnelManagerCommand::CreateTunnelPool { config, tx })) => {
-                    tx.send(self.on_create_tunnel_pool(config));
+                    let _ = tx.send(self.on_create_tunnel_pool(config));
                 }
                 Poll::Ready(Some(TunnelManagerCommand::Dummy)) => unreachable!(),
             }
+        }
+
+        futures::ready!(self.bloom_filter_timer.poll_unpin(cx));
+
+        // create new timer and register it into the executor
+        {
+            self.bloom_filter.decay();
+            self.bloom_filter_timer = Box::pin(R::delay(BLOOM_FILTER_DECAY_INTERVAL));
+            let _ = self.bloom_filter_timer.poll_unpin(cx);
         }
 
         Poll::Pending

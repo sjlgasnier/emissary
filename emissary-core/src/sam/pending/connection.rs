@@ -22,7 +22,7 @@ use crate::{
     primitives::Destination,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamCommand, SamVersion, SessionKind},
+        parser::{DestinationContext, SamCommand, SamVersion, SessionKind},
         socket::SamSocket,
     },
 };
@@ -44,12 +44,6 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::pending::connection";
 
-/// Minimum supported version of SAMv3.
-const MIN_SAMV3_VERSION: SamVersion = SamVersion::V31;
-
-/// Maximum supported version of SAMv3.
-const MAX_SAMV3_VERSION: SamVersion = SamVersion::V33;
-
 /// Keep-alive timeout.
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -63,8 +57,8 @@ pub enum ConnectionKind<R: Runtime> {
         /// SAMv3 socket associated with the session.
         socket: SamSocket<R>,
 
-        /// Destination kind.
-        destination: DestinationKind,
+        /// Destination context.
+        destination: DestinationContext,
 
         /// Negotiated version.
         version: SamVersion,
@@ -147,8 +141,6 @@ impl<R: Runtime> fmt::Debug for ConnectionKind<R> {
             Self::Stream {
                 session_id,
                 version,
-                destination,
-                options,
                 ..
             } => f
                 .debug_struct("ConnectionKind::Stream")
@@ -259,7 +251,7 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                         );
                         return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed)));
                     }
-                    Poll::Ready(Some(SamCommand::Hello { min, max })) => {
+                    Poll::Ready(Some(SamCommand::Hello { max, .. })) => {
                         // default to client's maximum supported version and if they didn't provide
                         // a version, default to server's maximum supported version which is SAMv3.3
                         let version = max.unwrap_or(SamVersion::V33);
@@ -408,11 +400,9 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
 
                         // generate keys and destination
                         let (private_key, signing_key, destination) = {
-                            let mut rng = R::rng();
-
-                            let signing_key = SigningPrivateKey::random(&mut rng);
-                            let private_key = StaticPrivateKey::new(rng);
-                            let destination = Destination::new(signing_key.public());
+                            let signing_key = SigningPrivateKey::random(R::rng());
+                            let private_key = StaticPrivateKey::random(R::rng());
+                            let destination = Destination::new::<R>(signing_key.public());
 
                             (private_key, signing_key, destination)
                         };
@@ -457,7 +447,7 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
             }
         }
 
-        if let Poll::Ready(_) = self.keep_alive_timer.poll_unpin(cx) {
+        if self.keep_alive_timer.poll_unpin(cx).is_ready() {
             tracing::debug!(
                 target: LOG_TARGET,
                 "keep-alive timer expired, closing connection",
@@ -477,11 +467,10 @@ mod tests {
         mock::{MockRuntime, MockTcpStream},
         TcpStream as _,
     };
-    use futures::StreamExt;
     use std::time::Duration;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::{TcpListener, TcpStream},
+        net::TcpListener,
     };
 
     #[tokio::test]
@@ -490,7 +479,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
-        stream1.unwrap().0.shutdown();
+        stream1.unwrap().0.shutdown().await.unwrap();
 
         match PendingSamConnection::<MockRuntime>::new(stream2.unwrap()).await {
             Err(Error::Connection(ConnectionError::SocketClosed)) => {}
@@ -502,7 +491,7 @@ mod tests {
     async fn keep_alive_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+        let (_stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         match PendingSamConnection::<MockRuntime>::new(stream2.unwrap()).await {
             Err(Error::Connection(ConnectionError::KeepAliveTimeout)) => {}
@@ -722,7 +711,6 @@ mod tests {
                 session_id,
                 version: SamVersion::V33,
                 session_kind: SessionKind::Stream,
-                options,
                 ..
             }) => {
                 assert_eq!(&*session_id, "test");
@@ -738,7 +726,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
-        let mut connection = PendingSamConnection::<MockRuntime>::new(stream2.unwrap());
+        let connection = PendingSamConnection::<MockRuntime>::new(stream2.unwrap());
         let mut stream = stream1.unwrap().0;
 
         stream

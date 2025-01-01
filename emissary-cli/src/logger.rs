@@ -16,47 +16,62 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use anyhow::anyhow;
 use tracing::Level;
-use tracing_subscriber::{
-    filter::{LevelFilter, Targets},
-    fmt::time::ChronoLocal,
-    prelude::*,
-};
+use tracing_subscriber::filter::{LevelFilter, Targets};
 
 use std::str::FromStr;
 
-/// Initialize logger.
-pub fn init_logger(log: Option<String>) -> anyhow::Result<()> {
+/// Parse a string of logging targets into [`Targets`].
+///
+/// INFO is enabled by default.
+pub(super) fn parse_log_targets(log: Option<String>) -> Targets {
     let mut targets = Targets::new().with_target("", Level::INFO);
+    let mut log_targets = Vec::<&str>::new();
 
-    if let Some(log) = log {
-        let mut log_targets = Vec::<&str>::new();
+    let Some(log) = log else {
+        return targets;
+    };
 
-        for target in log.split(',') {
-            let split = target.split('=').collect::<Vec<_>>();
-            log_targets.push(split.first().ok_or(anyhow!("invalid log target"))?);
+    for target in log.split(',') {
+        let split = target.split('=').collect::<Vec<_>>();
+        log_targets.push(split.first().expect("valid log target"));
 
-            let Some(level) = split.get(1) else {
-                continue;
-            };
+        let Some(level) = split.get(1) else {
+            continue;
+        };
 
-            targets = log_targets.into_iter().fold(targets, |targets, log_target| {
-                targets.with_target(
-                    log_target,
-                    LevelFilter::from_str(level).expect("valid level filter"),
-                )
-            });
-            log_targets = Vec::new();
-        }
+        targets = log_targets.into_iter().fold(targets, |targets, log_target| {
+            targets.with_target(
+                log_target,
+                LevelFilter::from_str(level).expect("valid level filter"),
+            )
+        });
+        log_targets = Vec::new();
     }
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_timer(ChronoLocal::new(String::from("%H:%M:%S%.3f"))),
-        )
-        .with(targets)
-        .try_init()
-        .map_err(From::from)
+    targets
+}
+
+#[macro_export]
+macro_rules! init_logger {
+    ($log:expr) => {{
+        use crate::logger::parse_log_targets;
+        use tracing_subscriber::{fmt::time::ChronoLocal, prelude::*, reload};
+
+        let targets = parse_log_targets($log);
+        let (filter, handle) = reload::Layer::new(targets);
+
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_timer(ChronoLocal::new(String::from("%H:%M:%S%.3f"))),
+            )
+            .with(filter)
+            .try_init();
+
+        handle
+    }};
+    ($log:expr, $handle:ident) => {{
+        $handle.reload(crate::logger::parse_log_targets($log)).expect("to succeed");
+    }};
 }

@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    i2cp::message::{MessageType, SessionId, I2CP_HEADER_SIZE, LOG_TARGET},
+    i2cp::message::{MessageType, I2CP_HEADER_SIZE},
     primitives::Lease,
 };
 
@@ -35,7 +35,7 @@ impl RequestVariableLeaseSet {
     ///
     /// Caller must have made user `leases` contains at least one `Lease`.
     pub fn new(session_id: u16, leases: Vec<Lease>) -> BytesMut {
-        let payload_len = (1 + leases.len() * leases[0].serialized_len_lease());
+        let payload_len = 1 + leases.len() * leases[0].serialized_len_lease();
         let mut out = BytesMut::with_capacity(I2CP_HEADER_SIZE + payload_len);
 
         out.put_u32(payload_len as u32);

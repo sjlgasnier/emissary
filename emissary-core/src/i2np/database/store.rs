@@ -17,7 +17,6 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::SigningPrivateKey,
     i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
     primitives::{LeaseSet2, RouterId, RouterInfo, TunnelId},
     runtime::Runtime,
@@ -31,7 +30,6 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
 use core::{fmt, marker::PhantomData};
 
 /// "No reply" token/tunnel ID.
@@ -180,10 +178,11 @@ impl fmt::Display for DatabaseStorePayload {
 }
 
 impl DatabaseStorePayload {
+    #[allow(unused)]
     fn serialized_len(&self) -> usize {
         match self {
             // TODO: calculate actual size
-            Self::RouterInfo { router_info } => 2048usize,
+            Self::RouterInfo { .. } => 2048usize,
             Self::LeaseSet2 { lease_set } => lease_set.serialized_len(),
         }
     }
@@ -296,7 +295,14 @@ impl<R: Runtime> DatabaseStore<R> {
                     },
                 ))
             }
-            store_type => todo!("support for {store_type:?} not implemented"),
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "support for store kind not implemented",
+                );
+                Err(Err::Error(make_error(input, ErrorKind::Fail)))
+            }
         }
     }
 
@@ -306,7 +312,7 @@ impl<R: Runtime> DatabaseStore<R> {
     }
 
     /// Extract raw payload from [`DatabaseStore`] message.
-    fn extraw_raw_data_payload(input: &[u8]) -> Bytes {
+    fn extraw_raw_data_payload(input: &[u8], router_info: bool) -> Bytes {
         let (rest, _) = take::<_, _, ()>(DATABASE_KEY_SIZE)(input).expect("to succeed");
         let (rest, _) = be_u8::<_, ()>(rest).expect("to succeed");
         let (rest, reply_token) = be_u32::<_, ()>(rest).expect("to succeed");
@@ -321,23 +327,30 @@ impl<R: Runtime> DatabaseStore<R> {
             }
         };
 
-        BytesMut::from(rest).freeze()
+        if router_info {
+            let (rest, size) = be_u16::<_, ()>(rest).expect("to succeed");
+            let (_, data) = take::<_, _, ()>(size)(rest).expect("to succeed");
+
+            BytesMut::from(data).freeze()
+        } else {
+            BytesMut::from(rest).freeze()
+        }
     }
 
     /// Extract raw, unserialized [`LeaseSet`] from `input`.
     ///
-    /// Caller is expected to ensure that `input` it is a valid [`DatabaseStore`] that contains
+    /// Caller is expected to ensure that `input` is a valid [`DatabaseStore`] that contains
     /// a valid [`LeaseSet2`].
     pub fn extract_raw_lease_set(input: &[u8]) -> Bytes {
-        Self::extraw_raw_data_payload(input)
+        Self::extraw_raw_data_payload(input, false)
     }
 
     /// Extract raw, unserialized [`RouterInfo`] from `input`.
     ///
-    /// Caller is expected to ensure that `input` it is a valid [`DatabaseStore`] that contains
+    /// Caller is expected to ensure that `input` is a valid [`DatabaseStore`] that contains
     /// a valid [`RouterInfo`].
     pub fn extract_raw_router_info(input: &[u8]) -> Bytes {
-        Self::extraw_raw_data_payload(input)
+        Self::extraw_raw_data_payload(input, true)
     }
 }
 
@@ -407,8 +420,7 @@ impl DatabaseStoreBuilder {
         out.put_slice(&self.key);
 
         match &self.kind {
-            DatabaseStoreKind::RouterInfo { router_info } =>
-                out.put_u8(StoreType::RouterInfo.as_u8()),
+            DatabaseStoreKind::RouterInfo { .. } => out.put_u8(StoreType::RouterInfo.as_u8()),
             DatabaseStoreKind::LeaseSet2 { .. } => out.put_u8(StoreType::LeaseSet2.as_u8()),
         }
 
@@ -450,8 +462,8 @@ impl DatabaseStoreBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{mock::MockRuntime, Runtime};
-    use rand::{Rng, RngCore};
+    use crate::runtime::mock::MockRuntime;
+    use rand::RngCore;
 
     #[test]
     fn parse_database_store() {

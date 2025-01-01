@@ -59,9 +59,9 @@ impl Mapping {
         let mut out = vec![0u8; size];
 
         out[..key.len()].copy_from_slice(&key);
-        out[key.len()] = '=' as u8;
+        out[key.len()] = b'=';
         out[1 + key.len()..1 + key.len() + value.len()].copy_from_slice(&value);
-        out[1 + key.len() + value.len()] = ';' as u8;
+        out[1 + key.len() + value.len()] = b';';
 
         out
     }
@@ -97,7 +97,7 @@ impl Mapping {
     }
 
     /// Try to convert `bytes` into a [`Mapping`].
-    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Mapping> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Mapping> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
@@ -119,13 +119,11 @@ impl Mapping {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
     use super::*;
 
     #[test]
     fn empty_mapping() {
-        assert!(Str::from_bytes(Vec::new()).is_none());
+        assert!(Str::parse(Vec::new()).is_none());
     }
 
     #[test]
@@ -133,7 +131,7 @@ mod tests {
         let mapping = Mapping::new(Str::from("hello"), Str::from("world")).serialize();
 
         assert_eq!(
-            Mapping::from_bytes(mapping),
+            Mapping::parse(mapping),
             Some(Mapping {
                 key: Str::from("hello"),
                 value: Str::from("world"),
@@ -150,7 +148,7 @@ mod tests {
         mapping.push(4);
 
         assert_eq!(
-            Mapping::from_bytes(mapping),
+            Mapping::parse(mapping),
             Some(Mapping {
                 key: Str::from("hello"),
                 value: Str::from("world"),
@@ -205,7 +203,7 @@ mod tests {
             }
         );
 
-        let (rest, mapping) = Mapping::parse_frame(rest).unwrap();
+        let (_rest, mapping) = Mapping::parse_frame(rest).unwrap();
         assert_eq!(
             mapping,
             Mapping {

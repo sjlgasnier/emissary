@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::base32_encode,
+    crypto::{base32_encode, StaticPublicKey},
     error::{Error, QueryError},
     i2np::{
         database::{
@@ -28,6 +28,8 @@ use crate::{
                 ReplyType as StoreReplyType,
             },
         },
+        delivery_status::DeliveryStatus,
+        tunnel::gateway::TunnelGateway,
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
@@ -50,6 +52,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -75,11 +78,108 @@ const LOG_TARGET: &str = "emissary::netdb";
 /// `NetDb` query timeout.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Router info republish timeout.
+const ROUTER_INFO_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
 /// [`NetDb`] maintenance interval.
 const NETDB_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Maximum router hashes to include into [`DatabaseSearchReply`].
-const SEARCH_REPLY_MAX_ROUTERS: usize = 16usize;
+/// Number of router hashes to include into [`DatabaseSearchReply`].
+const SEARCH_REPLY_NUM_ROUTERS: usize = 5usize;
+
+/// Local router info publisher.
+///
+/// Publishes the router info of the local router first when the router boots up and after that
+/// periodically (1h) to prevent the router from disappearing from the global NetDb.
+///
+/// [`RouterInfoPublisher`] implements `Future` which fires periodically and instructs [`NetDb`] to
+/// call [`RouterInfoPublisher::publish()`] to get a `DatabaseStore` message and a `RouterId` of a
+/// floodfill to whom the message should be sent.
+pub struct RouterInfoPublisher<R> {
+    /// Local router ID.
+    router_id: RouterId,
+
+    /// Serialized [`RouterId`] of the local router.
+    serialized_router_id: Bytes,
+
+    /// Serialized [`RouterInfo`] of the local router.
+    serialized_router_info: Bytes,
+
+    /// Republish timer.
+    timer: BoxFuture<'static, ()>,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> RouterInfoPublisher<R> {
+    /// Create new [`RouterInfoPublisher`].
+    fn new(router_id: RouterId, serialized_router_info: Bytes) -> Self {
+        let serialized_router_id = Bytes::from(router_id.to_vec());
+
+        // gzip-compress the serialized router info, as required by the spec
+        //
+        // call is expected to succeed as the router info is created by emissary
+        let serialized_router_info =
+            Bytes::from(R::gzip_compress(serialized_router_info).expect("to succeed"));
+
+        Self {
+            router_id,
+            serialized_router_id,
+            serialized_router_info,
+            timer: Box::pin(R::delay(Duration::from_secs(10))),
+            _runtime: Default::default(),
+        }
+    }
+
+    /// Publish local router info to global NetDb.
+    ///
+    /// Fetches the closest floodfill to our key from `dht` and returns a DatabaseStore message
+    /// which [`NetDb`] needs to send to the selected floofill. Returns also the reply token that
+    /// was used in the DatabaseStore message, allowing [`NetDb`] to associate the response with the
+    /// router info publish.
+    ///
+    /// Returns `None` if there are no floodfills.
+    fn publish(&self) -> (u32, Vec<u8>) {
+        let reply_token = R::rng().next_u32();
+        let message = DatabaseStoreBuilder::new(
+            self.serialized_router_id.clone(),
+            DatabaseStoreKind::RouterInfo {
+                router_info: self.serialized_router_info.clone(),
+            },
+        )
+        .with_reply_type(StoreReplyType::Router {
+            reply_token,
+            router_id: self.router_id.clone(),
+        })
+        .build();
+
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseStore)
+            .with_message_id(R::rng().next_u32())
+            .with_payload(&message)
+            .build();
+
+        (reply_token, message)
+    }
+}
+
+impl<R: Runtime> Future for RouterInfoPublisher<R> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        futures::ready!(self.timer.poll_unpin(cx));
+
+        // reset timer and poll it to register it into the executor
+        {
+            self.timer = Box::pin(R::delay(ROUTER_INFO_REPUBLISH_TIMEOUT));
+            let _ = self.timer.poll_unpin(cx);
+        }
+
+        Poll::Ready(())
+    }
+}
 
 /// Tunnel selector.
 ///
@@ -157,30 +257,26 @@ impl MessageKind {
     }
 }
 
-/// Floodfill state.
-enum FloodfillState {
-    /// FloodFill is connected.
+/// Routere state.
+enum RouterState {
+    /// Router is connected.
     Connected,
 
-    /// FloodFill is being dialed.
+    /// Router is being dialed.
     Dialing {
         /// Pending messages.
         pending_messages: Vec<MessageKind>,
     },
-
-    /// Floodfill is disconnected.
-    Disconnected,
 }
 
-impl fmt::Debug for FloodfillState {
+impl fmt::Debug for RouterState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Connected => f.debug_struct("FloodfillState::Connected").finish(),
+            Self::Connected => f.debug_struct("RouterState::Connected").finish(),
             Self::Dialing { pending_messages } => f
-                .debug_struct("FloodfillState::Dialing")
+                .debug_struct("RouterState::Dialing")
                 .field("num_pending", &pending_messages.len())
                 .finish(),
-            Self::Disconnected => f.debug_struct("FloodfillState::Disconnected").finish(),
         }
     }
 }
@@ -195,6 +291,9 @@ enum QueryKind {
 
     /// Router exploration.
     Exploration,
+
+    /// Router info lookup.
+    Router,
 }
 
 impl fmt::Debug for QueryKind {
@@ -202,6 +301,7 @@ impl fmt::Debug for QueryKind {
         match self {
             Self::Leaseset { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
             Self::Exploration => f.debug_struct("QueryKind::Exploration").finish(),
+            Self::Router => f.debug_struct("QueryKind::Router").finish(),
         }
     }
 }
@@ -211,8 +311,15 @@ pub struct NetDb<R: Runtime> {
     /// Active queries.
     active: HashMap<Bytes, QueryKind>,
 
-    /// Kademlia DHT implementation.
-    dht: Dht<R>,
+    /// DHT of floodfills.
+    floodfill_dht: Dht<R>,
+
+    /// DHT of non-floodfill routers.
+    ///
+    /// Available only if the router is acting as a floodfill router.
+    ///
+    /// Used to answer router exploration queries.
+    router_dht: Option<Dht<R>>,
 
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
@@ -220,8 +327,8 @@ pub struct NetDb<R: Runtime> {
     /// Has the router been configured to act as a floodfill router.
     floodfill: bool,
 
-    /// Connected floodfills.
-    floodfills: HashMap<RouterId, FloodfillState>,
+    /// Connected routers.
+    routers: HashMap<RouterId, RouterState>,
 
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<NetDbAction, NetDbActionRecycle>,
@@ -243,25 +350,28 @@ pub struct NetDb<R: Runtime> {
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
-    /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
-    netdb_msg_rx: mpsc::Receiver<Message>,
-
     // Network ID.
     net_id: u8,
+
+    /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
+    netdb_msg_rx: mpsc::Receiver<Message>,
 
     /// Active inbound tunhnels
     outbound_tunnels: TunnelSelector<TunnelId>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// Query timers.
     query_timers: R::JoinSet<Bytes>,
+
+    /// Local router info publishers.
+    router_info_publishers: RouterInfoPublisher<R>,
 
     /// Serialized [`RouterInfo`]s received via `DatabaseStore` messages.
     ///
     /// This contains entries only if `floodfill` is true.
     router_infos: HashMap<Bytes, (Bytes, Duration)>,
-
-    /// Profile storage.
-    profile_storage: ProfileStorage<R>,
 
     /// Transport service.
     service: TransportService<R>,
@@ -278,11 +388,23 @@ impl<R: Runtime> NetDb<R> {
         exploratory_pool_handle: TunnelPoolHandle,
         net_id: u8,
         netdb_msg_rx: mpsc::Receiver<Message>,
+        local_router_info: Bytes,
     ) -> (Self, NetDbHandle) {
         let floodfills = profile_storage
             .get_router_ids(Bucket::Any, |_, info, _| info.is_floodfill())
             .into_iter()
             .collect::<HashSet<_>>();
+
+        let router_dht = floodfill.then(|| {
+            Dht::new(
+                local_router_id.clone(),
+                profile_storage
+                    .get_router_ids(Bucket::Any, |_, info, _| !info.is_floodfill())
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                metrics.clone(),
+            )
+        });
 
         metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
 
@@ -298,24 +420,29 @@ impl<R: Runtime> NetDb<R> {
         (
             Self {
                 active: HashMap::new(),
-                dht: Dht::new(local_router_id.clone(), floodfills.clone(), metrics.clone()),
+                floodfill_dht: Dht::new(
+                    local_router_id.clone(),
+                    floodfills.clone(),
+                    metrics.clone(),
+                ),
+                router_dht,
                 exploratory_pool_handle,
                 floodfill,
-                floodfills: HashMap::from_iter(
-                    floodfills
-                        .into_iter()
-                        .map(|router_id| (router_id, FloodfillState::Disconnected)),
-                ),
+                routers: HashMap::new(),
                 handle_rx,
                 inbound_tunnels: TunnelSelector::new(),
                 lease_sets: HashMap::new(),
-                local_router_id,
-                maintenance_timer: Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL)),
+                local_router_id: local_router_id.clone(),
+                maintenance_timer: Box::pin(R::delay(Duration::from_secs(5))),
                 metrics,
                 netdb_msg_rx,
                 net_id,
                 outbound_tunnels: TunnelSelector::new(),
                 query_timers: R::join_set(),
+                router_info_publishers: RouterInfoPublisher::new(
+                    local_router_id,
+                    local_router_info,
+                ),
                 router_infos: HashMap::new(),
                 profile_storage,
                 service,
@@ -331,22 +458,27 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle established connection to `router`.
     fn on_connection_established(&mut self, router_id: RouterId) {
-        // did the floodfill already exist in `floodfills`
-        let did_exist = self.floodfills.contains_key(&router_id);
+        let is_floodfill = self.profile_storage.is_floodfill(&router_id);
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            ?is_floodfill,
+            "connection established",
+        );
 
         // send any pending messages to the connected router
         //
         // if the message was of the expiring kind (flooding) and the payload inside the i2np
         // message has expired, the message is skipped
-        if let Some(FloodfillState::Dialing { pending_messages }) =
-            self.floodfills.remove(&router_id)
-        {
+        if let Some(RouterState::Dialing { pending_messages }) = self.routers.remove(&router_id) {
             let now = R::time_since_epoch();
 
             tracing::trace!(
                 target: LOG_TARGET,
                 floodfill = %router_id,
-                "floodfill with pending messages connected",
+                num_pending = ?pending_messages.len(),
+                "router with pending messages connected",
             );
 
             pending_messages.into_iter().for_each(|message| {
@@ -357,7 +489,7 @@ impl<R: Runtime> NetDb<R> {
                         tracing::debug!(
                             target: LOG_TARGET,
                             ?expires,
-                            "message has expired, will not flood",
+                            "message has expired, will not send",
                         );
                         None
                     }
@@ -376,36 +508,19 @@ impl<R: Runtime> NetDb<R> {
             });
         }
 
-        // non-floodfills must not be stored into `floodfills`
-        //
-        // the router must exist in `profile_storage` as connection was established to them
-        if !self.profile_storage.is_floodfill(&router_id) {
-            return;
+        if is_floodfill {
+            self.floodfill_dht.add_router(router_id.clone());
+            self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+        } else {
+            self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
         }
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            %router_id,
-            "floodfill connected",
-        );
-
-        if !did_exist {
-            tracing::debug!(
-                target: LOG_TARGET,
-                %router_id,
-                "new floodfill connected",
-            );
-            self.metrics.counter(NUM_FLOODFILLS).increment(1);
-        }
-
-        self.dht.add_floodfill(router_id.clone());
-        self.floodfills.insert(router_id, FloodfillState::Connected);
-        self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+        self.routers.insert(router_id, RouterState::Connected);
     }
 
     /// Handle closed connection to `router`.
     fn on_connection_closed(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
+        match self.routers.remove(&router_id) {
             None => tracing::trace!(
                 target: LOG_TARGET,
                 %router_id,
@@ -417,8 +532,6 @@ impl<R: Runtime> NetDb<R> {
                     %router_id,
                     "floodfill disconnected",
                 );
-
-                self.floodfills.remove(&router_id);
                 self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
             }
         }
@@ -426,27 +539,25 @@ impl<R: Runtime> NetDb<R> {
 
     // Handle connection failure to `router_id`.
     fn on_connection_failure(&mut self, router_id: RouterId) {
-        match self.floodfills.remove(&router_id) {
-            Some(FloodfillState::Dialing { pending_messages }) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    num_pending_messages = ?pending_messages.len(),
-                    "failed to establish connection",
-                );
-                self.floodfills.insert(router_id, FloodfillState::Disconnected);
-            }
-            Some(state) => {
-                self.floodfills.insert(router_id, FloodfillState::Disconnected);
-            }
-            None => {}
+        match self.routers.remove(&router_id) {
+            Some(RouterState::Dialing { pending_messages }) => tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                num_pending_messages = ?pending_messages.len(),
+                "failed to establish connection",
+            ),
+            _ => tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                "failed to establish connection",
+            ),
         }
     }
 
     /// Flood `message` to `routers`.
     fn send_message(&mut self, routers: &[RouterId], message: MessageKind) {
-        routers.iter().for_each(|router_id| match self.floodfills.get_mut(router_id) {
-            None | Some(FloodfillState::Disconnected) => match self.service.connect(router_id) {
+        routers.iter().for_each(|router_id| match self.routers.get_mut(router_id) {
+            None => match self.service.connect(router_id) {
                 Err(error) => tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
@@ -454,18 +565,23 @@ impl<R: Runtime> NetDb<R> {
                     "failed to connect to router",
                 ),
                 Ok(()) => {
-                    self.floodfills.insert(
+                    tracing::debug!(target: LOG_TARGET, %router_id, "staring to dial router");
+
+                    self.routers.insert(
                         router_id.clone(),
-                        FloodfillState::Dialing {
+                        RouterState::Dialing {
                             pending_messages: vec![message.clone()],
                         },
                     );
                 }
             },
-            Some(FloodfillState::Dialing { pending_messages }) => {
+            Some(RouterState::Dialing { pending_messages }) => {
+                tracing::debug!(target: LOG_TARGET, %router_id, "router is already being dialed");
                 pending_messages.push(message.clone());
             }
-            Some(FloodfillState::Connected) =>
+            Some(RouterState::Connected) => {
+                tracing::debug!(target: LOG_TARGET, %router_id, "router is connected, send message");
+
                 if let Err(error) = self.service.send(router_id, message.clone().into_inner()) {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -473,7 +589,8 @@ impl<R: Runtime> NetDb<R> {
                         ?error,
                         "failed to send message to router",
                     );
-                },
+                }
+            }
         });
     }
 
@@ -497,6 +614,14 @@ impl<R: Runtime> NetDb<R> {
             return;
         }
 
+        if router_id == self.local_router_id {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "local router id, ignoring router info store",
+            );
+            return;
+        }
+
         tracing::trace!(
             target: LOG_TARGET,
             %router_id,
@@ -516,7 +641,7 @@ impl<R: Runtime> NetDb<R> {
 
         // parse the router info set from the database store, store it in the set of router infos we
         // keep track of and flood it to three floodfills closest to `key`
-        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(&message);
+        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
         self.router_infos.insert(
             key.clone(),
             (
@@ -524,21 +649,81 @@ impl<R: Runtime> NetDb<R> {
                 Duration::from_millis(*router_info.published.date()),
             ),
         );
+        self.profile_storage.add_router(router_info);
+        self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
 
-        if let StoreReplyType::None = reply {
-            tracing::trace!(
-                target: LOG_TARGET,
-                "reply type is `None`, don't flood the router info",
-            );
-            return;
+        match reply {
+            StoreReplyType::None => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    "reply type is `None`, don't flood the router info",
+                );
+                return;
+            }
+            StoreReplyType::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::standard()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &TunnelGateway {
+                            tunnel_id,
+                            payload: &message,
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
+            StoreReplyType::Router {
+                reply_token,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
         }
 
-        let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
         if floodfills.is_empty() {
             tracing::debug!(
                 target: LOG_TARGET,
                 %router_id,
-                "cannot flood router inof, no floodfills",
+                "cannot flood router info, no floodfills",
             );
             return;
         }
@@ -590,20 +775,78 @@ impl<R: Runtime> NetDb<R> {
 
         // parse the raw lease set from the database store, store it in the set of leases we keep
         // track of and flood it to three floodfills closest to `key`
-        let raw_lease_set = DatabaseStore::<R>::extract_raw_lease_set(&message);
+        let raw_lease_set = DatabaseStore::<R>::extract_raw_lease_set(message);
         let expires = lease_set.expires();
 
         self.lease_sets.insert(key.clone(), (raw_lease_set.clone(), expires));
 
-        if let StoreReplyType::None = reply {
-            tracing::trace!(
-                target: LOG_TARGET,
-                "reply type is `None`, don't flood the lease set",
-            );
-            return;
+        match reply {
+            StoreReplyType::None => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    "reply type is `None`, don't flood the router info",
+                );
+                return;
+            }
+            StoreReplyType::Tunnel {
+                reply_token,
+                tunnel_id,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::standard()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &TunnelGateway {
+                            tunnel_id,
+                            payload: &message,
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
+            StoreReplyType::Router {
+                reply_token,
+                router_id,
+            } => {
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+
+                let message = MessageBuilder::short()
+                    .with_expiration(expires)
+                    .with_message_type(MessageType::DeliveryStatus)
+                    .with_message_id(R::rng().next_u32())
+                    .with_payload(
+                        &DeliveryStatus {
+                            message_id: reply_token,
+                            timestamp: R::time_since_epoch(),
+                        }
+                        .serialize(),
+                    )
+                    .build();
+
+                self.send_message(&[router_id], MessageKind::Expiring { message, expires });
+            }
         }
 
-        let floodfills = self.dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
         if floodfills.is_empty() {
             tracing::debug!(
                 target: LOG_TARGET,
@@ -655,8 +898,8 @@ impl<R: Runtime> NetDb<R> {
                 //
                 // the reply list is limited to 16 floodfills
                 let routers = self
-                    .dht
-                    .closest_with_ignore(&key, SEARCH_REPLY_MAX_ROUTERS, &ignore)
+                    .floodfill_dht
+                    .closest_with_ignore(&key, SEARCH_REPLY_NUM_ROUTERS, &ignore)
                     .collect::<Vec<_>>();
 
                 (
@@ -758,8 +1001,8 @@ impl<R: Runtime> NetDb<R> {
                 //
                 // the reply list is limited to 16 floodfills
                 let routers = self
-                    .dht
-                    .closest_with_ignore(&key, SEARCH_REPLY_MAX_ROUTERS, &ignore)
+                    .floodfill_dht
+                    .closest_with_ignore(&key, SEARCH_REPLY_NUM_ROUTERS, &ignore)
                     .collect::<Vec<_>>();
 
                 (
@@ -838,6 +1081,69 @@ impl<R: Runtime> NetDb<R> {
         }
     }
 
+    /// Handle router exploration lookup.
+    fn on_router_exploration(
+        &mut self,
+        key: Bytes,
+        reply_type: ReplyType,
+        ignore: HashSet<RouterId>,
+    ) {
+        let Some(dht) = self.router_dht.as_mut() else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "ignore router exploration, not a floodfill",
+            );
+            return;
+        };
+
+        let routers = dht
+            .closest_with_ignore(&key, SEARCH_REPLY_NUM_ROUTERS, &ignore)
+            .collect::<Vec<_>>();
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            num_routers = ?routers.len(),
+            "send router exploration reply",
+        );
+
+        let message = Message {
+            message_type: MessageType::DatabaseSearchReply,
+            message_id: R::rng().next_u32(),
+            expiration: R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: DatabaseSearchReply {
+                from: self.local_router_id.to_vec(),
+                key: key.clone(),
+                routers,
+            }
+            .serialize()
+            .to_vec(),
+        };
+
+        let (router_id, message) = match reply_type {
+            ReplyType::Tunnel {
+                tunnel_id,
+                router_id,
+            } => (
+                router_id,
+                MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(R::rng().next_u32())
+                    .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_payload(
+                        &TunnelGateway {
+                            tunnel_id,
+                            payload: &message.serialize_standard(),
+                        }
+                        .serialize(),
+                    )
+                    .build(),
+            ),
+            ReplyType::Router { router_id } => (router_id, message.serialize_short()),
+        };
+
+        self.send_message(&[router_id], MessageKind::NonExpiring { message });
+    }
+
     /// Handle I2NP message.
     fn on_message(&mut self, message: Message) -> crate::Result<()> {
         self.metrics.counter(NUM_NETDB_MESSAGES).increment(1);
@@ -869,7 +1175,7 @@ impl<R: Runtime> NetDb<R> {
                             target: LOG_TARGET,
                             "router info received",
                         ),
-                        DatabaseStorePayload::LeaseSet2 { lease_set } => tracing::warn!(
+                        DatabaseStorePayload::LeaseSet2 { .. } => tracing::warn!(
                             target: LOG_TARGET,
                             "ignoring lease set database store",
                         ),
@@ -881,11 +1187,41 @@ impl<R: Runtime> NetDb<R> {
                         ) => {
                             tracing::trace!(
                                 target: LOG_TARGET,
-                                id = ?lease_set.header.destination.id(),
-                                "leaseset reply received",
+                                destination_id = %lease_set.header.destination.id(),
+                                "lease set query reply received",
                             );
 
                             let _ = tx.send(Ok(lease_set));
+                        }
+                        (DatabaseStorePayload::RouterInfo { router_info }, QueryKind::Router) => {
+                            let router_id = router_info.identity.id();
+
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "router info query reply received",
+                            );
+
+                            if router_info.net_id() != self.net_id {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    local_net_id = ?self.net_id,
+                                    remote_net_id = ?router_info.net_id(),
+                                    "invalid network id, ignoring router info query reply",
+                                );
+                                return Ok(());
+                            }
+
+                            if router_id == self.local_router_id {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    "local router id, ignoring router info query reply",
+                                );
+                                return Ok(());
+                            }
+
+                            self.profile_storage.add_router(router_info);
+                            self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
                         }
                         (payload, query) => tracing::warn!(
                             target: LOG_TARGET,
@@ -915,6 +1251,7 @@ impl<R: Runtime> NetDb<R> {
                 match lookup {
                     LookupType::Leaseset => self.on_lease_set_lookup(key, reply, ignore),
                     LookupType::Router => self.on_router_info_lookup(key, reply, ignore),
+                    LookupType::Exploration => self.on_router_exploration(key, reply, ignore),
                     kind => tracing::warn!(
                         target: LOG_TARGET,
                         ?kind,
@@ -927,7 +1264,7 @@ impl<R: Runtime> NetDb<R> {
                 "ignoring database lookup, not a floodfill",
             ),
             MessageType::DatabaseSearchReply => {
-                let DatabaseSearchReply { key, routers, .. } =
+                let DatabaseSearchReply { key, routers, from } =
                     DatabaseSearchReply::parse(&message.payload).ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -938,15 +1275,69 @@ impl<R: Runtime> NetDb<R> {
 
                 match self.active.remove(&key) {
                     None => {}
-                    Some(QueryKind::Exploration) => {}
-                    Some(kind) => tracing::warn!(
+                    Some(QueryKind::Exploration) => {
+                        let router_id = RouterId::from(from);
+
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            num_routers = ?routers.len(),
+                            "router exploration succeeded, send database lookups",
+                        );
+
+                        // filter out routers we already know about and send database lookup queries
+                        // for the rest of routers
+                        routers
+                            .into_iter()
+                            .filter(|router_id| {
+                                self.profile_storage.get(&router_id).is_none()
+                                    && router_id != &self.local_router_id
+                            })
+                            .map(|router_id| {
+                                (
+                                    Bytes::from(router_id.to_vec()),
+                                    MessageBuilder::short()
+                                        .with_message_type(MessageType::DatabaseLookup)
+                                        .with_message_id(R::rng().next_u32())
+                                        .with_expiration(
+                                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                                        )
+                                        .with_payload(
+                                            &DatabaseLookupBuilder::new(
+                                                Bytes::from(router_id.to_vec()),
+                                                LookupType::Router,
+                                            )
+                                            .with_reply_type(ReplyType::Router {
+                                                router_id: self.local_router_id.clone(),
+                                            })
+                                            .build(),
+                                        )
+                                        .build(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .for_each(|(key, message)| {
+                                self.active.insert(key.clone(), QueryKind::Router);
+                                self.query_timers.push(async move {
+                                    R::delay(QUERY_TIMEOUT).await;
+                                    key
+                                });
+                                self.send_message(
+                                    &[router_id.clone()],
+                                    MessageKind::NonExpiring { message },
+                                );
+                            });
+                    }
+                    Some(kind) => tracing::debug!(
                         target: LOG_TARGET,
                         key = ?base32_encode(key),
                         ?kind,
-                        "unhanled query kind for database search reply",
+                        "database lookup failed",
                     ),
                 }
             }
+            MessageType::DeliveryStatus => {}
             message_type => tracing::warn!(
                 target: LOG_TARGET,
                 ?message_type,
@@ -963,7 +1354,7 @@ impl<R: Runtime> NetDb<R> {
         key: Bytes,
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
     ) {
-        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 5usize).collect::<Vec<_>>();
 
         tracing::debug!(
             target: LOG_TARGET,
@@ -985,7 +1376,7 @@ impl<R: Runtime> NetDb<R> {
             );
             debug_assert!(false);
 
-            tx.send(Err(QueryError::NoTunnel));
+            let _ = tx.send(Err(QueryError::NoTunnel));
             return;
         };
 
@@ -997,7 +1388,7 @@ impl<R: Runtime> NetDb<R> {
             );
             debug_assert!(false);
 
-            tx.send(Err(QueryError::NoTunnel));
+            let _ = tx.send(Err(QueryError::NoTunnel));
             return;
         };
 
@@ -1053,8 +1444,33 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Get `RouterId`'s of the floodfills closest to `key`.
-    fn on_get_closest_floodfills(&mut self, key: Bytes, tx: oneshot::Sender<Vec<RouterId>>) {
-        let floodfills = self.dht.closest(&key, 5usize).collect::<Vec<_>>();
+    fn on_get_closest_floodfills(
+        &mut self,
+        key: Bytes,
+        tx: oneshot::Sender<Vec<(RouterId, StaticPublicKey)>>,
+    ) {
+        let floodfills = self
+            .floodfill_dht
+            .closest(&key, 3usize)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|router_id| {
+                self.profile_storage
+                    .get(&router_id)
+                    .map(|router_info| (router_id, router_info.identity.static_key().clone()))
+            })
+            .collect::<Vec<_>>();
+
+        if floodfills.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                key = ?base32_encode(&key),
+                "no floodfills available",
+            );
+
+            return drop(tx);
+        }
+
         let _ = tx.send(floodfills);
     }
 
@@ -1095,14 +1511,20 @@ impl<R: Runtime> NetDb<R> {
             key.freeze()
         };
 
-        let floodfills = self.dht.closest(&key, 1usize).collect::<Vec<_>>();
-        let Some(floodfill) = floodfills.get(0) else {
+        let floodfills = self.floodfill_dht.closest(&key, 1usize).collect::<Vec<_>>();
+        let Some(floodfill) = floodfills.first() else {
             tracing::warn!(
                 target: LOG_TARGET,
                 "cannot perform router exploration, not enough floodfills",
             );
             return;
         };
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %floodfill,
+            "send router exploration query",
+        );
 
         let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Exploration)
             .with_reply_type(ReplyType::Router {
@@ -1117,6 +1539,11 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(&message)
             .build();
 
+        self.active.insert(key.clone(), QueryKind::Exploration);
+        self.query_timers.push(async move {
+            R::delay(QUERY_TIMEOUT).await;
+            key
+        });
         self.send_message(&[floodfill.clone()], MessageKind::NonExpiring { message });
     }
 }
@@ -1128,6 +1555,7 @@ impl<R: Runtime> Future for NetDb<R> {
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| {
                         if let Err(error) = self.on_message(message) {
@@ -1144,7 +1572,7 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_connection_closed(router),
                 Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
                     self.on_connection_failure(router),
-                _ => {}
+                Poll::Ready(Some(SubsystemEvent::Dummy)) => {}
             }
         }
 
@@ -1215,7 +1643,11 @@ impl<R: Runtime> Future for NetDb<R> {
 
                             let _ = tx.send(Err(QueryError::Timeout));
                         }
-                        QueryKind::Exploration => {}
+                        kind => tracing::debug!(
+                            target: LOG_TARGET,
+                            ?kind,
+                            "query timed out",
+                        ),
                     },
                     None => tracing::trace!(
                         target: LOG_TARGET,
@@ -1232,6 +1664,29 @@ impl<R: Runtime> Future for NetDb<R> {
             // reset timer and register it into the executor
             self.maintenance_timer = Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL));
             let _ = self.maintenance_timer.poll_unpin(cx);
+        }
+
+        if self.router_info_publishers.poll_unpin(cx).is_ready() {
+            let key = Bytes::from(self.local_router_id.to_vec());
+
+            match self.floodfill_dht.closest(key, 1usize).collect::<Vec<_>>().pop() {
+                None => tracing::warn!(
+                    target: LOG_TARGET,
+                    "unable to publish router info, no floodfills",
+                ),
+                Some(floodfill) => {
+                    let (reply_token, message) = self.router_info_publishers.publish();
+
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %floodfill,
+                        %reply_token,
+                        "publish local router info",
+                    );
+
+                    self.send_message(&[floodfill], MessageKind::NonExpiring { message });
+                }
+            }
         }
 
         Poll::Pending
@@ -1270,22 +1725,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1340,11 +1796,11 @@ mod tests {
             }
             _ => false,
         }));
-        assert_eq!(netdb.floodfills.len(), 3);
+        assert_eq!(netdb.routers.len(), 4);
         assert!(netdb
-            .floodfills
+            .routers
             .values()
-            .all(|state| std::matches!(state, FloodfillState::Dialing { .. })));
+            .all(|state| std::matches!(state, RouterState::Dialing { .. })));
     }
 
     #[tokio::test]
@@ -1353,7 +1809,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -1363,22 +1819,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             false,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1427,34 +1884,16 @@ mod tests {
             .is_ok());
         assert!(netdb.lease_sets.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
     async fn expired_lease_set_store() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -1464,22 +1903,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1530,29 +1970,11 @@ mod tests {
             .is_ok());
         assert!(netdb.lease_sets.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
     async fn expired_lease_sets_are_pruned() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
@@ -1567,22 +1989,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key1, expired_lease_set1) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1614,9 +2037,9 @@ mod tests {
         };
 
         let (key2, expired_lease_set2) = {
-            let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[2u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1648,9 +2071,9 @@ mod tests {
         };
 
         let (key3, valid_lease_set) = {
-            let sgk = SigningPrivateKey::new(&[3u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[3u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -1706,7 +2129,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -1714,8 +2137,8 @@ mod tests {
                 }
                 _ => false,
             }));
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
+            assert!(netdb.routers.values().all(|state| match state {
+                RouterState::Dialing { pending_messages } => {
                     assert_eq!(pending_messages.len(), 1);
                     true
                 }
@@ -1747,11 +2170,16 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 2);
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 2);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
+                    }
+
                     true
                 }
                 _ => false,
@@ -1782,11 +2210,15 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 3);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 6);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 3);
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 3);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
+                    }
                     true
                 }
                 _ => false,
@@ -1816,16 +2248,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -1845,7 +2278,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -1884,34 +2317,20 @@ mod tests {
             }
             _ => false,
         }));
-        assert_eq!(netdb.floodfills.len(), 3);
+        assert_eq!(netdb.routers.len(), 4);
         assert!(netdb
-            .floodfills
+            .routers
             .values()
-            .all(|state| std::matches!(state, FloodfillState::Dialing { .. })));
+            .all(|state| std::matches!(state, RouterState::Dialing { .. })));
     }
 
     #[tokio::test]
     async fn stale_router_info_not_stored_nor_flooded() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -1921,16 +2340,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -1950,7 +2370,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -1979,20 +2399,16 @@ mod tests {
             .is_ok());
         assert!(netdb.router_infos.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
     async fn lease_set_query() {
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2002,22 +2418,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set, expires) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -2092,11 +2509,11 @@ mod tests {
 
     #[tokio::test]
     async fn lease_set_query_value_not_found() {
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2106,16 +2523,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -2163,7 +2581,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_info_query() {
-        let (mut service, rx, tx, storage) = TransportService::new();
+        let (mut service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // register new router into `service`
@@ -2178,7 +2596,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), service.next()).await;
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2188,16 +2606,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -2217,7 +2636,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2268,7 +2687,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_info_query_value_not_found() {
-        let (mut service, rx, tx, storage) = TransportService::new();
+        let (mut service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // register new router into `service`
@@ -2283,7 +2702,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), service.next()).await;
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2293,16 +2712,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -2341,11 +2761,11 @@ mod tests {
 
     #[tokio::test]
     async fn pending_messages_sent_when_floodfill_connects() {
-        let (service, rx, tx, storage) = TransportService::new();
+        let (service, _rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2355,16 +2775,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             false,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         // set timer to a shorter timeout and poll netdb until it sends a router exploration
@@ -2372,10 +2793,10 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), &mut netdb).await.unwrap_err();
 
         let selected_floofill = netdb
-            .floodfills
+            .routers
             .iter()
-            .find(|(key, state)| match state {
-                FloodfillState::Dialing { pending_messages } if pending_messages.len() == 1 => true,
+            .find(|(_, state)| match state {
+                RouterState::Dialing { pending_messages } if pending_messages.len() == 1 => true,
                 _ => false,
             })
             .unwrap()
@@ -2414,21 +2835,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_pending_lease_sets_not_flooded() {
-        let (service, _rx, tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
@@ -2442,22 +2849,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key1, expired_lease_set1) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -2489,9 +2897,9 @@ mod tests {
         };
 
         let (key2, valid_lease_set) = {
-            let sgk = SigningPrivateKey::new(&[2u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[2u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -2547,7 +2955,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -2555,8 +2963,8 @@ mod tests {
                 }
                 _ => false,
             }));
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
+            assert!(netdb.routers.values().all(|state| match state {
+                RouterState::Dialing { pending_messages } => {
                     assert_eq!(pending_messages.len(), 1);
                     true
                 }
@@ -2588,11 +2996,15 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 2);
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 2);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
+                    }
                     true
                 }
                 _ => false,
@@ -2629,12 +3041,8 @@ mod tests {
                     let message = Message::parse_short(&message).unwrap();
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
 
-                    let DatabaseStore {
-                        key,
-                        payload,
-                        reply,
-                        ..
-                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    let DatabaseStore { key, payload, .. } =
+                        DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
 
                     assert_eq!(key, key2);
                     assert!(std::matches!(
@@ -2655,21 +3063,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_pending_router_infos_not_flooded() {
-        let (service, _rx, tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
-        let (service, rx, _tx, storage) = TransportService::new();
+        let (service, rx, tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
@@ -2683,16 +3077,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key1, expiring_router_info) = {
@@ -2711,7 +3106,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2744,7 +3139,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2783,7 +3178,7 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 1);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 4);
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
                 ProtocolCommand::Connect { router } => {
                     assert!(floodfills.remove(&router.identity.id()));
@@ -2791,8 +3186,8 @@ mod tests {
                 }
                 _ => false,
             }));
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
+            assert!(netdb.routers.values().all(|state| match state {
+                RouterState::Dialing { pending_messages } => {
                     assert_eq!(pending_messages.len(), 1);
                     true
                 }
@@ -2823,11 +3218,15 @@ mod tests {
                 })
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 2);
-            assert_eq!(netdb.floodfills.len(), 3);
+            assert_eq!(netdb.routers.len(), 5);
             assert!(rx.try_recv().is_err());
-            assert!(netdb.floodfills.values().all(|state| match state {
-                FloodfillState::Dialing { pending_messages } => {
-                    assert_eq!(pending_messages.len(), 2);
+            assert!(netdb.routers.iter().all(|(router_id, state)| match state {
+                RouterState::Dialing { pending_messages } => {
+                    if netdb.profile_storage.is_floodfill(router_id) {
+                        assert_eq!(pending_messages.len(), 2);
+                    } else {
+                        assert_eq!(pending_messages.len(), 1);
+                    }
                     true
                 }
                 _ => false,
@@ -2864,12 +3263,8 @@ mod tests {
                     let message = Message::parse_short(&message).unwrap();
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
 
-                    let DatabaseStore {
-                        key,
-                        payload,
-                        reply,
-                        ..
-                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    let DatabaseStore { key, payload, .. } =
+                        DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
 
                     assert_eq!(key, key2);
                     assert!(std::matches!(
@@ -2890,25 +3285,11 @@ mod tests {
 
     #[tokio::test]
     async fn router_info_with_different_network_id_ignored() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-        let (msg_tx, msg_rx) = channel(64);
-        let netdb = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![]),
-            tp_handle,
-            2u8,
-            msg_rx,
-        );
-
         let (service, rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2918,16 +3299,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -2946,7 +3328,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("99")),
@@ -2975,11 +3357,7 @@ mod tests {
             .is_ok());
         assert!(netdb.router_infos.is_empty());
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -2988,7 +3366,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -2998,22 +3376,23 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, lease_set) = {
-            let sgk = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let sk = StaticPrivateKey::new(&mut MockRuntime::rng());
-            let destination = Destination::new(sgk.public());
+            let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let sk = StaticPrivateKey::random(&mut MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(sgk.public());
             let id = destination.id();
 
             let lease1 = Lease {
@@ -3057,11 +3436,7 @@ mod tests {
             .is_ok());
         assert_eq!(netdb.lease_sets.len(), 1);
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
     }
 
     #[tokio::test]
@@ -3070,7 +3445,7 @@ mod tests {
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 
         // add few floodfills to router storage
-        let mut floodfills = (0..3)
+        let _floodfills = (0..3)
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
@@ -3080,16 +3455,17 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (msg_tx, msg_rx) = channel(64);
+        let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterId::random(),
             true,
             service,
             storage,
-            MockRuntime::register_metrics(vec![]),
+            MockRuntime::register_metrics(vec![], None),
             tp_handle,
             2u8,
             msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
         );
 
         let (key, router_info) = {
@@ -3109,7 +3485,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished(vec![1u8; 32]),
+                                RouterAddress::new_unpublished([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -3138,10 +3514,42 @@ mod tests {
             .is_ok());
         assert_eq!(netdb.router_infos.len(), 1);
         assert!(rx.try_recv().is_err());
-        assert_eq!(netdb.floodfills.len(), 3);
-        assert!(netdb
-            .floodfills
-            .values()
-            .all(|state| std::matches!(state, FloodfillState::Disconnected)));
+        assert!(netdb.routers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_router_info_published() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add floodfill to router storage
+        let info = RouterInfo::floodfill::<MockRuntime>();
+        let floodfill = info.identity.id();
+        storage.add_router(info);
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        assert!(std::matches!(netdb.routers.get(&floodfill), None));
+
+        // poll netdb until the initial publish timeout is over
+        assert!(tokio::time::timeout(Duration::from_secs(20), &mut netdb).await.is_err());
+
+        match netdb.routers.get(&floodfill).expect("to exist") {
+            RouterState::Dialing { pending_messages } => {
+                assert_eq!(pending_messages.len(), 1);
+            }
+            _ => panic!("invalid state"),
+        }
     }
 }

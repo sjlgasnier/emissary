@@ -41,30 +41,12 @@ const LOG_TARGET: &str = "emissary::tunnel::noise";
 /// Noise protocol name;.
 const PROTOCOL_NAME: &str = "Noise_N_25519_ChaChaPoly_SHA256";
 
-/// Tunnel key context.
-pub struct TunnelKeyContext {
-    iv_key: Vec<u8>,
-    layer_key: Vec<u8>,
-}
-
-impl TunnelKeyContext {
-    /// Get reference to IV key.
-    pub fn iv_key(&self) -> &[u8] {
-        &self.iv_key
-    }
-
-    /// Get reference to layer key.
-    pub fn layer_key(&self) -> &[u8] {
-        &self.layer_key
-    }
-}
-
 /// Tunnel keys.
 pub struct TunnelKeys {
     /// Garlic key.
     ///
     /// Only available for OBEP.
-    garlic_key: Option<Vec<u8>>,
+    garlic_key: Option<Bytes>,
 
     /// Garlic tag.
     ///
@@ -85,13 +67,17 @@ pub struct TunnelKeys {
 
 impl TunnelKeys {
     /// Get reference to Garlic key.
-    pub fn garlic_key(&self) -> &[u8] {
-        self.garlic_key.as_ref().expect("garlic key to exist").as_ref()
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_key(&self) -> Bytes {
+        self.garlic_key.as_ref().expect("garlic key to exist").clone()
     }
 
     /// Get reference to Garlic tag.
-    pub fn garlic_tag(&self) -> &[u8] {
-        self.garlic_tag.as_ref().expect("garlic tag to exist").as_ref()
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_tag(&self) -> Bytes {
+        self.garlic_tag.as_ref().expect("garlic tag to exist").clone()
     }
 
     /// Get reference to IV key.
@@ -132,20 +118,22 @@ impl TunnelKeys {
 impl TunnelKeys {
     /// Create new [`TunnelKeys`].
     fn new(mut chaining_key: Vec<u8>, hop_role: HopRole) -> TunnelKeys {
-        let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-        let ck = Hmac::new(&temp_key).update(&b"SMTunnelReplyKey").update(&[0x01]).finalize();
+        let mut temp_key = Hmac::new(&chaining_key).update([]).finalize();
+        let ck = Hmac::new(&temp_key).update(b"SMTunnelReplyKey").update([0x01]).finalize();
         let reply_key = Hmac::new(&temp_key)
             .update(&ck)
-            .update(&b"SMTunnelReplyKey")
-            .update(&[0x02])
+            .update(b"SMTunnelReplyKey")
+            .update([0x02])
             .finalize();
 
-        let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-        let mut ck = Hmac::new(&temp_key).update(&b"SMTunnelLayerKey").update(&[0x01]).finalize();
+        temp_key.zeroize();
+
+        let mut temp_key = Hmac::new(&ck).update([]).finalize();
+        let ck = Hmac::new(&temp_key).update(b"SMTunnelLayerKey").update([0x01]).finalize();
         let layer_key = Hmac::new(&temp_key)
             .update(&ck)
-            .update(&b"SMTunnelLayerKey")
-            .update(&[0x02])
+            .update(b"SMTunnelLayerKey")
+            .update([0x02])
             .finalize();
 
         match hop_role {
@@ -162,23 +150,25 @@ impl TunnelKeys {
                 }
             }
             HopRole::OutboundEndpoint => {
-                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-                let ck =
-                    Hmac::new(&temp_key).update(&b"TunnelLayerIVKey").update(&[0x01]).finalize();
+                let mut temp_key = Hmac::new(&ck).update([]).finalize();
+                let ck = Hmac::new(&temp_key).update(b"TunnelLayerIVKey").update([0x01]).finalize();
                 let iv_key = Hmac::new(&temp_key)
                     .update(&ck)
-                    .update(&b"TunnelLayerIVKey")
-                    .update(&[0x02])
+                    .update(b"TunnelLayerIVKey")
+                    .update([0x02])
                     .finalize();
 
-                let mut temp_key = Hmac::new(&ck).update(&[]).finalize();
-                let mut ck =
-                    Hmac::new(&temp_key).update(&b"RGarlicKeyAndTag").update(&[0x01]).finalize();
-                let garlic_key = Hmac::new(&temp_key)
-                    .update(&ck)
-                    .update(&b"RGarlicKeyAndTag")
-                    .update(&[0x02])
-                    .finalize();
+                temp_key.zeroize();
+
+                let mut temp_key = Hmac::new(&ck).update([]).finalize();
+                let ck = Hmac::new(&temp_key).update(b"RGarlicKeyAndTag").update([0x01]).finalize();
+                let garlic_key = Bytes::from(
+                    Hmac::new(&temp_key)
+                        .update(&ck)
+                        .update(b"RGarlicKeyAndTag")
+                        .update([0x02])
+                        .finalize(),
+                );
                 let garlic_tag = Bytes::from(ck[..8].to_vec());
 
                 temp_key.zeroize();
@@ -361,15 +351,14 @@ impl ShortInboundSession {
 
                 // encrypt our record with chachapoly, using the associated data derived in
                 // `Self::decrypt_build_record()` and encrypt the other records with
-                payload[1..].chunks_mut(218).enumerate().for_each(|(idx, mut record)| {
+                payload[1..].chunks_mut(218).enumerate().for_each(|(idx, record)| {
                     if idx == our_record {
-                        let tag = ChaChaPoly::with_nonce(&tunnel_keys.reply_key(), idx as u64)
+                        let tag = ChaChaPoly::with_nonce(tunnel_keys.reply_key(), idx as u64)
                             .encrypt_with_ad(&state, &mut record[0..202])
                             .unwrap();
                         record[202..218].copy_from_slice(&tag);
                     } else {
-                        ChaCha::with_nonce(&tunnel_keys.reply_key(), idx as u64)
-                            .encrypt(&mut record);
+                        ChaCha::with_nonce(tunnel_keys.reply_key(), idx as u64).encrypt(record);
                     }
                 });
                 self.state = ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys };
@@ -389,7 +378,7 @@ impl ShortInboundSession {
     }
 
     /// Finalize inbound session creation and return tunnel keys.
-    pub fn finalize(mut self) -> crate::Result<TunnelKeys> {
+    pub fn finalize(self) -> crate::Result<TunnelKeys> {
         match self.state {
             ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys } => Ok(tunnel_keys),
             state => {
@@ -520,6 +509,8 @@ impl LongInboundSession {
                     .unwrap();
                 record[512..528].copy_from_slice(&tag);
 
+                chaining_key.zeroize();
+
                 self.state = LongInboundSessionState::BuildRecordsEncrypted;
 
                 Ok(())
@@ -537,7 +528,7 @@ impl LongInboundSession {
     }
 
     /// Finalize inbound session creation and return tunnel keys.
-    pub fn finalize(mut self, layer_key: Vec<u8>, iv_key: Vec<u8>) -> crate::Result<TunnelKeys> {
+    pub fn finalize(self, layer_key: Vec<u8>, iv_key: Vec<u8>) -> crate::Result<TunnelKeys> {
         match self.state {
             LongInboundSessionState::BuildRecordsEncrypted => Ok(TunnelKeys {
                 garlic_key: None,
@@ -598,13 +589,17 @@ impl OutboundSession {
     }
 
     /// Get reference to Garlic key.
-    pub fn garlic_key(&self) -> &[u8] {
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_key(&self) -> Bytes {
         self.tunnel_keys.garlic_key()
     }
 
     /// Get reference to Garlic tag.
-    pub fn garlic_tag(&self) -> &[u8] {
-        &self.tunnel_keys.garlic_tag()
+    ///
+    /// Panics if called for a non-OBEP tunnel.
+    pub fn garlic_tag(&self) -> Bytes {
+        self.tunnel_keys.garlic_tag()
     }
 
     /// Get owned garlic tag.
@@ -615,17 +610,17 @@ impl OutboundSession {
 
     /// Get reference to IV key.
     pub fn iv_key(&self) -> &[u8] {
-        &self.tunnel_keys.iv_key()
+        self.tunnel_keys.iv_key()
     }
 
     /// Get reference to layer key.
     pub fn layer_key(&self) -> &[u8] {
-        &self.tunnel_keys.layer_key()
+        self.tunnel_keys.layer_key()
     }
 
     /// Get reference to reply key.
     pub fn reply_key(&self) -> &[u8] {
-        &self.tunnel_keys.reply_key()
+        self.tunnel_keys.reply_key()
     }
 }
 
@@ -663,10 +658,8 @@ impl NoiseContext {
             chaining_key
         };
         let outbound_state = Sha256::new().update(&chaining_key).finalize();
-        let inbound_state = Sha256::new()
-            .update(&outbound_state)
-            .update(local_key.public().to_bytes())
-            .finalize();
+        let inbound_state =
+            Sha256::new().update(&outbound_state).update(local_key.public()).finalize();
 
         Self {
             local_router_hash,
@@ -682,13 +675,18 @@ impl NoiseContext {
         &self.local_router_hash
     }
 
+    /// Get copy of local public key.
+    pub fn local_public_key(&self) -> StaticPublicKey {
+        self.local_key.public()
+    }
+
     /// Create outbound Noise context for tunnels created by the local router.
     pub fn create_outbound_session<R: Runtime>(
         &self,
         remote_static: StaticPublicKey,
         hop_role: HopRole,
     ) -> OutboundSession {
-        let local_ephemeral = EphemeralPrivateKey::new(R::rng());
+        let local_ephemeral = EphemeralPrivateKey::random(R::rng());
         let local_ephemeral_public = local_ephemeral.public_key().to_vec();
         let state = {
             let state = Sha256::new()
@@ -701,8 +699,8 @@ impl NoiseContext {
 
         let mut shared_secret = local_ephemeral.diffie_hellman(&remote_static);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -723,12 +721,10 @@ impl NoiseContext {
     ) -> ShortInboundSession {
         let mut shared_secret = self.local_key.diffie_hellman(&remote_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
-        let state = Sha256::new()
-            .update(&self.inbound_state)
-            .update(&remote_key.to_vec())
-            .finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        let state =
+            Sha256::new().update(&self.inbound_state).update(remote_key.to_vec()).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -743,12 +739,10 @@ impl NoiseContext {
     ) -> LongInboundSession {
         let mut shared_secret = self.local_key.diffie_hellman(&remote_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
-        let state = Sha256::new()
-            .update(&self.inbound_state)
-            .update(&remote_key.to_vec())
-            .finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        let state =
+            Sha256::new().update(&self.inbound_state).update(remote_key.to_vec()).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
@@ -756,23 +750,89 @@ impl NoiseContext {
         LongInboundSession::new(chaining_key, aead_key, state)
     }
 
-    /// Derive keys for `GarlicMessage`.
+    /// Derive keys for an inbound `GarlicMessage`.
     ///
     /// Returns a ChaCha20Poly1305 cipher key.
-    pub fn derive_garlic_key(&self, ephemeral_key: EphemeralPublicKey) -> (Vec<u8>, Vec<u8>) {
+    pub fn derive_inbound_garlic_key(
+        &self,
+        ephemeral_key: EphemeralPublicKey,
+    ) -> (Vec<u8>, Vec<u8>) {
         let state = Sha256::new()
             .update(&self.inbound_state)
             .update::<&[u8]>(ephemeral_key.as_ref())
             .finalize();
         let mut shared_secret = self.local_key.diffie_hellman(&ephemeral_key);
         let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
-        let mut chaining_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update(&[0x02]).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         temp_key.zeroize();
         shared_secret.zeroize();
         chaining_key.zeroize();
 
         (aead_key, state)
+    }
+
+    /// Derive keys for an outbound `GarlicMessage`.
+    ///
+    /// Returns a ChaCha20Poly1305 cipher key.
+    pub fn derive_outbound_garlic_key(
+        &self,
+        remote_public: StaticPublicKey,
+        ephemeral_secret: EphemeralPrivateKey,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let ephemeral_public = ephemeral_secret.public_key();
+        let state = Sha256::new()
+            .update(
+                Sha256::new()
+                    .update(&self.outbound_state)
+                    .update::<&[u8]>(remote_public.as_ref())
+                    .finalize(),
+            )
+            .update::<&[u8]>(ephemeral_public.as_ref())
+            .finalize();
+
+        let mut shared_secret = ephemeral_secret.diffie_hellman(&remote_public);
+        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared_secret).finalize();
+        let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let aead_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+        temp_key.zeroize();
+        shared_secret.zeroize();
+        chaining_key.zeroize();
+        ephemeral_secret.zeroize();
+
+        (aead_key, state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::RouterId;
+
+    #[test]
+    fn derive_garlic_keys() {
+        let remote_key = StaticPrivateKey::random(rand::thread_rng());
+        let remote_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let local_key = StaticPrivateKey::random(rand::thread_rng());
+        let local_router_id = Bytes::from(RouterId::random().to_vec());
+
+        let remote_noise = NoiseContext::new(remote_key.clone(), remote_router_id);
+        let local_noise = NoiseContext::new(local_key, local_router_id);
+
+        // derive outbound garlic context
+        let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
+        let ephemeral_public = ephemeral_secret.public_key();
+        let (local_key, local_state) =
+            local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
+
+        // derive inbound garlic context from the received ephemeral public key
+        let (remote_key, remote_state) = remote_noise.derive_inbound_garlic_key(ephemeral_public);
+
+        // verify states match
+        assert_eq!(local_key, remote_key);
+        assert_eq!(local_state, remote_state);
     }
 }

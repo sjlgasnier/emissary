@@ -136,6 +136,7 @@ pub trait TunnelSender: Clone {
     /// identified by (`gateway`, `tunnel_id`) tuple.
     ///
     /// Blocks until the message is sent and returns an error if the channel is closed.
+    #[allow(unused)]
     fn send_to_tunnel(
         &self,
         gateway: RouterId,
@@ -230,6 +231,7 @@ pub struct TunnelPoolHandle {
     sender: TunnelMessageSender,
 
     /// TX channel for sending a shutdown command to `TunnelPool`.
+    #[allow(unused)]
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -271,8 +273,8 @@ impl TunnelPoolHandle {
         &self.sender
     }
 
-    #[cfg(test)]
     /// Create new [`TunnelPoolHandle`] for testing.
+    #[cfg(test)]
     pub fn create() -> (
         Self,
         mpsc::Receiver<TunnelMessage>,
@@ -327,7 +329,7 @@ impl TunnelPoolHandle {
 impl Stream for TunnelPoolHandle {
     type Item = TunnelPoolEvent;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.event_rx.poll_recv(cx)
     }
 }

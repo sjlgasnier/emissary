@@ -83,8 +83,12 @@ impl TcpListener<NoopTcpStream> for NoopTcpListener {
         std::future::pending()
     }
 
-    fn poll_accept(&mut self, _cx: &mut Context<'_>) -> Poll<Option<NoopTcpStream>> {
+    fn poll_accept(&mut self, _cx: &mut Context<'_>) -> Poll<Option<(NoopTcpStream, SocketAddr)>> {
         Poll::Pending
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        None
     }
 }
 
@@ -110,6 +114,10 @@ impl UdpSocket for NoopUdpSocket {
         _buf: &mut [u8],
     ) -> Poll<Option<(usize, SocketAddr)>> {
         Poll::Pending
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        None
     }
 }
 
@@ -239,7 +247,10 @@ impl Runtime for NoopRuntime {
         NoopJoinSet(task::JoinSet::<T>::new())
     }
 
-    fn register_metrics(_metrics: Vec<crate::runtime::MetricType>) -> Self::MetricsHandle {
+    fn register_metrics(
+        _metrics: Vec<crate::runtime::MetricType>,
+        _: Option<u16>,
+    ) -> Self::MetricsHandle {
         NoopMetricsHandle {}
     }
 

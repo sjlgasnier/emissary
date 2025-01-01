@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::aes::{cbc, ecb},
-    i2np::{tunnel::data::TunnelDataBuilder, HopRole, Message, MessageBuilder, MessageType},
+    i2np::{tunnel::data::TunnelDataBuilder, HopRole, MessageBuilder, MessageType},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
@@ -26,17 +26,13 @@ use crate::{
 
 use hashbrown::HashSet;
 use rand_core::RngCore;
-use thingbuf::mpsc::Receiver;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
-    future::Future,
     iter,
     marker::PhantomData,
     num::NonZeroUsize,
     ops::{Range, RangeFrom},
-    pin::Pin,
-    task::{Context, Poll},
     time::Duration,
 };
 
@@ -81,7 +77,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         );
 
         // hop must exist since the tunnel is created by us
-        let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let next_hop = self.hops.first().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
         // split `message` into one or more i2np message fragments
@@ -89,7 +85,6 @@ impl<R: Runtime> OutboundTunnel<R> {
         let messages = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_router_delivery(&router, &message)
             .build::<R>(&self.padding_bytes)
-            .into_iter()
             .map(|mut message| {
                 let (iv, ciphertext) = self.hops.iter().rev().fold(
                     (
@@ -97,13 +92,13 @@ impl<R: Runtime> OutboundTunnel<R> {
                         message[PAYLOAD_OFFSET].to_vec(),
                     ),
                     |(iv, message), hop| {
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(&iv);
 
-                        let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                        let mut aes = cbc::Aes::new_decryptor(hop.key_context.layer_key(), &iv);
                         let ciphertext = aes.decrypt(message);
 
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(iv);
 
                         (iv, ciphertext)
@@ -123,7 +118,7 @@ impl<R: Runtime> OutboundTunnel<R> {
                     .build()
             });
 
-        (next_hop.router.clone(), messages)
+        (next_hop.router.clone(), messages.into_iter())
     }
 
     /// Send `message` to tunnel identified by the (`router`, `gateway`) tuple.
@@ -143,7 +138,7 @@ impl<R: Runtime> OutboundTunnel<R> {
         );
 
         // hop must exist since the tunnel is created by us
-        let next_hop = self.hops.iter().next().expect("tunnel to exist");
+        let next_hop = self.hops.first().expect("tunnel to exist");
         let router: Vec<u8> = router.into();
 
         // split `message` into one or more i2np message fragments
@@ -151,7 +146,6 @@ impl<R: Runtime> OutboundTunnel<R> {
         let messages = TunnelDataBuilder::new(next_hop.tunnel_id)
             .with_tunnel_delivery(&router, gateway, &message)
             .build::<R>(&self.padding_bytes)
-            .into_iter()
             .map(|mut message| {
                 let (iv, ciphertext) = self.hops.iter().rev().fold(
                     (
@@ -159,13 +153,13 @@ impl<R: Runtime> OutboundTunnel<R> {
                         message[PAYLOAD_OFFSET].to_vec(),
                     ),
                     |(iv, message), hop| {
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(&iv);
 
-                        let mut aes = cbc::Aes::new_decryptor(&hop.key_context.layer_key(), &iv);
+                        let mut aes = cbc::Aes::new_decryptor(hop.key_context.layer_key(), &iv);
                         let ciphertext = aes.decrypt(message);
 
-                        let mut aes = ecb::Aes::new_decryptor(&hop.key_context.iv_key());
+                        let mut aes = ecb::Aes::new_decryptor(hop.key_context.iv_key());
                         let iv = aes.decrypt(iv);
 
                         (iv, ciphertext)
@@ -187,25 +181,10 @@ impl<R: Runtime> OutboundTunnel<R> {
 
         (next_hop.router.clone(), messages)
     }
-
-    /// Send `message` to `router`
-    pub fn send(&self, router: RouterId, message: Vec<u8>) -> (RouterId, Vec<u8>) {
-        assert!(message.len() < 950, "fragmentation not supported");
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            tunnel = %self.tunnel_id,
-            %router,
-            message_len = ?message.len(),
-            "local delivery",
-        );
-
-        todo!();
-    }
 }
 
 impl<R: Runtime> Tunnel for OutboundTunnel<R> {
-    fn new<U>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+    fn new<U>(tunnel_id: TunnelId, _receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
         // generate random padding bytes used in `TunnelData` messages
         let padding_bytes = {
             let mut padding_bytes = [0u8; 1028];
@@ -253,7 +232,7 @@ impl<R: Runtime> Tunnel for OutboundTunnel<R> {
 mod tests {
     use super::*;
     use crate::{
-        i2np::tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
+        i2np::Message,
         runtime::mock::MockRuntime,
         tunnel::{
             routing_table::RoutingKind,
@@ -282,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_tunnel_message() {
-        let (local_outbound_hash, mut outbound, mut outbound_transit) =
+        let (_local_outbound_hash, outbound, mut outbound_transit) =
             build_outbound_tunnel(true, 2usize);
         let (local_inbound_hash, mut inbound, mut inbound_transit) =
             build_inbound_tunnel(true, 2usize);
@@ -377,9 +356,9 @@ mod tests {
     #[tokio::test]
     async fn send_tunnel_message_fragmented() {
         let original = (0..4 * 1028usize).map(|i| (i % 256) as u8).collect::<Vec<_>>();
-        let (local_outbound_hash, mut outbound, mut outbound_transit) =
+        let (_local_outbound_hash, outbound, mut outbound_transit) =
             build_outbound_tunnel(true, 3usize);
-        let (local_inbound_hash, mut inbound, mut inbound_transit) =
+        let (_local_inbound_hash, mut inbound, mut inbound_transit) =
             build_inbound_tunnel(true, 3usize);
 
         let (gateway_router, gateway_tunnel) = inbound.gateway();
@@ -392,7 +371,7 @@ mod tests {
             .build();
 
         // 1st outbound hop (participant)
-        let (next_router, mut messages) =
+        let (next_router, messages) =
             outbound.send_to_tunnel(gateway_router, gateway_tunnel, message);
         assert_eq!(outbound_transit[0].router(), next_router);
 
@@ -420,7 +399,7 @@ mod tests {
         assert_eq!(messages.len(), 5);
 
         // 2nd outbound hop (participant)
-        for (router, message) in messages {
+        for (_router, message) in messages {
             let message = Message::parse_short(&message).unwrap();
             assert!(outbound_transit[1].routing_table().route_message(message).is_ok());
         }
@@ -444,7 +423,7 @@ mod tests {
         assert_eq!(messages.len(), 5);
 
         // 3rd outbound hop (obep)
-        for (router, message) in messages {
+        for (_router, message) in messages {
             let message = Message::parse_short(&message).unwrap();
             assert!(outbound_transit[2].routing_table().route_message(message).is_ok());
         }
@@ -494,7 +473,7 @@ mod tests {
         assert_eq!(messages.len(), 5);
 
         // 2nd inbound hop (participant)
-        for (router, message) in messages {
+        for (_router, message) in messages {
             let message = Message::parse_short(&message).unwrap();
             assert!(inbound_transit[1].routing_table().route_message(message).is_ok());
         }
@@ -517,7 +496,7 @@ mod tests {
         assert_eq!(messages.len(), 5);
 
         // 3rd inbound hop (participant)
-        for (router, message) in messages {
+        for (_router, message) in messages {
             let message = Message::parse_short(&message).unwrap();
             assert!(inbound_transit[2].routing_table().route_message(message).is_ok());
         }

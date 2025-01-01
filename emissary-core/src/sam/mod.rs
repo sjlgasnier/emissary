@@ -23,10 +23,10 @@
 use crate::{
     error::{ChannelError, ConnectionError, Error},
     netdb::NetDbHandle,
-    primitives::Str,
-    runtime::{JoinSet, MetricsHandle, Runtime, TcpListener, UdpSocket},
+    primitives::{DestinationId, Str},
+    runtime::{JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
-        parser::{Datagram, SamCommand},
+        parser::Datagram,
         pending::{
             connection::{ConnectionKind, PendingSamConnection},
             session::{PendingSamSession, SamSessionContext},
@@ -36,8 +36,8 @@ use crate::{
     tunnel::{TunnelManagerHandle, TunnelPoolConfig},
 };
 
-use futures::{FutureExt, Stream, StreamExt};
-use hashbrown::HashMap;
+use futures::{Stream, StreamExt};
+use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{channel, with_recycle, Receiver, Sender};
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
@@ -146,6 +146,12 @@ enum DatagramWriterState {
 
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
+    /// Active destinations.
+    active_destinations: HashSet<DestinationId>,
+
+    /// Session ID to `DestinationId` mappings.
+    session_id_destinations: HashMap<Arc<str>, DestinationId>,
+
     /// Active SAMV3 sessions.
     active_sessions: SessionContext<R, Arc<str>>,
 
@@ -162,6 +168,7 @@ pub struct SamServer<R: Runtime> {
     listener: R::TcpListener,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics: R::MetricsHandle,
 
     /// Handle to `NetDb`.
@@ -197,14 +204,6 @@ impl<R: Runtime> SamServer<R> {
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
     ) -> crate::Result<Self> {
-        tracing::info!(
-            target: LOG_TARGET,
-            ?host,
-            ?tcp_port,
-            ?udp_port,
-            "starting sam server",
-        );
-
         let listener = R::TcpListener::bind(SocketAddr::new(
             host.parse::<IpAddr>().expect("valid address"),
             tcp_port,
@@ -219,9 +218,18 @@ impl<R: Runtime> SamServer<R> {
         .await
         .ok_or(Error::Connection(ConnectionError::BindFailure))?;
 
+        tracing::info!(
+            target: LOG_TARGET,
+            ?host,
+            tcp_port = ?listener.local_address().map(|address| address.port()),
+            udp_port = ?socket.local_address().map(|address| address.port()),
+            "starting sam server",
+        );
+
         let (datagram_tx, datagram_rx) = channel(1024);
 
         Ok(Self {
+            active_destinations: HashSet::new(),
             active_sessions: SessionContext::new(),
             datagram_rx,
             datagram_tx,
@@ -232,23 +240,34 @@ impl<R: Runtime> SamServer<R> {
             pending_inbound_connections: R::join_set(),
             pending_sessions: SessionContext::new(),
             read_buffer: vec![0u8; 0xfff],
+            session_id_destinations: HashMap::new(),
             socket,
             tunnel_manager_handle,
         })
+    }
+
+    /// Get address of the SAMv3 TCP listener.
+    pub fn tcp_local_address(&self) -> Option<SocketAddr> {
+        self.listener.local_address()
+    }
+
+    /// Get address of the SAMv3 UDP socket.
+    pub fn udp_local_address(&self) -> Option<SocketAddr> {
+        self.socket.local_address()
     }
 }
 
 impl<R: Runtime> Future for SamServer<R> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = Pin::into_inner(self);
 
         loop {
             match this.listener.poll_accept(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(stream)) => {
+                Poll::Ready(Some((stream, _))) => {
                     this.pending_inbound_connections.push(PendingSamConnection::new(stream));
                 }
             }
@@ -258,7 +277,7 @@ impl<R: Runtime> Future for SamServer<R> {
             match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.read_buffer) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some((nread, address))) => {
+                Poll::Ready(Some((nread, _))) => {
                     let Some(Datagram {
                         session_id,
                         destination,
@@ -282,6 +301,7 @@ impl<R: Runtime> Future for SamServer<R> {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?session_id,
+                            ?error,
                             "failed to send datagram to active session",
                         );
                     }
@@ -329,7 +349,7 @@ impl<R: Runtime> Future for SamServer<R> {
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(Ok(kind))) => match kind {
                     ConnectionKind::Session {
-                        socket,
+                        mut socket,
                         version,
                         session_id,
                         destination,
@@ -348,12 +368,41 @@ impl<R: Runtime> Future for SamServer<R> {
                                 %session_id,
                                 "duplicate session id",
                             );
+
+                            R::spawn(async move {
+                                let _ = socket
+                                    .send_message_blocking(
+                                        b"SESSION STATUS RESULT=DUPLICATE_ID".to_vec(),
+                                    )
+                                    .await;
+                            });
+                            continue;
+                        }
+
+                        // ensure this is not a duplicate session for the same destination
+                        let destination_id = destination.destination.id();
+
+                        if this.active_destinations.contains(&destination_id) {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                "duplicate destination",
+                            );
+
+                            R::spawn(async move {
+                                let _ = socket
+                                    .send_message_blocking(
+                                        b"SESSION STATUS RESULT=DUPLICATE_DEST".to_vec(),
+                                    )
+                                    .await;
+                            });
                             continue;
                         }
 
                         tracing::info!(
                             target: LOG_TARGET,
                             ?session_id,
+                            %destination_id,
                             ?version,
                             "start constructing new session",
                         );
@@ -401,14 +450,16 @@ impl<R: Runtime> Future for SamServer<R> {
                                 Box::pin(tunnel_pool_future),
                                 netdb_handle,
                             ),
-                        )
+                        );
+                        this.active_destinations.insert(destination_id.clone());
+                        this.session_id_destinations.insert(session_id, destination_id);
                     }
                     ConnectionKind::Stream {
                         session_id,
                         socket,
-                        version,
                         destination,
                         options,
+                        ..
                     } => {
                         if let Err(error) = this.active_sessions.send_command(
                             &session_id,
@@ -429,8 +480,8 @@ impl<R: Runtime> Future for SamServer<R> {
                     ConnectionKind::Accept {
                         session_id,
                         socket,
-                        version,
                         options,
+                        ..
                     } => {
                         if let Err(error) = this.active_sessions.send_command(
                             &session_id,
@@ -447,9 +498,9 @@ impl<R: Runtime> Future for SamServer<R> {
                     ConnectionKind::Forward {
                         session_id,
                         socket,
-                        version,
                         port,
                         options,
+                        ..
                     } => {
                         if let Err(error) = this.active_sessions.send_command(
                             &session_id,
@@ -467,11 +518,6 @@ impl<R: Runtime> Future for SamServer<R> {
                             )
                         }
                     }
-                    kind => tracing::warn!(
-                        target: LOG_TARGET,
-                        ?kind,
-                        "currently unuspported command",
-                    ),
                 },
                 Poll::Ready(Some(Err(error))) => tracing::trace!(
                     target: LOG_TARGET,
@@ -501,6 +547,12 @@ impl<R: Runtime> Future for SamServer<R> {
                                 "pending session doesn't exist"
                             );
                             debug_assert!(false);
+
+                            if let Some(destination_id) =
+                                this.session_id_destinations.remove(&context.session_id)
+                            {
+                                this.active_destinations.remove(&destination_id);
+                            }
                         }
                     },
                 Poll::Ready(Some(Err(error))) => tracing::warn!(
@@ -522,6 +574,10 @@ impl<R: Runtime> Future for SamServer<R> {
                         "session terminated",
                     );
                     this.active_sessions.remove(&session_id);
+
+                    if let Some(destination_id) = this.session_id_destinations.remove(&session_id) {
+                        this.active_destinations.remove(&destination_id);
+                    }
                 }
             }
         }

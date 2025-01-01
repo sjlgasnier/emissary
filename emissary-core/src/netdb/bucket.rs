@@ -77,9 +77,9 @@ impl<R: Runtime> KBucket<R> {
     }
 
     /// Get entry into the bucket.
-    pub fn entry<'a>(&'a mut self, key: Key<RouterId>) -> KBucketEntry<'a, R> {
+    pub fn entry(&mut self, key: Key<RouterId>) -> KBucketEntry<'_, R> {
         for i in 0..self.floodfills.len() {
-            if &self.floodfills[i].key == &key {
+            if self.floodfills[i].key == key {
                 return KBucketEntry::Occupied(&mut self.floodfills[i]);
             }
         }

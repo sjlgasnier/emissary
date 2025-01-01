@@ -46,7 +46,7 @@ impl Date {
     }
 
     /// Try to convert `bytes` into a [`Date`].
-    pub fn from_bytes<T: AsRef<[u8]>>(bytes: T) -> Option<Date> {
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Option<Date> {
         Some(Self::parse_frame(bytes.as_ref()).ok()?.1)
     }
 
@@ -67,7 +67,7 @@ mod tests {
         let since_epoch =
             SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let serialized = Date::new(since_epoch).serialize();
-        let date = Date::from_bytes(&serialized).unwrap();
+        let date = Date::parse(&serialized).unwrap();
 
         assert_eq!(date.date, since_epoch);
     }
@@ -78,7 +78,7 @@ mod tests {
         let time = time.to_be_bytes();
 
         assert_eq!(
-            Date::from_bytes(time),
+            Date::parse(time),
             Some(Date {
                 date: 1719940343u64
             })
@@ -95,7 +95,7 @@ mod tests {
         time.push(4);
 
         assert_eq!(
-            Date::from_bytes(time),
+            Date::parse(time),
             Some(Date {
                 date: 1719940343u64
             })
@@ -124,14 +124,14 @@ mod tests {
 
     #[test]
     fn empty_date() {
-        assert!(Date::from_bytes(Vec::<u8>::new()).is_none());
+        assert!(Date::parse(Vec::<u8>::new()).is_none());
     }
 
     #[test]
     fn incomplete_date() {
         for i in 0..7 {
             let empty = vec![1 as u8; i];
-            assert!(Date::from_bytes(empty).is_none());
+            assert!(Date::parse(empty).is_none());
         }
     }
 }

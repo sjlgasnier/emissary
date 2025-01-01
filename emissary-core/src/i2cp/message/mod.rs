@@ -20,17 +20,13 @@ use crate::{
     crypto::StaticPrivateKey,
     i2cp::payload::I2cpParameters,
     primitives::{Date, Destination, LeaseSet2, Mapping, Str},
-    runtime::Runtime,
-    tunnel::TunnelPoolConfig,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use hashbrown::HashMap;
 use nom::{
     bytes::complete::take,
-    error::{make_error, ErrorKind},
     number::complete::{be_u16, be_u32, be_u8},
-    Err, IResult,
 };
 
 use alloc::vec::Vec;
@@ -57,6 +53,9 @@ const LOG_TARGET: &str = "emissary::i2cp::message";
 ///
 /// Header is payload size (4 bytes) + message type (1 bytes).
 pub const I2CP_HEADER_SIZE: usize = 5;
+
+/// Signature length.
+const SIGNATURE_LEN: usize = 64usize;
 
 /// Session ID.
 #[derive(Debug)]
@@ -93,13 +92,13 @@ pub enum RequestKind {
     /// Host name.
     HostName {
         /// Host name.
-        host_name: Str,
+        _host_name: Str,
     },
 
     /// Hash.
     Hash {
         /// SHA256 hash.
-        hash: Vec<u8>,
+        _hash: Vec<u8>,
     },
 }
 
@@ -255,6 +254,7 @@ impl MessageType {
 }
 
 /// I2CP message.
+#[allow(unused)]
 pub enum Message {
     /// Bandwidth limit
     BandwidthLimits,
@@ -457,7 +457,7 @@ impl Message {
         let (rest, destination) = Destination::parse_frame(input.as_ref()).ok()?;
         let (rest, options) = Mapping::parse_multi_frame(rest).ok()?;
         let (rest, date) = Date::parse_frame(rest).ok()?;
-        let (rest, signature) = take::<_, _, ()>(64usize)(rest).ok()?;
+        let (_rest, signature) = take::<_, _, ()>(SIGNATURE_LEN)(rest).ok()?;
 
         match destination.verifying_key() {
             None => tracing::debug!(
@@ -466,7 +466,10 @@ impl Message {
                 "no verifying key in destination, cannot verify signature",
             ),
             Some(signing_key) =>
-                if let Err(error) = signing_key.verify(input.as_ref(), signature) {
+                if let Err(error) = signing_key.verify(
+                    &input.as_ref()[..input.as_ref().len() - SIGNATURE_LEN],
+                    signature,
+                ) {
                     tracing::warn!(
                         target: LOG_TARGET,
                         ?error,
@@ -495,10 +498,10 @@ impl Message {
 
         let kind = match kind {
             0 => RequestKind::Hash {
-                hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
+                _hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
             },
             1 => RequestKind::HostName {
-                host_name: Str::parse_frame(rest).ok()?.1,
+                _host_name: Str::parse_frame(rest).ok()?.1,
             },
             kind => {
                 tracing::warn!(
@@ -577,7 +580,7 @@ impl Message {
         };
 
         let (rest, num_private_keys) = be_u8::<_, ()>(rest).ok()?;
-        let (rest, private_keys) = (0..num_private_keys).try_fold(
+        let (_rest, private_keys) = (0..num_private_keys).try_fold(
             (rest, Vec::<StaticPrivateKey>::new()),
             |(rest, mut keys), _| {
                 let (rest, key_kind) = be_u16::<_, ()>(rest).ok()?;
@@ -586,7 +589,7 @@ impl Message {
 
                 match key_kind {
                     0x0004 if key_length == 32 => {
-                        keys.push(StaticPrivateKey::from(key.to_vec()));
+                        keys.push(StaticPrivateKey::from_bytes(key)?);
 
                         Some((rest, keys))
                     }
@@ -596,11 +599,18 @@ impl Message {
                             ?key_kind,
                             "unsupported key kind",
                         );
-                        return None;
+                        None
                     }
                 }
             },
         )?;
+
+        if private_keys.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "no encryption keys",
+            );
+        }
 
         Some(Message::CreateLeaseSet2 {
             session_id: SessionId::from(session_id),
@@ -613,7 +623,7 @@ impl Message {
     /// Attempt to parse [`Message::SendMessageExpires`] from `input`.
     ///
     /// https://geti2p.net/spec/i2cp#sendmessageexpiresmessage
-    fn parse_send_message_expires<R: Runtime>(input: impl AsRef<[u8]>) -> Option<Self> {
+    fn parse_send_message_expires(input: impl AsRef<[u8]>) -> Option<Self> {
         let (rest, session_id) = be_u16::<_, ()>(input.as_ref()).ok()?;
         let (rest, destination) = Destination::parse_frame(rest).ok()?;
         let (rest, payload_len) = be_u32::<_, ()>(rest).ok()?;
@@ -623,12 +633,12 @@ impl Message {
         let expires = {
             let expiration = take::<_, _, ()>(6usize)(rest).ok()?.1;
             let mut extended = [0u8; 8];
-            extended[2..].copy_from_slice(&expiration);
+            extended[2..].copy_from_slice(expiration);
 
             Duration::from_millis(u64::from_be_bytes(extended))
         };
 
-        let Some(parameters) = I2cpParameters::new(&payload) else {
+        let Some(parameters) = I2cpParameters::new(payload) else {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?session_id,
@@ -649,7 +659,7 @@ impl Message {
     }
 
     /// Attempt to parse `input` into [`Message`].
-    pub fn parse<R: Runtime>(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
+    pub fn parse(msg_type: MessageType, input: impl AsRef<[u8]>) -> Option<Self> {
         match msg_type {
             MessageType::GetDate => Self::parse_get_date(input),
             MessageType::SetDate => Self::parse_set_date(input),
@@ -658,7 +668,7 @@ impl Message {
             MessageType::CreateSession => Self::parse_create_session(input),
             MessageType::HostLookup => Self::parse_host_lookup(input),
             MessageType::CreateLeaseSet2 => Self::parse_create_leaseset2(input),
-            MessageType::SendMessageExpires => Self::parse_send_message_expires::<R>(input),
+            MessageType::SendMessageExpires => Self::parse_send_message_expires(input),
             msg_type => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -675,7 +685,6 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
 
     #[test]
     fn parse_create_leaseset2() {
@@ -714,6 +723,6 @@ mod tests {
             26, 115, 111, 255, 68,
         ];
 
-        assert!(Message::parse::<MockRuntime>(MessageType::CreateLeaseSet2, &message).is_some());
+        assert!(Message::parse(MessageType::CreateLeaseSet2, &message).is_some());
     }
 }

@@ -17,12 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::aes::{cbc, ecb},
-    error::{RejectionReason, TunnelError},
-    i2np::{
-        tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
-        HopRole, Message, MessageBuilder, MessageType,
-    },
+    i2np::{tunnel::data::EncryptedTunnelData, Message, MessageBuilder, MessageType},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
     tunnel::{
@@ -30,17 +25,15 @@ use crate::{
         routing_table::RoutingTable,
         transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
-    Error,
 };
 
 use bytes::{BufMut, BytesMut};
 use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -62,6 +55,7 @@ pub struct Participant<R: Runtime> {
     message_rx: Receiver<Message>,
 
     /// Metrics handle.
+    #[allow(unused)]
     metrics_handle: R::MetricsHandle,
 
     /// Next router ID.
@@ -112,7 +106,7 @@ impl<R: Runtime> Participant<R> {
             .with_payload(&out)
             .build();
 
-        return Ok((self.next_router.clone(), message));
+        Ok((self.next_router.clone(), message))
     }
 }
 
@@ -136,10 +130,6 @@ impl<R: Runtime> TransitTunnel<R> for Participant<R> {
             tunnel_id,
             tunnel_keys,
         }
-    }
-
-    fn role(&self) -> HopRole {
-        HopRole::Participant
     }
 }
 
@@ -190,7 +180,7 @@ impl<R: Runtime> Future for Participant<R> {
             }
         }
 
-        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+        if self.expiration_timer.poll_unpin(cx).is_ready() {
             return Poll::Ready(self.tunnel_id);
         }
 

@@ -24,7 +24,7 @@
 use crate::{
     netdb::{
         bucket::{KBucket, KBucketEntry},
-        types::{Distance, FloodFill, Key, U256},
+        types::{Distance, FloodFill, Key},
     },
     primitives::RouterId,
     runtime::Runtime,
@@ -84,7 +84,7 @@ impl<R: Runtime> RoutingTable<R> {
     }
 
     /// Get an entry for `peer` into a k-bucket.
-    pub fn entry<'a>(&'a mut self, key: Key<RouterId>) -> KBucketEntry<'a, R> {
+    pub fn entry(&mut self, key: Key<RouterId>) -> KBucketEntry<'_, R> {
         let Some(index) = BucketIndex::new(&self.local_key.distance(&key)) else {
             return KBucketEntry::LocalNode;
         };
@@ -92,12 +92,12 @@ impl<R: Runtime> RoutingTable<R> {
         self.buckets[*index].entry(key)
     }
 
-    /// Add floodfill router to [`RoutingTable`].
-    pub fn add_floodfill(&mut self, router_id: RouterId) {
+    /// Add router to [`RoutingTable`].
+    pub fn add_router(&mut self, router_id: RouterId) {
         tracing::trace!(
             target: LOG_TARGET,
             %router_id,
-            "add floodfill router",
+            "add router",
         );
 
         match self.entry(Key::from(router_id.clone())) {
@@ -120,6 +120,9 @@ impl<R: Runtime> RoutingTable<R> {
         }
     }
 
+    /// Remove router from [`RoutingTable`].
+    pub fn remove_router(&mut self, _router_id: RouterId) {}
+
     /// Get `limit` many floodfills closest to `target` from the k-buckets.
     pub fn closest<'a, K: Clone + 'a>(
         &'a mut self,
@@ -127,8 +130,7 @@ impl<R: Runtime> RoutingTable<R> {
         limit: usize,
     ) -> impl Iterator<Item = RouterId> + 'a {
         ClosestBucketsIter::new(self.local_key.distance(&target))
-            .map(move |index| self.buckets[*index].closest_iter(&target))
-            .flatten()
+            .flat_map(move |index| self.buckets[*index].closest_iter(&target))
             .take(limit)
     }
 
@@ -141,8 +143,7 @@ impl<R: Runtime> RoutingTable<R> {
         ignore: &'b HashSet<RouterId>,
     ) -> impl Iterator<Item = RouterId> + 'a {
         ClosestBucketsIter::new(self.local_key.distance(&target))
-            .map(move |index| self.buckets[*index].closest_iter(&target))
-            .flatten()
+            .flat_map(move |index| self.buckets[*index].closest_iter(&target))
             .filter(|router_id| !ignore.contains(router_id))
             .take(limit)
     }
@@ -239,7 +240,7 @@ impl Iterator for ClosestBucketsIter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::{netdb::types::U256, runtime::mock::MockRuntime};
     use core::time::Duration;
 
     #[test]

@@ -23,6 +23,7 @@
 use crate::{
     crypto::{base64_decode, base64_encode, sha256::Sha256, SigningPublicKey},
     primitives::LOG_TARGET,
+    runtime::Runtime,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -33,21 +34,24 @@ use nom::{
     sequence::tuple,
     Err, IResult,
 };
+use rand_core::RngCore;
 
-use alloc::{string::String, sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 /// Null certificate.
 const NULL_CERTIFICATE: u8 = 0x00;
-
-/// Null certificate length.
-const NULL_CERTIFICATE_LEN: u16 = 0x00;
 
 /// Key certificate.
 const KEY_CERTIFICATE: u8 = 0x05;
 
 /// Key certificate length.
 const KEY_CERTIFICATE_LEN: u16 = 0x04;
+
+/// Padding length.
+///
+/// Consists of padding and an empty public key.
+const PADDING_LEN: usize = 320usize + 32usize;
 
 /// Key kind for `EdDSA_SHA512_Ed25519`.
 ///
@@ -62,9 +66,6 @@ const DESTINATION_WITH_NULL_CERT_LEN: usize = 387usize;
 
 /// Minimum serialized length of [`Destination`].
 const DESTINATION_MINIMUM_LEN: usize = 387usize;
-
-/// Certificate header length.
-const CERTIFICATE_HEADER_LEN: usize = 3usize;
 
 /// Serialized [`Destination`] length without certificate.
 const DESTINATION_LEN_NO_CERTIFICATE: usize = 384usize;
@@ -83,7 +84,7 @@ impl DestinationId {
 
     /// Copy [`DestinationId`] into a byte vector.
     pub fn to_vec(&self) -> Vec<u8> {
-        base64_decode(&self.0.as_bytes()).expect("to succeed")
+        base64_decode(self.0.as_bytes()).expect("to succeed")
     }
 }
 
@@ -109,7 +110,7 @@ pub struct Destination {
     identity_hash: Bytes,
 
     /// Serialized destination, if any.
-    serialized: Option<Bytes>,
+    serialized: Bytes,
 
     /// Destination's verifying key.
     verifying_key: Option<SigningPublicKey>,
@@ -117,23 +118,33 @@ pub struct Destination {
 
 impl Destination {
     /// Create new [`Destination`] from `verifying_key`.
-    pub fn new(verifying_key: SigningPublicKey) -> Self {
-        let identity_hash = Sha256::new()
-            .update(
-                Self {
-                    destination_id: DestinationId::from(vec![0]),
-                    identity_hash: Bytes::from(vec![0]),
-                    serialized: None,
-                    verifying_key: Some(verifying_key.clone()),
-                }
-                .serialize(),
-            )
-            .finalize();
+    pub fn new<R: Runtime>(verifying_key: SigningPublicKey) -> Self {
+        let serialized = {
+            let serialized_len = PADDING_LEN
+                .saturating_add(32usize) // signing public key
+                .saturating_add(1usize) // certificate type
+                .saturating_add(2usize) // certificate length
+                .saturating_add(4usize); // certificate payload length
+
+            let mut out = BytesMut::with_capacity(serialized_len);
+            let mut padding = [0u8; PADDING_LEN];
+            R::rng().fill_bytes(&mut padding);
+
+            out.put_slice(&padding);
+            out.put_slice(verifying_key.as_ref());
+            out.put_u8(KEY_CERTIFICATE);
+            out.put_u16(KEY_CERTIFICATE_LEN);
+            out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519);
+            out.put_u16(0u16); // public key type
+
+            out.freeze()
+        };
+        let identity_hash = Sha256::new().update(&serialized).finalize();
 
         Self {
             destination_id: DestinationId::from(identity_hash.clone()),
             identity_hash: Bytes::from(identity_hash),
-            serialized: None,
+            serialized,
             verifying_key: Some(verifying_key),
         }
     }
@@ -167,10 +178,17 @@ impl Destination {
                 match signing_key_kind {
                     KEY_KIND_EDDSA_SHA512_ED25519 => (
                         rest,
-                        Some(
-                            SigningPublicKey::from_bytes(&initial_bytes[384 - 32..384])
-                                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?,
-                        ),
+                        Some({
+                            // call must succeed as the slice into `initial_bytes`
+                            // and `public_key` are the same size
+                            let public_key = TryInto::<[u8; 32]>::try_into(
+                                initial_bytes[384 - 32..384].to_vec(),
+                            )
+                            .expect("to succeed");
+
+                            SigningPublicKey::from_bytes(&public_key)
+                                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?
+                        }),
                         DESTINATION_WITH_KEY_CERT_LEN,
                     ),
                     key_kind => {
@@ -195,7 +213,7 @@ impl Destination {
         };
 
         let identity_hash = Bytes::from(Sha256::new().update(&input[..destination_len]).finalize());
-        let serialized = Some(Bytes::from(input[..destination_len].to_vec()));
+        let serialized = Bytes::from(input[..destination_len].to_vec());
 
         Ok((
             rest,
@@ -215,31 +233,7 @@ impl Destination {
 
     /// Serialize [`Destination`] into a byte vector.
     pub fn serialize(&self) -> Bytes {
-        if let Some(serialized) = &self.serialized {
-            return serialized.clone();
-        }
-
-        let mut out = BytesMut::with_capacity(self.serialized_len());
-
-        out.put_slice(&[0u8; 32]);
-        out.put_slice(&[0u8; 320]);
-
-        match &self.verifying_key {
-            None => {
-                out.put_slice(&[0u8; 32]); // empty verifying key
-                out.put_u8(NULL_CERTIFICATE);
-                out.put_u16(NULL_CERTIFICATE_LEN);
-            }
-            Some(signing_key) => {
-                out.put_slice(&signing_key.to_bytes());
-                out.put_u8(KEY_CERTIFICATE);
-                out.put_u16(KEY_CERTIFICATE_LEN);
-                out.put_u16(KEY_KIND_EDDSA_SHA512_ED25519); // verifying key type
-                out.put_u16(0u16); // public key type
-            }
-        }
-
-        out.freeze()
+        self.serialized.clone()
     }
 
     /// Get serialized length of [`Destination`].
@@ -268,19 +262,20 @@ impl Destination {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{crypto::SigningPrivateKey, runtime::mock::MockRuntime};
 
     #[test]
     fn serialize_and_parse_destination() {
-        let signing_key = SigningPublicKey::from_private_ed25519(&[0xaa; 32]).unwrap();
-        let destination = Destination::new(signing_key.clone());
+        let signing_key = SigningPrivateKey::from_bytes(&[0xa; 32]).unwrap().public();
+        let destination = Destination::new::<MockRuntime>(signing_key.clone());
 
         let serialized = destination.clone().serialize();
         let parsed = Destination::parse(&serialized).unwrap();
 
         assert_eq!(parsed.destination_id, destination.destination_id);
         assert_eq!(
-            parsed.verifying_key.unwrap().to_bytes(),
-            destination.verifying_key.unwrap().to_bytes()
+            parsed.verifying_key.unwrap().as_ref(),
+            destination.verifying_key.unwrap().as_ref()
         );
     }
 

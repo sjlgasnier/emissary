@@ -101,9 +101,9 @@ impl<R: Runtime> OutboundSession<R> {
     /// This function can only be called once, after the outbound session has been initialized and
     /// its state is `OutboundSessionPending`, for other states the call will panic.
     pub fn generate_new_session_reply_tags(&self) -> impl Iterator<Item = TagSetEntry> {
-        let mut temp_key = Hmac::new(&self.chaining_key).update(&[]).finalize();
+        let mut temp_key = Hmac::new(&self.chaining_key).update([]).finalize();
         let tag_set_key =
-            Hmac::new(&temp_key).update(&b"SessionReplyTags").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"SessionReplyTags").update([0x01]).finalize();
 
         let mut nsr_tag_set = TagSet::new(&self.chaining_key, tag_set_key);
 
@@ -159,7 +159,7 @@ impl<R: Runtime> OutboundSession<R> {
         let state = {
             let state = Sha256::new()
                 .update(&self.state)
-                .update(&tag_set_entry.tag.to_le_bytes())
+                .update(tag_set_entry.tag.to_le_bytes())
                 .finalize();
 
             Sha256::new().update(&state).update::<&[u8]>(public_key.as_ref()).finalize()
@@ -170,17 +170,14 @@ impl<R: Runtime> OutboundSession<R> {
             // ephemeral-ephemeral
             let mut shared = self.ephemeral_private_key.diffie_hellman(&public_key);
             let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
+            let mut chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
 
             // static-ephemeral
             shared = self.static_private_key.diffie_hellman(&public_key);
             temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            chaining_key = Hmac::new(&temp_key).update(&b"").update(&[0x01]).finalize();
-            let keydata = Hmac::new(&temp_key)
-                .update(&chaining_key)
-                .update(&b"")
-                .update(&[0x02])
-                .finalize();
+            chaining_key = Hmac::new(&temp_key).update(b"").update([0x01]).finalize();
+            let keydata =
+                Hmac::new(&temp_key).update(&chaining_key).update(b"").update([0x02]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();
@@ -198,9 +195,9 @@ impl<R: Runtime> OutboundSession<R> {
 
         // split key into send and receive keys
         let (send_key, recv_key) = {
-            let mut temp_key = Hmac::new(&chaining_key).update(&[]).finalize();
-            let send_key = Hmac::new(&temp_key).update(&[0x01]).finalize();
-            let recv_key = Hmac::new(&temp_key).update(&send_key).update(&[0x02]).finalize();
+            let mut temp_key = Hmac::new(&chaining_key).update([]).finalize();
+            let send_key = Hmac::new(&temp_key).update([0x01]).finalize();
+            let recv_key = Hmac::new(&temp_key).update(&send_key).update([0x02]).finalize();
 
             temp_key.zeroize();
 
@@ -212,9 +209,9 @@ impl<R: Runtime> OutboundSession<R> {
         let recv_tag_set = TagSet::new(chaining_key, &recv_key);
 
         // decode payload of the `NewSessionReply` message
-        let mut temp_key = Hmac::new(&recv_key).update(&[]).finalize();
+        let mut temp_key = Hmac::new(&recv_key).update([]).finalize();
         let mut payload_key =
-            Hmac::new(&temp_key).update(&b"AttachPayloadKDF").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"AttachPayloadKDF").update([0x01]).finalize();
 
         ChaChaPoly::new(&payload_key).decrypt_with_ad(&state, &mut payload)?;
 

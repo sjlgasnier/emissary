@@ -17,23 +17,19 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base64_encode, EphemeralPublicKey, SigningPrivateKey, SigningPublicKey, StaticPrivateKey,
-        StaticPublicKey,
-    },
-    i2np::{
-        tunnel::{build::short, data, gateway},
-        Message,
-    },
+    crypto::{StaticPrivateKey, StaticPublicKey},
+    i2np::{tunnel::gateway, Message, MessageType},
     primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
     runtime::{mock::MockRuntime, Runtime},
+    shutdown::ShutdownContext,
     tunnel::{
+        garlic::DeliveryInstructions,
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
             TunnelBuildParameters, TunnelInfo,
         },
         noise::NoiseContext,
-        pool::{TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle},
+        pool::TunnelPoolBuildParameters,
         routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
@@ -42,7 +38,7 @@ use crate::{
 use bytes::Bytes;
 use futures::FutureExt;
 use rand_core::RngCore;
-use thingbuf::mpsc::{channel, Receiver, Sender};
+use thingbuf::mpsc::{channel, Receiver};
 
 use core::{
     fmt,
@@ -50,6 +46,8 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+
+use super::garlic::GarlicHandler;
 
 /// Make new router.
 pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
@@ -59,7 +57,7 @@ pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterI
     MockRuntime::rng().fill_bytes(&mut static_key_bytes);
     MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-    let sk = StaticPrivateKey::from(static_key_bytes.clone());
+    let sk = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
     let pk = sk.public();
 
     let mut router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
@@ -80,6 +78,9 @@ pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterI
 
 /// [`TransitTunnelManager`] for testing.
 pub struct TestTransitTunnelManager {
+    /// Garlic handler.
+    garlic: GarlicHandler<MockRuntime>,
+
     /// Transit tunnel manager.
     manager: TransitTunnelManager<MockRuntime>,
 
@@ -95,11 +96,14 @@ pub struct TestTransitTunnelManager {
     /// Router hash.
     router_hash: Bytes,
 
+    /// Router info.
+    router_info: RouterInfo,
+
     /// Routing table.
     routing_table: RoutingTable,
 
-    /// Router info.
-    router_info: RouterInfo,
+    /// Shutdown context.
+    _shutdown_ctx: ShutdownContext<MockRuntime>,
 }
 
 impl fmt::Debug for TestTransitTunnelManager {
@@ -117,20 +121,24 @@ impl TestTransitTunnelManager {
         let (message_tx, message_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
+        let mut _shutdown_ctx = ShutdownContext::<MockRuntime>::new();
 
         Self {
+            garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![], None)),
             manager: TransitTunnelManager::<MockRuntime>::new(
                 noise,
                 routing_table.clone(),
                 transit_rx,
-                MockRuntime::register_metrics(vec![]),
+                MockRuntime::register_metrics(vec![], None),
+                _shutdown_ctx.handle(),
             ),
             message_rx,
             public_key,
             router_hash: router_hash.clone(),
+            router_info,
             router: RouterId::from(router_hash),
             routing_table,
-            router_info,
+            _shutdown_ctx,
         }
     }
 
@@ -152,6 +160,11 @@ impl TestTransitTunnelManager {
     /// Get ID of the router.
     pub fn router(&self) -> RouterId {
         self.router.clone()
+    }
+
+    /// Get mutable reference to [`GarlicHandler`].
+    pub fn garlic(&mut self) -> &mut GarlicHandler<MockRuntime> {
+        &mut self.garlic
     }
 
     /// Handle short tunnel build.
@@ -204,12 +217,12 @@ pub fn build_outbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise, _router_info) = make_router(fast);
+    let (local_hash, _local_pk, local_noise, _router_info) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
-    let (pending_tunnel, next_router, message) =
+    let (pending_tunnel, _next_router, message) =
         PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
             TunnelBuildParameters {
                 hops: hops.clone(),
@@ -227,17 +240,16 @@ pub fn build_outbound_tunnel(
 
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
-        |acc, ((router_hash, _), transit_manager)| {
+        |acc, ((_, _), transit_manager)| {
             let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
             Message::parse_short(&message).unwrap()
         },
     );
-    let gateway::TunnelGateway {
-        tunnel_id: recv_tunnel_id,
-        payload,
-    } = gateway::TunnelGateway::parse(&message.payload).unwrap();
+    let gateway::TunnelGateway { payload, .. } =
+        gateway::TunnelGateway::parse(&message.payload).unwrap();
 
     let message = Message::parse_standard(&payload).unwrap();
+    assert_eq!(message.message_type, MessageType::Garlic);
     let tunnel = pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
 
     (local_hash, tunnel, transit_managers)
@@ -262,12 +274,11 @@ pub fn build_inbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, local_pk, local_noise, _router_info) = make_router(fast);
+    let (local_hash, _local_pk, local_noise, _router_info) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
-    let (tx, rx) = channel(64);
+    let (_tx, rx) = channel(64);
     let TunnelPoolBuildParameters {
-        context,
         context_handle: handle,
         ..
     } = TunnelPoolBuildParameters::new(Default::default());
@@ -288,14 +299,19 @@ pub fn build_inbound_tunnel(
         })
         .unwrap();
 
+    let message = match transit_managers[0].garlic().handle_message(message).unwrap().next() {
+        Some(DeliveryInstructions::Local { message }) => message,
+        _ => panic!("invalid delivery instructions"),
+    };
+
     assert_eq!(message.message_id, message_id.into());
     assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-    assert_eq!(message.payload[0], 4u8);
+    assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
     assert_eq!(message.payload[1..].len() % 218, 0);
 
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
-        |acc, ((router_hash, _), transit_manager)| {
+        |acc, ((_, _), transit_manager)| {
             let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
             Message::parse_short(&message).unwrap()
         },

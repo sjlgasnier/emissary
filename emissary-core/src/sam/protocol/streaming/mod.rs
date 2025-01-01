@@ -28,7 +28,7 @@ use crate::{
             listener::{SocketKind, StreamListener, StreamListenerEvent},
             packet::{Packet, PacketBuilder},
             stream::{
-                active::{Stream, StreamContext, StreamKind},
+                active::{Stream, StreamContext, StreamEvent, StreamKind},
                 pending::{PendingStream, PendingStreamResult},
             },
         },
@@ -44,6 +44,7 @@ use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, format, vec::Vec};
 use core::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -74,6 +75,9 @@ const PENDING_STREAM_PRUNE_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// How long should a pending outbound stream wait before sending another `SYN`.
 const SYN_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for graceful shutdown.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum `SYN` retries before the remote destination is considered unreachable.
 const MAX_SYN_RETRIES: usize = 3usize;
@@ -121,6 +125,81 @@ pub enum StreamManagerEvent {
         /// Packet.
         packet: Vec<u8>,
     },
+
+    /// [`StreamManager`] has been shut down.
+    ShutDown,
+}
+
+/// Shutdown handler.
+enum ShutdownHandler {
+    /// Shutdown has not been requested.
+    Idle,
+
+    /// Shutdown has been requested and a timer for forcible shutdown has been started.
+    ShutdownRequested {
+        /// Shutdown timer.
+        ///
+        /// See [`GRACEFUL_SHUTDOWN_TIMEOUT`] for more details.
+        timer: BoxFuture<'static, ()>,
+    },
+
+    /// [`StreamManager`] has been shut down.
+    ShutDown,
+}
+
+impl ShutdownHandler {
+    /// Create new [`ShutdownHandler`].
+    fn new() -> Self {
+        ShutdownHandler::Idle
+    }
+
+    /// Is [`StreamManager`] shutting down.
+    fn shutting_down(&self) -> bool {
+        core::matches!(self, Self::ShutdownRequested { .. })
+    }
+
+    /// Shut down [`StreamManager`].
+    fn start_shutdown<R: Runtime>(&mut self) {
+        *self = ShutdownHandler::ShutdownRequested {
+            timer: Box::pin(R::delay(GRACEFUL_SHUTDOWN_TIMEOUT)),
+        };
+    }
+
+    /// Mark [`StreamManager`] as shut down.
+    ///
+    /// Any further calls to [`StreamManger::poll_next()`] will return `Poll::Pending`.
+    fn set_as_shutdown(&mut self) {
+        *self = ShutdownHandler::ShutDown;
+    }
+}
+
+/// Shutdown event.
+enum ShutdownEvent {
+    /// Forcibly shut down [`StreamManager`].
+    ShutDown,
+
+    /// [`StreamManager`] has already been shutdown.
+    AlreadyShutDown,
+}
+
+impl Future for ShutdownHandler {
+    type Output = ShutdownEvent;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = Pin::into_inner(self);
+
+        match this {
+            ShutdownHandler::Idle => Poll::Pending,
+            ShutdownHandler::ShutdownRequested { timer } => match timer.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(_) => {
+                    this.set_as_shutdown();
+                    return Poll::Ready(ShutdownEvent::ShutDown);
+                }
+            },
+            ShutdownHandler::ShutDown => return Poll::Ready(ShutdownEvent::AlreadyShutDown),
+        }
+    }
 }
 
 /// Pending outbound stream.
@@ -146,7 +225,7 @@ pub struct StreamManager<R: Runtime> {
     /// TX channels for sending [`Packet`]'s to active streams.
     ///
     /// Indexed with receive stream ID.
-    active: HashMap<u32, (DestinationId, Sender<Vec<u8>>)>,
+    active: HashMap<u32, (DestinationId, Sender<StreamEvent>)>,
 
     /// Destination of the session the stream manager is bound to.
     destination: Destination,
@@ -183,6 +262,9 @@ pub struct StreamManager<R: Runtime> {
     /// Timer for pruning stale pending streams.
     prune_timer: BoxFuture<'static, ()>,
 
+    /// Shutdown handler.
+    shutdown_handler: ShutdownHandler,
+
     /// Signing key.
     signing_key: SigningPrivateKey,
 
@@ -209,6 +291,7 @@ impl<R: Runtime> StreamManager<R> {
             pending_inbound: HashMap::new(),
             pending_outbound: HashMap::new(),
             prune_timer: Box::pin(R::delay(PENDING_STREAM_PRUNE_THRESHOLD)),
+            shutdown_handler: ShutdownHandler::new(),
             signing_key,
             streams: R::join_set(),
         }
@@ -229,13 +312,62 @@ impl<R: Runtime> StreamManager<R> {
         let Packet {
             send_stream_id,
             recv_stream_id,
-            seq_nro,
-            ack_through,
             nacks,
-            resend_delay,
             flags,
             payload,
+            ..
         } = Packet::parse(&packet).ok_or(StreamingError::Malformed)?;
+
+        // verify signature
+        let signature = flags.signature().ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "signature missing from syn packet",
+            );
+
+            StreamingError::SignatureMissing
+        })?;
+        let destination = flags.from_included().as_ref().ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "destination missing from syn packet",
+            );
+            StreamingError::DestinationMissing
+        })?;
+
+        {
+            match destination.verifying_key() {
+                None => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        "verifying key missing from destination",
+                    );
+                    return Err(StreamingError::VerifyingKeyMissing);
+                }
+                Some(verifying_key) => {
+                    // signature field is the last field of options, meaning it starts at
+                    // `original.len() - payload.len() - SIGNATURE_LEN`
+                    //
+                    // in order to verify the signature, the calculated signature must be filled
+                    // with zeros
+                    let mut original = packet.to_vec();
+                    let signature_start = original.len() - payload.len() - SIGNATURE_LEN;
+                    original[signature_start..signature_start + SIGNATURE_LEN]
+                        .copy_from_slice(&[0u8; SIGNATURE_LEN]);
+
+                    verifying_key.verify(&original, signature).map_err(|error| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to verify packet signature"
+                        );
+
+                        StreamingError::InvalidSignature
+                    })?;
+                }
+            }
+        }
 
         // if this is a syn-ack for an outbound stream, initialize state
         // for a new stream future and spawn it in the background
@@ -267,59 +399,26 @@ impl<R: Runtime> StreamManager<R> {
             return Ok(());
         }
 
-        let signature = flags.signature().ok_or(StreamingError::SignatureMissing)?;
-        let destination =
-            flags.from_included().as_ref().ok_or(StreamingError::DestinationMissing)?;
-
         // verify that the nacks field contains local destination id for replay protection
-        if nacks.len() == 8 {
-            let destination_id = nacks
-                .into_iter()
-                .fold(BytesMut::with_capacity(32), |mut acc, x| {
-                    acc.put_slice(&x.to_be_bytes());
-                    acc
-                })
-                .freeze()
-                .to_vec();
-
-            if destination_id != self.destination_id.to_vec() {
-                return Err(StreamingError::ReplayProtectionCheckFailed);
-            }
+        if nacks.len() != 8 {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "destination id for replay protection not set",
+            );
+            return Err(StreamingError::ReplayProtectionCheckFailed);
         }
 
-        // verify signature
-        {
-            match destination.verifying_key() {
-                None => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        "verifying key missing from destination",
-                    );
-                    return Err(StreamingError::VerifyingKeyMissing);
-                }
-                Some(verifying_key) => {
-                    // signature field is the last field of options, meaning it starts at
-                    // `original.len() - payload.len() - SIGNATURE_LEN`
-                    //
-                    // in order to verify the signature, the calculated signature must be filled
-                    // with zeros
-                    let mut original = packet.to_vec();
-                    let signature_start = original.len() - payload.len() - SIGNATURE_LEN;
-                    original[signature_start..signature_start + SIGNATURE_LEN]
-                        .copy_from_slice(&[0u8; SIGNATURE_LEN]);
+        let destination_id = nacks
+            .into_iter()
+            .fold(BytesMut::with_capacity(32), |mut acc, x| {
+                acc.put_slice(&x.to_be_bytes());
+                acc
+            })
+            .freeze()
+            .to_vec();
 
-                    verifying_key.verify_new(&original, signature).map_err(|error| {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "failed to verify packet signature"
-                        );
-
-                        StreamingError::InvalidSignature
-                    })?;
-                }
-            }
+        if destination_id != self.destination_id.to_vec() {
+            return Err(StreamingError::ReplayProtectionCheckFailed);
         }
 
         tracing::info!(
@@ -352,8 +451,13 @@ impl<R: Runtime> StreamManager<R> {
                 // create new pending stream and send syn-ack for it
                 let destination_id = destination.id();
 
-                let (pending, packet) =
-                    PendingStream::new(destination_id.clone(), recv_stream_id, payload.to_vec());
+                let (pending, packet) = PendingStream::new(
+                    self.destination.clone(),
+                    destination_id.clone(),
+                    recv_stream_id,
+                    payload.to_vec(),
+                    &self.signing_key,
+                );
                 let _ = self.outbound_tx.try_send((destination_id.clone(), packet));
 
                 self.pending_inbound.insert(recv_stream_id, pending);
@@ -388,11 +492,13 @@ impl<R: Runtime> StreamManager<R> {
         // when it starts and uses that for sending
         let (tx, rx) = channel(STREAM_CHANNEL_SIZE);
         let context = StreamContext {
+            destination: self.destination.clone(),
             cmd_rx: rx,
             event_tx: self.outbound_tx.clone(),
             local: self.destination_id.clone(),
             recv_stream_id,
             remote: destination_id.clone(),
+            signing_key: self.signing_key.clone(),
         };
 
         // if the socket wasn't configured to be silent, send the remote's destination
@@ -553,12 +659,7 @@ impl<R: Runtime> StreamManager<R> {
 
     /// Handle `payload` received from `src_port` to `dst_port`.
     pub fn on_packet(&mut self, payload: I2cpPayload) -> Result<(), StreamingError> {
-        let I2cpPayload {
-            dst_port,
-            payload,
-            src_port,
-            ..
-        } = payload;
+        let I2cpPayload { payload, .. } = payload;
 
         let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
@@ -573,7 +674,7 @@ impl<R: Runtime> StreamManager<R> {
 
         // forward received packet to an active handler if it exists
         if let Some((_, tx)) = self.active.get(&packet.recv_stream_id()) {
-            if let Err(error) = tx.try_send(payload) {
+            if let Err(error) = tx.try_send(StreamEvent::Packet { packet: payload }) {
                 tracing::debug!(
                     target: LOG_TARGET,
                     local = %self.destination_id,
@@ -606,9 +707,9 @@ impl<R: Runtime> StreamManager<R> {
                     if let Some(PendingStream { destination_id, .. }) =
                         self.pending_inbound.remove(&packet.recv_stream_id())
                     {
-                        self.destination_streams.get_mut(&destination_id).map(|streams| {
-                            streams.remove(&packet.recv_stream_id());
-                        });
+                        if let Some(stream) = self.destination_streams.get_mut(&destination_id) {
+                            stream.remove(&packet.recv_stream_id());
+                        }
                     }
                 }
                 PendingStreamResult::Destroy => {
@@ -622,9 +723,9 @@ impl<R: Runtime> StreamManager<R> {
                     if let Some(PendingStream { destination_id, .. }) =
                         self.pending_inbound.remove(&packet.recv_stream_id())
                     {
-                        self.destination_streams.get_mut(&destination_id).map(|streams| {
-                            streams.remove(&packet.recv_stream_id());
-                        });
+                        if let Some(stream) = self.destination_streams.get_mut(&destination_id) {
+                            stream.remove(&packet.recv_stream_id());
+                        }
                     }
                 }
             }
@@ -636,7 +737,9 @@ impl<R: Runtime> StreamManager<R> {
         //
         // both deserialized packet and the original payload are returned
         // so the included signature can be verified
-        if packet.synchronize() {
+        //
+        // any new streams are ignored if stream manager is shutting down
+        if packet.synchronize() && !self.shutdown_handler.shutting_down() {
             return self.on_synchronize(payload);
         }
 
@@ -712,11 +815,6 @@ impl<R: Runtime> StreamManager<R> {
         (packet, recv_stream_id)
     }
 
-    /// Remove pending outbound stream associated with `recv_stream_id`.
-    pub fn remove_pending_stream(&mut self, recv_stream_id: u32) {
-        self.pending_outbound.remove(&recv_stream_id);
-    }
-
     /// Remove all streaming context associated with `destination_id`.
     pub fn remove_session(&mut self, destination_id: &DestinationId) {
         let Some(streams) = self.destination_streams.remove(destination_id) else {
@@ -737,6 +835,35 @@ impl<R: Runtime> StreamManager<R> {
             self.pending_outbound.remove(&stream_id);
         });
     }
+
+    /// Shut down [`StreamManager`].
+    ///
+    /// Send shutdown signal for each active stream which causes them to send a `CLOSE` packet to
+    /// remote. After all streams have exited, the stream manager can be shut down.
+    ///
+    /// A timer is also started which
+    ///
+    /// If there are no active streams, the stream manager is shut down right away.
+    pub fn shutdown(&mut self) {
+        tracing::info!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            "shut down stream manager",
+        );
+
+        self.active.values().for_each(|(_, tx)| {
+            if let Err(error) = tx.try_send(StreamEvent::ShutDown) {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    ?error,
+                    "failed to send shutdown signal to active stream",
+                );
+            }
+        });
+
+        self.shutdown_handler.start_shutdown::<R>();
+    }
 }
 
 impl<R: Runtime> futures::Stream for StreamManager<R> {
@@ -747,16 +874,43 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
             return Poll::Ready(Some(event));
         }
 
-        loop {
-            match self.outbound_rx.poll_recv(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some((destination_id, packet))) =>
-                    return Poll::Ready(Some(StreamManagerEvent::SendPacket {
-                        destination_id,
-                        packet,
-                    })),
+        // poll shutdown handler
+        //
+        // if shutdown hasn't been requested or the graceful shutdown timer is active,
+        // `shutdown_handler` keeps returning `Poll::Pending`
+        //
+        // once the timer expires, a graceful shutdown is skipped and stream manager is forcibly
+        // shut down, without gracefully closing all open streams
+        //
+        // after that (or after all streams have been gracefully shut down), the `shutdown_handler`
+        // is set to a shut down state and it keeps returning [`ShutdownEvent::AlreadyShutdown`]
+        // which short-circuits this stream implementation and keeps returning `Poll::Pending`
+        //
+        // this is done so that stream manager doesn't get polled after it has been shut down which
+        // might happen because the stream manager is shut down before the sam session that owns the
+        // manager is shut down
+        match self.shutdown_handler.poll_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(ShutdownEvent::ShutDown) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    num_active = ?self.active.len(),
+                    "forcibly shutting down stream manager",
+                );
+                return Poll::Ready(Some(StreamManagerEvent::ShutDown));
             }
+            Poll::Ready(ShutdownEvent::AlreadyShutDown) => return Poll::Pending,
+        }
+
+        match self.outbound_rx.poll_recv(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some((destination_id, packet))) =>
+                return Poll::Ready(Some(StreamManagerEvent::SendPacket {
+                    destination_id,
+                    packet,
+                })),
         }
 
         loop {
@@ -782,6 +936,17 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         );
                         continue;
                     };
+
+                    if self.streams.is_empty() && self.shutdown_handler.shutting_down() {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "stream manager has been shut down",
+                        );
+
+                        self.shutdown_handler.set_as_shutdown();
+                        self.pending_events.push_back(StreamManagerEvent::ShutDown);
+                    }
 
                     return Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id }));
                 }
@@ -841,10 +1006,8 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         // stream must exist since it was just fetched from `pending_outbound`
                         let PendingOutboundStream {
                             destination_id,
-                            silent,
                             mut socket,
-                            packet,
-                            num_sent,
+                            ..
                         } = self.pending_outbound.remove(&stream_id).expect("to exist");
 
                         tracing::debug!(
@@ -857,7 +1020,7 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         // send rejection to client and return event to `SamSession`
                         // indicating that the connection failed
                         R::spawn(async move {
-                            socket
+                            let _ = socket
                                 .send_message_blocking(
                                     b"STREAM STATUS RESULT=CANT_REACH_PEER\n".to_vec(),
                                 )
@@ -913,7 +1076,6 @@ mod tests {
         },
         sam::{protocol::streaming::packet::PacketBuilder, socket::SamSocket},
     };
-    use rand::RngCore;
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, BufReader},
         net::TcpListener,
@@ -934,7 +1096,7 @@ mod tests {
             let address = self.listener.local_addr().unwrap();
             let (stream1, stream2) =
                 tokio::join!(self.listener.accept(), MockTcpStream::connect(address));
-            let (mut stream, _) = stream1.unwrap();
+            let (stream, _) = stream1.unwrap();
 
             (SamSocket::new(stream2.unwrap()), stream)
         }
@@ -946,11 +1108,11 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (_stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         assert!(manager
@@ -963,16 +1125,16 @@ mod tests {
 
     #[tokio::test]
     async fn stale_pending_streams_are_pruned() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let mut packets = (0..3)
             .into_iter()
             .map(|stream_id| {
-                let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-                let destination = Destination::new(signing_key.public());
+                let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+                let destination = Destination::new::<MockRuntime>(signing_key.public());
                 let packet = PacketBuilder::new(stream_id as u32)
                     .with_synchronize()
                     .with_send_stream_id(0u32)
@@ -1064,14 +1226,14 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_silent_listener() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1096,8 +1258,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (_stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1140,14 +1302,14 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_non_silent_listener() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1172,8 +1334,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (_stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1211,14 +1373,14 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_persistent_listener() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1244,8 +1406,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let port = address.port();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (stream, _) = stream1.unwrap();
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Persistent {
@@ -1290,14 +1452,14 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_with_buffered_data_initialized() {
-        let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = destination.id();
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1384,7 +1546,6 @@ mod tests {
                         let Packet {
                             send_stream_id,
                             recv_stream_id,
-                            flags,
                             ack_through,
                             ..
                         } = Packet::parse(&packet).unwrap();
@@ -1407,7 +1568,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
         let (mut stream, _) = stream1.unwrap();
-        let mut socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1432,16 +1593,14 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager1 = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let mut manager2 = {
-            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1455,8 +1614,8 @@ mod tests {
             .is_ok());
 
         // create new oubound stream to `manager1`
-        let (socket, mut client_stream) = socket_factory.socket().await;
-        let (packet, stream_id) =
+        let (socket, client_stream) = socket_factory.socket().await;
+        let (packet, _stream_id) =
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
         assert!(manager1
@@ -1519,14 +1678,13 @@ mod tests {
         let remote = DestinationId::random();
 
         let mut manager2 = {
-            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         // create new oubound stream to `manager1`
-        let (socket, mut client_stream) = socket_factory.socket().await;
+        let (socket, client_stream) = socket_factory.socket().await;
         let _ = manager2.create_stream(remote.clone(), socket, false);
 
         // verify the syn packet is sent twice more
@@ -1571,9 +1729,8 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1586,8 +1743,8 @@ mod tests {
             })
             .is_ok());
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
@@ -1627,14 +1784,13 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
+        let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
@@ -1642,8 +1798,8 @@ mod tests {
             })
             .is_ok());
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = base64_encode(destination.id().to_vec());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1690,14 +1846,13 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = base64_encode(destination.id().to_vec());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
@@ -1721,7 +1876,7 @@ mod tests {
         assert!(!manager.pending_inbound.is_empty());
 
         // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
+        let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
@@ -1754,15 +1909,13 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
-        let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-        let destination = Destination::new(signing_key.public());
-        let destination_id = base64_encode(destination.id().to_vec());
+        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(signing_key.public());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
@@ -1785,7 +1938,7 @@ mod tests {
         assert!(!manager.pending_inbound.is_empty());
 
         // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
+        let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
@@ -1809,16 +1962,14 @@ mod tests {
         let socket_factory = SocketFactory::new().await;
 
         let mut manager1 = {
-            let signing_key = SigningPrivateKey::new(&[0u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
         let mut manager2 = {
-            let signing_key = SigningPrivateKey::new(&[1u8; 32]).unwrap();
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
@@ -1832,8 +1983,8 @@ mod tests {
             .is_ok());
 
         // create new oubound stream to `manager1`
-        let (socket, mut client_stream) = socket_factory.socket().await;
-        let (packet, stream_id) =
+        let (socket, client_stream) = socket_factory.socket().await;
+        let (packet, _stream_id) =
             manager2.create_stream(manager1.destination_id.clone(), socket, false);
 
         assert!(manager1
@@ -1897,13 +2048,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signature_missing_inbound_stream() {
+        let mut manager = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // build syn packet without signature
+        let payload = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+
+            PacketBuilder::new(1337u32)
+                .with_synchronize()
+                .with_send_stream_id(0u32)
+                .with_replay_protection(&manager.destination.id())
+                .with_from_included(destination)
+                .with_payload(b"hello, world\n")
+                .build()
+                .to_vec()
+        };
+
+        assert_eq!(
+            manager.on_packet(I2cpPayload {
+                dst_port: 0,
+                payload,
+                protocol: Protocol::Streaming,
+                src_port: 0
+            }),
+            Err(StreamingError::SignatureMissing),
+        );
+    }
+
+    #[tokio::test]
+    async fn destination_missing() {
+        let mut manager = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // build syn packet without replay protection
+        let packet = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+
+            PacketBuilder::new(1337u32)
+                .with_send_stream_id(0u32)
+                .with_synchronize()
+                .with_signature()
+                .with_from_included(destination.clone())
+                .build_and_sign(&signing_key)
+        };
+
+        assert_eq!(
+            manager.on_packet(I2cpPayload {
+                dst_port: 0,
+                payload: packet.to_vec(),
+                protocol: Protocol::Streaming,
+                src_port: 0
+            }),
+            Err(StreamingError::ReplayProtectionCheckFailed),
+        );
+    }
+
+    #[tokio::test]
     async fn inbound_stream() {
-        let signing_key = SigningPrivateKey::new(&[
+        let signing_key = SigningPrivateKey::from_bytes(&[
             116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
             221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
         ])
         .unwrap();
-        let destination = Destination::new(signing_key.public());
+        let destination = {
+            let serialized_len = (320usize + 32usize)
+                .saturating_add(32usize)
+                .saturating_add(1usize)
+                .saturating_add(2usize)
+                .saturating_add(4usize);
+
+            let mut out = BytesMut::with_capacity(serialized_len);
+
+            out.put_slice(&[0u8; 320usize + 32usize]);
+            out.put_slice(signing_key.public().as_ref());
+            out.put_u8(0x05);
+            out.put_u16(0x04);
+            out.put_u16(0x0007);
+            out.put_u16(0u16);
+
+            Destination::parse(&out).unwrap()
+        };
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let payload = vec![
@@ -1948,12 +2182,29 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let signing_key = SigningPrivateKey::new(&[
+        let signing_key = SigningPrivateKey::from_bytes(&[
             116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
             221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
         ])
         .unwrap();
-        let destination = Destination::new(signing_key.public());
+        let destination = {
+            let serialized_len = (320usize + 32usize)
+                .saturating_add(32usize)
+                .saturating_add(1usize)
+                .saturating_add(2usize)
+                .saturating_add(4usize);
+
+            let mut out = BytesMut::with_capacity(serialized_len);
+
+            out.put_slice(&[0u8; 320usize + 32usize]);
+            out.put_slice(signing_key.public().as_ref());
+            out.put_u8(0x05);
+            out.put_u16(0x04);
+            out.put_u16(0x0007);
+            out.put_u16(0u16);
+
+            Destination::parse(&out).unwrap()
+        };
         let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
 
         let payload = vec![
@@ -1999,50 +2250,32 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_destination_id() {
-        let signing_key = SigningPrivateKey::new(&[
-            116, 15, 103, 156, 205, 43, 224, 113, 103, 249, 182, 195, 149, 25, 171, 177, 151, 135,
-            221, 125, 79, 161, 205, 146, 188, 100, 15, 177, 189, 91, 167, 60,
-        ])
-        .unwrap();
-        let destination = Destination::new(signing_key.public());
-        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
+        let mut manager = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
 
-        let payload = vec![
-            0, 0, 0, 0, 7, 170, 162, 225, 0, 0, 0, 0, 0, 0, 0, 0, 8, 92, 237, 165, 51, 230, 31, 2,
-            219, 176, 105, 43, 109, 206, 122, 239, 241, 221, 135, 206, 60, 147, 145, 41, 155, 120,
-            133, 180, 145, 4, 26, 107, 40, 9, 4, 169, 1, 201, 127, 213, 228, 57, 98, 56, 202, 186,
-            4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107,
-            167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46,
-            112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93,
-            127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224,
-            232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56,
-            202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97,
-            227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192,
-            50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101,
-            93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46,
-            224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57,
-            98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217,
-            232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78,
-            254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167,
-            187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112,
-            10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127,
-            213, 228, 57, 98, 56, 202, 186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232,
-            108, 24, 217, 232, 97, 227, 107, 167, 187, 30, 101, 93, 127, 213, 228, 57, 98, 56, 202,
-            186, 4, 78, 254, 192, 50, 46, 112, 10, 223, 46, 224, 232, 108, 24, 217, 232, 97, 227,
-            107, 167, 187, 30, 101, 93, 25, 140, 66, 230, 135, 216, 58, 4, 196, 109, 50, 64, 50,
-            20, 213, 102, 99, 242, 187, 7, 216, 187, 137, 158, 228, 199, 195, 182, 38, 53, 40, 227,
-            5, 0, 4, 0, 7, 0, 0, 7, 20, 182, 215, 224, 75, 178, 60, 111, 31, 179, 197, 227, 223,
-            204, 20, 139, 51, 220, 96, 129, 16, 67, 235, 112, 185, 5, 108, 37, 55, 24, 251, 233,
-            175, 88, 10, 18, 128, 227, 33, 34, 87, 15, 141, 210, 183, 58, 42, 184, 148, 221, 156,
-            78, 128, 175, 18, 79, 142, 32, 0, 13, 28, 247, 4, 222, 7,
-        ];
+        let packet = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+
+            PacketBuilder::new(1337u32)
+                .with_send_stream_id(0u32)
+                .with_replay_protection(&DestinationId::random())
+                .with_synchronize()
+                .with_signature()
+                .with_from_included(destination.clone())
+                .build_and_sign(&signing_key)
+                .to_vec()
+        };
 
         assert_eq!(
             manager.on_packet(I2cpPayload {
                 src_port: 13u16,
                 dst_port: 37u16,
                 protocol: Protocol::Streaming,
-                payload,
+                payload: packet,
             }),
             Err(StreamingError::ReplayProtectionCheckFailed)
         );

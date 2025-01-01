@@ -20,6 +20,7 @@ use crate::{
     crypto::{base64_decode, SigningPrivateKey, StaticPrivateKey},
     primitives::Destination,
     protocol::Protocol,
+    runtime::Runtime,
 };
 
 use hashbrown::HashMap;
@@ -35,11 +36,12 @@ use nom::{
 };
 
 use alloc::{
+    boxed::Box,
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
 };
-use core::fmt;
+use core::{fmt, marker::PhantomData};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::parser";
@@ -48,7 +50,7 @@ const LOG_TARGET: &str = "emissary::sam::parser";
 ///
 /// Represent a command that had value form but isn't necessarily
 /// a command that `yosemite` recognizes.
-struct ParsedCommand<'a> {
+struct ParsedCommand<'a, R: Runtime> {
     /// Command
     ///
     /// Supported values: `HELLO`, `STATUS` and `STREAM`.
@@ -61,6 +63,9 @@ struct ParsedCommand<'a> {
 
     /// Parsed key-value pairs.
     key_value_pairs: HashMap<&'a str, &'a str>,
+
+    /// Marker for `Runtime.`
+    _runtime: PhantomData<R>,
 }
 
 /// Session kind.
@@ -78,12 +83,12 @@ pub enum SessionKind {
     Anonymous,
 }
 
-impl Into<Protocol> for SessionKind {
-    fn into(self) -> Protocol {
-        match self {
-            Self::Stream => Protocol::Streaming,
-            Self::Datagram => Protocol::Datagram,
-            Self::Anonymous => Protocol::Anonymous,
+impl From<SessionKind> for Protocol {
+    fn from(value: SessionKind) -> Self {
+        match value {
+            SessionKind::Stream => Protocol::Streaming,
+            SessionKind::Datagram => Protocol::Datagram,
+            SessionKind::Anonymous => Protocol::Anonymous,
         }
     }
 }
@@ -124,61 +129,34 @@ impl fmt::Display for SamVersion {
     }
 }
 
-/// Destination kind.
+/// Destination context.
 #[derive(Clone)]
-pub enum DestinationKind {
-    /// Transient session.
-    Transient,
+pub struct DestinationContext {
+    /// Destination.
+    pub destination: Destination,
 
-    /// Persistent session.
-    Persistent {
-        /// Destination.
-        destination: Destination,
+    /// Private key of the destination.
+    pub private_key: Box<StaticPrivateKey>,
 
-        /// Private key of the destination.
-        private_key: StaticPrivateKey,
-
-        /// Signing key of the destination.
-        signing_key: SigningPrivateKey,
-    },
+    /// Signing key of the destination.
+    pub signing_key: Box<SigningPrivateKey>,
 }
 
-impl fmt::Debug for DestinationKind {
+impl fmt::Debug for DestinationContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Transient => f.debug_struct("DestinationKind::Transient").finish(),
-            Self::Persistent {
-                destination,
-                private_key,
-                signing_key,
-            } => f.debug_struct("DestinationKind::Persistent").finish_non_exhaustive(),
-        }
+        f.debug_struct("DestinationContext").finish_non_exhaustive()
     }
 }
 
-impl PartialEq for DestinationKind {
+impl PartialEq for DestinationContext {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (DestinationKind::Transient, DestinationKind::Transient) => true,
-            (
-                DestinationKind::Persistent {
-                    destination: dst1,
-                    private_key: priv1,
-                    signing_key: sign1,
-                },
-                DestinationKind::Persistent {
-                    destination: dst2,
-                    private_key: priv2,
-                    signing_key: sign2,
-                },
-            ) =>
-                dst1 == dst2 && priv1.as_ref() == priv2.as_ref() && sign1.as_ref() == sign2.as_ref(),
-            _ => false,
-        }
+        self.destination == other.destination
+            && (*self.private_key).as_ref() == (*other.private_key).as_ref()
+            && (*self.signing_key).as_ref() == (*other.signing_key).as_ref()
     }
 }
 
-impl Eq for DestinationKind {}
+impl Eq for DestinationContext {}
 
 /// SAMv3 commands received from the client.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -200,8 +178,8 @@ pub enum SamCommand {
         /// Session kind:
         session_kind: SessionKind,
 
-        /// Destination kind.
-        destination: DestinationKind,
+        /// Destination context.
+        destination: DestinationContext,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -276,22 +254,20 @@ impl fmt::Display for SamCommand {
     }
 }
 
-impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
+impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
     type Error = ();
 
-    fn try_from(mut value: ParsedCommand<'a>) -> Result<Self, Self::Error> {
+    fn try_from(mut value: ParsedCommand<'a, R>) -> Result<Self, Self::Error> {
         match (value.command, value.subcommand) {
             ("HELLO", Some("VERSION")) => Ok(Self::Hello {
                 min: value
                     .key_value_pairs
                     .get("MIN")
-                    .map(|value| SamVersion::try_from(*value).ok())
-                    .flatten(),
+                    .and_then(|value| SamVersion::try_from(*value).ok()),
                 max: value
                     .key_value_pairs
                     .get("MAX")
-                    .map(|value| SamVersion::try_from(*value).ok())
-                    .flatten(),
+                    .and_then(|value| SamVersion::try_from(*value).ok()),
             }),
             ("SESSION", Some("CREATE")) => {
                 let session_id = value
@@ -302,7 +278,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                             target: LOG_TARGET,
                             "session id missing from `SESSION CREATE`",
                         );
-                        ()
                     })?
                     .to_string();
 
@@ -310,13 +285,13 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                     Some("STREAM") => SessionKind::Stream,
                     style @ (Some("RAW") | Some("DATAGRAM")) => {
                         // currently only forwarded datagrams are supported
-                        let port = value.key_value_pairs.get("PORT").ok_or_else(|| {
+                        //
+                        // TODO: why is port unused?
+                        let _ = value.key_value_pairs.get("PORT").ok_or_else(|| {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 "only forwarded raw datagrams are supported",
                             );
-
-                            ()
                         })?;
 
                         // if no host was specified, default to localhost
@@ -342,20 +317,36 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                 };
 
                 let destination = match value.key_value_pairs.remove("DESTINATION") {
-                    Some("TRANSIENT") => DestinationKind::Transient,
+                    Some("TRANSIENT") => {
+                        let signing_key = SigningPrivateKey::random(R::rng());
+                        let encryption_key = StaticPrivateKey::random(R::rng());
+                        let destination = Destination::new::<R>(signing_key.public());
+
+                        DestinationContext {
+                            destination,
+                            private_key: Box::new(encryption_key),
+                            signing_key: Box::new(signing_key),
+                        }
+                    }
                     Some(destination) => {
                         let decoded = base64_decode(destination).ok_or(())?;
                         let (rest, destination) =
                             Destination::parse_frame(&decoded).map_err(|_| ())?;
                         let (rest, private_key) =
                             take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
-                        let (rest, signing_key) =
-                            take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
+                        let (_, signing_key) = take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
 
-                        DestinationKind::Persistent {
+                        // conversions are expected succeed since the client is interacting with
+                        // a local router and would only crash their onw router if they provided
+                        // invalid keying material
+                        DestinationContext {
                             destination,
-                            private_key: StaticPrivateKey::from(private_key.to_vec()),
-                            signing_key: SigningPrivateKey::new(&signing_key).ok_or(())?,
+                            private_key: Box::new(
+                                StaticPrivateKey::from_bytes(private_key).expect("to succeed"),
+                            ),
+                            signing_key: Box::new(
+                                SigningPrivateKey::from_bytes(signing_key).expect("to succeed"),
+                            ),
                         }
                     }
                     None => {
@@ -385,16 +376,12 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         target: LOG_TARGET,
                         "session id missing for `STREAM CONNECT`"
                     );
-
-                    ()
                 })?;
                 let destination = value.key_value_pairs.get("DESTINATION").ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         "destination missing for `STREAM CONNECT`"
                     );
-
-                    ()
                 })?;
 
                 let decoded = base64_decode(destination).ok_or(())?;
@@ -416,8 +403,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         target: LOG_TARGET,
                         "session id missing for `STREAM ACCEPT`"
                     );
-
-                    ()
                 })?;
 
                 Ok(SamCommand::Accept {
@@ -435,8 +420,6 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                         target: LOG_TARGET,
                         "session id missing for `STREAM FORWARD`"
                     );
-
-                    ()
                 })?;
                 let port = value
                     .key_value_pairs
@@ -446,11 +429,9 @@ impl<'a> TryFrom<ParsedCommand<'a>> for SamCommand {
                             target: LOG_TARGET,
                             "destination missing for `STREAM FORWARD`"
                         );
-
-                        ()
                     })?
                     .parse::<u16>()
-                    .map_err(|error| ())?;
+                    .map_err(|_| ())?;
 
                 Ok(SamCommand::Forward {
                     session_id: session_id.to_string(),
@@ -502,7 +483,7 @@ impl SamCommand {
     /// Attempt to parse `input` into `Response`.
     //
     // Non-public method returning `IResult` for cleaner error handling.
-    fn parse_inner(input: &str) -> IResult<&str, Self> {
+    fn parse_inner<R: Runtime>(input: &str) -> IResult<&str, Self> {
         let (rest, (command, _, subcommand, _, key_value_pairs)) = tuple((
             alt((
                 tag("HELLO"),
@@ -527,18 +508,19 @@ impl SamCommand {
 
         Ok((
             rest,
-            SamCommand::try_from(ParsedCommand {
+            SamCommand::try_from(ParsedCommand::<R> {
                 command,
                 subcommand,
                 key_value_pairs: key_value_pairs.unwrap_or(HashMap::new()),
+                _runtime: Default::default(),
             })
             .map_err(|_| Err::Error(make_error(input, ErrorKind::Fail)))?,
         ))
     }
 
     /// Attempt to parse `input` into `Response`.
-    pub fn parse(input: &str) -> Option<Self> {
-        Some(Self::parse_inner(input).ok()?.1)
+    pub fn parse<R: Runtime>(input: &str) -> Option<Self> {
+        Some(Self::parse_inner::<R>(input).ok()?.1)
     }
 }
 
@@ -633,7 +615,7 @@ mod tests {
     #[test]
     fn parse_hello() {
         // min and max are the same
-        match SamCommand::parse("HELLO VERSION MIN=3.3 MAX=3.3") {
+        match SamCommand::parse::<MockRuntime>("HELLO VERSION MIN=3.3 MAX=3.3") {
             Some(SamCommand::Hello {
                 min: Some(SamVersion::V33),
                 max: Some(SamVersion::V33),
@@ -642,7 +624,7 @@ mod tests {
         }
 
         // no version defined
-        match SamCommand::parse("HELLO VERSION") {
+        match SamCommand::parse::<MockRuntime>("HELLO VERSION") {
             Some(SamCommand::Hello {
                 min: None,
                 max: None,
@@ -651,25 +633,25 @@ mod tests {
         }
 
         // invalid subcommand
-        assert!(SamCommand::parse("HELLO REPLY").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("HELLO REPLY").is_none());
     }
 
     #[test]
     fn unrecognized_command() {
-        assert!(SamCommand::parse("TEST COMMAND KEY=VALUE").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("TEST COMMAND KEY=VALUE").is_none());
     }
 
     #[test]
     fn parse_session_create_stream() {
         // transient
-        match SamCommand::parse(
+        match SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=STREAM ID=test DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         ) {
             Some(SamCommand::CreateSession {
                 session_id,
                 session_kind: SessionKind::Stream,
-                destination: DestinationKind::Transient,
                 options,
+                ..
             }) => {
                 assert_eq!(session_id.as_str(), "test");
                 assert_eq!(
@@ -682,13 +664,10 @@ mod tests {
 
         // persistent
         let privkey = {
-            let mut rng = MockRuntime::rng();
+            let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+            let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
 
-            let signing_key = SigningPrivateKey::random(&mut rng);
-            let encryption_key = StaticPrivateKey::new(rng);
-
-            let destination = Destination::new(signing_key.public());
-            let destination_id = destination.id();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
 
             let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
             out.put_slice(&destination.serialize());
@@ -698,14 +677,14 @@ mod tests {
             base64_encode(out)
         };
 
-        match SamCommand::parse(&format!(
+        match SamCommand::parse::<MockRuntime>(&format!(
             "SESSION CREATE STYLE=STREAM ID=test DESTINATION={privkey} i2cp.leaseSetEncType=4,0"
         )) {
             Some(SamCommand::CreateSession {
                 session_id,
                 session_kind: SessionKind::Stream,
-                destination: DestinationKind::Persistent { .. },
                 options,
+                ..
             }) => {
                 assert_eq!(session_id.as_str(), "test");
                 assert_eq!(
@@ -717,13 +696,13 @@ mod tests {
         }
 
         // invalid destination
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=DATAGRAM ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
         )
         .is_none());
 
         // session id missing
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=DATAGRAM DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         )
         .is_none());
@@ -732,17 +711,17 @@ mod tests {
     #[test]
     fn parse_stream_connect() {
         let destination = {
-            let mut signing_key = SigningPrivateKey::random(&mut MockRuntime::rng());
-            base64_encode(Destination::new(signing_key.public()).serialize())
+            let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+            base64_encode(Destination::new::<MockRuntime>(signing_key.public()).serialize())
         };
 
-        match SamCommand::parse(&format!(
+        match SamCommand::parse::<MockRuntime>(&format!(
             "STREAM CONNECT ID=MM9z52ZwnTTPwfeD DESTINATION={destination} SILENT=false"
         )) {
             Some(SamCommand::Connect {
                 session_id,
-                destination,
                 options,
+                ..
             }) => {
                 assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
                 assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
@@ -751,21 +730,27 @@ mod tests {
         }
 
         // invalid subcommand
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "STREAM CREATE ID=MM9z52ZwnTTPwfeD  DESTINATION=host.i2p SILENT=false",
         )
         .is_none());
 
         // session id missing
-        assert!(SamCommand::parse("STREAM CONNECT DESTINATION=host.i2p SILENT=false",).is_none());
+        assert!(SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT DESTINATION=host.i2p SILENT=false",
+        )
+        .is_none());
 
         // non-transient destination
-        assert!(SamCommand::parse("STREAM CONNECT ID=MM9z52ZwnTTPwfeD SILENT=false",).is_none());
+        assert!(SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT ID=MM9z52ZwnTTPwfeD SILENT=false",
+        )
+        .is_none());
     }
 
     #[test]
     fn parse_stream_accept() {
-        match SamCommand::parse("STREAM ACCEPT ID=MM9z52ZwnTTPwfeD SILENT=false") {
+        match SamCommand::parse::<MockRuntime>("STREAM ACCEPT ID=MM9z52ZwnTTPwfeD SILENT=false") {
             Some(SamCommand::Accept {
                 session_id,
                 options,
@@ -777,12 +762,14 @@ mod tests {
         }
 
         // session id missing
-        assert!(SamCommand::parse("STREAM ACCEPT SILENT=false").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("STREAM ACCEPT SILENT=false").is_none());
     }
 
     #[test]
     fn parse_stream_forward() {
-        match SamCommand::parse("STREAM FORWARD ID=MM9z52ZwnTTPwfeD PORT=8888 SILENT=false") {
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM FORWARD ID=MM9z52ZwnTTPwfeD PORT=8888 SILENT=false",
+        ) {
             Some(SamCommand::Forward {
                 session_id,
                 port,
@@ -796,15 +783,20 @@ mod tests {
         }
 
         // session id missing
-        assert!(SamCommand::parse("STREAM FORWARD PORT=8888 SILENT=false").is_none());
+        assert!(
+            SamCommand::parse::<MockRuntime>("STREAM FORWARD PORT=8888 SILENT=false").is_none()
+        );
 
         // port missing
-        assert!(SamCommand::parse("STREAM FORWARD ID=MM9z52ZwnTTPwfeD SILENT=false").is_none());
+        assert!(SamCommand::parse::<MockRuntime>(
+            "STREAM FORWARD ID=MM9z52ZwnTTPwfeD SILENT=false"
+        )
+        .is_none());
     }
 
     #[test]
     fn parse_naming_lookup() {
-        match SamCommand::parse("NAMING LOOKUP NAME=host.i2p") {
+        match SamCommand::parse::<MockRuntime>("NAMING LOOKUP NAME=host.i2p") {
             Some(SamCommand::NamingLookup { name }) => {
                 assert_eq!(name.as_str(), "host.i2p");
             }
@@ -812,33 +804,33 @@ mod tests {
         }
 
         // subcommand missing
-        assert!(SamCommand::parse("NAMING").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("NAMING").is_none());
 
         // invalid subcommand
-        assert!(SamCommand::parse("NAMING GENERATE").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("NAMING GENERATE").is_none());
 
         // name missing
-        assert!(SamCommand::parse("NAMING LOOKUP").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("NAMING LOOKUP").is_none());
     }
 
     #[test]
     fn parse_dest_generate() {
-        match SamCommand::parse("DEST GENERATE SIGNATURE_TYPE=7") {
+        match SamCommand::parse::<MockRuntime>("DEST GENERATE SIGNATURE_TYPE=7") {
             Some(SamCommand::GenerateDestination) => {}
             response => panic!("invalid response: {response:?}"),
         }
 
         // invalid signature type
-        assert!(SamCommand::parse("DEST GENERATE SIGNATURE_TYPE=1337").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("DEST GENERATE SIGNATURE_TYPE=1337").is_none());
 
         // signature type missing
-        assert!(SamCommand::parse("DEST GENERATE").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("DEST GENERATE").is_none());
 
         // subcommand missing
-        assert!(SamCommand::parse("DEST").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("DEST").is_none());
 
         // invalid subcommand
-        assert!(SamCommand::parse("DEST LOOKUP").is_none());
+        assert!(SamCommand::parse::<MockRuntime>("DEST LOOKUP").is_none());
     }
 
     #[test]
@@ -853,12 +845,12 @@ mod tests {
                         SIGNATURE_TYPE=7 \
                         i2cp.leaseSetEncType=4\n";
 
-            match SamCommand::parse(command) {
+            match SamCommand::parse::<MockRuntime>(command) {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Datagram,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.2.2.2".to_string()));
@@ -877,12 +869,12 @@ mod tests {
                         SIGNATURE_TYPE=7 \
                         i2cp.leaseSetEncType=4\n";
 
-            match SamCommand::parse(command) {
+            match SamCommand::parse::<MockRuntime>(command) {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Datagram,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.0.0.1".to_string()));
@@ -900,19 +892,16 @@ mod tests {
                         SIGNATURE_TYPE=7 \
                         i2cp.leaseSetEncType=4\n";
 
-            assert!(SamCommand::parse(command).is_none());
+            assert!(SamCommand::parse::<MockRuntime>(command).is_none());
         }
 
         // session with persistent destination
         {
             let privkey = {
-                let mut rng = MockRuntime::rng();
+                let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+                let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
 
-                let signing_key = SigningPrivateKey::random(&mut rng);
-                let encryption_key = StaticPrivateKey::new(rng);
-
-                let destination = Destination::new(signing_key.public());
-                let destination_id = destination.id();
+                let destination = Destination::new::<MockRuntime>(signing_key.public());
 
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
@@ -932,12 +921,12 @@ mod tests {
                         i2cp.leaseSetEncType=4\n"
             );
 
-            match SamCommand::parse(&command) {
+            match SamCommand::parse::<MockRuntime>(&command) {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Datagram,
-                    destination: DestinationKind::Persistent { .. },
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id.as_str(), "test");
                     assert_eq!(options.get("i2cp.leaseSetEncType"), Some(&"4".to_string()));
@@ -947,13 +936,13 @@ mod tests {
         }
 
         // invalid destination
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=DATAGRAM PORT=8888 ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
         )
         .is_none());
 
         // session id missing
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=DATAGRAM PORT=8888 DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         )
         .is_none());
@@ -971,12 +960,12 @@ mod tests {
                         SIGNATURE_TYPE=7 \
                         i2cp.leaseSetEncType=4\n";
 
-            match SamCommand::parse(command) {
+            match SamCommand::parse::<MockRuntime>(command) {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Anonymous,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.2.2.2".to_string()));
@@ -995,12 +984,12 @@ mod tests {
                         SIGNATURE_TYPE=7 \
                         i2cp.leaseSetEncType=4\n";
 
-            match SamCommand::parse(command) {
+            match SamCommand::parse::<MockRuntime>(command) {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Anonymous,
-                    destination,
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id, "test");
                     assert_eq!(options.get("HOST"), Some(&"127.0.0.1".to_string()));
@@ -1018,19 +1007,16 @@ mod tests {
                         SIGNATURE_TYPE=7 \
                         i2cp.leaseSetEncType=4\n";
 
-            assert!(SamCommand::parse(command).is_none());
+            assert!(SamCommand::parse::<MockRuntime>(command).is_none());
         }
 
         // session with persistent destination
         {
             let privkey = {
-                let mut rng = MockRuntime::rng();
+                let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+                let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
 
-                let signing_key = SigningPrivateKey::random(&mut rng);
-                let encryption_key = StaticPrivateKey::new(rng);
-
-                let destination = Destination::new(signing_key.public());
-                let destination_id = destination.id();
+                let destination = Destination::new::<MockRuntime>(signing_key.public());
 
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
@@ -1050,12 +1036,12 @@ mod tests {
                         i2cp.leaseSetEncType=4\n"
             );
 
-            match SamCommand::parse(&command) {
+            match SamCommand::parse::<MockRuntime>(&command) {
                 Some(SamCommand::CreateSession {
                     session_id,
                     session_kind: SessionKind::Anonymous,
-                    destination: DestinationKind::Persistent { .. },
                     options,
+                    ..
                 }) => {
                     assert_eq!(session_id.as_str(), "test");
                     assert_eq!(options.get("i2cp.leaseSetEncType"), Some(&"4".to_string()));
@@ -1065,13 +1051,13 @@ mod tests {
         }
 
         // invalid destination
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=RAW PORT=8888 ID=test DESTINATION=BASE64_DESTINATION i2cp.leaseSetEncType=4,0",
         )
         .is_none());
 
         // session id missing
-        assert!(SamCommand::parse(
+        assert!(SamCommand::parse::<MockRuntime>(
             "SESSION CREATE STYLE=RAW PORT=8888 DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         )
         .is_none());
@@ -1080,11 +1066,10 @@ mod tests {
     #[test]
     fn parse_datagram() {
         let destination = {
-            let mut rng = MockRuntime::rng();
-            let signing_key = SigningPrivateKey::random(&mut rng);
-            let encryption_key = StaticPrivateKey::new(rng);
+            let rng = MockRuntime::rng();
+            let signing_key = SigningPrivateKey::random(rng);
 
-            Destination::new(signing_key.public())
+            Destination::new::<MockRuntime>(signing_key.public())
         };
         let serialized = {
             let mut out = BytesMut::with_capacity(destination.serialized_len());
@@ -1099,13 +1084,13 @@ mod tests {
         match Datagram::parse(&datagram) {
             Some(Datagram {
                 session_id,
-                destination: parsed,
                 datagram,
+                ..
             }) => {
                 assert_eq!(*session_id, *"test");
                 assert_eq!(datagram, b"hello, world");
             }
-            response => panic!("invalid datagram"),
+            _ => panic!("invalid datagram"),
         }
 
         {
@@ -1128,7 +1113,7 @@ mod tests {
                     assert_eq!(*session_id, *"12OzbmMqo3bdv3w8");
                     assert_eq!(datagram, b"hello, world 1");
                 }
-                response => panic!("invalid datagram"),
+                _ => panic!("invalid datagram"),
             }
         }
     }

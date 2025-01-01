@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    error::{ConnectionError, Error, StreamingError},
+    error::StreamingError,
     primitives::DestinationId,
     runtime::{JoinSet, Runtime, TcpStream},
     sam::socket::SamSocket,
@@ -86,6 +86,7 @@ impl<R: Runtime> fmt::Debug for ListenerKind<R> {
 /// Socket kind for a SAMV3 socket.
 pub enum SocketKind<R: Runtime> {
     /// Direct connection opened with `STREAM CONNECT`.
+    #[allow(unused)]
     Connect {
         /// Underlying TCP stream of the SAMv3 socket.
         socket: R::TcpStream,
@@ -180,6 +181,7 @@ enum ListenerState<R: Runtime> {
     /// Listener is configured to be persistent.
     Persistent {
         /// Socket that was used to send the `STREAM FORWARD` command.
+        #[allow(unused)]
         socket: SamSocket<R>,
 
         /// Port of the active TCP listener.
@@ -305,11 +307,11 @@ impl<R: Runtime> StreamListener<R> {
                     kind: PendingListenerKind::Ephemeral,
                 },
                 kind @ ListenerKind::Ephemeral { .. },
-            ) => return Some(kind),
+            ) => Some(kind),
 
             // only an unitialized listener can accept `STREAM FORWARD`
             (ListenerState::Uninitialized { .. }, kind @ ListenerKind::Persistent { .. }) =>
-                return Some(kind),
+                Some(kind),
 
             // all other states are invalid and the accept requested is rejected
             (state, kind @ (ListenerKind::Ephemeral { .. } | ListenerKind::Persistent { .. })) => {
@@ -404,7 +406,10 @@ impl<R: Runtime> StreamListener<R> {
                                 .await
                                 .map(|()| socket)
                         });
-                        self.waker.take().map(|waker| waker.wake_by_ref());
+
+                        if let Some(waker) = self.waker.take() {
+                            waker.wake_by_ref();
+                        }
 
                         Ok(false)
                     }
@@ -433,7 +438,10 @@ impl<R: Runtime> StreamListener<R> {
                             .await
                             .map(|()| socket)
                     });
-                    self.waker.take().map(|waker| waker.wake_by_ref());
+
+                    if let Some(waker) = self.waker.take() {
+                        waker.wake_by_ref();
+                    }
 
                     Ok(false)
                 }
@@ -453,7 +461,10 @@ impl<R: Runtime> StreamListener<R> {
                             .await
                             .map(|()| socket)
                     });
-                    self.waker.take().map(|waker| waker.wake_by_ref());
+
+                    if let Some(waker) = self.waker.take() {
+                        waker.wake_by_ref();
+                    }
 
                     Ok(false)
                 }
@@ -483,7 +494,10 @@ impl<R: Runtime> StreamListener<R> {
                         .await
                         .map(|()| socket)
                 });
-                self.waker.take().map(|waker| waker.wake_by_ref());
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
 
                 Ok(false)
             }
@@ -562,7 +576,6 @@ mod tests {
         mock::{MockRuntime, MockTcpStream},
         noop::{NoopRuntime, NoopTcpStream},
     };
-    use std::time::Duration;
     use tokio::net::TcpListener;
 
     #[test]

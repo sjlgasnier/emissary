@@ -83,19 +83,17 @@ impl Aes {
         let mut blocks = plaintext
             .as_ref()
             .chunks(16)
-            .into_iter()
             .map(|chunk| {
                 GenericArray::from(TryInto::<[u8; 16]>::try_into(chunk).expect("to succeed"))
             })
             .collect::<Vec<_>>();
 
-        let _ = aes.encrypt_blocks_mut(&mut blocks);
+        aes.encrypt_blocks_mut(&mut blocks);
         let _iv = aes.iv_state();
 
         blocks
             .into_iter()
-            .map(|block| block.into_iter().collect::<Vec<u8>>())
-            .flatten()
+            .flat_map(|block| block.into_iter().collect::<Vec<u8>>())
             .collect()
     }
 
@@ -112,18 +110,15 @@ impl Aes {
         let mut blocks = ciphertext
             .as_ref()
             .chunks(16)
-            .into_iter()
             .map(|chunk| {
                 GenericArray::from(TryInto::<[u8; 16]>::try_into(chunk).expect("to succeed"))
             })
             .collect::<Vec<_>>();
 
-        let _ = aes.decrypt_blocks_mut(&mut blocks);
-
+        aes.decrypt_blocks_mut(&mut blocks);
         blocks
             .into_iter()
-            .map(|block| block.into_iter().collect::<Vec<u8>>())
-            .flatten()
+            .flat_map(|block| block.into_iter().collect::<Vec<u8>>())
             .collect::<Vec<u8>>()
     }
 

@@ -25,7 +25,7 @@ use crate::{
     protocol::Protocol,
     runtime::Runtime,
     sam::{
-        parser::{DestinationKind, SamVersion, SessionKind},
+        parser::{DestinationContext, SessionKind},
         pending::session::SamSessionContext,
         protocol::{
             datagram::DatagramManager,
@@ -128,6 +128,7 @@ enum ProtocolKind<R: Runtime> {
         socket: SamSocket<R>,
 
         /// Remote destination.
+        #[allow(unused)]
         destination: Dest,
 
         /// Stream options.
@@ -147,15 +148,9 @@ enum ProtocolKind<R: Runtime> {
 impl<R: Runtime> fmt::Debug for ProtocolKind<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stream {
-                socket,
-                destination,
-                options,
-            } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
-            Self::Datagram {
-                destination,
-                datagrams,
-            } => f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
+            Self::Stream { .. } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
+            Self::Datagram { .. } =>
+                f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
         }
     }
 }
@@ -204,6 +199,7 @@ pub struct SamSession<R: Runtime> {
     encryption_key: StaticPrivateKey,
 
     /// Session options.
+    #[allow(unused)]
     options: HashMap<String, String>,
 
     /// Pending outbound streams.
@@ -229,13 +225,12 @@ pub struct SamSession<R: Runtime> {
     signing_key: SigningPrivateKey,
 
     /// Socket for reading session-related commands from the client.
-    socket: SamSocket<R>,
+    ///
+    /// Set to `None` after the socket has been closed and th session is being destroyed.
+    socket: Option<SamSocket<R>>,
 
     /// I2P virtual stream manager.
     stream_manager: StreamManager<R>,
-
-    /// Negotiated SAMv3 version.
-    version: SamVersion,
 }
 
 impl<R: Runtime> SamSession<R> {
@@ -253,28 +248,15 @@ impl<R: Runtime> SamSession<R> {
             session_id,
             session_kind,
             tunnel_pool_handle,
-            version,
         } = context;
 
         let (session_destination, dest, privkey, encryption_key, signing_key) = {
-            let (encryption_key, signing_key, destination_id, destination) = match destination {
-                DestinationKind::Transient => {
-                    let mut rng = R::rng();
-
-                    let signing_key = SigningPrivateKey::random(&mut rng);
-                    let encryption_key = StaticPrivateKey::new(rng);
-
-                    let destination = Dest::new(signing_key.public());
-                    let destination_id = destination.id();
-
-                    (encryption_key, signing_key, destination_id, destination)
-                }
-                DestinationKind::Persistent {
-                    destination,
-                    private_key,
-                    signing_key,
-                } => (private_key, signing_key, destination.id(), destination),
-            };
+            let DestinationContext {
+                destination,
+                private_key,
+                signing_key,
+            } = destination;
+            let destination_id = destination.id();
 
             // from specification:
             //
@@ -285,14 +267,14 @@ impl<R: Runtime> SamSession<R> {
             let privkey = {
                 let mut out = BytesMut::with_capacity(destination.serialized_len() + 2 * 32);
                 out.put_slice(&destination.serialize());
-                out.put_slice(encryption_key.as_ref());
-                out.put_slice(signing_key.as_ref());
+                out.put_slice((*private_key).as_ref());
+                out.put_slice((*signing_key).as_ref());
 
                 base64_encode(out)
             };
 
             // create leaseset for the destination and store it in `NetDb`
-            let public_key = encryption_key.public();
+            let public_key = private_key.public();
             let local_leaseset = Bytes::from(
                 LeaseSet2 {
                     header: LeaseSet2Header {
@@ -308,7 +290,7 @@ impl<R: Runtime> SamSession<R> {
 
             let mut session_destination = Destination::new(
                 destination_id.clone(),
-                encryption_key.clone(),
+                *private_key.clone(),
                 local_leaseset.clone(),
                 netdb_handle,
                 tunnel_pool_handle,
@@ -329,7 +311,7 @@ impl<R: Runtime> SamSession<R> {
                 session_destination,
                 destination,
                 privkey,
-                encryption_key,
+                private_key,
                 signing_key,
             )
         };
@@ -343,21 +325,84 @@ impl<R: Runtime> SamSession<R> {
                 dest.clone(),
                 datagram_tx,
                 options.clone(),
-                signing_key.clone(),
+                *signing_key.clone(),
                 session_kind,
             ),
             dest: dest.clone(),
             destination: session_destination,
-            encryption_key,
+            encryption_key: *encryption_key,
             options,
             pending_outbound: HashMap::new(),
             receiver,
             session_id,
             session_kind,
-            signing_key: signing_key.clone(),
+            signing_key: *signing_key.clone(),
+            socket: Some(socket),
+            stream_manager: StreamManager::new(dest, *signing_key),
+        }
+    }
+
+    /// Create outbound stream for a remote destiantion who's lease set has been resolved.
+    ///
+    /// The stream is considered pending and it's acceptance contingent on the remote destination
+    /// responding to us within a reasonable time frame.
+    fn create_outbound_stream(
+        &mut self,
+        destination_id: DestinationId,
+        socket: SamSocket<R>,
+        options: HashMap<String, String>,
+    ) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            %destination_id,
+            "create pending outbound stream",
+        );
+
+        let (packet, stream_id) = self.stream_manager.create_stream(
+            destination_id.clone(),
             socket,
-            stream_manager: StreamManager::new(dest, signing_key),
-            version,
+            options
+                .get("SILENT")
+                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+        );
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = ?self.session_id,
+            %destination_id,
+            ?stream_id,
+            "lease set found, create outbound stream",
+        );
+
+        // mark the stream as pending & waiting for session to be opened
+        //
+        // from now on `StreamManager` will drive forward the stream progress and will
+        // emit an event when the stream opens/fails to open
+        self.pending_outbound.insert(
+            destination_id.clone(),
+            PendingSessionState::AwaitingSession { stream_id },
+        );
+
+        let Some(message) =
+            I2cpPayloadBuilder::<R>::new(&packet).with_protocol(Protocol::Streaming).build()
+        else {
+            tracing::error!(
+                target: LOG_TARGET,
+                session_id = ?self.session_id,
+                "failed to create i2cp payload",
+            );
+            debug_assert!(false);
+            return;
+        };
+
+        if let Err(error) = self.destination.send_message(&destination_id, message) {
+            tracing::error!(
+                target: LOG_TARGET,
+                session_id = ?self.session_id,
+                ?error,
+                "failed to send message to remote peer",
+            );
+            debug_assert!(false);
         }
     }
 
@@ -366,7 +411,7 @@ impl<R: Runtime> SamSession<R> {
     /// TODO: more documentation
     fn on_stream_connect(
         &mut self,
-        socket: SamSocket<R>,
+        mut socket: SamSocket<R>,
         destination: Dest,
         options: HashMap<String, String>,
     ) {
@@ -381,6 +426,20 @@ impl<R: Runtime> SamSession<R> {
             return drop(socket);
         };
 
+        if destination.id() == self.dest.id() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "tried to open connection to self",
+            );
+
+            R::spawn(async move {
+                let _ = socket
+                    .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
+                    .await;
+            });
+            return;
+        }
+
         tracing::info!(
             target: LOG_TARGET,
             session_id = %self.session_id,
@@ -390,13 +449,7 @@ impl<R: Runtime> SamSession<R> {
         let destination_id = destination.id();
 
         match self.destination.query_lease_set(&destination_id) {
-            LeaseSetStatus::Found => {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    "not implemented",
-                );
-                todo!();
-            }
+            LeaseSetStatus::Found => self.create_outbound_stream(destination_id, socket, options),
             LeaseSetStatus::NotFound => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -595,59 +648,8 @@ impl<R: Runtime> SamSession<R> {
         match self.pending_outbound.remove(&destination_id) {
             Some(PendingSessionState::AwaitingLeaseSet { protocol }) => match protocol {
                 ProtocolKind::Stream {
-                    socket,
-                    destination,
-                    options,
-                } => {
-                    let destination_id = destination.id();
-                    let (packet, stream_id) = self.stream_manager.create_stream(
-                        destination_id.clone(),
-                        socket,
-                        options
-                            .get("SILENT")
-                            .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
-                    );
-
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        session_id = ?self.session_id,
-                        %destination_id,
-                        ?stream_id,
-                        "lease set found, create outbound stream",
-                    );
-
-                    // mark the stream as pending & waiting for session to be opened
-                    //
-                    // from now on `StreamManager` will drive forward the stream progress and will
-                    // emit an event when the stream opens/fails to open
-                    self.pending_outbound.insert(
-                        destination_id.clone(),
-                        PendingSessionState::AwaitingSession { stream_id },
-                    );
-
-                    let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
-                        .with_protocol(Protocol::Streaming)
-                        .build()
-                    else {
-                        tracing::error!(
-                            target: LOG_TARGET,
-                            session_id = ?self.session_id,
-                            "failed to create i2cp payload",
-                        );
-                        debug_assert!(false);
-                        return;
-                    };
-
-                    if let Err(error) = self.destination.send_message(&destination_id, message) {
-                        tracing::error!(
-                            target: LOG_TARGET,
-                            session_id = ?self.session_id,
-                            ?error,
-                            "failed to send message to remote peer",
-                        );
-                        debug_assert!(false);
-                    }
-                }
+                    socket, options, ..
+                } => self.create_outbound_stream(destination_id, socket, options),
                 ProtocolKind::Datagram {
                     destination,
                     datagrams,
@@ -695,12 +697,13 @@ impl<R: Runtime> SamSession<R> {
                     session_id = ?self.session_id,
                     %destination_id,
                     ?protocol,
+                    ?error,
                     "failed to find lease set",
                 );
 
                 if let ProtocolKind::Stream { mut socket, .. } = protocol {
                     R::spawn(async move {
-                        socket
+                        let _ = socket
                             .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
                             .await;
                     });
@@ -712,6 +715,7 @@ impl<R: Runtime> SamSession<R> {
                     session_id = ?self.session_id,
                     %destination_id,
                     ?state,
+                    ?error,
                     "stream in invalid state for lease set query error",
                 );
                 debug_assert!(false);
@@ -727,7 +731,7 @@ impl<R: Runtime> SamSession<R> {
                 Some(payload) => {
                     tracing::trace!(
                         target: LOG_TARGET,
-                        session_id = ?self.session_id,
+                        session_id = %self.session_id,
                         src_port = ?payload.src_port,
                         dst_port = ?payload.dst_port,
                         protocol = ?payload.protocol,
@@ -750,6 +754,7 @@ impl<R: Runtime> SamSession<R> {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     session_id = ?self.session_id,
+                                    ?protocol,
                                     ?error,
                                     "failed to handle datagram",
                                 );
@@ -769,18 +774,23 @@ impl<R: Runtime> Future for SamSession<R> {
     type Output = Arc<str>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        loop {
-            match self.socket.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
-                Poll::Ready(Some(command)) => match command {
-                    command => tracing::warn!(
-                        target: LOG_TARGET,
-                        session_id = %self.session_id,
-                        ?command,
-                        "ignoring command"
-                    ),
-                },
+        if let Some(socket) = &mut self.socket {
+            loop {
+                match socket.poll_next_unpin(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(None) => {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            session_id = %self.session_id,
+                            "session socket closed, destroy session",
+                        );
+
+                        self.stream_manager.shutdown();
+                        self.socket = None;
+                        break;
+                    }
+                    Poll::Ready(Some(_command)) => {}
+                }
             }
         }
 
@@ -850,7 +860,22 @@ impl<R: Runtime> Future for SamSession<R> {
                 Poll::Ready(Some(StreamManagerEvent::StreamRejected { destination_id })) => {
                     self.pending_outbound.remove(&destination_id);
                 }
-                Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id })) => {}
+                Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id })) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        ?destination_id,
+                        "stream closed",
+                    );
+                }
+                Poll::Ready(Some(StreamManagerEvent::ShutDown)) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = ?self.session_id,
+                        "stream manager shut down, shutting down tunnel pool",
+                    );
+                    self.destination.shutdown();
+                }
             }
         }
 

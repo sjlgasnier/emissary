@@ -30,9 +30,11 @@ pub enum SessionStatusKind {
     Created,
 
     /// Session updated.
+    #[allow(unused)]
     Updated,
 
     /// Invalid session.
+    #[allow(unused)]
     Invalid,
 
     /// Session refused.
@@ -52,6 +54,7 @@ impl SessionStatusKind {
     }
 
     /// Try to convert `status_kind` into `SessionStatusKind`.
+    #[allow(unused)]
     pub fn from_u8(kind: u8) -> Option<Self> {
         match kind {
             0 => Some(Self::Destroyed),
@@ -88,15 +91,4 @@ impl SessionStatus {
 
         out
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn serialize_deserialize() {}
-
-    #[test]
-    fn invalid_message() {}
 }

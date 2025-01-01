@@ -35,6 +35,7 @@ use core::{fmt, mem};
 /// "The maximum number of messages before the DH must ratchet is 65535." [1]
 ///
 /// [1]: https://geti2p.net/spec/ecies#new-session-tags-and-comparison-to-signal
+#[allow(unused)]
 const MAX_TAGS: usize = 65535;
 
 /// Maximum key ID.
@@ -163,6 +164,7 @@ struct KeyContext {
     session_tag_constant: Vec<u8>,
 
     /// Session tag key.
+    #[allow(unused)]
     session_tag_key: Vec<u8>,
 
     /// Symmetric key.
@@ -174,29 +176,29 @@ impl KeyContext {
     pub fn new(root_key: impl AsRef<[u8]>, tag_set_key: impl AsRef<[u8]>) -> Self {
         let temp_key = Hmac::new(root_key.as_ref()).update(tag_set_key.as_ref()).finalize();
         let next_root_key =
-            Hmac::new(&temp_key).update(&b"KDFDHRatchetStep").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"KDFDHRatchetStep").update([0x01]).finalize();
         let ratchet_key = Hmac::new(&temp_key)
             .update(&next_root_key)
-            .update(&b"KDFDHRatchetStep")
-            .update(&[0x02])
+            .update(b"KDFDHRatchetStep")
+            .update([0x02])
             .finalize();
 
-        let temp_key = Hmac::new(&ratchet_key).update(&[]).finalize();
+        let temp_key = Hmac::new(&ratchet_key).update([]).finalize();
         let session_tag_key =
-            Hmac::new(&temp_key).update(&b"TagAndKeyGenKeys").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"TagAndKeyGenKeys").update([0x01]).finalize();
         let symmetric_key = Hmac::new(&temp_key)
             .update(&session_tag_key)
-            .update(&b"TagAndKeyGenKeys")
-            .update(&[0x02])
+            .update(b"TagAndKeyGenKeys")
+            .update([0x02])
             .finalize();
 
-        let mut temp_key = Hmac::new(&session_tag_key).update(&[]).finalize();
+        let mut temp_key = Hmac::new(&session_tag_key).update([]).finalize();
         let session_key_data =
-            Hmac::new(&temp_key).update(&b"STInitialization").update(&[0x01]).finalize();
+            Hmac::new(&temp_key).update(b"STInitialization").update([0x01]).finalize();
         let session_tag_constant = Hmac::new(&temp_key)
             .update(&session_key_data)
-            .update(&b"STInitialization")
-            .update(&[0x02])
+            .update(b"STInitialization")
+            .update([0x02])
             .finalize();
 
         temp_key.zeroize();
@@ -240,11 +242,13 @@ pub struct TagSet {
     /// Receive key ID.
     ///
     /// `None` if new session keys haven't been exchanged.
+    #[allow(unused)]
     recv_key_id: Option<u16>,
 
     /// Send key ID.
     ///
     /// `None` if new session keys haven't been exchanged.
+    #[allow(unused)]
     send_key_id: Option<u16>,
 
     /// Next tag index.
@@ -286,13 +290,13 @@ impl TagSet {
 
             // store session key data for the next session tag ratchet
             self.key_context.session_key_data = Bytes::from(
-                Hmac::new(&temp_key).update(&b"SessionTagKeyGen").update(&[0x01]).finalize(),
+                Hmac::new(&temp_key).update(b"SessionTagKeyGen").update([0x01]).finalize(),
             );
 
             let session_tag_key_data = Hmac::new(&temp_key)
                 .update(&self.key_context.session_key_data)
-                .update(&b"SessionTagKeyGen")
-                .update(&[0x02])
+                .update(b"SessionTagKeyGen")
+                .update([0x02])
                 .finalize();
 
             temp_key.zeroize();
@@ -301,16 +305,16 @@ impl TagSet {
         };
 
         let symmetric_key = {
-            let mut temp_key = Hmac::new(&self.key_context.symmetric_key).update(&[]).finalize();
+            let mut temp_key = Hmac::new(&self.key_context.symmetric_key).update([]).finalize();
 
             // store symmetric key for the next key ratchet
             self.key_context.symmetric_key =
-                Hmac::new(&temp_key).update(&b"SymmetricRatchet").update(&[0x01]).finalize();
+                Hmac::new(&temp_key).update("SymmetricRatchet").update([0x01]).finalize();
 
             let symmetric_key = Hmac::new(&temp_key)
                 .update(&self.key_context.symmetric_key)
-                .update(&b"SymmetricRatchet")
-                .update(&[0x02])
+                .update(b"SymmetricRatchet")
+                .update([0x02])
                 .finalize();
 
             temp_key.zeroize();
@@ -344,9 +348,9 @@ impl TagSet {
     ) {
         let tag_set_key = {
             let mut shared = private_key.diffie_hellman(&public_key);
-            let mut temp_key = Hmac::new(&shared).update(&[]).finalize();
+            let mut temp_key = Hmac::new(&shared).update([]).finalize();
             let tagset_key =
-                Hmac::new(&temp_key).update(&b"XDHRatchetTagSet").update(&[0x01]).finalize();
+                Hmac::new(&temp_key).update(b"XDHRatchetTagSet").update([0x01]).finalize();
 
             shared.zeroize();
             temp_key.zeroize();
@@ -391,7 +395,7 @@ impl TagSet {
 
         match mem::replace(&mut self.key_state, KeyState::Poisoned) {
             KeyState::Uninitialized => {
-                let private_key = StaticPrivateKey::new(R::rng());
+                let private_key = StaticPrivateKey::random(R::rng());
                 let public_key = private_key.public();
 
                 self.key_state = KeyState::AwaitingReverseKey {
@@ -422,7 +426,7 @@ impl TagSet {
                 // https://geti2p.net/spec/ecies#dh-ratchet-message-flow
                 match self.tag_set_id % 2 != 0 {
                     true => {
-                        let private_key = StaticPrivateKey::new(R::rng());
+                        let private_key = StaticPrivateKey::random(R::rng());
                         let public_key = private_key.public();
 
                         if send_key_id + 1 > MAX_KEY_ID {
@@ -497,7 +501,7 @@ impl TagSet {
                     reverse_key_requested: true,
                 },
             ) => {
-                let private_key = StaticPrivateKey::new(R::rng());
+                let private_key = StaticPrivateKey::random(R::rng());
                 let public_key = private_key.public();
 
                 self.reinitialize_tag_set(private_key, remote_public_key.clone(), 0u16, 0u16);
@@ -622,7 +626,7 @@ impl TagSet {
                     return Err(SessionError::SessionTerminated);
                 }
 
-                let private_key = StaticPrivateKey::new(R::rng());
+                let private_key = StaticPrivateKey::random(R::rng());
                 let public_key = private_key.public();
 
                 self.reinitialize_tag_set(
@@ -730,8 +734,8 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
 
         // generate tags until the second dh ratchet can be done
         //
@@ -798,8 +802,8 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
 
         // generate tags until the second dh ratchet can be done
         //
@@ -866,8 +870,8 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
 
         // generate tags until the second dh ratchet can be done
         //
@@ -934,7 +938,7 @@ mod tests {
             state => panic!("invalid state: {state:?}"),
         };
 
-        assert_eq!(s_priv.public().to_bytes(), r_pub.to_bytes());
-        assert_eq!(r_priv.public().to_bytes(), s_pub.to_bytes());
+        assert_eq!(s_priv.public().to_vec(), r_pub.to_vec());
+        assert_eq!(r_priv.public().to_vec(), s_pub.to_vec());
     }
 }

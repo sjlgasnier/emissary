@@ -213,11 +213,10 @@ mod tests {
         runtime::{mock::MockRuntime, Runtime},
     };
     use alloc::collections::VecDeque;
-    use chacha20poly1305::aead::Buffer;
     use std::time::Duration;
 
     fn split(num_fragments: usize, message: Vec<u8>) -> VecDeque<Vec<u8>> {
-        let remainder = message.len() % num_fragments;
+        let _remainder = message.len() % num_fragments;
         let fragment_len = message.len() / num_fragments;
 
         let mut fragments = message
@@ -238,7 +237,7 @@ mod tests {
     fn simple_fragmentation() {
         let expiration = MockRuntime::time_since_epoch();
 
-        let mut message = MessageBuilder::standard()
+        let message = MessageBuilder::standard()
             .with_expiration(expiration)
             .with_message_type(MessageType::Data)
             .with_message_id(1338u32)
@@ -264,7 +263,7 @@ mod tests {
                 .is_none());
         }
 
-        let (message, delivery_instructions) =
+        let (message, _delivery_instructions) =
             handler.last_fragment(message_id, 3, &fragments.pop_front().unwrap()).unwrap();
 
         assert_eq!(
@@ -280,7 +279,7 @@ mod tests {
     fn first_and_last_fragment() {
         let expiration = MockRuntime::time_since_epoch();
 
-        let mut message = MessageBuilder::standard()
+        let message = MessageBuilder::standard()
             .with_expiration(expiration)
             .with_message_type(MessageType::Data)
             .with_message_id(1339u32)
@@ -301,7 +300,7 @@ mod tests {
             )
             .is_none());
 
-        let (message, delivery_instructions) =
+        let (message, _delivery_instructions) =
             handler.last_fragment(message_id, 1, &fragments.pop_front().unwrap()).unwrap();
 
         assert_eq!(
@@ -317,7 +316,7 @@ mod tests {
     fn out_of_order_last_is_first() {
         let expiration = MockRuntime::time_since_epoch();
 
-        let mut message = MessageBuilder::standard()
+        let message = MessageBuilder::standard()
             .with_expiration(expiration)
             .with_message_type(MessageType::Data)
             .with_message_id(1338u32)
@@ -340,7 +339,7 @@ mod tests {
                 .is_none());
         }
 
-        let (message, delivery_instructions) = handler
+        let (message, _delivery_instructions) = handler
             .first_fragment(message_id, &DeliveryInstructions::Local, &first)
             .unwrap();
 
@@ -357,7 +356,7 @@ mod tests {
     fn middle_fragment_delivered_last() {
         let expiration = MockRuntime::time_since_epoch();
 
-        let mut message = MessageBuilder::standard()
+        let message = MessageBuilder::standard()
             .with_expiration(expiration)
             .with_message_type(MessageType::Data)
             .with_message_id(1338u32)
@@ -383,7 +382,7 @@ mod tests {
 
         assert!(handler.last_fragment(message_id, 3, &fragments.pop_back().unwrap()).is_none());
 
-        let (message, delivery_instructions) =
+        let (message, _delivery_instructions) =
             handler.middle_fragment(message_id, 2, &fragments.pop_front().unwrap()).unwrap();
 
         assert_eq!(

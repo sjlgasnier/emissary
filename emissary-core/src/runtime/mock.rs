@@ -20,7 +20,7 @@ use crate::{
     error::{ConnectionError, Error},
     runtime::{
         AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet,
-        MetricsHandle, Runtime, TcpListener, TcpStream, UdpSocket,
+        MetricsHandle, Runtime, TcpListener, UdpSocket,
     },
 };
 
@@ -28,7 +28,7 @@ use flate2::{
     write::{GzDecoder, GzEncoder},
     Compression,
 };
-use futures::{future::BoxFuture, Stream};
+use futures::Stream;
 use futures_io::{AsyncRead as _, AsyncWrite as _};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -37,11 +37,9 @@ use tokio::{io::ReadBuf, net, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use std::{
-    borrow::Borrow,
     collections::HashMap,
-    future::{pending, Future},
+    future::Future,
     io::Write,
-    marker::PhantomData,
     net::SocketAddr,
     pin::{pin, Pin},
     sync::Arc,
@@ -50,6 +48,15 @@ use std::{
 };
 
 pub struct MockTcpStream(Compat<net::TcpStream>);
+
+impl MockTcpStream {
+    pub fn new(stream: net::TcpStream) -> Self {
+        let stream = TokioAsyncReadCompatExt::compat(stream).into_inner();
+        let stream = TokioAsyncWriteCompatExt::compat_write(stream);
+
+        Self(stream)
+    }
+}
 
 impl AsyncRead for MockTcpStream {
     fn poll_read(
@@ -61,7 +68,7 @@ impl AsyncRead for MockTcpStream {
 
         match futures::ready!(pinned.poll_read(cx, buf)) {
             Ok(nread) => Poll::Ready(Ok(nread)),
-            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+            Err(_) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 }
@@ -76,7 +83,7 @@ impl AsyncWrite for MockTcpStream {
 
         match futures::ready!(pinned.poll_write(cx, buf)) {
             Ok(nwritten) => Poll::Ready(Ok(nwritten)),
-            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+            Err(_) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 
@@ -85,7 +92,7 @@ impl AsyncWrite for MockTcpStream {
 
         match futures::ready!(pinned.poll_flush(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+            Err(_) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 
@@ -94,7 +101,7 @@ impl AsyncWrite for MockTcpStream {
 
         match futures::ready!(pinned.poll_close(cx)) {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(error) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
+            Err(_) => Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
         }
     }
 }
@@ -112,16 +119,22 @@ impl crate::runtime::TcpStream for MockTcpStream {
     }
 }
 
-#[derive(Debug)]
-pub struct MockTcpListener {}
+pub struct MockTcpListener(net::TcpListener);
 
 impl TcpListener<MockTcpStream> for MockTcpListener {
-    fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
-        pending()
+    async fn bind(address: SocketAddr) -> Option<Self> {
+        net::TcpListener::bind(&address).await.ok().map(MockTcpListener)
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<MockTcpStream>> {
-        Poll::Pending
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<(MockTcpStream, SocketAddr)>> {
+        match futures::ready!(self.0.poll_accept(cx)) {
+            Err(_) => Poll::Ready(None),
+            Ok((stream, address)) => Poll::Ready(Some((MockTcpStream::new(stream), address))),
+        }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
     }
 }
 
@@ -155,6 +168,10 @@ impl UdpSocket for MockUdpSocket {
                 Poll::Ready(Some((nread, from)))
             }
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
     }
 }
 
@@ -194,7 +211,8 @@ impl Gauge for MockMetricsGauge {
     fn decrement(&mut self, value: usize) {
         GAUGES.with(|v| {
             let mut inner = v.write();
-            *inner.entry(self.name).or_default() -= value;
+            let entry = inner.entry(self.name).or_default();
+            *entry = value.saturating_sub(value);
         });
     }
 }
@@ -202,7 +220,7 @@ impl Gauge for MockMetricsGauge {
 pub struct MockMetricsHistogram {}
 
 impl Histogram for MockMetricsHistogram {
-    fn record(&mut self, record: f64) {}
+    fn record(&mut self, _: f64) {}
 }
 
 #[derive(Debug, Clone)]
@@ -217,7 +235,7 @@ impl MetricsHandle for MockMetricsHandle {
         MockMetricsGauge { name }
     }
 
-    fn histogram(&self, name: &'static str) -> impl Histogram {
+    fn histogram(&self, _: &'static str) -> impl Histogram {
         MockMetricsHistogram {}
     }
 }
@@ -330,7 +348,7 @@ impl Runtime for MockRuntime {
     }
 
     /// Register `metrics` and return handle for registering metrics.
-    fn register_metrics(metrics: Vec<crate::runtime::MetricType>) -> Self::MetricsHandle {
+    fn register_metrics(_: Vec<crate::runtime::MetricType>, _: Option<u16>) -> Self::MetricsHandle {
         MockMetricsHandle {}
     }
 

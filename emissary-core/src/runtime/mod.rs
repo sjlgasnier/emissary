@@ -18,10 +18,10 @@
 
 // TODO: documentation
 
-use futures::{future::BoxFuture, Stream};
+use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     fmt,
     future::Future,
@@ -61,7 +61,8 @@ pub trait TcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + Sized + 'sta
 
 pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
     fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>>;
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<TcpStream>>;
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<(TcpStream, SocketAddr)>>;
+    fn local_address(&self) -> Option<SocketAddr>;
 }
 
 pub trait UdpSocket: Unpin + Send + Sized {
@@ -77,6 +78,7 @@ pub trait UdpSocket: Unpin + Send + Sized {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Option<(usize, SocketAddr)>>;
+    fn local_address(&self) -> Option<SocketAddr>;
 }
 
 pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
@@ -181,7 +183,10 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     fn join_set<T: Send + 'static>() -> Self::JoinSet<T>;
 
     /// Register `metrics` and return handle for registering metrics.
-    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle;
+    ///
+    /// An optional port can be specified for the metrics server and if none is specified, the
+    /// runtime will bind to a default port or ignore it alltogether if it doesn't need it.
+    fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle;
 
     /// Return future which blocks for `duration` before returning.
     fn delay(duration: Duration) -> impl Future<Output = ()> + Send;

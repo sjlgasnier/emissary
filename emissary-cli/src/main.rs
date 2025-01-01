@@ -16,12 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{cli::Arguments, config::Config, error::Error, logger::init_logger};
+use crate::{cli::Arguments, config::Config, error::Error, signal::SignalHandler};
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::router::Router;
+use emissary_core::router::{Router, RouterEvent};
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
+use futures::StreamExt;
 
 use std::{fs::File, io::Write};
 
@@ -29,6 +30,7 @@ mod cli;
 mod config;
 mod error;
 mod logger;
+mod signal;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -42,16 +44,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
+    let mut handler = SignalHandler::new();
 
-    // initialize logger
-    init_logger(arguments.log.clone())?;
+    // initialize logger with any logging directive given as a cli argument
+    let handle = init_logger!(arguments.log.clone());
 
     // parse router config and merge it with cli options
     let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
 
+    // reinitialize the logger with any directives given in the configuration file
+    init_logger!(config.log.clone(), handle);
+
     // try to reseed the router if there aren't enough known routers
-    if (config.routers.len() < RESEED_THRESHOLD
-        && !arguments.reseed.disable_reseed.unwrap_or(false))
+    if (config.routers.len() < RESEED_THRESHOLD && !config.reseed.disable)
         || arguments.reseed.force_reseed.unwrap_or(false)
     {
         tracing::info!(
@@ -62,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
             "reseed router"
         );
 
-        match Reseeder::reseed(arguments.reseed.reseed_hosts).await {
+        match Reseeder::reseed(config.reseed.hosts.clone()).await {
             Ok(routers) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -97,13 +102,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let path = config.base_path.clone();
-    let (router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
+    let (mut router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
 
     // TODO: ugly
     let mut file = File::create(path.join("router.info"))?;
     file.write_all(&local_router_info)?;
 
-    let _ = router.await;
-
-    Ok(())
+    loop {
+        tokio::select! {
+            _ = handler.next() => {
+                router.shutdown();
+            }
+            event = router.next() => match event {
+                None => return Ok(()),
+                Some(RouterEvent::Shutdown) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        "emissary shut down",
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    }
 }

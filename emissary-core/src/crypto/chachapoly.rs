@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::Error;
+use crate::error::Error;
 
 use aes::cipher::generic_array::GenericArray;
 use chacha20::{
@@ -24,7 +24,7 @@ use chacha20::{
     ChaCha20,
 };
 use chacha20poly1305::{
-    aead::{Aead, AeadInPlace, AeadMutInPlace},
+    aead::{Aead, AeadInPlace},
     consts::U12,
     ChaCha20Poly1305,
 };
@@ -173,10 +173,8 @@ impl ChaChaPoly {
     }
 }
 
+/// ChaCha cipher.
 pub struct ChaCha {
-    /// Nonce.
-    nonce: Nonce,
-
     /// Internal cipher.
     cipher: ChaCha20,
 }
@@ -197,7 +195,6 @@ impl ChaCha {
                 cipher.seek(64);
                 cipher
             },
-            nonce,
         }
     }
 

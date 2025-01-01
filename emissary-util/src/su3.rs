@@ -211,7 +211,7 @@ impl<'a> Su3<'a> {
 
     /// Attempt to parse reseed data from `input`.
     pub fn parse_reseed(input: &'a [u8]) -> Option<Vec<ReseedRouterInfo>> {
-        let (_, su3) = Self::parse_inner(input.as_ref()).ok()?;
+        let (_, su3) = Self::parse_inner(input).ok()?;
 
         match (su3.file_kind, su3.content_kind) {
             (FileKind::Zip, ContentKind::ReseedData) => {}
@@ -228,15 +228,13 @@ impl<'a> Su3<'a> {
 
         let temp_dir = TempDir::new().ok()?;
         let mut zip_file = File::create_new(temp_dir.path().join("routers.zip")).ok()?;
-        File::write_all(&mut zip_file, &su3.content).ok()?;
+        File::write_all(&mut zip_file, su3.content).ok()?;
 
         let mut archive = zip::ZipArchive::new(zip_file).ok()?;
         let router_infos = (0..archive.len())
             .filter_map(|i| {
                 let mut file = archive.by_index(i).expect("to exist");
-                let Some(outpath) = file.enclosed_name() else {
-                    return None;
-                };
+                let outpath = file.enclosed_name()?;
 
                 if !file.is_file() {
                     tracing::warn!(

@@ -16,8 +16,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![cfg(feature = "tokio")]
-
 use emissary_core::runtime::{
     AsyncRead, AsyncWrite, Counter, Gauge, Histogram, Instant as InstantT, JoinSet, MetricType,
     MetricsHandle, Runtime as RuntimeT, TcpListener, TcpStream, UdpSocket,
@@ -45,7 +43,7 @@ use std::{
 /// Logging targer for the file.
 const LOG_TARGET: &str = "emissary::runtime::tokio";
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct Runtime {}
 
 impl Runtime {
@@ -127,12 +125,14 @@ impl TcpStream for TokioTcpStream {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?address,
-                    ?error,
+                    error = ?error.kind(),
                     "failed to connect"
                 );
             })
             .ok()
-            .map(|stream| Self::new(stream))
+            .map(|stream| stream.set_nodelay(true).ok().map(|()| stream))
+            .flatten()
+            .map(Self::new)
     }
 }
 
@@ -147,19 +147,37 @@ impl TcpListener<TokioTcpStream> for TokioTcpListener {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?address,
-                    ?error,
+                    error = ?error.kind(),
                     "failed to bind"
                 );
             })
             .ok()
-            .map(|listener| TokioTcpListener(listener))
+            .map(TokioTcpListener)
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<TokioTcpStream>> {
-        match futures::ready!(self.0.poll_accept(cx)) {
-            Err(_) => return Poll::Ready(None),
-            Ok((stream, _)) => return Poll::Ready(Some(TokioTcpStream::new(stream))),
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<(TokioTcpStream, SocketAddr)>> {
+        loop {
+            match futures::ready!(self.0.poll_accept(cx)) {
+                Err(_) => return Poll::Ready(None),
+                Ok((stream, address)) => match stream.set_nodelay(true) {
+                    Err(error) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to configure `TCP_NODELAY` for inbound connection",
+                        );
+                        continue;
+                    }
+                    Ok(()) => {
+                        return Poll::Ready(Some((TokioTcpStream::new(stream), address)));
+                    }
+                },
+            }
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
     }
 }
 
@@ -167,7 +185,7 @@ pub struct TokioUdpSocket(net::UdpSocket);
 
 impl UdpSocket for TokioUdpSocket {
     fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>> {
-        async move { net::UdpSocket::bind(address).await.ok().map(|socket| Self(socket)) }
+        async move { net::UdpSocket::bind(address).await.ok().map(Self) }
     }
 
     fn poll_send_to(
@@ -187,12 +205,16 @@ impl UdpSocket for TokioUdpSocket {
         let mut buf = ReadBuf::new(buf);
 
         match futures::ready!(self.0.poll_recv_from(cx, &mut buf)) {
-            Err(_) => return Poll::Ready(None),
+            Err(_) => Poll::Ready(None),
             Ok(from) => {
                 let nread = buf.filled().len();
                 Poll::Ready(Some((nread, from)))
             }
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
     }
 }
 
@@ -213,7 +235,11 @@ impl<T: Send + 'static> JoinSet<T> for TokioJoinSet<T> {
         F::Output: Send,
     {
         let _ = self.0.spawn(future);
-        self.1.as_mut().map(|waker| waker.wake_by_ref());
+
+        // TODO: remove?
+        if let Some(waker) = self.1.take() {
+            waker.wake_by_ref();
+        }
     }
 }
 
@@ -321,9 +347,25 @@ impl RuntimeT for Runtime {
         TokioJoinSet(task::JoinSet::<T>::new(), None)
     }
 
-    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
-        let builder = PrometheusBuilder::new()
-            .with_http_listener("0.0.0.0:12842".parse::<SocketAddr>().expect(""));
+    fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle {
+        if metrics.is_empty() {
+            tracing::info!(
+                target: LOG_TARGET,
+                "disabling metrics server",
+            );
+
+            return TokioMetricsHandle {};
+        }
+
+        let address = format!("0.0.0.0:{}", port.unwrap_or(12842));
+        let builder =
+            PrometheusBuilder::new().with_http_listener(address.parse::<SocketAddr>().expect(""));
+
+        tracing::info!(
+            target: LOG_TARGET,
+            ?address,
+            "starting prometheus server",
+        );
 
         metrics
             .into_iter()

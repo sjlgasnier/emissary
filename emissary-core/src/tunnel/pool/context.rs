@@ -19,7 +19,7 @@
 //! Tunnel pool context.
 
 use crate::{
-    error::{ChannelError, RouteKind, RoutingError},
+    error::{ChannelError, RoutingError},
     i2np::{Message, MessageType},
     primitives::{Lease, MessageId, RouterId, TunnelId},
     tunnel::pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TUNNEL_CHANNEL_SIZE},
@@ -65,9 +65,6 @@ struct MessageListeners {
 /// Tunnel pool handle.
 #[derive(Clone)]
 pub struct TunnelPoolContextHandle {
-    /// Leases of the tunnel pool.
-    leases: Arc<RwLock<HashMap<TunnelId, Lease>>>,
-
     /// Message listeners.
     listeners: Arc<RwLock<MessageListeners>>,
 
@@ -97,6 +94,7 @@ impl TunnelPoolContextHandle {
 
     /// Send `message `via one of the tunnel pool's outbound tunnels to remote tunnel identified by
     /// (`gateway`, `tunnel_id`) tuple.
+    #[allow(unused)]
     pub fn send_to_tunnel(
         &self,
         gateway: RouterId,
@@ -139,29 +137,32 @@ impl TunnelPoolContextHandle {
 
                         message_id
                     }
-                    None => {
-                        return self
-                            .event_tx
-                            .try_send(TunnelPoolEvent::Message { message })
-                            .map_err(|error| {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?message_id,
-                                    ?error,
-                                    "failed to route garlic message to client destination",
-                                );
+                    None => match inner.listeners.remove(&message_id) {
+                        Some(listener) =>
+                            return listener.send(message).map_err(RoutingError::ChannelClosed),
+                        None =>
+                            return self
+                                .event_tx
+                                .try_send(TunnelPoolEvent::Message { message })
+                                .map_err(|error| {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?message_id,
+                                        ?error,
+                                        "failed to route garlic message to client destination",
+                                    );
 
-                                match error {
-                                    mpsc::errors::TrySendError::Full(
-                                        TunnelPoolEvent::Message { message },
-                                    ) => RoutingError::ChannelFull(message),
-                                    mpsc::errors::TrySendError::Closed(
-                                        TunnelPoolEvent::Message { message },
-                                    ) => RoutingError::ChannelClosed(message),
-                                    _ => unreachable!(),
-                                }
-                            });
-                    }
+                                    match error {
+                                        mpsc::errors::TrySendError::Full(
+                                            TunnelPoolEvent::Message { message },
+                                        ) => RoutingError::ChannelFull(message),
+                                        mpsc::errors::TrySendError::Closed(
+                                            TunnelPoolEvent::Message { message },
+                                        ) => RoutingError::ChannelClosed(message),
+                                        _ => unreachable!(),
+                                    }
+                                }),
+                    },
                 }
             }
             MessageType::DatabaseStore
@@ -200,23 +201,16 @@ impl TunnelPoolContextHandle {
         };
 
         match inner.listeners.remove(&message_id) {
-            Some(listener) =>
-                listener.send(message).map_err(|message| RoutingError::ChannelClosed(message)),
+            Some(listener) => listener.send(message).map_err(RoutingError::ChannelClosed),
             // TODO: is this necessary?
             None =>
                 self.tx
                     .try_send(TunnelMessage::Inbound { message })
                     .map_err(|error| match error {
-                        mpsc::errors::TrySendError::Full(message) => match message {
-                            TunnelMessage::Inbound { message } =>
-                                RoutingError::ChannelFull(message),
-                            _ => unreachable!(),
-                        },
-                        mpsc::errors::TrySendError::Closed(message) => match message {
-                            TunnelMessage::Inbound { message } =>
-                                RoutingError::ChannelClosed(message),
-                            _ => unreachable!(),
-                        },
+                        mpsc::errors::TrySendError::Full(TunnelMessage::Inbound { message }) =>
+                            RoutingError::ChannelFull(message),
+                        mpsc::errors::TrySendError::Closed(TunnelMessage::Inbound { message }) =>
+                            RoutingError::ChannelClosed(message),
                         _ => unreachable!(),
                     }),
         }
@@ -264,13 +258,6 @@ impl TunnelPoolContextHandle {
             .message_ids
             .remove(message_id)
             .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
-    }
-
-    /// Attempt to get a [`Lease2`] for the tunnel pool.
-    // TODO: remove
-    pub fn lease(&self) -> Option<Lease> {
-        // TODO: distribute more evently
-        self.leases.read().values().next().cloned()
     }
 }
 
@@ -320,9 +307,6 @@ impl Default for TunnelMessage {
 
 /// Tunnel pool context.
 pub struct TunnelPoolContext {
-    /// Leases of the tunnel pool.
-    leases: Arc<RwLock<HashMap<TunnelId, Lease>>>,
-
     /// Message listeners.
     listeners: Arc<RwLock<MessageListeners>>,
 
@@ -338,32 +322,6 @@ pub struct TunnelPoolContext {
 }
 
 impl TunnelPoolContext {
-    /// Create new [`TunnelPoolContext`].
-    fn new(config: TunnelPoolConfig) -> (Self, TunnelPoolContextHandle, TunnelPoolHandle) {
-        let listeners = Arc::new(RwLock::new(MessageListeners::default()));
-        let leases = Arc::new(RwLock::new(Default::default()));
-        let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
-
-        let (tunnel_pool_handle, event_tx, shutdown_tx) = TunnelPoolHandle::new(config, tx.clone());
-
-        (
-            Self {
-                leases: Arc::clone(&leases),
-                listeners: Arc::clone(&listeners),
-                event_tx: event_tx.clone(),
-                rx,
-                tx: tx.clone(),
-            },
-            TunnelPoolContextHandle {
-                leases,
-                listeners,
-                event_tx,
-                tx,
-            },
-            tunnel_pool_handle,
-        )
-    }
-
     /// Allocate new (`MessageId`, `oneshot::Receiver<Message>)` tuple for an inbound build
     /// response.
     pub fn add_listener(&self, rng: &mut impl RngCore) -> (MessageId, oneshot::Receiver<Message>) {
@@ -392,26 +350,9 @@ impl TunnelPoolContext {
             .map(|garlic_tag| inner.garlic_tags.remove(&garlic_tag));
     }
 
-    /// Add new [`Lease2`] for the tunnel pool.
-    //
-    // TODO: remove
-    pub fn add_lease(&self, tunnel_id: TunnelId, lease: Lease) {
-        let mut inner = self.leases.write();
-
-        inner.insert(tunnel_id, lease);
-    }
-
-    /// Remove [`Lease2`] from the tunnel pool.
-    //
-    // TODO: remove
-    pub fn remove_lease(&self, tunnel_id: &TunnelId) {
-        self.leases.write().remove(tunnel_id);
-    }
-
     /// Allocate new [`TunnelPoolContextHandle`] for the context.
     pub fn context_handle(&self) -> TunnelPoolContextHandle {
         TunnelPoolContextHandle {
-            leases: Arc::clone(&self.leases),
             listeners: Arc::clone(&self.listeners),
             event_tx: self.event_tx.clone(),
             tx: self.tx.clone(),
@@ -508,7 +449,6 @@ impl TunnelPoolBuildParameters {
     /// Create new [`TunnelPoolBuildParameters`].
     pub fn new(config: TunnelPoolConfig) -> Self {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
-        let leases = Arc::new(RwLock::new(Default::default()));
         let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
         let (tunnel_pool_handle, event_tx, shutdown_rx) =
             TunnelPoolHandle::new(config.clone(), tx.clone());
@@ -516,14 +456,12 @@ impl TunnelPoolBuildParameters {
         Self {
             config,
             context: TunnelPoolContext {
-                leases: Arc::clone(&leases),
                 listeners: Arc::clone(&listeners),
                 event_tx: event_tx.clone(),
                 rx,
                 tx: tx.clone(),
             },
             context_handle: TunnelPoolContextHandle {
-                leases,
                 listeners,
                 event_tx,
                 tx,

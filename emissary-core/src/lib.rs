@@ -17,17 +17,25 @@
 // DEALINGS IN THE SOFTWARE.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![allow(dead_code)]
-#![allow(unused)]
+#![allow(clippy::wrong_self_convention)]
+#![allow(clippy::manual_async_fn)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::assign_op_pattern)]
+#![allow(clippy::new_ret_no_self)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::option_map_unit_fn)]
 
 extern crate alloc;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub use config::{Config, ExploratoryConfig, I2cpConfig, Ntcp2Config, SamConfig};
+pub use config::{Config, ExploratoryConfig, I2cpConfig, MetricsConfig, Ntcp2Config, SamConfig};
 pub use error::Error;
 pub use profile::Profile;
 
+mod bloom;
 mod config;
 mod crypto;
 mod destination;
@@ -36,6 +44,7 @@ mod i2cp;
 mod netdb;
 mod profile;
 mod sam;
+mod shutdown;
 mod subsystem;
 mod transports;
 mod tunnel;

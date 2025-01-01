@@ -35,21 +35,21 @@ use crate::{
         base64_decode, sha256::Sha256, siphash::SipHash, SigningPrivateKey, StaticPrivateKey,
         StaticPublicKey,
     },
+    error::Error,
     primitives::{RouterInfo, Str, TransportKind},
     profile::ProfileStorage,
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
+    runtime::{Runtime, TcpStream},
     transports::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
         SubsystemHandle,
     },
-    util::{AsyncReadExt, AsyncWriteExt},
-    Error,
+    util::{is_global, AsyncReadExt, AsyncWriteExt},
 };
 
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use bytes::Bytes;
 
 use alloc::{vec, vec::Vec};
-use core::{future::Future, marker::PhantomData, net::SocketAddr, str::FromStr};
+use core::{future::Future, net::IpAddr, str::FromStr};
 
 mod active;
 mod initiator;
@@ -96,44 +96,21 @@ impl KeyContext {
     }
 }
 
-/// Initiator options.
-#[derive(Debug, AsBytes, FromBytes, FromZeroes)]
-#[repr(packed)]
-pub(super) struct InitiatorOptions {
-    id: u8,
-    version: u8,
-    padding_length: [u8; 2],
-    m3_p2_len: [u8; 2],
-    reserved1: [u8; 2],
-    timestamp: [u8; 4],
-    reserved2: [u8; 4],
-}
-
-/// Responder options.
-#[derive(Debug, AsBytes, FromBytes, FromZeroes)]
-#[repr(packed)]
-pub(super) struct ResponderOptions {
-    reserved1: [u8; 2],
-    padding_length: [u8; 2],
-    reserved2: [u8; 4],
-    timestamp: [u8; 4],
-    reserved3: [u8; 4],
-}
-
 /// Session manager.
 ///
 /// Responsible for creating context for inbound and outboudn NTCP2 sessions.
 pub struct SessionManager<R: Runtime> {
+    /// Allow local addresses.
+    allow_local: bool,
+
     /// Chaining key.
-    // TODO: `bytes::Bytes`?
-    chaining_key: Vec<u8>,
+    chaining_key: Bytes,
 
     /// State that is common for all inbound connections.
-    // TODO: `bytes::Bytes`?
-    inbound_initial_state: Vec<u8>,
+    inbound_initial_state: Bytes,
 
     /// Local NTCP2 IV.
-    local_iv: Vec<u8>,
+    local_iv: [u8; 16],
 
     /// Local NTCP2 static key.
     local_key: StaticPrivateKey,
@@ -145,16 +122,13 @@ pub struct SessionManager<R: Runtime> {
     local_signing_key: SigningPrivateKey,
 
     /// State that is common for all outbound connections.
-    outbound_initial_state: Vec<u8>,
+    outbound_initial_state: Bytes,
 
     /// Router storage.
     profile_storage: ProfileStorage<R>,
 
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
-
-    /// Marker for `Runtime`.
-    _runtime: PhantomData<R>,
 }
 
 impl<R: Runtime> SessionManager<R> {
@@ -166,42 +140,35 @@ impl<R: Runtime> SessionManager<R> {
     ///
     /// [1]: https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1
     pub fn new(
-        local_key: Vec<u8>,
-        local_iv: Vec<u8>,
+        local_key: [u8; 32],
+        local_iv: [u8; 16],
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
         profile_storage: ProfileStorage<R>,
-    ) -> crate::Result<Self> {
+        allow_local: bool,
+    ) -> Self {
         let local_key = StaticPrivateKey::from(local_key);
-
-        // initial state
-        let state = Sha256::new().update(&PROTOCOL_NAME.as_bytes().to_vec()).finalize();
-
-        // chaining key
+        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
         let chaining_key = state.clone();
-
-        // MixHash (null prologue)
         let outbound_initial_state = Sha256::new().update(&state).finalize();
-
-        // MixHash(rs)
         let inbound_initial_state = Sha256::new()
             .update(&outbound_initial_state)
-            .update(&local_key.public().to_vec())
+            .update(local_key.public().to_vec())
             .finalize();
 
-        Ok(Self {
-            chaining_key,
-            inbound_initial_state,
+        Self {
+            allow_local,
+            chaining_key: Bytes::from(chaining_key),
+            inbound_initial_state: Bytes::from(inbound_initial_state),
             local_iv,
             local_key,
             local_router_info,
             local_signing_key,
-            outbound_initial_state,
+            outbound_initial_state: Bytes::from(outbound_initial_state),
             profile_storage,
             subsystem_handle,
-            _runtime: Default::default(),
-        })
+        }
     }
 
     /// Create new [`Handshaker`] for initiator (Alice).
@@ -215,12 +182,13 @@ impl<R: Runtime> SessionManager<R> {
         &self,
         router: RouterInfo,
     ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
+        let net_id = self.local_router_info.net_id;
         let local_info = self.local_router_info.serialize(&self.local_signing_key);
-        let local_router_hash = self.local_router_info.identity.hash().to_vec();
         let router_id = router.identity.id();
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
+        let allow_local = self.allow_local;
         let mut subsystem_handle = self.subsystem_handle.clone();
 
         async move {
@@ -229,27 +197,39 @@ impl<R: Runtime> SessionManager<R> {
                     router.addresses.get(&TransportKind::Ntcp2).ok_or(Error::NotSupported)?;
 
                 let static_key = ntcp2
-                    .options()
+                    .options
                     .get(&Str::from_str("s").expect("to succeed"))
                     .ok_or_else(|| {
                         tracing::warn!(target: LOG_TARGET, "static key missing from ntcp2 info");
                         Error::InvalidData
                     })?;
 
-                let iv = ntcp2.options().get(&Str::from_str("i").expect("to succeed")).ok_or_else(
+                let iv = ntcp2.options.get(&Str::from_str("i").expect("to succeed")).ok_or_else(
                     || {
                         tracing::warn!(target: LOG_TARGET, "iv missing from ntcp2 info");
                         Error::InvalidData
                     },
                 )?;
 
-                let socket_address = ntcp2.socket_address().ok_or_else(|| {
+                let socket_address = ntcp2.socket_address.ok_or_else(|| {
                     tracing::debug!(target: LOG_TARGET, "router doesn't have socket address");
                     Error::InvalidData
                 })?;
 
+                match socket_address.ip() {
+                    IpAddr::V4(address) if !is_global(address) && !allow_local => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?address,
+                            "tried to dial local address but local addresses were disabled",
+                        );
+                        return Err(Error::InvalidData);
+                    }
+                    _ => {}
+                }
+
                 (
-                    StaticPublicKey::from_bytes(base64_decode(static_key.as_bytes()).ok_or_else(
+                    StaticPublicKey::from_bytes(&base64_decode(static_key.as_bytes()).ok_or_else(
                         || {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -284,29 +264,27 @@ impl<R: Runtime> SessionManager<R> {
                 "start dialing remote peer",
             );
 
-            let mut stream = match R::TcpStream::connect(socket_address).await {
-                Some(stream) => stream,
-                None => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        router = ?router_id,
-                        "failed to dial router",
-                    );
-                    subsystem_handle.report_connection_failure(router_id).await;
-                    return Err(Error::DialFailure);
-                }
+            let Some(mut stream) = R::TcpStream::connect(socket_address).await else {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "failed to dial router",
+                );
+                subsystem_handle.report_connection_failure(router_id).await;
+                return Err(Error::DialFailure);
             };
             let router_hash = router.identity.hash().to_vec();
 
             // create `SessionRequest` message and send it remote peer
             let (mut initiator, message) = Initiator::new::<R>(
-                outbound_initial_state,
-                chaining_key,
+                &outbound_initial_state,
+                &chaining_key,
                 local_info,
                 local_key,
                 &remote_key,
                 router_hash,
                 iv,
+                net_id,
             )?;
             stream.write_all(&message).await?;
 
@@ -320,7 +298,7 @@ impl<R: Runtime> SessionManager<R> {
             let mut reply = alloc::vec![0u8; padding_len];
             stream.read_exact(&mut reply).await?;
 
-            let (mut key_context, message) = initiator.finalize(&reply)?;
+            let (key_context, message) = initiator.finalize(&reply)?;
             stream.write_all(&message).await?;
 
             Ok(Ntcp2Session::<R>::new(
@@ -337,15 +315,14 @@ impl<R: Runtime> SessionManager<R> {
     pub fn accept_session(
         &self,
         mut stream: R::TcpStream,
-    ) -> impl Future<Output = crate::Result<(Ntcp2Session<R>)>> {
+    ) -> impl Future<Output = crate::Result<Ntcp2Session<R>>> {
         let net_id = self.local_router_info.net_id();
-        let local_info = self.local_router_info.serialize(&self.local_signing_key);
         let local_router_hash = self.local_router_info.identity.hash().to_vec();
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
-        let iv = self.local_iv.clone();
+        let iv = self.local_iv;
         let profile_storage = self.profile_storage.clone();
 
         async move {
@@ -354,17 +331,18 @@ impl<R: Runtime> SessionManager<R> {
                 "read `SessionRequest` from socket",
             );
 
-            /// read first part of `SessionRequest` which has fixed length
+            // read first part of `SessionRequest` which has fixed length
             let mut message = vec![0u8; 64];
             stream.read_exact(&mut message).await?;
 
-            let (mut responder, padding_len) = Responder::new::<R>(
-                inbound_initial_state.clone(),
-                chaining_key.clone(),
+            let (mut responder, padding_len) = Responder::new(
+                &inbound_initial_state,
+                &chaining_key,
                 local_router_hash,
                 local_key.clone(),
                 iv,
                 message,
+                net_id,
             )?;
 
             // read padding and create session if the peer is accepted
@@ -414,5 +392,473 @@ impl<R: Runtime> SessionManager<R> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        crypto::{SigningPrivateKey, StaticPrivateKey},
+        i2np::{MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
+        primitives::{
+            Capabilities, Date, RouterAddress, RouterIdentity, RouterInfo, Str, TransportKind,
+        },
+        profile::ProfileStorage,
+        runtime::{
+            mock::{MockRuntime, MockTcpListener, MockTcpStream},
+            Runtime, TcpListener as _,
+        },
+        subsystem::{InnerSubsystemEvent, SubsystemCommand, SubsystemHandle},
+        transports::ntcp2::{listener::Ntcp2Listener, session::SessionManager},
+    };
+    use futures::StreamExt;
+    use hashbrown::HashMap;
+    use rand::{thread_rng, RngCore};
+    use std::time::Duration;
+    use thingbuf::mpsc::channel;
+    use tokio::net::TcpListener;
+
+    struct Ntcp2Builder {
+        net_id: u8,
+        router_address: Option<RouterAddress>,
+        ntcp2_iv: [u8; 16],
+        ntcp2_key: [u8; 32],
+    }
+
+    impl Ntcp2Builder {
+        fn new() -> Self {
+            let ntcp2_key = {
+                let mut local_key = [0u8; 32];
+                thread_rng().fill_bytes(&mut local_key);
+                local_key
+            };
+            let ntcp2_iv = {
+                let mut local_iv = [0u8; 16];
+                thread_rng().fill_bytes(&mut local_iv);
+                local_iv
+            };
+
+            Self {
+                net_id: 2u8,
+                router_address: None,
+                ntcp2_iv,
+                ntcp2_key,
+            }
+        }
+
+        fn with_net_id(mut self, net_id: u8) -> Self {
+            self.net_id = net_id;
+            self
+        }
+
+        fn with_router_address(mut self, port: u16) -> Self {
+            self.router_address = Some(RouterAddress::new_published(
+                self.ntcp2_key.clone(),
+                self.ntcp2_iv,
+                port,
+                "127.0.0.1".parse().unwrap(),
+            ));
+            self
+        }
+
+        fn build(mut self) -> Ntcp2 {
+            let signing_key = SigningPrivateKey::random(thread_rng());
+            let static_key = StaticPrivateKey::random(thread_rng());
+            let identity =
+                RouterIdentity::from_keys::<MockRuntime>(&static_key, &signing_key).unwrap();
+            let router_info = RouterInfo {
+                identity,
+                published: Date::new(
+                    (MockRuntime::time_since_epoch() - Duration::from_secs(2 * 60)).as_millis()
+                        as u64,
+                ),
+                addresses: HashMap::from_iter([(
+                    TransportKind::Ntcp2,
+                    self.router_address
+                        .take()
+                        .unwrap_or(RouterAddress::new_unpublished(self.ntcp2_key.clone(), 8888)),
+                )]),
+                options: HashMap::from_iter([
+                    (Str::from("netId"), Str::from(self.net_id.to_string())),
+                    (Str::from("caps"), Str::from("L")),
+                ]),
+                net_id: self.net_id,
+                capabilities: Capabilities::parse(&Str::from("L")).unwrap(),
+            };
+
+            Ntcp2 {
+                ntcp2_iv: self.ntcp2_iv,
+                ntcp2_key: self.ntcp2_key,
+                router_info,
+                signing_key,
+            }
+        }
+    }
+
+    struct Ntcp2 {
+        ntcp2_iv: [u8; 16],
+        ntcp2_key: [u8; 32],
+        router_info: RouterInfo,
+        signing_key: SigningPrivateKey,
+    }
+
+    #[tokio::test]
+    async fn connection_succeeds() {
+        let local = Ntcp2Builder::new().build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_router_address(listener.local_addr().unwrap().port())
+            .build();
+        let remote_manager = SessionManager::new(
+            remote.ntcp2_key,
+            remote.ntcp2_iv,
+            remote.signing_key,
+            remote.router_info.clone(),
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let handle =
+            tokio::spawn(
+                async move { local_manager.create_session(remote.router_info.clone()).await },
+            );
+
+        let stream = MockTcpStream::new(
+            tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+        );
+        let (res1, res2) = tokio::join!(remote_manager.accept_session(stream), handle);
+
+        assert!(res1.is_ok());
+        assert!(res2.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn invalid_network_id_initiator() {
+        let local = Ntcp2Builder::new().with_net_id(128).build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_router_address(listener.local_addr().unwrap().port())
+            .build();
+        let remote_manager = SessionManager::new(
+            remote.ntcp2_key,
+            remote.ntcp2_iv,
+            remote.signing_key,
+            remote.router_info.clone(),
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let handle = tokio::spawn(async move {
+            let stream = MockTcpStream::new(
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            );
+            remote_manager.accept_session(stream).await
+        });
+
+        assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
+        assert!(handle.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_network_id_responder() {
+        let local = Ntcp2Builder::new().build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_net_id(128)
+            .with_router_address(listener.local_addr().unwrap().port())
+            .build();
+        let remote_manager = SessionManager::new(
+            remote.ntcp2_key,
+            remote.ntcp2_iv,
+            remote.signing_key,
+            remote.router_info.clone(),
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let handle = tokio::spawn(async move {
+            let stream = MockTcpStream::new(
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            );
+            remote_manager.accept_session(stream).await
+        });
+
+        assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
+        assert!(handle.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn dialer_local_addresses_disabled() {
+        let local = Ntcp2Builder::new().build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            false,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_net_id(128)
+            .with_router_address(listener.local_addr().unwrap().port())
+            .build();
+        let remote_manager = SessionManager::new(
+            remote.ntcp2_key,
+            remote.ntcp2_iv,
+            remote.signing_key,
+            remote.router_info.clone(),
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        tokio::spawn(async move {
+            let stream = MockTcpStream::new(
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            );
+            remote_manager.accept_session(stream).await.unwrap();
+        });
+
+        assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn listener_local_addresses_disabled() {
+        let local = Ntcp2Builder::new().build();
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            SubsystemHandle::new(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let listener = MockTcpListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = Ntcp2Listener::<MockRuntime>::new(listener, false);
+        let remote = Ntcp2Builder::new()
+            .with_net_id(128)
+            .with_router_address(listener.local_address().port())
+            .build();
+
+        tokio::spawn(async move { while let Some(_) = listener.next().await {} });
+
+        assert!(local_manager.create_session(remote.router_info.clone()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn received_expired_message() {
+        crate::util::init_logger();
+
+        let local = Ntcp2Builder::new().build();
+        let mut local_handle = SubsystemHandle::new();
+
+        let (_local_tunnel_tx, _local_tunnel_rx) = channel(64);
+        local_handle.register_subsystem(_local_tunnel_tx);
+
+        let (local_tx, local_rx) = channel(64);
+        local_handle.register_subsystem(local_tx);
+
+        let local_manager = SessionManager::new(
+            local.ntcp2_key,
+            local.ntcp2_iv,
+            local.signing_key,
+            local.router_info,
+            local_handle,
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Ntcp2Builder::new()
+            .with_router_address(listener.local_addr().unwrap().port())
+            .build();
+
+        let mut remote_handle = SubsystemHandle::new();
+
+        let (_remote_tunnel_tx, _remote_tunnel_rx) = channel(64);
+        remote_handle.register_subsystem(_remote_tunnel_tx);
+
+        let (remote_tx, remote_rx) = channel(64);
+        remote_handle.register_subsystem(remote_tx);
+
+        let remote_manager = SessionManager::new(
+            remote.ntcp2_key,
+            remote.ntcp2_iv,
+            remote.signing_key,
+            remote.router_info.clone(),
+            remote_handle.clone(),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            true,
+        );
+
+        let handle =
+            tokio::spawn(
+                async move { local_manager.create_session(remote.router_info.clone()).await },
+            );
+
+        let stream = MockTcpStream::new(
+            tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+        );
+        let (res1, res2) = tokio::join!(remote_manager.accept_session(stream), handle);
+
+        tokio::spawn(res1.unwrap().run());
+        tokio::spawn(res2.unwrap().unwrap().run());
+
+        let (_local_router, remote_command_tx) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                match remote_rx.recv().await {
+                    Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => (router, tx),
+                    _ => panic!("invalid event received"),
+                }
+            })
+            .await
+            .expect("no timeout");
+        let (_remote_router, _local_command_tx) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                match local_rx.recv().await {
+                    Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => (router, tx),
+                    _ => panic!("invalid event received"),
+                }
+            })
+            .await
+            .expect("no timeout");
+
+        // send non-expired database message
+        remote_command_tx
+            .send(SubsystemCommand::SendMessage {
+                message: MessageBuilder::short()
+                    .with_expiration(MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_message_type(MessageType::DatabaseStore)
+                    .with_message_id(1337u32)
+                    .with_payload(&vec![1, 1, 1, 1])
+                    .build(),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            match local_rx.recv().await {
+                Some(InnerSubsystemEvent::I2Np { mut messages }) => {
+                    assert_eq!(messages.len(), 1);
+                    let message = messages.pop().unwrap();
+
+                    assert_eq!(message.message_type, MessageType::DatabaseStore);
+                    assert_eq!(message.message_id, 1337u32);
+                    assert_eq!(message.payload, vec![1, 1, 1, 1]);
+                }
+                _ => panic!("invalid event received"),
+            }
+        })
+        .await
+        .expect("no timeout");
+
+        // send expired database message
+        remote_command_tx
+            .send(SubsystemCommand::SendMessage {
+                message: MessageBuilder::short()
+                    .with_expiration(MockRuntime::time_since_epoch() - Duration::from_secs(5))
+                    .with_message_type(MessageType::DatabaseStore)
+                    .with_message_id(1338u32)
+                    .with_payload(&vec![2, 2, 2, 2])
+                    .build(),
+            })
+            .await
+            .unwrap();
+
+        // operation times out because the message was expired
+        tokio::time::timeout(Duration::from_secs(5), async {
+            match local_rx.recv().await {
+                _ => panic!("didn't expect to receive anything"),
+            }
+        })
+        .await
+        .unwrap_err();
+
+        // send another non-expired database message
+        remote_command_tx
+            .send(SubsystemCommand::SendMessage {
+                message: MessageBuilder::short()
+                    .with_expiration(MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                    .with_message_type(MessageType::DatabaseStore)
+                    .with_message_id(1339u32)
+                    .with_payload(&vec![3, 3, 3, 3])
+                    .build(),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            match local_rx.recv().await {
+                Some(InnerSubsystemEvent::I2Np { mut messages }) => {
+                    assert_eq!(messages.len(), 1);
+                    let message = messages.pop().unwrap();
+
+                    assert_eq!(message.message_type, MessageType::DatabaseStore);
+                    assert_eq!(message.message_id, 1339u32);
+                    assert_eq!(message.payload, vec![3, 3, 3, 3]);
+                }
+                _ => panic!("invalid event received"),
+            }
+        })
+        .await
+        .expect("no timeout");
     }
 }

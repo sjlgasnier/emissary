@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    error::{ChannelError, RouteKind, RoutingError},
+    error::{RouteKind, RoutingError},
     i2np::{
         tunnel::{data::EncryptedTunnelData, gateway::TunnelGateway},
         Message, MessageType,
@@ -26,7 +26,7 @@ use crate::{
 };
 
 use futures_channel::oneshot;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use rand_core::RngCore;
 use thingbuf::mpsc::{self, errors::TrySendError};
 
@@ -45,7 +45,7 @@ const LOG_TARGET: &str = "emissary::tunnel::routing-table";
 pub enum RoutingKind {
     /// Message needs to be send to an external router.
     External {
-        ///
+        /// Router ID.
         router_id: RouterId,
 
         /// Serialize I2NP essage.
@@ -292,11 +292,11 @@ impl RoutingTable {
             }
             false => self.manager.try_send(RoutingKind::External { router_id, message }).map_err(
                 |error| match error {
-                    TrySendError::Full(RoutingKind::External { router_id, message }) =>
+                    TrySendError::Full(RoutingKind::External { message, .. }) =>
                         RoutingError::ChannelFull(
                             Message::parse_short(&message).expect("valid message"),
                         ),
-                    TrySendError::Closed(RoutingKind::External { router_id, message }) =>
+                    TrySendError::Closed(RoutingKind::External { message, .. }) =>
                         RoutingError::ChannelClosed(
                             Message::parse_short(&message).expect("valid message"),
                         ),
@@ -314,14 +314,13 @@ mod tests {
         i2np::{tunnel::data::TunnelDataBuilder, MessageBuilder},
         runtime::{mock::MockRuntime, Runtime},
     };
-    use futures_channel::oneshot;
     use rand_core::RngCore;
     use thingbuf::mpsc::channel;
 
     #[test]
     fn tunnel_doesnt_exist() {
-        let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -350,8 +349,8 @@ mod tests {
 
     #[test]
     fn tunnel_exists() {
-        let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -383,7 +382,7 @@ mod tests {
     #[test]
     fn listener_doesnt_exist() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -405,7 +404,7 @@ mod tests {
     #[test]
     fn listener_exists() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -432,12 +431,12 @@ mod tests {
     #[should_panic]
     fn channel_closed() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add listener for message into routing table
-        let (message_id, mut listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
+        let (message_id, listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
 
         let message = {
             let message = MessageBuilder::short()
@@ -460,8 +459,8 @@ mod tests {
 
     #[test]
     fn channel_full() {
-        let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -521,13 +520,13 @@ mod tests {
 
     #[test]
     fn send_message_to_remote() {
-        let (transit_tx, transit_rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
         // add listener for message into routing table
-        let (message_id, mut listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
+        let (message_id, _listener_rx) = routing_table.insert_listener(&mut MockRuntime::rng());
 
         let message = MessageBuilder::short()
             .with_message_type(MessageType::ShortTunnelBuild)
@@ -543,7 +542,7 @@ mod tests {
     #[test]
     fn route_message_locally() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -560,8 +559,8 @@ mod tests {
 
     #[test]
     fn tunnel_already_exists() {
-        let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
+        let (manager_tx, _manager_rx) = channel(64);
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -581,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_internal() {
-        let (transit_tx, transit_rx) = channel(64);
+        let (transit_tx, _transit_rx) = channel(64);
         let (manager_tx, manager_rx) = channel(64);
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);

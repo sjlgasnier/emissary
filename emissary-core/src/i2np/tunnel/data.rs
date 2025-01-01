@@ -62,6 +62,9 @@ const LAST_FRAGMENT: u8 = 0x01;
 /// Maximum size for `TunnelData` message.
 const TUNNEL_DATA_LEN: usize = 1028usize;
 
+/// Tunnel data payload length.
+const TUNNEL_DATA_PAYLOAD_LEN: usize = 1008usize;
+
 /// Encrypted tunnel data.
 pub struct EncryptedTunnelData<'a> {
     /// Tunnel ID.
@@ -81,7 +84,7 @@ impl<'a> EncryptedTunnelData<'a> {
     pub fn parse_frame(input: &'a [u8]) -> IResult<&'a [u8], EncryptedTunnelData<'a>> {
         let (rest, tunnel_id) = be_u32(input)?;
         let (rest, iv) = take(AES256_IV_LEN)(rest)?;
-        let (rest, ciphertext) = take(rest.len())(rest)?;
+        let (rest, ciphertext) = take(TUNNEL_DATA_PAYLOAD_LEN)(rest)?;
 
         Ok((
             rest,
@@ -111,6 +114,17 @@ impl<'a> EncryptedTunnelData<'a> {
     /// Get reference to ciphertext ([`TunnelData`]).
     pub fn ciphertext(&self) -> &[u8] {
         self.ciphertext
+    }
+
+    /// Get XOR of IV and ciphertext's first block.
+    pub fn xor(&self) -> [u8; AES256_IV_LEN] {
+        let mut result = [0u8; AES256_IV_LEN];
+
+        for (i, item) in result.iter_mut().enumerate().take(AES256_IV_LEN) {
+            *item = self.iv[i] ^ self.ciphertext[i];
+        }
+
+        result
     }
 }
 
@@ -215,11 +229,11 @@ impl<'a> MessageKind<'a> {
             MessageKind::Unfragmented {
                 delivery_instructions,
             } => match delivery_instructions {
-                DeliveryInstructions::Local => BytesMut::from_iter(vec![0x00].into_iter()),
+                DeliveryInstructions::Local => BytesMut::from_iter(vec![0x00]),
                 DeliveryInstructions::Router { hash } => {
                     let mut out = BytesMut::with_capacity(33);
                     out.put_u8(0x02 << 5);
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
 
                     out
                 }
@@ -227,7 +241,7 @@ impl<'a> MessageKind<'a> {
                     let mut out = BytesMut::with_capacity(37);
                     out.put_u8(0x01 << 5);
                     out.put_u32(tunnel_id);
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
 
                     out
                 }
@@ -246,7 +260,7 @@ impl<'a> MessageKind<'a> {
                 DeliveryInstructions::Router { hash } => {
                     let mut out = BytesMut::with_capacity(38);
                     out.put_u8((0x01 << 3) | (0x02 << 5));
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
                     out.put_u32(message_id);
 
                     out
@@ -255,7 +269,7 @@ impl<'a> MessageKind<'a> {
                     let mut out = BytesMut::with_capacity(41);
                     out.put_u8((0x01 << 3) | (0x01 << 5));
                     out.put_u32(tunnel_id);
-                    out.put_slice(&hash);
+                    out.put_slice(hash);
                     out.put_u32(message_id);
 
                     out
@@ -502,8 +516,8 @@ impl<'a> TunnelDataBuilder<'a> {
             &Sha256::new()
                 .update(delivery_instructions)
                 .update((message.len() as u16).to_be_bytes())
-                .update(&message)
-                .update(&iv)
+                .update(message)
+                .update(iv)
                 .finalize()[..4],
         )
         .expect("to succeed")
@@ -530,18 +544,18 @@ impl<'a> TunnelDataBuilder<'a> {
 
         out.put_u32(tunnel_id.into());
         out.put_slice(&aes_iv);
-        out.put_slice(&Self::checksum(&delivery_instructions, &message, &aes_iv));
+        out.put_slice(&Self::checksum(delivery_instructions, message, &aes_iv));
 
         if let Some(padding) = padding {
             // calculate padding size and generate random offset into `padding`
             let padding_size = payload_size.saturating_sub(message.len());
-            let padding_offset = (R::rng().next_u32() as usize % (TUNNEL_DATA_LEN - padding_size));
+            let padding_offset = R::rng().next_u32() as usize % (TUNNEL_DATA_LEN - padding_size);
 
             out.put_slice(&padding[padding_offset..padding_offset + padding_size]);
         }
 
         out.put_u8(0x00); // zero byte (end of padding)
-        out.put_slice(&delivery_instructions);
+        out.put_slice(delivery_instructions);
         out.put_u16(message.len() as u16);
         out.put_slice(message);
 
@@ -661,7 +675,7 @@ impl<'a> TunnelDataBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{mock::MockRuntime, Runtime};
+    use crate::runtime::mock::MockRuntime;
 
     fn find_payload_start(ciphertext: &[u8], iv: &[u8]) -> Option<usize> {
         let padding_end = ciphertext[4..].iter().enumerate().find(|(_, byte)| byte == &&0x0)?;

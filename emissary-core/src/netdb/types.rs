@@ -21,10 +21,7 @@
 
 //! Kademlia types.
 
-use crate::{
-    primitives::RouterId,
-    runtime::{Instant, Runtime},
-};
+use crate::{primitives::RouterId, runtime::Runtime};
 
 use sha2::{
     digest::generic_array::{typenum::U32, GenericArray},
@@ -35,7 +32,6 @@ use uint::construct_uint;
 use alloc::vec::Vec;
 use core::{
     borrow::Borrow,
-    fmt,
     hash::{Hash, Hasher},
 };
 
@@ -203,10 +199,6 @@ impl<R: Runtime> FloodFill<R> {
 impl<R: Runtime> PartialEq for FloodFill<R> {
     fn eq(&self, other: &Self) -> bool {
         self.key.eq(&other.key)
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.key.ne(&other.key)
     }
 }
 

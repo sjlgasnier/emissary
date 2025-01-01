@@ -66,10 +66,13 @@ export class Emissary implements Router {
 
     let config = toml.stringify({
       floodfill: this.floodfill,
+      insecure_tunnels: true,
+      allow_local: true,
       caps: this.floodfill ? "XfR" : "LR",
       ntcp2: {
         host: this.host,
         port: 9999,
+        published: true,
       },
       i2cp: {
         port: 7654,
@@ -97,12 +100,13 @@ export class Emissary implements Router {
       this.log,
       "--base-path",
       "/var/lib/emissary",
+      "--disable-reseed",
     ]);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await container.destroy();
 
     let routerInfo = new Uint8Array(
-      await fs.readFile(`${path}/routerInfo.dat`),
+      await fs.readFile(`${path}/router.info`),
     );
     this.hash = getRouterHash(routerInfo.subarray(0, 391));
 
@@ -149,7 +153,7 @@ export class Emissary implements Router {
       [`${this.path}:/var/lib/emissary`],
       ports,
       exposedPorts,
-      ["emissary-cli", this.log, "--base-path", "/var/lib/emissary"],
+      ["emissary-cli", this.log, "--base-path", "/var/lib/emissary", "--disable-reseed"],
     );
   }
 

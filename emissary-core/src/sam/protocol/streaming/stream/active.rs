@@ -17,8 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::SigningPrivateKey,
     error::StreamingError,
-    primitives::DestinationId,
+    primitives::{Destination, DestinationId},
     runtime::{AsyncRead, AsyncWrite, Instant, Runtime},
     sam::protocol::streaming::{
         config::StreamConfig,
@@ -51,7 +52,7 @@ use core::{
 const LOG_TARGET: &str = "emissary::streaming::active";
 
 /// Read buffer size.
-const READ_BUFFER_SIZE: usize = 8192;
+const READ_BUFFER_SIZE: usize = 0xffff;
 
 /// Initial ACK delay.
 const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
@@ -88,6 +89,28 @@ const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
 
 /// Threshold for stopping exponential growth of the window size.
 const EXP_GROWTH_STOP_THRESHOLD: usize = 64;
+
+/// MTU size.
+const MTU_SIZE: usize = 1812;
+
+/// Stream event.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Streaming packet received from remote.
+    Packet {
+        /// Serialized packet.
+        packet: Vec<u8>,
+    },
+
+    /// [`StreamManager`] has asked the stream to be shut down.
+    ShutDown,
+}
+
+impl Default for StreamEvent {
+    fn default() -> Self {
+        StreamEvent::ShutDown
+    }
+}
 
 /// Measured RTT.
 #[derive(Debug, Copy, Clone)]
@@ -227,8 +250,11 @@ pub enum StreamKind {
 
 /// Context needed to initialize [`Stream`].
 pub struct StreamContext {
+    /// Local destination.
+    pub destination: Destination,
+
     /// RX channel for receiving [`Packet`]s from the network.
-    pub cmd_rx: Receiver<Vec<u8>>,
+    pub cmd_rx: Receiver<StreamEvent>,
 
     /// TX channel for sending [`Packet`]s to the network.
     pub event_tx: Sender<(DestinationId, Vec<u8>)>,
@@ -241,6 +267,9 @@ pub struct StreamContext {
 
     /// ID of the remote destination.
     pub remote: DestinationId,
+
+    /// Signing key.
+    pub signing_key: SigningPrivateKey,
 }
 
 /// Pending outbound packet.
@@ -269,6 +298,9 @@ enum WriteState {
         message: Vec<u8>,
     },
 
+    /// Socket has been closed.
+    Closed,
+
     /// [`WriteState`] has been poisoned.
     Poisoned,
 }
@@ -283,6 +315,9 @@ enum SocketState {
         /// Offset into read buffer.
         offset: usize,
     },
+
+    /// Socket has been closed.
+    Closed,
 }
 
 /// Inbound context.
@@ -384,33 +419,26 @@ impl<R: Runtime> InboundContext<R> {
             if self.ack_timer.is_none() {
                 self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
             }
-        } else {
-            if self.missing.first() == Some(&seq_nro) {
+        } else if self.missing.first() == Some(&seq_nro) {
+            self.ready.push_back(payload);
+            self.missing.remove(&seq_nro);
+
+            let mut next_seq = seq_nro + 1;
+
+            while let Some(payload) = self.pending.remove(&next_seq) {
                 self.ready.push_back(payload);
-                self.missing.remove(&seq_nro);
+                next_seq += 1;
+            }
 
-                let mut next_seq = seq_nro + 1;
+            if self.ack_timer.is_none() {
+                self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
+            }
+        } else {
+            self.missing.remove(&seq_nro);
+            self.pending.insert(seq_nro, payload);
 
-                loop {
-                    match self.pending.remove(&next_seq) {
-                        Some(payload) => {
-                            self.ready.push_back(payload);
-                            next_seq += 1;
-                        }
-                        None => break,
-                    }
-                }
-
-                if self.ack_timer.is_none() {
-                    self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
-                }
-            } else {
-                self.missing.remove(&seq_nro);
-                self.pending.insert(seq_nro, payload);
-
-                if self.ack_timer.is_none() {
-                    self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
-                }
+            if self.ack_timer.is_none() {
+                self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
             }
         }
 
@@ -423,6 +451,10 @@ impl<R: Runtime> InboundContext<R> {
 
     fn close(&mut self) {
         self.close_requested = true;
+
+        if self.ack_timer.is_none() {
+            self.ack_timer = Some(Box::pin(R::delay(self.rtt)));
+        }
     }
 
     fn can_close(&self) -> bool {
@@ -450,8 +482,14 @@ impl<R: Runtime> Future for InboundContext<R> {
 /// Implements a `Future` which returns the send stream ID after the virtual stream has been shut
 /// down, either by the client or by the remote participant.
 pub struct Stream<R: Runtime> {
-    /// RX channel for receiving [`Packet`]s from the network.
-    cmd_rx: Receiver<Vec<u8>>,
+    /// Close requested.
+    close_requested: bool,
+
+    /// RX channel for receiving [`StreamEvent`]s from the network.
+    cmd_rx: Receiver<StreamEvent>,
+
+    /// Local destination.
+    destination: Destination,
 
     /// TX channel for sending [`Packet`]s to the network.
     event_tx: Sender<(DestinationId, Vec<u8>)>,
@@ -464,9 +502,6 @@ pub struct Stream<R: Runtime> {
 
     /// Next sequence number.
     next_seq_nro: u32,
-
-    /// Pending (unACKed) outbound packets.
-    unacked: BTreeMap<u32, PendingPacket<R>>,
 
     /// Pending (unsent) outbound packets.
     pending: BTreeMap<u32, PendingPacket<R>>,
@@ -486,17 +521,23 @@ pub struct Stream<R: Runtime> {
     /// RTO.
     rto: Rto,
 
-    /// RTT.
-    rtt: Rtt,
-
     /// RTO timer.
     rto_timer: Option<BoxFuture<'static, ()>>,
+
+    /// RTT.
+    rtt: Rtt,
 
     /// Send stream ID (selected by us).
     send_stream_id: u32,
 
+    /// Signing key.
+    signing_key: SigningPrivateKey,
+
     /// Underlying TCP stream used to communicate with the client.
     stream: R::TcpStream,
+
+    /// Pending (unACKed) outbound packets.
+    unacked: BTreeMap<u32, PendingPacket<R>>,
 
     /// Window size.
     window_size: usize,
@@ -520,6 +561,8 @@ impl<R: Runtime> Stream<R> {
             cmd_rx,
             event_tx,
             recv_stream_id,
+            signing_key,
+            destination,
         } = context;
 
         let (send_stream_id, initial_message, highest_ack) = match state {
@@ -527,9 +570,11 @@ impl<R: Runtime> Stream<R> {
                 let send_stream_id = R::rng().next_u32();
                 let packet = PacketBuilder::new(send_stream_id)
                     .with_send_stream_id(recv_stream_id)
+                    .with_from_included(destination.clone())
                     .with_seq_nro(0)
                     .with_synchronize()
-                    .build();
+                    .with_signature()
+                    .build_and_sign(&signing_key);
 
                 event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
 
@@ -589,22 +634,25 @@ impl<R: Runtime> Stream<R> {
         };
 
         Self {
+            close_requested: false,
             cmd_rx,
+            destination,
             event_tx,
             inbound_context: InboundContext::new(highest_ack),
             local,
             next_seq_nro: 1u32,
-            unacked: BTreeMap::new(),
             pending: BTreeMap::new(),
             read_buffer: vec![0u8; READ_BUFFER_SIZE],
             read_state: SocketState::ReadMessage,
-            rto: Rto::new(),
-            rtt: Rtt::new(),
-            rto_timer: None,
             recv_stream_id,
             remote,
+            rto: Rto::new(),
+            rto_timer: None,
+            rtt: Rtt::new(),
             send_stream_id,
+            signing_key,
             stream,
+            unacked: BTreeMap::new(),
             window_size: INITIAL_WINDOW_SIZE,
             write_state: match initial_message {
                 None => WriteState::GetMessage,
@@ -648,7 +696,7 @@ impl<R: Runtime> Stream<R> {
             .unacked
             .iter()
             .filter_map(|(seq_nro, _)| {
-                (seq_nro <= &ack_through && nacks.iter().find(|nack| nack == &seq_nro).is_none())
+                (seq_nro <= &ack_through && !nacks.iter().any(|nack| nack == seq_nro))
                     .then_some(*seq_nro)
             })
             .collect::<Vec<_>>()
@@ -693,7 +741,9 @@ impl<R: Runtime> Stream<R> {
                 .with_send_stream_id(self.recv_stream_id)
                 .with_seq_nro(0)
                 .with_synchronize()
-                .build();
+                .with_from_included(self.destination.clone())
+                .with_signature()
+                .build_and_sign(&self.signing_key);
 
             self.event_tx.try_send((self.remote.clone(), packet.to_vec())).unwrap();
         }
@@ -720,6 +770,9 @@ impl<R: Runtime> Stream<R> {
                 send_id = ?self.send_stream_id,
                 "remote sent `CLOSE`",
             );
+
+            // stop reading any  more data from the client socket
+            self.read_state = SocketState::Closed;
             self.inbound_context.close();
         }
 
@@ -731,6 +784,16 @@ impl<R: Runtime> Stream<R> {
             self.inbound_context.handle_packet(seq_nro, payload.to_vec())?;
         }
 
+        if self.close_requested && self.unacked.is_empty() && self.pending.is_empty() {
+            tracing::trace!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                "shutting down stream",
+            );
+            return Err(StreamingError::Closed);
+        }
+
         Ok(())
     }
 
@@ -738,7 +801,7 @@ impl<R: Runtime> Stream<R> {
         let sent = R::now();
 
         let packets = self.read_buffer[..offset]
-            .chunks(256)
+            .chunks(MTU_SIZE)
             .map(|chunk| {
                 let seq_nro = {
                     let seq_nro = self.next_seq_nro;
@@ -852,6 +915,85 @@ impl<R: Runtime> Stream<R> {
             }
         }
     }
+
+    /// Client has closed down the socket.
+    fn shutdown(&mut self) {
+        if self.close_requested {
+            return;
+        }
+
+        tracing::info!(
+            target: LOG_TARGET,
+            local = %self.local,
+            remote = %self.remote,
+            num_pending = ?self.pending.len(),
+            num_unacked = ?self.unacked.len(),
+            "shutdown stream",
+        );
+
+        self.close_requested = true;
+
+        let seq_nro = {
+            let seq_nro = self.next_seq_nro;
+            self.next_seq_nro += 1;
+            seq_nro
+        };
+
+        let packet = PacketBuilder::new(self.send_stream_id)
+            .with_send_stream_id(self.recv_stream_id)
+            .with_ack_through(self.inbound_context.seq_nro)
+            .with_seq_nro(seq_nro)
+            .with_close()
+            .with_from_included(self.destination.clone())
+            .with_signature()
+            .build_and_sign(&self.signing_key)
+            .to_vec();
+
+        if self.window_size.saturating_sub(self.unacked.len()) == 0 {
+            tracing::info!(
+                target: LOG_TARGET,
+                local = %self.local,
+                remote = %self.remote,
+                "postponing `CLOSE`, send window is full",
+            );
+
+            self.pending.insert(
+                seq_nro,
+                PendingPacket::<R> {
+                    sent: R::now(),
+                    seq_nro,
+                    packet,
+                },
+            );
+        } else {
+            match self.event_tx.try_send((self.remote.clone(), packet.clone())) {
+                Err(_) => {
+                    self.pending.insert(
+                        seq_nro,
+                        PendingPacket::<R> {
+                            sent: R::now(),
+                            seq_nro,
+                            packet,
+                        },
+                    );
+                }
+                Ok(()) => {
+                    self.unacked.insert(
+                        seq_nro,
+                        PendingPacket::<R> {
+                            sent: R::now(),
+                            seq_nro,
+                            packet,
+                        },
+                    );
+                }
+            }
+
+            if self.rto_timer.is_none() {
+                self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
+            }
+        }
+    }
 }
 
 impl<R: Runtime> Future for Stream<R> {
@@ -875,28 +1017,34 @@ impl<R: Runtime> Future for Stream<R> {
                             },
                     },
                     Poll::Ready(None) => return Poll::Ready(this.recv_stream_id),
-                    Poll::Ready(Some(message)) => match this.on_packet(message) {
-                        Err(StreamingError::Closed | StreamingError::SequenceNumberTooHigh) =>
-                            return Poll::Ready(this.recv_stream_id),
-                        Err(error) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                local = %this.local,
-                                remote = %this.remote,
-                                ?error,
-                                "failed to handle packet"
-                            );
-                            this.write_state = WriteState::GetMessage;
-                        }
-                        Ok(()) => match this.inbound_context.pop_message() {
-                            Some(message) =>
-                                this.write_state = WriteState::WriteMessage {
-                                    offset: 0usize,
-                                    message,
-                                },
-                            None => this.write_state = WriteState::GetMessage,
+                    Poll::Ready(Some(StreamEvent::ShutDown)) => {
+                        this.write_state = WriteState::Closed;
+                        this.read_state = SocketState::Closed;
+                        this.shutdown();
+                    }
+                    Poll::Ready(Some(StreamEvent::Packet { packet })) =>
+                        match this.on_packet(packet) {
+                            Err(StreamingError::Closed | StreamingError::SequenceNumberTooHigh) =>
+                                return Poll::Ready(this.recv_stream_id),
+                            Err(error) => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    local = %this.local,
+                                    remote = %this.remote,
+                                    ?error,
+                                    "failed to handle packet"
+                                );
+                                this.write_state = WriteState::GetMessage;
+                            }
+                            Ok(()) => match this.inbound_context.pop_message() {
+                                Some(message) =>
+                                    this.write_state = WriteState::WriteMessage {
+                                        offset: 0usize,
+                                        message,
+                                    },
+                                None => this.write_state = WriteState::GetMessage,
+                            },
                         },
-                    },
                 },
                 WriteState::WriteMessage { offset, message } =>
                     match Pin::new(&mut this.stream).as_mut().poll_write(cx, &message[offset..]) {
@@ -904,14 +1052,11 @@ impl<R: Runtime> Future for Stream<R> {
                             this.write_state = WriteState::WriteMessage { offset, message };
                             break;
                         }
-                        Poll::Ready(Err(_)) => return Poll::Ready(this.recv_stream_id),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                "wrote zero bytes to socket",
-                            );
-
-                            return Poll::Ready(this.recv_stream_id);
+                        Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) => {
+                            this.write_state = WriteState::Closed;
+                            this.read_state = SocketState::Closed;
+                            this.shutdown();
+                            continue;
                         }
                         Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
                             true => {
@@ -925,6 +1070,36 @@ impl<R: Runtime> Future for Stream<R> {
                             }
                         },
                     },
+                WriteState::Closed => match this.cmd_rx.poll_recv(cx) {
+                    Poll::Pending => {
+                        this.write_state = WriteState::Closed;
+                        break;
+                    }
+                    Poll::Ready(None) => return Poll::Ready(this.recv_stream_id),
+                    Poll::Ready(Some(StreamEvent::ShutDown)) => {
+                        this.write_state = WriteState::Closed;
+                        this.read_state = SocketState::Closed;
+                        break;
+                    }
+                    Poll::Ready(Some(StreamEvent::Packet { packet })) =>
+                        match this.on_packet(packet) {
+                            Err(StreamingError::Closed | StreamingError::SequenceNumberTooHigh) =>
+                                return Poll::Ready(this.recv_stream_id),
+                            Err(error) => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    local = %this.local,
+                                    remote = %this.remote,
+                                    ?error,
+                                    "failed to handle packet"
+                                );
+                                this.write_state = WriteState::Closed;
+                            }
+                            Ok(()) => {
+                                this.write_state = WriteState::Closed;
+                            }
+                        },
+                },
                 WriteState::Poisoned => {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -941,7 +1116,7 @@ impl<R: Runtime> Future for Stream<R> {
         loop {
             match this.read_state {
                 // if there are pending messages from previous reads, the socket shouldn't be read
-                SocketState::ReadMessage => match this.pending.is_empty() {
+                SocketState::ReadMessage | SocketState::Closed => match this.pending.is_empty() {
                     false => {
                         let outstanding = this.unacked.len();
                         let available = this.window_size.saturating_sub(outstanding);
@@ -953,6 +1128,8 @@ impl<R: Runtime> Future for Stream<R> {
 
                         tracing::info!(
                             target: LOG_TARGET,
+                            local = %this.local,
+                            remote = %this.remote,
                             window_size = this.window_size,
                             num_unacked = ?this.unacked.len(),
                             num_pending = ?this.pending.len(),
@@ -989,38 +1166,26 @@ impl<R: Runtime> Future for Stream<R> {
                             this.rto_timer = Some(Box::pin(R::delay(*this.rto)));
                         }
                     }
-                    true => match Pin::new(&mut this.stream)
-                        .as_mut()
-                        .poll_read(cx, &mut this.read_buffer)
-                    {
-                        Poll::Pending => {
-                            this.read_state = SocketState::ReadMessage;
-                            break;
-                        }
-                        Poll::Ready(Err(error)) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                ?error,
-                                local = %this.local,
-                                remote = %this.remote,
-                                "socket error",
-                            );
-                            return Poll::Ready(this.recv_stream_id);
-                        }
-                        Poll::Ready(Ok(nread)) => {
-                            if nread == 0 {
-                                tracing::debug!(
-                                    target: LOG_TARGET,
-                                    local = %this.local,
-                                    remote = %this.remote,
-                                    "read zero bytes from socket",
-                                );
-                                return Poll::Ready(this.recv_stream_id);
+                    true if !core::matches!(this.read_state, SocketState::Closed) =>
+                        match Pin::new(&mut this.stream)
+                            .as_mut()
+                            .poll_read(cx, &mut this.read_buffer)
+                        {
+                            Poll::Pending => {
+                                this.read_state = SocketState::ReadMessage;
+                                break;
                             }
-
-                            this.read_state = SocketState::SendMessage { offset: nread };
-                        }
-                    },
+                            Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) => {
+                                this.write_state = WriteState::Closed;
+                                this.read_state = SocketState::Closed;
+                                this.shutdown();
+                                continue;
+                            }
+                            Poll::Ready(Ok(nread)) => {
+                                this.read_state = SocketState::SendMessage { offset: nread };
+                            }
+                        },
+                    true => break,
                 },
                 SocketState::SendMessage { offset } => {
                     this.packetize(offset);
@@ -1098,7 +1263,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     struct StreamBuilder {
-        cmd_tx: Sender<Vec<u8>>,
+        cmd_tx: Sender<StreamEvent>,
         event_rx: Receiver<(DestinationId, Vec<u8>)>,
         stream: tokio::net::TcpStream,
     }
@@ -1106,6 +1271,9 @@ mod tests {
     impl StreamBuilder {
         pub async fn build_stream() -> (Stream<MockRuntime>, Self) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            let destination_id = destination.id();
 
             let address = listener.local_addr().unwrap();
             let (stream1, stream2) =
@@ -1120,11 +1288,13 @@ mod tests {
                     stream2.unwrap(),
                     None,
                     StreamContext {
+                        destination,
                         cmd_rx,
                         event_tx,
-                        local: DestinationId::random(),
+                        local: destination_id,
                         recv_stream_id: 1337u32,
                         remote: DestinationId::random(),
+                        signing_key,
                     },
                     Default::default(),
                     StreamKind::Inbound { payload: vec![] },
@@ -1160,14 +1330,14 @@ mod tests {
 
         for (i, message) in messages.iter().enumerate() {
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(i as u32 + 1)
                         .with_payload(message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -1207,14 +1377,14 @@ mod tests {
 
         // send one more packet and verify that it's acked
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(5u32)
                     .with_payload(b"test message\n")
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -1279,14 +1449,14 @@ mod tests {
             let (seq_nro, message) = messages.pop_front().unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(seq_nro)
                         .with_payload(&message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -1322,14 +1492,14 @@ mod tests {
             let (seq_nro, message) = messages.pop_front().unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(seq_nro)
                         .with_payload(&message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -1367,14 +1537,14 @@ mod tests {
                 let (seq_nro, message) = messages.pop_front().unwrap();
 
                 cmd_tx
-                    .send(
-                        PacketBuilder::new(1338u32)
+                    .send(StreamEvent::Packet {
+                        packet: PacketBuilder::new(1338u32)
                             .with_send_stream_id(1337u32)
                             .with_seq_nro(seq_nro)
                             .with_payload(&message)
                             .build()
                             .to_vec(),
-                    )
+                    })
                     .await
                     .unwrap();
             }
@@ -1412,14 +1582,14 @@ mod tests {
             let (seq_nro, message) = messages.pop_front().unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(seq_nro)
                         .with_payload(&message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -1456,14 +1626,14 @@ mod tests {
             let (seq_nro, message) = messages.pop_front().unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(seq_nro)
                         .with_payload(&message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -1537,7 +1707,7 @@ mod tests {
 
         // send packet to stream with random sleeps
         for packet in packets {
-            cmd_tx.try_send(packet).unwrap();
+            cmd_tx.try_send(StreamEvent::Packet { packet }).unwrap();
 
             tokio::time::sleep(Duration::from_millis(thread_rng().gen_range(5..100))).await;
         }
@@ -1564,14 +1734,14 @@ mod tests {
         // send two normal packets
         for (seq_nro, message) in vec![(1u32, b"msg1\n".to_vec()), (2u32, b"msg2\n".to_vec())] {
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(seq_nro)
                         .with_payload(&message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -1579,14 +1749,14 @@ mod tests {
         // send packet with high seq number (missing packets) with `RESET`
         // and verify that the stream is closed event though there's missing data
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(10u32)
                     .with_reset()
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -1622,14 +1792,14 @@ mod tests {
 
         for (i, message) in messages.iter() {
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(*i)
                         .with_payload(message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -1705,7 +1875,7 @@ mod tests {
 
         // send packet to stream with random sleeps
         for packet in packets {
-            cmd_tx.try_send(packet).unwrap();
+            cmd_tx.try_send(StreamEvent::Packet { packet }).unwrap();
 
             tokio::time::sleep(Duration::from_millis(thread_rng().gen_range(5..100))).await;
         }
@@ -1748,28 +1918,28 @@ mod tests {
 
         for (i, message) in messages.iter().enumerate() {
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(i as u32 + 1)
                         .with_payload(message)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
 
         // send packet with way too high sequence number
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(1024)
                     .with_payload(b"hello, world")
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -1796,14 +1966,14 @@ mod tests {
         for i in 0..1024 {
             if i % 2 == 0 {
                 cmd_tx
-                    .send(
-                        PacketBuilder::new(1338u32)
+                    .send(StreamEvent::Packet {
+                        packet: PacketBuilder::new(1338u32)
                             .with_send_stream_id(1337u32)
                             .with_seq_nro(i as u32 + 1)
                             .with_payload(b"test")
                             .build()
                             .to_vec(),
-                    )
+                    })
                     .await
                     .unwrap();
             }
@@ -1873,14 +2043,14 @@ mod tests {
 
         // send ack for the packet
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_ack_through(packet.seq_nro)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(PLAIN_ACK)
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -2002,14 +2172,14 @@ mod tests {
 
         // send ack for the packet
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_ack_through(packet.seq_nro)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(PLAIN_ACK)
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -2088,9 +2258,9 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; 256]);
-                data.extend_from_slice(&vec![2u8; 256]);
-                data.extend_from_slice(&vec![3u8; 256]);
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![2u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![3u8; MTU_SIZE]);
 
                 data
             })
@@ -2106,21 +2276,21 @@ mod tests {
             .expect("to succeed");
 
         let packet = Packet::parse(&first_packet).unwrap();
-        assert_eq!(packet.payload, vec![1u8; 256]);
+        assert_eq!(packet.payload, vec![1u8; MTU_SIZE]);
         assert_eq!(stream.window_size, 1);
         assert_eq!(stream.unacked.len(), INITIAL_WINDOW_SIZE);
         assert_eq!(stream.pending.len(), 2);
 
         // send ack for the packet
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_ack_through(packet.seq_nro)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(PLAIN_ACK)
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -2132,7 +2302,7 @@ mod tests {
         assert_ne!(*stream.rto, INITIAL_RTO);
 
         // send more data
-        client.write_all(&vec![4u8; 256]).await.unwrap();
+        client.write_all(&vec![4u8; MTU_SIZE]).await.unwrap();
 
         // verify the other two packets are sent now that window size is 2
         let future = async {
@@ -2153,24 +2323,24 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(2), future).await.expect("no timeout");
 
         let first = Packet::parse(&packets[0].1).unwrap();
-        assert_eq!(first.payload, vec![2u8; 256]);
+        assert_eq!(first.payload, vec![2u8; MTU_SIZE]);
 
         let second = Packet::parse(&packets[1].1).unwrap();
-        assert_eq!(second.payload, vec![3u8; 256]);
+        assert_eq!(second.payload, vec![3u8; MTU_SIZE]);
 
         assert!(stream.pending.is_empty());
         assert_eq!(stream.unacked.len(), 2);
 
         // send ack for both packets
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_ack_through(second.seq_nro)
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(PLAIN_ACK)
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -2189,7 +2359,7 @@ mod tests {
             .expect("to succeed");
 
         let third = Packet::parse(&third_packet).unwrap();
-        assert_eq!(third.payload, vec![4u8; 256]);
+        assert_eq!(third.payload, vec![4u8; MTU_SIZE]);
     }
 
     #[tokio::test]
@@ -2217,11 +2387,11 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; 256]);
-                data.extend_from_slice(&vec![2u8; 256]);
-                data.extend_from_slice(&vec![3u8; 256]);
-                data.extend_from_slice(&vec![4u8; 256]);
-                data.extend_from_slice(&vec![5u8; 256]);
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![2u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![3u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![4u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![5u8; MTU_SIZE]);
 
                 data
             })
@@ -2242,14 +2412,14 @@ mod tests {
             let packet = Packet::parse(&first_packet).unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -2275,14 +2445,14 @@ mod tests {
             let packet = Packet::parse(&packets[1].1).unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -2308,14 +2478,14 @@ mod tests {
             let packet = Packet::parse(&packets[1].1).unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -2330,12 +2500,12 @@ mod tests {
         client
             .write_all(&{
                 let mut data = Vec::new();
-                data.extend_from_slice(&vec![6u8; 256]);
-                data.extend_from_slice(&vec![7u8; 256]);
-                data.extend_from_slice(&vec![8u8; 256]);
-                data.extend_from_slice(&vec![9u8; 256]);
-                data.extend_from_slice(&vec![0xau8; 256]);
-                data.extend_from_slice(&vec![0xbu8; 256]);
+                data.extend_from_slice(&vec![6u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![7u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![8u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![9u8; MTU_SIZE]);
+                data.extend_from_slice(&vec![0xau8; MTU_SIZE]);
+                data.extend_from_slice(&vec![0xbu8; MTU_SIZE]);
 
                 data
             })
@@ -2361,15 +2531,15 @@ mod tests {
         let packet = Packet::parse(&packets[5].1).unwrap();
 
         cmd_tx
-            .send(
-                PacketBuilder::new(1338u32)
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
                     .with_ack_through(packet.seq_nro)
                     .with_nacks(vec![packet.seq_nro - 1, packet.seq_nro - 3])
                     .with_send_stream_id(1337u32)
                     .with_seq_nro(PLAIN_ACK)
                     .build()
                     .to_vec(),
-            )
+            })
             .await
             .unwrap();
 
@@ -2398,8 +2568,8 @@ mod tests {
         let first_missing = Packet::parse(&packets[0].1).unwrap();
         let second_missing = Packet::parse(&packets[1].1).unwrap();
 
-        assert_eq!(first_missing.payload, vec![8u8; 256]);
-        assert_eq!(second_missing.payload, vec![0xau8; 256]);
+        assert_eq!(first_missing.payload, vec![8u8; MTU_SIZE]);
+        assert_eq!(second_missing.payload, vec![0xau8; MTU_SIZE]);
         assert_eq!(stream.window_size, 66);
     }
 
@@ -2436,14 +2606,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -2495,14 +2665,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(500)).await;
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -2549,14 +2719,14 @@ mod tests {
 
             let packet = Packet::parse(&packet).unwrap();
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -2584,14 +2754,14 @@ mod tests {
             let packet = Packet::parse(&packet).unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
 
@@ -2616,14 +2786,14 @@ mod tests {
             let packet = Packet::parse(&packet).unwrap();
 
             cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await
                 .unwrap();
         }
@@ -2661,6 +2831,7 @@ mod tests {
         assert_eq!(rto.exponential_backoff(), Duration::from_millis(238));
     }
 
+    #[tokio::test]
     async fn client_closes_socket_with_pending_data() {
         let (
             stream,
@@ -2683,24 +2854,21 @@ mod tests {
         // ignore syn
         let _ = event_rx.recv().await.unwrap();
 
-        // send five packets
+        // send 20 packets
         client
             .write_all(&{
-                let mut data = Vec::new();
-                data.extend_from_slice(&vec![1u8; 256]);
-                data.extend_from_slice(&vec![2u8; 256]);
-                data.extend_from_slice(&vec![3u8; 256]);
-                data.extend_from_slice(&vec![4u8; 256]);
-                data.extend_from_slice(&vec![5u8; 256]);
-
-                data
+                (1..=20).fold(Vec::new(), |mut data, i| {
+                    data.extend_from_slice(&vec![i as u8; MTU_SIZE]);
+                    data
+                })
             })
             .await
             .unwrap();
 
+        tokio::time::sleep(Duration::from_secs(5)).await;
         drop(client);
 
-        for i in 1..=5 {
+        for i in 1..=20 {
             let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("no timeout")
@@ -2709,21 +2877,238 @@ mod tests {
 
             let packet = Packet::parse(&packet).unwrap();
 
-            assert_eq!(packet.payload, vec![i as u8; 256]);
+            assert_eq!(packet.payload, vec![i as u8; MTU_SIZE]);
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             let _ = cmd_tx
-                .send(
-                    PacketBuilder::new(1338u32)
+                .send(StreamEvent::Packet {
+                    packet: PacketBuilder::new(1338u32)
                         .with_ack_through(packet.seq_nro)
                         .with_send_stream_id(1337u32)
                         .with_seq_nro(PLAIN_ACK)
                         .build()
                         .to_vec(),
-                )
+                })
                 .await;
         }
+
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+
+        let packet = Packet::parse(&packet).unwrap();
+        let _ = cmd_tx
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .with_close()
+                    .build()
+                    .to_vec(),
+            })
+            .await;
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+    }
+
+    #[tokio::test]
+    async fn local_client_closes_socket() {
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
+
+        let mut handle = tokio::spawn(async move {
+            let _ = stream.await;
+        });
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        client
+            .write_all(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data
+            })
+            .await
+            .unwrap();
+
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+
+        let packet = Packet::parse(&packet).unwrap();
+
+        assert_eq!(packet.payload, vec![1u8; MTU_SIZE]);
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // send ack with payload
+        let _ = cmd_tx
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(1u32)
+                    .with_payload(&vec![2u8; MTU_SIZE])
+                    .build()
+                    .to_vec(),
+            })
+            .await;
+
+        // verify the correct payload was received and close client socket
+        let mut buffer = vec![0u8; MTU_SIZE * 2];
+        let nread = client.read(&mut buffer).await.unwrap();
+        assert_eq!(buffer[..nread], vec![2u8; MTU_SIZE]);
+
+        client.shutdown().await.unwrap();
+        drop(client);
+
+        // verify `CLOSE` is received
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+        let packet = Packet::parse(&packet).unwrap();
+        assert!(packet.flags.close());
+
+        // verify that the stream is not shut down because ack hasn't been received
+        assert!(tokio::time::timeout(Duration::from_secs(5), &mut handle).await.is_err());
+
+        let _ = cmd_tx
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(PLAIN_ACK)
+                    .with_close()
+                    .build()
+                    .to_vec(),
+            })
+            .await;
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+    }
+
+    #[tokio::test]
+    async fn remote_closes_socket() {
+        crate::util::init_logger();
+
+        let (
+            stream,
+            StreamBuilder {
+                cmd_tx,
+                stream: mut client,
+                event_rx,
+            },
+        ) = StreamBuilder::build_stream().await;
+
+        // verify initial state
+        assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
+        assert_eq!(*stream.rtt, INITIAL_RTT);
+        assert_eq!(*stream.rto, INITIAL_RTO);
+
+        let handle = tokio::spawn(async move {
+            let _ = stream.await;
+        });
+
+        // ignore syn
+        let _ = event_rx.recv().await.unwrap();
+
+        client
+            .write_all(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&vec![1u8; MTU_SIZE]);
+                data
+            })
+            .await
+            .unwrap();
+
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+
+        let packet = Packet::parse(&packet).unwrap();
+
+        assert_eq!(packet.payload, vec![1u8; MTU_SIZE]);
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // send ack with payload
+        let _ = cmd_tx
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(1u32)
+                    .with_payload(&vec![2u8; MTU_SIZE])
+                    .build()
+                    .to_vec(),
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // verify the correct payload was received and close client socket
+        let mut buffer = vec![0u8; MTU_SIZE * 2];
+        let nread = client.read(&mut buffer).await.unwrap();
+        assert_eq!(buffer[..nread], vec![2u8; MTU_SIZE]);
+
+        // verify `CLOSE` is received
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+        let packet = Packet::parse(&packet).unwrap();
+        assert!(!packet.flags.close());
+
+        // send close
+        let _ = cmd_tx
+            .send(StreamEvent::Packet {
+                packet: PacketBuilder::new(1338u32)
+                    .with_ack_through(packet.seq_nro)
+                    .with_send_stream_id(1337u32)
+                    .with_seq_nro(2u32)
+                    .with_close()
+                    .build()
+                    .to_vec(),
+            })
+            .await;
+
+        // verify `CLOSE` is received
+        let packet = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+            .1;
+        let packet = Packet::parse(&packet).unwrap();
+        assert!(packet.flags.close());
 
         let _ = tokio::time::timeout(Duration::from_secs(5), handle)
             .await

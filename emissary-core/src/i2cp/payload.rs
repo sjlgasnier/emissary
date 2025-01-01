@@ -56,6 +56,7 @@ impl<'a, R: Runtime> I2cpPayloadBuilder<'a, R> {
     /// Specify source port.
     ///
     /// Optional, defaults to 0.
+    #[allow(unused)]
     pub fn with_source_port(mut self, src_port: u16) -> Self {
         self.src_port = src_port;
         self
@@ -64,6 +65,7 @@ impl<'a, R: Runtime> I2cpPayloadBuilder<'a, R> {
     /// Specify destination port.
     ///
     /// Optional, defaults to 0.
+    #[allow(unused)]
     pub fn with_destination_port(mut self, dst_port: u16) -> Self {
         self.dst_port = dst_port;
         self

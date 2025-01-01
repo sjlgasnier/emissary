@@ -48,7 +48,7 @@ pub struct TunnelId(u32);
 impl TunnelId {
     #[cfg(test)]
     pub fn random() -> TunnelId {
-        use rand::{Rng, RngCore};
+        use rand::RngCore;
 
         TunnelId::from(rand::thread_rng().next_u32())
     }
@@ -60,9 +60,9 @@ impl From<u32> for TunnelId {
     }
 }
 
-impl Into<u32> for TunnelId {
-    fn into(self) -> u32 {
-        self.0
+impl From<TunnelId> for u32 {
+    fn from(value: TunnelId) -> Self {
+        value.0
     }
 }
 
@@ -87,7 +87,7 @@ pub struct MessageId(u32);
 impl MessageId {
     #[cfg(test)]
     pub fn random() -> MessageId {
-        use rand::{Rng, RngCore};
+        use rand::RngCore;
 
         MessageId::from(rand::thread_rng().next_u32())
     }
@@ -99,15 +99,15 @@ impl From<u32> for MessageId {
     }
 }
 
-impl fmt::Display for MessageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+impl From<MessageId> for u32 {
+    fn from(value: MessageId) -> Self {
+        value.0
     }
 }
 
-impl Into<u32> for MessageId {
-    fn into(self) -> u32 {
-        self.0
+impl fmt::Display for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

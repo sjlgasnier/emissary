@@ -17,40 +17,43 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    primitives::RouterInfo,
     runtime::{Runtime, TcpListener},
     transports::ntcp2::LOG_TARGET,
+    util::is_global,
 };
 
-use futures::{Future, FutureExt, Stream};
+use futures::Stream;
 
-use alloc::{string::String, vec::Vec};
 use core::{
     net::SocketAddr,
-    pin::{pin, Pin},
+    pin::Pin,
     task::{Context, Poll},
 };
 
-// TODO: fix listen address
 // TODO: support both ipv4 and ipv6
 
 /// NTCP2 listener.
 pub struct Ntcp2Listener<R: Runtime> {
+    /// Allow local addresses.
+    allow_local: bool,
+
     /// TCP Listener.
     listener: R::TcpListener,
 }
 
 impl<R: Runtime> Ntcp2Listener<R> {
-    /// Create new [`Ntcp2Listener`].
-    pub async fn new(address: SocketAddr) -> crate::Result<Self> {
-        let mut listener = R::TcpListener::bind(address).await.unwrap();
+    /// Create new [`Ntcp2Listener`] from a TCP listener.
+    pub fn new(listener: R::TcpListener, allow_local: bool) -> Self {
+        Self {
+            allow_local,
+            listener,
+        }
+    }
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            "starting ntcp2 listener",
-        );
-
-        Ok(Self { listener })
+    /// Get local address of the TCP listener.
+    #[cfg(test)]
+    pub fn local_address(&self) -> SocketAddr {
+        self.listener.local_address().expect("to succeed")
     }
 }
 
@@ -58,10 +61,22 @@ impl<R: Runtime> Stream for Ntcp2Listener<R> {
     type Item = R::TcpStream;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.listener.poll_accept(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(stream)) => return Poll::Ready(Some(stream)),
+        loop {
+            match self.listener.poll_accept(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((stream, address))) => match address {
+                    SocketAddr::V4(address) if !is_global(*address.ip()) && !self.allow_local => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?address,
+                            "incoming connection from local address but local addresses were disabled",
+                        );
+                        continue;
+                    }
+                    _ => return Poll::Ready(Some(stream)),
+                },
+            }
         }
     }
 }

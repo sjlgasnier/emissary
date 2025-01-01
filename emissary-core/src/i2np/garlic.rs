@@ -30,7 +30,7 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, time::Duration};
 
 /// Garlic message header length.
@@ -361,7 +361,7 @@ pub enum GarlicMessageBlock<'a> {
     /// Next key.
     NextKey {
         /// `NextKey` kind.
-        kind: NextKeyKind,
+        kind: Box<NextKeyKind>,
     },
 
     /// ACK.
@@ -444,10 +444,8 @@ pub struct GarlicMessage<'a> {
 impl<'a> GarlicMessage<'a> {
     /// Try to parse [`GarlicMessage::DateTime`] from `input`.
     fn parse_date_time(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
+        let (rest, _size) = be_u16(input)?;
         let (rest, timestamp) = be_u32(rest)?;
-
-        debug_assert!(size == 4, "invalid size for datetime block {size:?}");
 
         Ok((rest, GarlicMessageBlock::DateTime { timestamp }))
     }
@@ -456,9 +454,21 @@ impl<'a> GarlicMessage<'a> {
     fn parse_delivery_instructions(input: &'a [u8]) -> IResult<&'a [u8], DeliveryInstructions<'a>> {
         let (rest, flag) = be_u8(input)?;
 
-        // TODO: handle gracefully
-        assert!(flag >> 7 & 1 == 0, "encrypted garlic");
-        assert!(flag >> 4 & 1 == 0, "delay");
+        if flag >> 7 & 1 != 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "encrypted garlic messages not supported",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
+
+        if flag >> 4 & 1 != 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "delay not supproted",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        }
 
         match (flag >> 5) & 0x3 {
             0x00 => Ok((rest, DeliveryInstructions::Local)),
@@ -478,7 +488,14 @@ impl<'a> GarlicMessage<'a> {
 
                 Ok((rest, DeliveryInstructions::Tunnel { hash, tunnel_id }))
             }
-            _ => panic!("invalid garlic type"), // TODO: don't panic
+            kind => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    "invalid delivery kind",
+                );
+                Err(Err::Error(make_error(input, ErrorKind::Fail)))
+            }
         }
     }
 
@@ -520,7 +537,7 @@ impl<'a> GarlicMessage<'a> {
 
     /// Try to parse [`GarlicMessage::NextKey`] from `input`.
     fn parse_next_key(input: &'a [u8]) -> IResult<&'a [u8], GarlicMessageBlock<'a>> {
-        let (rest, size) = be_u16(input)?;
+        let (rest, _size) = be_u16(input)?;
         let (rest, flag) = be_u8(rest)?;
         let (rest, key_id) = be_u16(rest)?;
 
@@ -549,7 +566,12 @@ impl<'a> GarlicMessage<'a> {
             _ => unreachable!(),
         };
 
-        Ok((rest, GarlicMessageBlock::NextKey { kind }))
+        Ok((
+            rest,
+            GarlicMessageBlock::NextKey {
+                kind: Box::new(kind),
+            },
+        ))
     }
 
     /// Try to parse [`GarlicMessage::AckRequest`] from `input`.
@@ -598,9 +620,12 @@ impl<'a> GarlicMessage<'a> {
                     target: LOG_TARGET,
                     ?message_type,
                     ?parsed_message_type,
-                    "invalid garlic message block",
+                    "unsupported garlic message block",
                 );
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                let (rest, size) = be_u16(rest)?;
+                let (rest, _) = take(size)(rest)?;
+
+                Self::parse_frame(rest)
             }
         }
     }
@@ -638,6 +663,7 @@ impl<'a> GarlicMessage<'a> {
 }
 
 /// Garlic message builder.
+#[derive(Default)]
 pub struct GarlicMessageBuilder<'a> {
     /// Cloves.
     cloves: Vec<GarlicMessageBlock<'a>>,
@@ -647,14 +673,6 @@ pub struct GarlicMessageBuilder<'a> {
 }
 
 impl<'a> GarlicMessageBuilder<'a> {
-    /// Create new [`GarlicMessageBuilder`].
-    pub fn new() -> Self {
-        Self {
-            cloves: Vec::new(),
-            message_size: 0usize,
-        }
-    }
-
     /// Add [`GarlicMessageBlock::DateTime`].
     pub fn with_date_time(mut self, timestamp: u32) -> Self {
         self.message_size = self.message_size.saturating_add(GARLIC_HEADER_LEN).saturating_add(4); // 4-byte timestamp
@@ -695,7 +713,9 @@ impl<'a> GarlicMessageBuilder<'a> {
     // Add [`GarlicMessageBlock::NextKey`]
     pub fn with_next_key(mut self, kind: NextKeyKind) -> Self {
         self.message_size += kind.serialized_len();
-        self.cloves.push(GarlicMessageBlock::NextKey { kind });
+        self.cloves.push(GarlicMessageBlock::NextKey {
+            kind: Box::new(kind),
+        });
         self
     }
 
@@ -746,7 +766,7 @@ impl<'a> GarlicMessageBuilder<'a> {
                     out.put_u32(expiration.as_secs() as u32);
                     out.put_slice(message_body);
                 }
-                GarlicMessageBlock::NextKey { kind } => match kind {
+                GarlicMessageBlock::NextKey { kind } => match *kind {
                     NextKeyKind::ForwardKey {
                         key_id,
                         public_key,
@@ -824,4 +844,75 @@ pub struct GarlicClove {
 
     /// Message body.
     pub message_body: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_garlic_message_block() {
+        let mut message = GarlicMessageBuilder::default()
+            .with_date_time(1337u32)
+            .with_garlic_clove(
+                MessageType::DatabaseStore,
+                MessageId::from(1337u32),
+                Duration::from_secs(1337u64),
+                DeliveryInstructions::Local,
+                &vec![1, 2, 3, 4],
+            )
+            .build();
+
+        message.extend_from_slice(&{
+            let mut out = BytesMut::with_capacity(1 + 2 + 2);
+
+            out.put_u8(15u8); // unknown garlic message block type
+            out.put_u16(15u16);
+            out.put_slice(&vec![0xaa; 15]);
+
+            out.to_vec()
+        });
+        message.extend_from_slice(&{
+            let mut out = BytesMut::with_capacity(1 + 2 + 2);
+
+            out.put_u8(GarlicMessageType::DateTime.as_u8());
+            out.put_u16(4u16);
+            out.put_u32(1338u32);
+
+            out.to_vec()
+        });
+
+        let message = GarlicMessage::parse(&message).unwrap();
+        assert_eq!(message.blocks.len(), 3);
+
+        match message.blocks[0] {
+            GarlicMessageBlock::DateTime { timestamp } => assert_eq!(timestamp, 1337u32),
+            _ => panic!("invalid garlic block"),
+        }
+
+        match &message.blocks[1] {
+            GarlicMessageBlock::GarlicClove {
+                message_type,
+                message_id,
+                expiration,
+                delivery_instructions,
+                message_body,
+            } => {
+                assert_eq!(message_type, &MessageType::DatabaseStore);
+                assert_eq!(message_id, &MessageId::from(1337u32));
+                assert_eq!(expiration, &Duration::from_secs(1337u64));
+                assert!(std::matches!(
+                    delivery_instructions,
+                    DeliveryInstructions::Local
+                ));
+                assert_eq!(message_body, &vec![1, 2, 3, 4]);
+            }
+            _ => panic!("invalid garlic block"),
+        }
+
+        match message.blocks[2] {
+            GarlicMessageBlock::DateTime { timestamp } => assert_eq!(timestamp, 1338u32),
+            _ => panic!("invalid garlic block"),
+        }
+    }
 }

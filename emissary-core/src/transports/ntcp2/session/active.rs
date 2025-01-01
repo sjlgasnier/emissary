@@ -23,9 +23,8 @@
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
     error::ConnectionError,
-    i2np::MessageType,
     primitives::{RouterId, RouterInfo},
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
+    runtime::{AsyncRead, AsyncWrite, Runtime},
     subsystem::SubsystemCommand,
     transports::{
         ntcp2::{
@@ -34,14 +33,12 @@ use crate::{
         },
         SubsystemHandle,
     },
-    util::{AsyncReadExt, AsyncWriteExt},
     Error,
 };
 
-use futures::{future::FusedFuture, FutureExt};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{
     future::Future,
     mem,
@@ -149,9 +146,8 @@ impl<R: Runtime> Ntcp2Session<R> {
         router_info: RouterInfo,
         stream: R::TcpStream,
         key_context: KeyContext,
-        mut subsystem_handle: SubsystemHandle,
+        subsystem_handle: SubsystemHandle,
     ) -> Self {
-        let router = router_info.identity.id();
         let KeyContext {
             send_key,
             recv_key,
@@ -236,7 +232,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                             );
                             return Poll::Ready(Err(error));
                         }
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 return Poll::Ready(Err(Error::Connection(
                                     ConnectionError::SocketClosed,
@@ -264,7 +260,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     match stream.as_mut().poll_read(cx, &mut this.read_buffer[offset..size]) {
                         Poll::Pending => break,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 return Poll::Ready(Err(Error::Connection(
                                     ConnectionError::SocketClosed,
@@ -303,13 +299,39 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 "read ntc2 frame",
                             );
 
+                            if let Some(MessageBlock::Termination { reason, .. }) =
+                                messages.iter().find(|message| {
+                                    core::matches!(message, MessageBlock::Termination { .. })
+                                })
+                            {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    router_id = %this.router,
+                                    ?reason,
+                                    "session terminated by remote router",
+                                );
+                                return Poll::Ready(Err(Error::EssentialTaskClosed));
+                            }
+
                             let messages = messages
                                 .into_iter()
                                 .filter_map(|message| match message {
-                                    MessageBlock::I2Np { message } => Some(message),
+                                    MessageBlock::I2Np { message } =>
+                                        if message.is_expired::<R>() {
+                                            tracing::trace!(
+                                                target: LOG_TARGET,
+                                                message_type = ?message.message_type,
+                                                message_id = ?message.message_id,
+                                                expiration = ?message.expiration,
+                                                "discarding expired message",
+                                            );
+                                            None
+                                        } else {
+                                            Some(message)
+                                        },
                                     MessageBlock::Padding { .. } => None,
                                     message => {
-                                        tracing::warn!(
+                                        tracing::debug!(
                                             target: LOG_TARGET,
                                             router_id = %this.router,
                                             ?message,
@@ -320,9 +342,13 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 })
                                 .collect::<Vec<_>>();
 
-                            // TODO: no unwraps
-                            // TODO: if call fails, cache the message and break out of the loop
-                            this.subsystem_handle.dispatch_messages(messages).unwrap();
+                            if let Err(error) = this.subsystem_handle.dispatch_messages(messages) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?error,
+                                    "failed to dispatch messages to subsystems",
+                                );
+                            }
                             this.read_state = ReadState::ReadSize { offset: 0usize };
                         }
                     }
@@ -370,7 +396,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         break;
                     }
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                    Poll::Ready(Ok(0)) =>
                         return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
                     Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
                         true => {
@@ -397,7 +423,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         break;
                     }
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(nwritten)) if nwritten == 0 =>
+                    Poll::Ready(Ok(0)) =>
                         return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed))),
                     Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
                         true => {

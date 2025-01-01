@@ -33,7 +33,6 @@ use crate::{
         },
         socket::I2cpSocket,
     },
-    netdb::NetDbHandle,
     primitives::{Date, DestinationId, Lease, Str, TunnelId},
     runtime::Runtime,
     tunnel::{TunnelManagerHandle, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
@@ -223,9 +222,6 @@ impl<R: Runtime> PendingSessionState<R> {
 
 /// Pending I2CP client session.
 pub struct PendingI2cpSession<R: Runtime> {
-    /// Handle to `NetDb`.
-    netdb_handle: NetDbHandle,
-
     /// State of the pending session.
     state: PendingSessionState<R>,
 
@@ -239,10 +235,8 @@ impl<R: Runtime> PendingI2cpSession<R> {
         session_id: u16,
         socket: I2cpSocket<R>,
         tunnel_manager_handle: TunnelManagerHandle,
-        netdb_handle: NetDbHandle,
     ) -> Self {
         Self {
-            netdb_handle,
             state: PendingSessionState::Inactive { session_id, socket },
             tunnel_manager_handle,
         }
@@ -320,7 +314,7 @@ impl<R: Runtime> PendingI2cpSession<R> {
                                         || Str::from(destination.id().to_string()),
                                         |name| name.clone(),
                                     );
-                                options.insert(Str::from("inbound.nickname"), Str::from(name));
+                                options.insert(Str::from("inbound.nickname"), name);
 
                                 TunnelPoolConfig::from(&options)
                             }
@@ -379,10 +373,10 @@ impl<R: Runtime> PendingI2cpSession<R> {
                 }
             },
             Message::CreateLeaseSet2 {
-                session_id,
                 key,
                 leaseset,
                 private_keys,
+                ..
             } => match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
                 PendingSessionState::AwaitingLeaseSet {
                     session_id,

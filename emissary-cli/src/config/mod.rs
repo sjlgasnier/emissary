@@ -25,34 +25,20 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
-    path::PathBuf,
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Profile {
-    /// Last activity as seconds since UNIX epoch.
     last_activity: Option<u64>,
-
-    /// Number of accepted tunnels.
     num_accepted: Option<usize>,
-
-    /// Number of successful connections.
     num_connection: Option<usize>,
-
-    /// Number of dial failures.
     num_dial_failures: Option<usize>,
-
-    /// Number of rejected tunnels.
     num_rejected: Option<usize>,
-
-    /// Number of test failures for tunnels where the router was a selected hop.
     num_test_failures: Option<usize>,
-
-    /// Number of test successes for tunnels where the router was a selected hop.
     num_test_successes: Option<usize>,
-
-    /// Number of tunnel build request timeouts where this router was a selected hop.
     num_unaswered: Option<usize>,
 }
 
@@ -67,7 +53,8 @@ struct ExploratoryConfig {
 #[derive(Debug, Serialize, Deserialize)]
 struct Ntcp2Config {
     port: u16,
-    host: Option<String>,
+    host: Option<Ipv4Addr>,
+    published: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,76 +70,120 @@ pub struct SamConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ReseedConfig {
+    pub disable: bool,
+    pub hosts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    disable_metrics: bool,
+    metrics_server_port: Option<u16>,
+}
+
+impl From<MetricsConfig> for emissary_core::MetricsConfig {
+    fn from(value: MetricsConfig) -> Self {
+        emissary_core::MetricsConfig {
+            disable_metrics: value.disable_metrics,
+            metrics_server_port: value.metrics_server_port,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(default)]
-    floodfill: bool,
+    allow_local: bool,
     caps: Option<String>,
-    net_id: Option<u8>,
-    ntcp2: Option<Ntcp2Config>,
-    i2cp: Option<I2cpConfig>,
-    sam: Option<SamConfig>,
     exploratory: Option<ExploratoryConfig>,
     #[serde(default)]
+    floodfill: bool,
+    i2cp: Option<I2cpConfig>,
+    #[serde(default)]
     insecure_tunnels: bool,
+    log: Option<String>,
+    metrics: Option<MetricsConfig>,
+    net_id: Option<u8>,
+    ntcp2: Option<Ntcp2Config>,
+    reseed: Option<ReseedConfig>,
+    sam: Option<SamConfig>,
 }
 
 /// Router configuration.
 pub struct Config {
+    /// Allow local addresses.
+    pub allow_local: bool,
+
     /// Base path.
     pub base_path: PathBuf,
 
-    /// I2CP config.
-    pub i2cp_config: Option<emissary_core::I2cpConfig>,
-
-    /// NTCP2 config.
-    pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
+    /// Router capabilities.
+    pub caps: Option<String>,
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<emissary_core::ExploratoryConfig>,
 
-    /// Router info.
-    pub routers: Vec<Vec<u8>>,
+    /// Should the node be run as a floodfill router.
+    pub floodfill: bool,
+
+    /// I2CP config.
+    pub i2cp_config: Option<emissary_core::I2cpConfig>,
+
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
+
+    /// Logging targets.
+    pub log: Option<String>,
+
+    /// Metrics configuration.
+    pub metrics: Option<MetricsConfig>,
+
+    /// Network ID.
+    pub net_id: Option<u8>,
+
+    /// NTCP2 config.
+    pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
 
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
+
+    /// Reseed config.
+    pub reseed: ReseedConfig,
+
+    /// Router info.
+    pub router_info: Option<Vec<u8>>,
+
+    /// Router info.
+    pub routers: Vec<Vec<u8>>,
 
     /// SAMv3 config.
     pub sam_config: Option<emissary_core::SamConfig>,
 
     /// Signing key.
-    pub signing_key: Vec<u8>,
+    pub signing_key: [u8; 32],
 
     /// Static key.
-    pub static_key: Vec<u8>,
-
-    /// Should the node be run as a floodfill router.
-    pub floodfill: bool,
-
-    /// Router capabilities.
-    pub caps: Option<String>,
-
-    /// Network ID.
-    pub net_id: Option<u8>,
-
-    /// Are tunnels allowed to be insecure.
-    pub insecure_tunnels: bool,
+    pub static_key: [u8; 32],
 }
 
-impl Into<emissary_core::Config> for Config {
-    fn into(self) -> emissary_core::Config {
+impl From<Config> for emissary_core::Config {
+    fn from(val: Config) -> Self {
         emissary_core::Config {
-            static_key: self.static_key,
-            signing_key: self.signing_key,
-            ntcp2_config: self.ntcp2_config,
-            i2cp_config: self.i2cp_config,
-            routers: self.routers,
-            profiles: self.profiles,
-            samv3_config: self.sam_config,
-            floodfill: self.floodfill,
-            caps: self.caps,
-            net_id: self.net_id,
-            exploratory: self.exploratory,
-            insecure_tunnels: self.insecure_tunnels,
+            allow_local: val.allow_local,
+            caps: val.caps,
+            exploratory: val.exploratory,
+            floodfill: val.floodfill,
+            i2cp_config: val.i2cp_config,
+            insecure_tunnels: val.insecure_tunnels,
+            net_id: val.net_id,
+            ntcp2_config: val.ntcp2_config,
+            profiles: val.profiles,
+            router_info: val.router_info,
+            routers: val.routers,
+            samv3_config: val.sam_config,
+            signing_key: Some(val.signing_key),
+            static_key: Some(val.static_key),
+            metrics: val.metrics.map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -170,7 +201,7 @@ impl TryFrom<Option<PathBuf>> for Config {
                         path
                     })
                 },
-                |path| Some(path),
+                Some,
             )
             .ok_or(Error::Custom(String::from("couldn't resolve base path")))?;
 
@@ -186,12 +217,12 @@ impl TryFrom<Option<PathBuf>> for Config {
             fs::create_dir_all(path.join("routers"))?;
             fs::create_dir_all(path.join("profiles"))?;
 
-            return Ok(Config::new_empty(path)?);
+            return Config::new_empty(path);
         }
 
         // read static & signing keys from disk or generate new ones
         let static_key = match Self::load_key(path.clone(), "static") {
-            Ok(key) => x25519_dalek::StaticSecret::from(key).to_bytes().to_vec(),
+            Ok(key) => x25519_dalek::StaticSecret::from(key).to_bytes(),
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -204,7 +235,7 @@ impl TryFrom<Option<PathBuf>> for Config {
         };
 
         let signing_key = match Self::load_key(path.clone(), "signing") {
-            Ok(key) => ed25519_dalek::SigningKey::from(key).to_bytes().to_vec(),
+            Ok(key) => ed25519_dalek::SigningKey::from(key).to_bytes(),
             Err(error) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -231,6 +262,7 @@ impl TryFrom<Option<PathBuf>> for Config {
 
         // try to find `router.toml` and parse it into `EmissaryConfig`
         let router_config = Self::load_router_config(path.clone()).ok();
+        let router_info = Self::load_router_info(path.clone()).ok();
 
         let mut config = Config::new(
             path.clone(),
@@ -239,6 +271,7 @@ impl TryFrom<Option<PathBuf>> for Config {
             ntcp2_key,
             ntcp2_iv,
             router_config,
+            router_info,
         )?;
 
         config.routers = Self::load_router_infos(&path);
@@ -250,19 +283,19 @@ impl TryFrom<Option<PathBuf>> for Config {
 
 impl Config {
     /// Create static key.
-    fn create_static_key(base_path: PathBuf) -> crate::Result<Vec<u8>> {
+    fn create_static_key(base_path: PathBuf) -> crate::Result<[u8; 32]> {
         let key = x25519_dalek::StaticSecret::random();
-        Self::save_key(base_path, "static", &key).map(|_| key.to_bytes().to_vec())
+        Self::save_key(base_path, "static", &key).map(|_| key.to_bytes())
     }
 
     /// Create signing key.
-    fn create_signing_key(base_path: PathBuf) -> crate::Result<Vec<u8>> {
+    fn create_signing_key(base_path: PathBuf) -> crate::Result<[u8; 32]> {
         let key = ed25519_dalek::SigningKey::generate(&mut OsRng);
-        Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes().to_vec())
+        Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes())
     }
 
     /// Create NTCP2 key and store it on disk.
-    fn create_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
+    fn create_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
         let key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
         let iv = {
             let mut iv = [0u8; 16];
@@ -281,7 +314,7 @@ impl Config {
             file.write_all(combined.as_ref())?;
         }
 
-        Ok((key, iv))
+        Ok((TryInto::<[u8; 32]>::try_into(key).expect("to succeed"), iv))
     }
 
     /// Save key to disk.
@@ -294,7 +327,7 @@ impl Config {
 
     /// Load key from disk.
     fn load_key(path: PathBuf, key_type: &str) -> crate::Result<[u8; 32]> {
-        let mut file = fs::File::open(&path.join(format!("{key_type}.key")))?;
+        let mut file = fs::File::open(path.join(format!("{key_type}.key")))?;
         let mut key_bytes = [0u8; 32];
         file.read_exact(&mut key_bytes)?;
 
@@ -302,9 +335,9 @@ impl Config {
     }
 
     /// Load NTCP2 key and IV from disk.
-    fn load_ntcp2_keys(path: PathBuf) -> crate::Result<(Vec<u8>, [u8; 16])> {
+    fn load_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
         let key_bytes = {
-            let mut file = fs::File::open(&path.join("ntcp2.keys"))?;
+            let mut file = fs::File::open(path.join("ntcp2.keys"))?;
             let mut key_bytes = [0u8; 32 + 16];
             file.read_exact(&mut key_bytes)?;
 
@@ -312,14 +345,14 @@ impl Config {
         };
 
         Ok((
-            key_bytes[..32].to_vec(),
+            TryInto::<[u8; 32]>::try_into(&key_bytes[..32]).expect("to succeed"),
             TryInto::<[u8; 16]>::try_into(&key_bytes[32..]).expect("to succeed"),
         ))
     }
 
     fn load_router_config(path: PathBuf) -> crate::Result<EmissaryConfig> {
         // parse configuration, if it exists
-        let mut file = fs::File::open(&path.join("router.toml"))?;
+        let mut file = fs::File::open(path.join("router.toml"))?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
 
@@ -334,6 +367,14 @@ impl Config {
         })
     }
 
+    fn load_router_info(path: PathBuf) -> crate::Result<Vec<u8>> {
+        // parse configuration, if it exists
+        let mut file = fs::File::open(path.join("router.info"))?;
+        let mut contents = Vec::new();
+
+        file.read_to_end(&mut contents).map(|_| contents).map_err(From::from)
+    }
+
     /// Create empty config.
     ///
     /// Creates a default config with NTCP2 enabled.
@@ -343,25 +384,33 @@ impl Config {
         let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
 
         let config = EmissaryConfig {
+            allow_local: false,
+            caps: None,
             exploratory: None,
+            floodfill: false,
+            i2cp: Some(I2cpConfig { port: 7654 }),
+            insecure_tunnels: false,
+            log: None,
+            metrics: Some(MetricsConfig {
+                disable_metrics: false,
+                metrics_server_port: None,
+            }),
+            net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
                 host: None,
+                published: Some(false),
             }),
-            i2cp: Some(I2cpConfig { port: 7654 }),
             sam: Some(SamConfig {
                 tcp_port: 7656,
                 udp_port: 7655,
                 host: None,
             }),
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            insecure_tunnels: false,
+            reseed: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
-        file.write_all(&config.as_bytes())?;
+        file.write_all(config.as_bytes())?;
 
         tracing::info!(
             target: LOG_TARGET,
@@ -370,103 +419,133 @@ impl Config {
         );
 
         Ok(Self {
+            allow_local: false,
             base_path,
-            routers: Vec::new(),
-            profiles: Vec::new(),
+            caps: None,
             exploratory: None,
+            floodfill: false,
+            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            insecure_tunnels: false,
+            log: None,
+            metrics: Some(MetricsConfig {
+                disable_metrics: false,
+                metrics_server_port: None,
+            }),
+            net_id: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
-                host: String::from("127.0.0.1"),
+                host: Some("127.0.0.1".parse().expect("valid address")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
+                published: false,
             }),
-            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            profiles: Vec::new(),
+            reseed: ReseedConfig {
+                hosts: None,
+                disable: false,
+            },
+            router_info: None,
+            routers: Vec::new(),
             sam_config: Some(emissary_core::SamConfig {
                 tcp_port: 7656u16,
                 udp_port: 7655u16,
                 host: String::from("127.0.0.1"),
             }),
-            static_key,
             signing_key,
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            insecure_tunnels: false,
+            static_key,
         })
     }
 
     /// Create new [`Config`].
     fn new(
         base_path: PathBuf,
-        static_key: Vec<u8>,
-        signing_key: Vec<u8>,
-        ntcp2_key: Vec<u8>,
+        static_key: [u8; 32],
+        signing_key: [u8; 32],
+        ntcp2_key: [u8; 32],
         ntcp2_iv: [u8; 16],
         config: Option<EmissaryConfig>,
+        router_info: Option<Vec<u8>>,
     ) -> crate::Result<Self> {
         let config = match config {
             Some(config) => config,
             None => {
                 let config = EmissaryConfig {
+                    allow_local: false,
+                    caps: None,
                     exploratory: None,
+                    floodfill: false,
+                    i2cp: Some(I2cpConfig { port: 7654 }),
+                    insecure_tunnels: false,
+                    log: None,
+                    metrics: Some(MetricsConfig {
+                        disable_metrics: false,
+                        metrics_server_port: None,
+                    }),
+                    net_id: None,
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
+                        published: Some(false),
                     }),
-                    i2cp: Some(I2cpConfig { port: 7654 }),
+                    reseed: None,
                     sam: Some(SamConfig {
                         tcp_port: 7656,
                         udp_port: 7655,
                         host: None,
                     }),
-                    floodfill: false,
-                    caps: None,
-                    net_id: None,
-                    insecure_tunnels: false,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
                 let mut file = fs::File::create(base_path.join("router.toml"))?;
-                file.write_all(&toml_config.as_bytes())?;
+                file.write_all(toml_config.as_bytes())?;
 
                 config
             }
         };
 
         Ok(Self {
+            allow_local: config.allow_local,
             base_path,
-            routers: Vec::new(),
-            profiles: Vec::new(),
+            caps: config.caps,
             exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
                 inbound_len: config.inbound_len,
                 inbound_count: config.inbound_count,
                 outbound_len: config.outbound_len,
                 outbound_count: config.outbound_count,
             }),
+            floodfill: config.floodfill,
+            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            insecure_tunnels: config.insecure_tunnels,
+            log: config.log,
+            metrics: config.metrics,
+            net_id: config.net_id,
             ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
-                host: config.host.unwrap_or(String::from("127.0.0.1")),
+                host: config.host,
+                published: config.published.unwrap_or(false),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            profiles: Vec::new(),
+            reseed: config.reseed.unwrap_or(ReseedConfig {
+                hosts: None,
+                disable: false,
+            }),
+            router_info,
+            routers: Vec::new(),
             sam_config: config.sam.map(|config| emissary_core::SamConfig {
                 tcp_port: config.tcp_port,
                 udp_port: config.udp_port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
-            static_key,
             signing_key,
-            floodfill: config.floodfill,
-            caps: config.caps,
-            net_id: config.net_id,
-            insecure_tunnels: config.insecure_tunnels,
+            static_key,
         })
     }
 
     /// Attempt to load router infos.
-    fn load_router_infos(path: &PathBuf) -> Vec<Vec<u8>> {
-        let Ok(router_dir) = fs::read_dir(&path.join("routers")) else {
+    fn load_router_infos(path: &Path) -> Vec<Vec<u8>> {
+        let Ok(router_dir) = fs::read_dir(path.join("routers")) else {
             return Vec::new();
         };
 
@@ -485,8 +564,8 @@ impl Config {
     }
 
     /// Attempt to load router profiles.
-    fn load_router_profiles(path: &PathBuf) -> Vec<(String, emissary_core::Profile)> {
-        let Ok(profile_dir) = fs::read_dir(&path.join("profiles")) else {
+    fn load_router_profiles(path: &Path) -> Vec<(String, emissary_core::Profile)> {
+        let Ok(profile_dir) = fs::read_dir(path.join("profiles")) else {
             return Vec::new();
         };
 
@@ -542,12 +621,51 @@ impl Config {
             }
         }
 
+        if let Some(true) = arguments.allow_local {
+            if !self.allow_local {
+                self.allow_local = true;
+            }
+        }
+
+        match (
+            arguments.metrics.disable_metrics,
+            arguments.metrics.metrics_server_port,
+        ) {
+            (Some(true), _) => {
+                self.metrics = Some(MetricsConfig {
+                    disable_metrics: true,
+                    metrics_server_port: None,
+                });
+            }
+            (Some(false), Some(port)) =>
+                self.metrics = Some(MetricsConfig {
+                    disable_metrics: false,
+                    metrics_server_port: Some(port),
+                }),
+            _ => {}
+        }
+
         if let Some(ref caps) = arguments.caps {
             self.caps = Some(caps.clone());
         }
 
         if let Some(net_id) = arguments.net_id {
             self.net_id = Some(net_id);
+        }
+
+        if let Some(log) = &arguments.log {
+            self.log = Some(log.clone());
+        }
+
+        if let Some(true) = arguments.reseed.disable_reseed {
+            self.reseed = ReseedConfig {
+                hosts: None,
+                disable: true,
+            };
+        }
+
+        if let Some(hosts) = &arguments.reseed.reseed_hosts {
+            self.reseed.hosts = Some(hosts.clone());
         }
 
         self.exploratory = match &mut self.exploratory {
@@ -587,10 +705,7 @@ mod tests {
         assert_eq!(config.static_key.len(), 32);
         assert_eq!(config.signing_key.len(), 32);
         assert_eq!(config.ntcp2_config.as_ref().unwrap().port, 8888);
-        assert_eq!(
-            config.ntcp2_config.as_ref().unwrap().host,
-            String::from("127.0.0.1")
-        );
+        assert_eq!(config.ntcp2_config.as_ref().unwrap().host, None,);
 
         let (key, iv) = {
             let mut path = dir.path().to_owned();
@@ -601,7 +716,7 @@ mod tests {
             file.read_exact(&mut contents).unwrap();
 
             (
-                contents[..32].to_vec(),
+                TryInto::<[u8; 32]>::try_into(&contents[..32]).expect("to succeed"),
                 TryInto::<[u8; 16]>::try_into(&contents[32..]).expect("to succeed"),
             )
         };
@@ -656,21 +771,26 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
+            allow_local: false,
+            caps: None,
             exploratory: None,
+            floodfill: false,
+            i2cp: Some(I2cpConfig { port: 0u16 }),
+            insecure_tunnels: false,
+            log: None,
+            metrics: None,
+            net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
+                published: None,
             }),
-            i2cp: Some(I2cpConfig { port: 0u16 }),
+            reseed: None,
             sam: None,
-            floodfill: false,
-            caps: None,
-            net_id: None,
-            insecure_tunnels: false,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
-        file.write_all(&config.as_bytes()).unwrap();
+        file.write_all(config.as_bytes()).unwrap();
 
         // load the new config
         //

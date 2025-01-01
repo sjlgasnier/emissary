@@ -54,8 +54,8 @@ pub struct ReseedOptions {
     /// Comma-separated list of reseed hosts
     ///
     /// Example:
-    ///   --reseed-hosts https://host1.com https://host2.com https://host3.com
-    #[arg(long, value_delimiter = ' ', num_args = 1.., value_name = "HOST")]
+    ///   --reseed-hosts https://host1.com,https://host2.com,https://host3.com
+    #[arg(long, value_delimiter = ',', num_args = 1.., value_name = "HOST")]
     pub reseed_hosts: Option<Vec<String>>,
 
     /// Don't reseed the routere even if there aren't enough routers
@@ -65,6 +65,18 @@ pub struct ReseedOptions {
     /// Forcibly reseed the router even if there are enough routers
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub force_reseed: Option<bool>,
+}
+
+/// Metrics options.
+#[derive(Args)]
+pub struct MetricsOptions {
+    /// Metrics server port.
+    #[arg(long)]
+    pub metrics_server_port: Option<u16>,
+
+    /// Disable metrics.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_metrics: Option<bool>,
 }
 
 #[derive(Parser)]
@@ -93,6 +105,10 @@ pub struct Arguments {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub floodfill: Option<bool>,
 
+    /// Allow local addresses.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub allow_local: Option<bool>,
+
     /// Router capabilities
     #[arg(long)]
     pub caps: Option<String>,
@@ -108,4 +124,8 @@ pub struct Arguments {
     /// Reseed options.
     #[clap(flatten)]
     pub reseed: ReseedOptions,
+
+    /// Metrics options.
+    #[clap(flatten)]
+    pub metrics: MetricsOptions,
 }

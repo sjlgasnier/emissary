@@ -16,14 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use core::net::Ipv4Addr;
+
 use crate::{primitives::Str, profile::Profile, tunnel::TunnelPoolConfig};
 
 use alloc::{string::String, vec::Vec};
-
-pub enum Transport {
-    Enabled { port: u16, host: Option<String> },
-    Disabled,
-}
 
 /// Exploratory tunnel pool config.
 #[derive(Clone, PartialEq, Eq)]
@@ -65,10 +62,13 @@ pub struct Ntcp2Config {
     pub port: u16,
 
     /// NTCP2 listen address.
-    pub host: String,
+    pub host: Option<Ipv4Addr>,
+
+    /// Should NTCP2 be published in router info.
+    pub published: bool,
 
     /// NTCP2 key.
-    pub key: Vec<u8>,
+    pub key: [u8; 32],
 
     /// NTCP2 IV.
     pub iv: [u8; 16],
@@ -94,45 +94,65 @@ pub struct SamConfig {
     pub host: String,
 }
 
+/// Metrics configuration.
+#[derive(Default, Debug, Clone)]
+pub struct MetricsConfig {
+    /// Disable metrics server.
+    pub disable_metrics: bool,
+
+    /// Port where the metrics server should be bound to.
+    pub metrics_server_port: Option<u16>,
+}
+
 /// Router configuration.
+#[derive(Default)]
 pub struct Config {
-    /// Router static key.
-    pub static_key: Vec<u8>,
+    /// Allow local addresses.
+    pub allow_local: bool,
 
-    /// Router signing key.
-    pub signing_key: Vec<u8>,
+    /// Router capabilities.
+    pub caps: Option<String>,
 
-    /// NTCP2 configuration.
-    pub ntcp2_config: Option<Ntcp2Config>,
+    /// Exploratory tunnel pool config.
+    pub exploratory: Option<ExploratoryConfig>,
+
+    /// Should the node be run as a floodfill router.
+    pub floodfill: bool,
 
     /// I2CP configuration.
     ///
     /// `None` if I2CP is disabled.
     pub i2cp_config: Option<I2cpConfig>,
 
+    /// Are tunnels allowed to be insecure.
+    pub insecure_tunnels: bool,
+
+    /// Metrics configuration.
+    pub metrics: MetricsConfig,
+
+    /// Network ID.
+    pub net_id: Option<u8>,
+
+    /// NTCP2 configuration.
+    pub ntcp2_config: Option<Ntcp2Config>,
+
+    /// Known router profiles.
+    pub profiles: Vec<(String, Profile)>,
+
+    /// Router Info, if it exists.
+    pub router_info: Option<Vec<u8>>,
+
+    /// Known routers.
+    pub routers: Vec<Vec<u8>>,
+
     /// SAMv3 configuration.
     ///
     /// `None` if SAMv3 is disabled.
     pub samv3_config: Option<SamConfig>,
 
-    /// Known routers.
-    pub routers: Vec<Vec<u8>>,
+    /// Router signing key.
+    pub signing_key: Option<[u8; 32]>,
 
-    /// Known router profiles.
-    pub profiles: Vec<(String, Profile)>,
-
-    /// Should the node be run as a floodfill router.
-    pub floodfill: bool,
-
-    /// Router capabilities.
-    pub caps: Option<String>,
-
-    /// Network ID.
-    pub net_id: Option<u8>,
-
-    /// Exploratory tunnel pool config.
-    pub exploratory: Option<ExploratoryConfig>,
-
-    /// Are tunnels allowed to be insecure.
-    pub insecure_tunnels: bool,
+    /// Router static key.
+    pub static_key: Option<[u8; 32]>,
 }

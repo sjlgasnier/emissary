@@ -25,7 +25,6 @@ use crate::{
 
 use futures::{future::BoxFuture, FutureExt};
 use futures_channel::oneshot;
-use rand_core::RngCore;
 use thingbuf::mpsc;
 
 use alloc::boxed::Box;
@@ -100,7 +99,7 @@ impl ZeroHopInboundTunnel {
             return;
         };
 
-        let Some(message) = Message::parse_standard(&payload) else {
+        let Some(message) = Message::parse_standard(payload) else {
             tracing::warn!(
                 target: LOG_TARGET,
                 tunnel_id = %self.tunnel_id,
@@ -137,7 +136,7 @@ impl Future for ZeroHopInboundTunnel {
             }
         }
 
-        if let Poll::Ready(_) = self.expiration_timer.poll_unpin(cx) {
+        if self.expiration_timer.poll_unpin(cx).is_ready() {
             tracing::trace!(
                 target: LOG_TARGET,
                 zero_hop_tunnel = %self.tunnel_id,
@@ -150,9 +149,4 @@ impl Future for ZeroHopInboundTunnel {
 
         Poll::Pending
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 }

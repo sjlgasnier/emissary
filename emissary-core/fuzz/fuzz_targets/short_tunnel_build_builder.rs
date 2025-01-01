@@ -1,6 +1,6 @@
 #![no_main]
 
-use emissary::{
+use emissary_core::{
     i2np::{
         tunnel::build::short::{TunnelBuildRecord, TunnelBuildRecordBuilder},
         HopRole,

@@ -28,7 +28,6 @@ use crate::{
 };
 
 use bytes::Bytes;
-use futures::{FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
@@ -39,7 +38,7 @@ use spin::rwlock::RwLock;
 
 use alloc::{sync::Arc, vec::Vec};
 use core::{
-    net::{Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -123,9 +122,6 @@ pub struct ExploratorySelector<R: Runtime> {
 
     /// Router participation.
     router_participation: Arc<RwLock<HashMap<RouterId, usize>>>,
-
-    /// Tunnel hops.
-    tunnel_hops: Arc<RwLock<HashMap<TunnelId, HashSet<RouterId>>>>,
 }
 
 impl<R: Runtime> ExploratorySelector<R> {
@@ -143,13 +139,7 @@ impl<R: Runtime> ExploratorySelector<R> {
             outbound: Default::default(),
             profile_storage,
             router_participation: Default::default(),
-            tunnel_hops: Default::default(),
         }
-    }
-
-    /// Get reference to exploratory tunnel pool's [`TunnePoolHandle`].
-    pub fn handle(&self) -> &TunnelPoolContextHandle {
-        &self.handle
     }
 
     /// Group router addresses of `router_ids` by /16 subnet.
@@ -170,7 +160,7 @@ impl<R: Runtime> ExploratorySelector<R> {
                         .addresses
                         .get(&TransportKind::Ntcp2)
                         .expect("to exist")
-                        .socket_address()
+                        .socket_address
                         .expect("to exist");
 
                     // TODO: add support for ipv6
@@ -336,14 +326,12 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             );
         }
 
-        // TODO: filter out routers which are already a participant >33% of tunnels
-
         // group addresses by /16 subnet to prevent having two routers
         // from the same subnet in the same tunnel
         let mut addresses = self.group_by_subnet(router_ids);
 
         let router_ids = if addresses.len() < num_hops {
-            let mut routers = addresses
+            let routers = addresses
                 .iter_mut()
                 .map(|(subnet, addresses)| {
                     (
@@ -364,7 +352,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
 
             // group fast routers by subnet and filter out subnets which the already-selected
             // routers are part of
-            let mut fast_router_addresses = self
+            let fast_router_addresses = self
                 .group_by_subnet(fast_router_ids)
                 .into_iter()
                 .filter_map(|(subnet, fast_routers)| {
@@ -376,7 +364,6 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 return None;
             }
 
-            let num_needed = num_hops - routers.len();
             let mut fast_router_addresses: Vec<RouterId> = fast_router_addresses
                 .into_iter()
                 .map(|mut routers| routers.pop().expect("to exist"))
@@ -392,7 +379,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             // select random router from each subnet and shuffle selected routers
             let mut routers = addresses
                 .into_iter()
-                .map(|(subnet, addresses)| {
+                .map(|(_, addresses)| {
                     addresses[R::rng().next_u32() as usize % addresses.len()].clone()
                 })
                 .collect::<Vec<_>>();
@@ -544,14 +531,12 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             );
         }
 
-        // TODO: filter out routers which are already a participant >33% of tunnels
-
         // group addresses by /16 subnet to prevent having two routers
         // from the same subnet in the same tunnel
         let mut addresses = self.exploratory.group_by_subnet(router_ids);
 
         let router_ids = if addresses.len() < num_hops {
-            let mut routers = addresses
+            let routers = addresses
                 .iter_mut()
                 .map(|(subnet, addresses)| {
                     (
@@ -573,7 +558,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
 
             // group standard routers by subnet and filter out subnets which the already-selected
             // routers are part of
-            let mut standard_router_addresses = self
+            let standard_router_addresses = self
                 .exploratory
                 .group_by_subnet(standard_router_ids)
                 .into_iter()
@@ -586,7 +571,6 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 return None;
             }
 
-            let num_needed = num_hops - routers.len();
             let mut standard_router_addresses: Vec<RouterId> = standard_router_addresses
                 .into_iter()
                 .map(|mut routers| routers.pop().expect("to exist"))
@@ -602,7 +586,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             // select random router from each subnet and shuffle selected routers
             let mut routers = addresses
                 .into_iter()
-                .map(|(subnet, addresses)| {
+                .map(|(_, addresses)| {
                     addresses[R::rng().next_u32() as usize % addresses.len()].clone()
                 })
                 .collect::<Vec<_>>();
@@ -684,7 +668,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -706,10 +690,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.16{i}.{}.{}", i + 5, i + 10),
+                        format!("192.16{i}.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -723,10 +707,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.17{i}.{}.{}", i + 5, i + 10),
+                        format!("192.17{i}.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -812,7 +796,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -884,10 +868,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.168.{}.{}", i + 5, i + 10),
+                        format!("192.168.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -902,10 +886,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("172.10.{}.{}", i + 5, i + 10),
+                        format!("172.10.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -937,10 +921,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.168.{}.{}", i + 5, i + 10),
+                        format!("192.168.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -955,10 +939,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("172.10.{}.{}", i + 5, i + 10),
+                        format!("172.10.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -970,10 +954,8 @@ mod tests {
             exploratory_build_parameters.context_handle.clone(),
             false,
         );
-        let selector = ClientSelector::new(
-            exploratory,
-            exploratory_build_parameters.context_handle.clone(),
-        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         // since three hops were requested but there were only two subnets,
         // the request cannot be fulfilled
@@ -986,7 +968,7 @@ mod tests {
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
         // 5 unreachable standard routers
-        for i in 0..5 {
+        for _ in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("LU")).unwrap();
@@ -995,7 +977,7 @@ mod tests {
         }
 
         // 3 reachable fast routers
-        for i in 0..3 {
+        for _ in 0..3 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("OR")).unwrap();
@@ -1020,7 +1002,7 @@ mod tests {
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
         // 3 reachable standard routers
-        for i in 0..3 {
+        for _ in 0..3 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
@@ -1029,7 +1011,7 @@ mod tests {
         }
 
         // 5 unreachable fast routers
-        for i in 0..5 {
+        for _ in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("OU")).unwrap();
@@ -1042,10 +1024,8 @@ mod tests {
             exploratory_build_parameters.context_handle.clone(),
             false,
         );
-        let selector = ClientSelector::new(
-            exploratory,
-            exploratory_build_parameters.context_handle.clone(),
-        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         // 5 hops requested but only 3 routers in the standard category
         assert!(selector.select_hops(5).is_none());
@@ -1064,10 +1044,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.168.{}.{}", i + 5, i + 10),
+                        format!("192.168.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1082,10 +1062,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("172.10.{}.{}", i + 5, i + 10),
+                        format!("172.10.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1120,10 +1100,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.168.{}.{}", i + 5, i + 10),
+                        format!("192.168.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1138,10 +1118,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("172.10.{}.{}", i + 5, i + 10),
+                        format!("172.10.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1153,10 +1133,8 @@ mod tests {
             exploratory_build_parameters.context_handle.clone(),
             true,
         );
-        let selector = ClientSelector::new(
-            exploratory,
-            exploratory_build_parameters.context_handle.clone(),
-        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         let reader = profile_storage.reader();
         assert!(selector
@@ -1179,10 +1157,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.168.{}.{}", i + 5, i + 10),
+                        format!("192.168.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1197,10 +1175,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("172.10.{}.{}", i + 5, i + 10),
+                        format!("172.10.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1236,7 +1214,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -1260,10 +1238,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("192.168.{}.{}", i + 5, i + 10),
+                        format!("192.168.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1278,10 +1256,10 @@ mod tests {
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
                     RouterAddress::new_published(
-                        vec![1u8; 32],
+                        [1u8; 32],
                         [1u8; 16],
                         8888,
-                        format!("172.10.{}.{}", i + 5, i + 10),
+                        format!("172.10.{}.{}", i + 5, i + 10).parse().unwrap(),
                     ),
                 )]);
                 info
@@ -1293,10 +1271,8 @@ mod tests {
             exploratory_build_parameters.context_handle.clone(),
             true,
         );
-        let selector = ClientSelector::new(
-            exploratory,
-            exploratory_build_parameters.context_handle.clone(),
-        );
+        let selector =
+            ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         let hops = selector.select_hops(5usize).unwrap();
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
@@ -1321,7 +1297,7 @@ mod tests {
             if prev
                 .iter()
                 .zip(hops.iter())
-                .all(|(a, b)| a.0 == b.0 && a.1.to_bytes() == b.1.to_bytes())
+                .all(|(a, b)| a.0 == b.0 && a.1.to_vec() == b.1.to_vec())
             {
                 (count + 1, hops)
             } else {
@@ -1390,7 +1366,7 @@ mod tests {
             routers[9].clone(),
             routers[10].clone(),
         ]));
-        for (i, router_id) in routers.iter().enumerate() {
+        for (_, router_id) in routers.iter().enumerate() {
             assert!(selector.can_participate(router_id));
         }
 
@@ -1484,7 +1460,6 @@ mod tests {
             .collect::<HashSet<_>>();
         selector.add_tunnel(&hops2);
 
-        assert!(!hops1.iter().all(|key| hops2.contains(key)));
         assert!(selector.select_hops(3).is_some());
     }
 
@@ -1642,7 +1617,6 @@ mod tests {
             .collect::<HashSet<_>>();
         selector.exploratory.add_tunnel(&hops2);
 
-        assert!(!hops1.iter().all(|key| hops2.contains(key)));
         assert!(selector.select_hops(3).is_some());
     }
 

@@ -5,7 +5,7 @@ version = "0.1.0"
 
 [dependencies]
 util = { path = "../../util" }
-yosemite = "0.2.0"
+yosemite = "0.3.0"
 
 # workspace dependencies
 futures = { workspace = true }

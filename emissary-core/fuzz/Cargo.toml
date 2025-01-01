@@ -10,8 +10,9 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
 emissary-core = { path = "../", features = ["std"] }
+emissary-util = { path = "../../emissary-util", features = ["tokio"] }
 libfuzzer-sys = "0.4.0"
-rand_core = {version = "0.6.4", features = ["alloc", "getrandom"] }
+rand_core = { version = "0.6.4", features = ["alloc", "getrandom"] }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -73,3 +74,70 @@ name = "garlic"
 path = "fuzz_targets/garlic.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "leaseset2"
+path = "fuzz_targets/leaseset2.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "database_lookup"
+path = "fuzz_targets/database_lookup.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "database_store"
+path = "fuzz_targets/database_store.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "database_search_reply"
+path = "fuzz_targets/database_search_reply.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "date"
+path = "fuzz_targets/date.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "router_info"
+path = "fuzz_targets/router_info.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "router_identity"
+path = "fuzz_targets/router_identity.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "destination"
+path = "fuzz_targets/destination.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mapping"
+path = "fuzz_targets/mapping.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "router_address"
+path = "fuzz_targets/router_address.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "string"
+path = "fuzz_targets/string.rs"
+test = false
+doc = false
+

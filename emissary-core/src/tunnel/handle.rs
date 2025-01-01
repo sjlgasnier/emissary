@@ -18,20 +18,13 @@
 
 use crate::{
     error::ChannelError,
-    i2np::Message,
-    primitives::{RouterId, TunnelId},
     tunnel::{TunnelPoolConfig, TunnelPoolHandle},
 };
 
-use futures::Stream;
 use futures_channel::oneshot;
 use thingbuf::mpsc;
 
-use core::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use core::future::Future;
 
 /// Recycling strategy for [`TunnelManagerCommand`].
 #[derive(Default, Clone)]
@@ -93,7 +86,7 @@ impl TunnelManagerHandle {
         &self,
         config: TunnelPoolConfig,
     ) -> Result<impl Future<Output = TunnelPoolHandle>, ChannelError> {
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
 
         // waiting on the channel won't fail unless `TunnelManager` has shut down
         self.tx

@@ -17,43 +17,52 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base64_decode, chachapoly::ChaChaPoly, SigningPrivateKey, StaticPrivateKey, StaticPublicKey,
-    },
-    primitives::{RouterAddress, RouterId, RouterInfo, Str, TransportKind},
+    config::Ntcp2Config,
+    crypto::SigningPrivateKey,
+    error::{ConnectionError, Error},
+    primitives::{RouterAddress, RouterId, RouterInfo},
     profile::ProfileStorage,
-    runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener, TcpStream},
+    runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener},
     subsystem::SubsystemHandle,
     transports::{
         metrics::*,
         ntcp2::{
             listener::Ntcp2Listener,
-            message::MessageBlock,
             session::{Ntcp2Session, SessionManager},
         },
         Transport, TransportEvent,
     },
-    Ntcp2Config,
 };
 
 use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
-use thingbuf::mpsc::Sender;
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{format, vec::Vec};
 use core::{
-    marker::PhantomData,
+    net::SocketAddr,
     pin::Pin,
-    str::FromStr,
     task::{Context, Poll, Waker},
 };
 
 mod listener;
 mod message;
+mod options;
 mod session;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ntcp2";
+
+/// NTCP2 context.
+pub struct Ntcp2Context<R: Runtime> {
+    /// NTCP2 configuration.
+    config: Ntcp2Config,
+
+    /// NTCP2 listener.
+    listener: R::TcpListener,
+
+    /// Socket address.
+    socket_address: SocketAddr,
+}
 
 /// NTCP2 transport.
 pub struct Ntcp2Transport<R: Runtime> {
@@ -84,52 +93,103 @@ pub struct Ntcp2Transport<R: Runtime> {
 
 impl<R: Runtime> Ntcp2Transport<R> {
     /// Create new [`Ntcp2Transport`].
-    pub async fn new(
-        config: Ntcp2Config,
+    pub fn new(
+        context: Ntcp2Context<R>,
+        allow_local: bool,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
         profile_storage: ProfileStorage<R>,
         metrics: R::MetricsHandle,
-    ) -> crate::Result<Self> {
-        // TODO: handle the case when user doesn't want to enable ntcp2 listener
-        let socket_address = local_router_info
-            .addresses
-            .get(&TransportKind::Ntcp2)
-            .expect("to exist")
-            .socket_address()
-            .expect("to exist");
-        let listener = Ntcp2Listener::new(socket_address).await?;
+    ) -> Self {
+        let Ntcp2Context {
+            config,
+            listener,
+            socket_address,
+        } = context;
 
         let session_manager = SessionManager::new(
             config.key,
-            config.iv.to_vec(),
+            config.iv,
             local_signing_key,
             local_router_info,
             subsystem_handle,
             profile_storage,
-        )?;
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            listen_address = ?socket_address,
-            "starting ntcp2 transport",
+            allow_local,
         );
 
-        Ok(Ntcp2Transport {
-            listener,
+        tracing::info!(
+            target: LOG_TARGET,
+            listen_address = ?socket_address,
+            ?allow_local,
+            "starting ntcp2",
+        );
+
+        Ntcp2Transport {
+            listener: Ntcp2Listener::new(listener, allow_local),
             metrics,
             open_connections: R::join_set(),
             pending_connections: HashMap::new(),
             pending_handshakes: R::join_set(),
             session_manager,
             waker: None,
-        })
+        }
     }
 
     /// Collect `Ntcp2Transport`-related metric counters, gauges and histograms.
     pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
         metrics
+    }
+
+    /// Initialize [`Ntcp2Transport`].
+    ///
+    /// If NTCP2 has been enabled, create a router address using the configuration that was provided
+    /// and bind a TCP listener to the port that was specified.
+    ///
+    /// Returns a [`RouterAddress`] of the transport and an [`Ntcp2Context`] that needs to be passed
+    /// to [`Ntcp2Transport::new()`] when constructing the transport.
+    pub async fn initialize(
+        config: Option<Ntcp2Config>,
+    ) -> crate::Result<(Option<Ntcp2Context<R>>, Option<RouterAddress>)> {
+        let Some(config) = config else {
+            return Ok((None, None));
+        };
+
+        let listener =
+            R::TcpListener::bind(format!("0.0.0.0:{}", config.port).parse().expect("to succeed"))
+                .await
+                .ok_or(Error::Connection(ConnectionError::BindFailure))?;
+
+        let socket_address = listener.local_address().ok_or_else(|| {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "failed to get local address of the ntcp2 listener",
+            );
+
+            Error::Connection(ConnectionError::BindFailure)
+        })?;
+
+        let address = match (config.published, config.host) {
+            (true, Some(host)) =>
+                RouterAddress::new_published(config.key, config.iv, socket_address.port(), host),
+            (true, None) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "ntcp2 requested to be published but no host provided",
+                );
+                RouterAddress::new_unpublished(config.key, socket_address.port())
+            }
+            (_, _) => RouterAddress::new_unpublished(config.key, socket_address.port()),
+        };
+
+        Ok((
+            Some(Ntcp2Context {
+                config,
+                listener,
+                socket_address,
+            }),
+            Some(address),
+        ))
     }
 }
 
@@ -137,32 +197,38 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
     fn connect(&mut self, router: RouterInfo) {
         tracing::trace!(
             target: LOG_TARGET,
-            router = ?router.identity.id(),
+            router_id = %router.identity.id(),
             "negotiate ntcp2 session with router",
         );
 
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
-        self.waker.as_mut().map(|waker| waker.wake_by_ref());
         self.metrics.counter(NUM_OUTBOUND).increment(1);
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
+        }
     }
 
-    fn accept(&mut self, router: &RouterId) {
-        match self.pending_connections.remove(router) {
+    fn accept(&mut self, router_id: &RouterId) {
+        match self.pending_connections.remove(router_id) {
             Some(session) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "ntcp2 session accepted, starting event loop",
                 );
 
                 self.open_connections.push(session.run());
-                self.waker.as_mut().map(|waker| waker.wake_by_ref());
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
             }
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "cannot accept non-existent ntcp2 session",
                 );
                 debug_assert!(false);
@@ -170,12 +236,12 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
         }
     }
 
-    fn reject(&mut self, router: &RouterId) {
-        match self.pending_connections.remove(router) {
+    fn reject(&mut self, router_id: &RouterId) {
+        match self.pending_connections.remove(router_id) {
             Some(connection) => {
                 tracing::debug!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "ntcp2 session rejected, closing connection",
                 );
                 self.metrics.counter(NUM_REJECTED).increment(1);
@@ -184,7 +250,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    %router,
+                    %router_id,
                     "cannot reject non-existent ntcp2 session",
                 );
                 debug_assert!(false);
@@ -245,11 +311,161 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         router_info,
                     }));
                 }
-                Some(Err(error)) => return Poll::Ready(Some(TransportEvent::ConnectionFailure {})),
+                Some(Err(error)) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to connect to router",
+                    );
+                    return Poll::Ready(Some(TransportEvent::ConnectionFailure {}));
+                }
                 None => return Poll::Ready(None),
             }
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{primitives::Str, runtime::mock::MockRuntime};
+
+    #[tokio::test]
+    async fn publish_ntcp() {
+        let config = Some(Ntcp2Config {
+            port: 0u16,
+            host: Some("8.8.8.8".parse().unwrap()),
+            published: true,
+            key: [0xaa; 32],
+            iv: [0xbb; 16],
+        });
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(config).await.unwrap();
+        let port = context.as_ref().unwrap().socket_address.port().to_string();
+
+        assert_eq!(
+            address.as_ref().unwrap().options.get(&Str::from("host")),
+            Some(&Str::from("8.8.8.8"))
+        );
+        assert_eq!(
+            address.as_ref().unwrap().options.get(&Str::from("port")),
+            Some(&Str::from(port))
+        );
+        assert!(address.as_ref().unwrap().options.get(&Str::from("i")).is_some());
+        assert!(address.as_ref().unwrap().socket_address.is_some());
+        assert!(context.is_some());
+    }
+
+    #[tokio::test]
+    async fn dont_publish_ntcp() {
+        let config = Some(Ntcp2Config {
+            port: 0u16,
+            host: None,
+            published: false,
+            key: [0xaa; 32],
+            iv: [0xbb; 16],
+        });
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(config).await.unwrap();
+
+        assert!(address.as_ref().unwrap().options.get(&Str::from("host")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("port")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("i")).is_none());
+        assert!(address.as_ref().unwrap().socket_address.is_some());
+        assert!(context.is_some());
+    }
+
+    #[tokio::test]
+    async fn dont_publish_ntcp_host_specified() {
+        let config = Some(Ntcp2Config {
+            port: 8888,
+            host: Some("8.8.8.8".parse().unwrap()),
+            published: false,
+            key: [0xaa; 32],
+            iv: [0xbb; 16],
+        });
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(config).await.unwrap();
+
+        assert!(address.as_ref().unwrap().options.get(&Str::from("host")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("port")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("i")).is_none());
+        assert!(address.as_ref().unwrap().socket_address.is_some());
+        assert!(context.is_some());
+    }
+
+    #[tokio::test]
+    async fn publish_ntcp_but_no_host() {
+        let config = Some(Ntcp2Config {
+            port: 8888,
+            host: None,
+            published: true,
+            key: [0xaa; 32],
+            iv: [0xbb; 16],
+        });
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(config).await.unwrap();
+
+        assert!(address.as_ref().unwrap().options.get(&Str::from("host")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("port")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("i")).is_none());
+        assert!(address.as_ref().unwrap().socket_address.is_some());
+        assert!(context.is_some());
+    }
+
+    #[tokio::test]
+    async fn bind_to_random_port() {
+        let config = Some(Ntcp2Config {
+            port: 0u16,
+            host: None,
+            published: true,
+            key: [0xaa; 32],
+            iv: [0xbb; 16],
+        });
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(config).await.unwrap();
+
+        assert!(address.as_ref().unwrap().options.get(&Str::from("host")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("port")).is_none());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("i")).is_none());
+        assert!(address.as_ref().unwrap().socket_address.is_some());
+        assert_ne!(
+            address.as_ref().unwrap().socket_address.as_ref().unwrap().port(),
+            0u16
+        );
+        assert!(context.is_some());
+    }
+
+    #[tokio::test]
+    async fn publish_random_port() {
+        let config = Some(Ntcp2Config {
+            port: 0u16,
+            host: Some("8.8.8.8".parse().unwrap()),
+            published: true,
+            key: [0xaa; 32],
+            iv: [0xbb; 16],
+        });
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(config).await.unwrap();
+
+        let published_port = address
+            .as_ref()
+            .unwrap()
+            .options
+            .get(&Str::from("port"))
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        let socket_address_port = address.as_ref().unwrap().socket_address.as_ref().unwrap().port();
+
+        assert!(address.as_ref().unwrap().options.get(&Str::from("host")).is_some());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("port")).is_some());
+        assert!(address.as_ref().unwrap().options.get(&Str::from("i")).is_some());
+        assert_eq!(published_port, socket_address_port);
+        assert_ne!(published_port, 0u16);
+        assert!(context.is_some());
+    }
+
+    #[tokio::test]
+    async fn ntcp2_not_enabled() {
+        let (context, address) = Ntcp2Transport::<MockRuntime>::initialize(None).await.unwrap();
+        assert!(context.is_none());
+        assert!(address.is_none());
     }
 }

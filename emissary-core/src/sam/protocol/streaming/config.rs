@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::primitives::Str;
+#![allow(unused)]
 
 use alloc::string::String;
 use core::{num::NonZeroUsize, time::Duration};

@@ -137,7 +137,12 @@ impl TcpStream for AsyncStdTcpStream {
     }
 }
 
-pub struct AsyncStdTcpListener(BoxStream<'static, async_std::io::Result<net::TcpStream>>);
+pub struct AsyncStdTcpListener(
+    (
+        SocketAddr,
+        BoxStream<'static, async_std::io::Result<net::TcpStream>>,
+    ),
+);
 
 impl TcpListener<AsyncStdTcpStream> for AsyncStdTcpListener {
     // TODO: can be made sync with `socket2`
@@ -153,36 +158,54 @@ impl TcpListener<AsyncStdTcpStream> for AsyncStdTcpListener {
                 );
             })
             .ok()
-            .map(|listener| AsyncStdTcpListener(Box::pin(listener.into_incoming())))
+            .map(|listener| {
+                let address = listener.local_addr().expect("to succeed");
+
+                AsyncStdTcpListener((address, Box::pin(listener.into_incoming())))
+            })
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<Option<AsyncStdTcpStream>> {
-        match futures::ready!(self.0.poll_next_unpin(cx)) {
-            Some(Ok(stream)) => return Poll::Ready(Some(AsyncStdTcpStream(stream))),
-            Some(Err(error)) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to accept connection",
-                );
-                return Poll::Ready(None);
-            }
-            None => {
-                return Poll::Ready(None);
+    fn poll_accept(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<(AsyncStdTcpStream, SocketAddr)>> {
+        loop {
+            match futures::ready!(self.0 .1.poll_next_unpin(cx)) {
+                Some(Ok(stream)) => match stream.local_addr() {
+                    Ok(address) => return Poll::Ready(Some((AsyncStdTcpStream(stream), address))),
+                    Err(_) => continue,
+                },
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to accept connection",
+                    );
+                    return Poll::Ready(None);
+                }
+                None => {
+                    return Poll::Ready(None);
+                }
             }
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        Some(self.0 .0)
     }
 }
 
 pub struct AsyncStdUdpSocket {
     dgram_tx: Sender<(Vec<u8>, SocketAddr)>,
     dgram_rx: Receiver<(Vec<u8>, SocketAddr)>,
+    local_address: Option<SocketAddr>,
 }
 
 impl AsyncStdUdpSocket {
     fn new(socket: net::UdpSocket) -> Self {
         let (send_tx, mut send_rx): (Sender<(Vec<u8>, SocketAddr)>, _) = channel(2048);
         let (mut recv_tx, recv_rx) = channel(2048);
+        let local_address = socket.local_addr().ok();
 
         async_std::task::spawn(async move {
             let mut buffer = vec![0u8; 0xffff];
@@ -229,6 +252,7 @@ impl AsyncStdUdpSocket {
         Self {
             dgram_tx: send_tx,
             dgram_rx: recv_rx,
+            local_address,
         }
     }
 }
@@ -286,6 +310,10 @@ impl UdpSocket for AsyncStdUdpSocket {
                     Poll::Ready(Some((datagram.len(), from)))
                 },
         }
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        self.local_address
     }
 }
 
@@ -453,9 +481,14 @@ impl RuntimeT for Runtime {
         AsyncStdJoinSet(FuturesJoinSet::<T>::new(), None)
     }
 
-    fn register_metrics(metrics: Vec<MetricType>) -> Self::MetricsHandle {
-        let builder = PrometheusBuilder::new()
-            .with_http_listener("0.0.0.0:12842".parse::<SocketAddr>().expect(""));
+    fn register_metrics(metrics: Vec<MetricType>, port: Option<u16>) -> Self::MetricsHandle {
+        if metrics.is_empty() {
+            return AsyncStdMetricsHandle {};
+        }
+
+        let builder = PrometheusBuilder::new().with_http_listener(
+            format!("0.0.0.0:{}", port.unwrap_or(12842)).parse::<SocketAddr>().expect(""),
+        );
 
         metrics
             .into_iter()

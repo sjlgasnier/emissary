@@ -18,12 +18,9 @@
 
 use crate::{i2np::Message, primitives::RouterId, Error};
 
-use thingbuf::mpsc::{Receiver, Sender};
+use thingbuf::mpsc::Sender;
 
 use alloc::vec::Vec;
-
-/// Logging target for the file.
-const LOG_TARGET: &str = "emissary::subsystem";
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub enum SubsystemKind {
@@ -36,7 +33,7 @@ pub enum SubsystemKind {
 
 #[derive(Clone)]
 pub enum SubsystemCommand {
-    /// Send I2NP to router.
+    /// Send I2NP message to router.
     SendMessage {
         /// Serialized I2NP message.
         message: Vec<u8>,
@@ -193,13 +190,6 @@ impl SubsystemHandle {
         let tunnel_messages = tunnel_messages.into_iter().flatten().collect::<Vec<_>>();
         let netdb_messages = netdb_messages.into_iter().flatten().collect::<Vec<_>>();
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            num_tunnel_messages = ?tunnel_messages.len(),
-            num_netdb_messages = ?netdb_messages.len(),
-            "dispatch messages to subsystems",
-        );
-
         if !tunnel_messages.is_empty() {
             self.subsystems[0]
                 .try_send(InnerSubsystemEvent::I2Np {
@@ -214,7 +204,7 @@ impl SubsystemHandle {
                 .try_send(InnerSubsystemEvent::I2Np {
                     messages: netdb_messages,
                 })
-                .map_err(|error| Error::NotSupported)
+                .map_err(|_| Error::NotSupported)
                 .unwrap();
         }
 

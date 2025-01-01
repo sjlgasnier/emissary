@@ -32,7 +32,7 @@ use hashbrown::HashSet;
 use thingbuf::mpsc::Receiver;
 
 use alloc::{collections::VecDeque, vec::Vec};
-use core::{iter, marker::PhantomData, num::NonZeroUsize};
+use core::{marker::PhantomData, num::NonZeroUsize};
 
 pub mod inbound;
 pub mod outbound;
@@ -44,9 +44,6 @@ pub struct TunnelHop {
     /// Key context.
     key_context: OutboundSession,
 
-    /// Hop role
-    role: HopRole,
-
     /// Router ID.
     router: RouterId,
 
@@ -55,22 +52,6 @@ pub struct TunnelHop {
 }
 
 impl TunnelHop {
-    /// Create new [`TunnelHop`].
-    #[cfg(test)]
-    pub fn new(
-        key_context: OutboundSession,
-        role: HopRole,
-        router: RouterId,
-        tunnel_id: TunnelId,
-    ) -> Self {
-        Self {
-            key_context,
-            role,
-            router,
-            tunnel_id,
-        }
-    }
-
     /// Get reference to hop's `OutboundSession`.
     #[cfg(test)]
     pub fn outbound_session(&self) -> &OutboundSession {

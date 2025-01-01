@@ -18,7 +18,7 @@
 
 use crate::{
     i2np::{database::DATABASE_KEY_SIZE, LOG_TARGET, ROUTER_HASH_LEN},
-    primitives::{RouterId, RouterInfo, TunnelId},
+    primitives::{RouterId, TunnelId},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -306,18 +306,17 @@ mod tests {
         ];
 
         for payload in &payloads {
-            let _ = DatabaseLookup::parse(&payloads[0]).unwrap();
+            let _ = DatabaseLookup::parse(&payload).unwrap();
         }
     }
 
     #[test]
     fn normal_lookup() {
-        let mut message =
-            DatabaseLookupBuilder::new(Bytes::from(vec![1u8; 32]), LookupType::Normal)
-                .with_reply_type(ReplyType::Router {
-                    router_id: RouterId::from(vec![0u8; 32]),
-                })
-                .build();
+        let message = DatabaseLookupBuilder::new(Bytes::from(vec![1u8; 32]), LookupType::Normal)
+            .with_reply_type(ReplyType::Router {
+                router_id: RouterId::from(vec![0u8; 32]),
+            })
+            .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Normal);
@@ -331,13 +330,12 @@ mod tests {
 
     #[test]
     fn leaseset_lookup() {
-        let mut message =
-            DatabaseLookupBuilder::new(Bytes::from(vec![2u8; 32]), LookupType::Leaseset)
-                .with_reply_type(ReplyType::Tunnel {
-                    router_id: RouterId::from(vec![1u8; 32]),
-                    tunnel_id: TunnelId::from(1337u32),
-                })
-                .build();
+        let message = DatabaseLookupBuilder::new(Bytes::from(vec![2u8; 32]), LookupType::Leaseset)
+            .with_reply_type(ReplyType::Tunnel {
+                router_id: RouterId::from(vec![1u8; 32]),
+                tunnel_id: TunnelId::from(1337u32),
+            })
+            .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Leaseset);
@@ -357,12 +355,11 @@ mod tests {
 
     #[test]
     fn router_lookup() {
-        let mut message =
-            DatabaseLookupBuilder::new(Bytes::from(vec![3u8; 32]), LookupType::Router)
-                .with_reply_type(ReplyType::Router {
-                    router_id: RouterId::from(vec![2u8; 32]),
-                })
-                .build();
+        let message = DatabaseLookupBuilder::new(Bytes::from(vec![3u8; 32]), LookupType::Router)
+            .with_reply_type(ReplyType::Router {
+                router_id: RouterId::from(vec![2u8; 32]),
+            })
+            .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Router);
@@ -379,13 +376,12 @@ mod tests {
         let mut ignored =
             (5..10).map(|id| RouterId::from(vec![id as u8; 32])).collect::<HashSet<_>>();
 
-        let mut message =
-            DatabaseLookupBuilder::new(Bytes::from(vec![3u8; 32]), LookupType::Router)
-                .with_reply_type(ReplyType::Router {
-                    router_id: RouterId::from(vec![3u8; 32]),
-                })
-                .with_ignored_routers(ignored.clone().into_iter().collect())
-                .build();
+        let message = DatabaseLookupBuilder::new(Bytes::from(vec![3u8; 32]), LookupType::Router)
+            .with_reply_type(ReplyType::Router {
+                router_id: RouterId::from(vec![3u8; 32]),
+            })
+            .with_ignored_routers(ignored.clone().into_iter().collect())
+            .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
         assert_eq!(message.lookup, LookupType::Router);
@@ -405,7 +401,7 @@ mod tests {
 
     #[test]
     fn exploration_lookup() {
-        let mut message =
+        let message =
             DatabaseLookupBuilder::new(Bytes::from(vec![4u8; 32]), LookupType::Exploration)
                 .with_reply_type(ReplyType::Router {
                     router_id: RouterId::from(vec![4u8; 32]),

@@ -41,6 +41,9 @@ pub enum SessionError {
 
     /// State machine has entered an invalid state.
     InvalidState,
+
+    /// Invalid key.
+    InvalidKey,
 }
 
 impl fmt::Display for SessionError {
@@ -51,6 +54,7 @@ impl fmt::Display for SessionError {
             Self::Malformed => write!(f, "malformed message"),
             Self::Chacha => write!(f, "encryption/decryption error"),
             Self::InvalidState => write!(f, "invalid state"),
+            Self::InvalidKey => write!(f, "invalid key"),
         }
     }
 }
@@ -281,6 +285,7 @@ pub enum RouteKind {
     Tunnel(TunnelId),
 
     /// Listener for message not found.
+    #[allow(unused)]
     Message(MessageId),
 }
 
@@ -297,17 +302,21 @@ impl fmt::Display for RouteKind {
 #[derive(Debug)]
 pub enum RoutingError {
     /// Route not found.
+    #[allow(unused)]
     RouteNotFound(Message, RouteKind),
 
     /// Failed to parse route from message.
     ///
     /// Message is invalid and doesn't contain a route.
+    #[allow(unused)]
     FailedToParseRoute(Message),
 
     /// Channel full.
+    #[allow(unused)]
     ChannelFull(Message),
 
     /// Channel closed.
+    #[allow(unused)]
     ChannelClosed(Message),
 
     /// Tunnel already exists in the routing table.
@@ -318,7 +327,7 @@ impl fmt::Display for RoutingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RouteNotFound(_, route) => write!(f, "route not found: {route}"),
-            Self::FailedToParseRoute(message) => write!(f, "failed to parse route"),
+            Self::FailedToParseRoute(_) => write!(f, "failed to parse route"),
             Self::ChannelFull(_) => write!(f, "channel full"),
             Self::ChannelClosed(_) => write!(f, "channel closed"),
             Self::TunnelExists(tunnel_id) =>
@@ -349,6 +358,9 @@ pub enum Error {
     Missing,
     Session(SessionError),
     NetworkMismatch,
+    Expired,
+    Routing(RoutingError),
+    Duplicate,
 }
 
 impl fmt::Display for Error {
@@ -374,6 +386,9 @@ impl fmt::Display for Error {
             Self::Missing => write!(f, "value missing"),
             Self::Session(error) => write!(f, "session error: {error}"),
             Self::NetworkMismatch => write!(f, "network mismatch"),
+            Self::Expired => write!(f, "message has expired"),
+            Self::Routing(error) => write!(f, "{error}"),
+            Self::Duplicate => write!(f, "duplicate message"),
         }
     }
 }
@@ -391,8 +406,14 @@ impl From<chacha20poly1305::Error> for Error {
 }
 
 impl From<Error> for SessionError {
-    fn from(value: Error) -> Self {
+    fn from(_: Error) -> Self {
         SessionError::Chacha
+    }
+}
+
+impl From<RoutingError> for Error {
+    fn from(value: RoutingError) -> Self {
+        Error::Routing(value)
     }
 }
 

@@ -17,21 +17,20 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::SigningPrivateKey,
     error::ChannelError,
-    i2np::Message,
-    primitives::{RouterAddress, RouterId, RouterInfo, TransportKind},
+    primitives::{RouterId, RouterInfo},
     profile::ProfileStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
-    transports::{metrics::*, ntcp2::Ntcp2Transport},
-    Error, Ntcp2Config,
+    transports::metrics::*,
 };
 
 use futures::{Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
+use ntcp2::Ntcp2Context;
 use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -45,22 +44,10 @@ mod metrics;
 mod ntcp2;
 mod ssu2;
 
+pub use ntcp2::Ntcp2Transport;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::transport-manager";
-
-// TODO: introduce `Endpoint`?
-
-#[derive(Debug, Clone)]
-pub enum NetworkEvent {
-    /// Connection successfully established to remote peer.
-    ConnectionEstablished {
-        /// `RouterInfo` for the connected peer.
-        router: RouterInfo,
-    },
-    ConnectionClosed {},
-    ConnectionFailure {},
-    Message {},
-}
 
 /// Transport event.
 #[derive(Debug)]
@@ -86,7 +73,7 @@ pub enum TransportEvent {
 
 // TODO: `poll_progress()` - only poll pending streams
 // TODO: `poll()` - poll pending streams and listener
-pub trait Transport: Stream + Unpin {
+pub trait Transport: Stream + Unpin + Send {
     /// Connect to `router`.
     //
     // TODO: how to signal preference for transport?
@@ -153,12 +140,11 @@ impl<R: Runtime> TransportService<R> {
     /// via [`TransportService::poll_next()`].
     pub fn connect(&mut self, router: &RouterId) -> Result<(), ()> {
         if self.routers.contains_key(router) {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 ?router,
                 "tried to dial an already-connected router",
             );
-            debug_assert!(false);
 
             self.pending_events.push_back(InnerSubsystemEvent::ConnectionFailure {
                 router: router.clone(),
@@ -250,25 +236,21 @@ impl<R: Runtime> Stream for TransportService<R> {
     type Item = SubsystemEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match futures::ready!(self.event_rx.poll_recv(cx)) {
-                None => return Poll::Ready(None),
-                Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => {
-                    self.routers.insert(router.clone(), tx);
-                    return Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router }));
-                }
-                Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
-                    self.routers.remove(&router);
-                    return Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }));
-                }
-                Some(InnerSubsystemEvent::ConnectionFailure { router }) => {
-                    return Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router }));
-                }
-                Some(InnerSubsystemEvent::I2Np { messages }) => {
-                    return Poll::Ready(Some(SubsystemEvent::I2Np { messages }));
-                }
-                Some(InnerSubsystemEvent::Dummy) => unreachable!(),
+        match futures::ready!(self.event_rx.poll_recv(cx)) {
+            None => Poll::Ready(None),
+            Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => {
+                self.routers.insert(router.clone(), tx);
+                Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router }))
             }
+            Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
+                self.routers.remove(&router);
+                Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }))
+            }
+            Some(InnerSubsystemEvent::ConnectionFailure { router }) =>
+                Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })),
+            Some(InnerSubsystemEvent::I2Np { messages }) =>
+                Poll::Ready(Some(SubsystemEvent::I2Np { messages })),
+            Some(InnerSubsystemEvent::Dummy) => unreachable!(),
         }
     }
 }
@@ -279,14 +261,14 @@ impl<R: Runtime> Stream for TransportService<R> {
 /// together with enabled, lower-level transports and polling for polling those
 /// transports so that they can make progress.
 pub struct TransportManager<R: Runtime> {
+    /// Allow local addresses.
+    allow_local: bool,
+
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
     /// TX channel passed onto other subsystems.
     cmd_tx: Sender<ProtocolCommand>,
-
-    /// Local key.
-    local_key: StaticPrivateKey,
 
     /// Local `RouterInfo`.
     local_router_info: RouterInfo,
@@ -316,18 +298,18 @@ pub struct TransportManager<R: Runtime> {
 impl<R: Runtime> TransportManager<R> {
     /// Create new [`TransportManager`].
     pub fn new(
-        local_key: StaticPrivateKey,
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
         profile_storage: ProfileStorage<R>,
         metrics_handle: R::MetricsHandle,
+        allow_local: bool,
     ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
 
         Self {
+            allow_local,
             cmd_rx,
             cmd_tx,
-            local_key,
             local_router_info,
             local_signing_key,
             metrics_handle,
@@ -342,9 +324,8 @@ impl<R: Runtime> TransportManager<R> {
     /// Collect `TransportManager`-related metric counters, gauges and histograms.
     pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
         let metrics = register_metrics(metrics);
-        let metrics = Ntcp2Transport::<R>::metrics(metrics);
 
-        metrics
+        Ntcp2Transport::<R>::metrics(metrics)
     }
 
     /// Register new subsystem to [`TransportManager`].
@@ -370,33 +351,17 @@ impl<R: Runtime> TransportManager<R> {
         }
     }
 
-    /// Register enabled transport
-    ///
-    /// The number of transports is fixed and the initialization order is important.
-    //
-    // TODO: this is not correct, fix when ssu2 is implemented
-    pub async fn register_transport(
-        &mut self,
-        kind: TransportKind,
-        config: Ntcp2Config,
-    ) -> crate::Result<()> {
-        let TransportKind::Ntcp2 = kind else {
-            panic!("only ntcp2 is supported");
-        };
-
-        self.transports.push(Box::new(
-            Ntcp2Transport::new(
-                config,
-                self.local_signing_key.clone(),
-                self.local_router_info.clone(),
-                self.subsystem_handle.clone(),
-                self.profile_storage.clone(),
-                self.metrics_handle.clone(),
-            )
-            .await?,
-        ));
-
-        Ok(())
+    /// Register NTCP2 as an active transport.
+    pub fn register_ntcp2(&mut self, context: Ntcp2Context<R>) {
+        self.transports.push(Box::new(Ntcp2Transport::new(
+            context,
+            self.allow_local,
+            self.local_signing_key.clone(),
+            self.local_router_info.clone(),
+            self.subsystem_handle.clone(),
+            self.profile_storage.clone(),
+            self.metrics_handle.clone(),
+        )))
     }
 }
 
@@ -417,9 +382,9 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
                     let router = router_info.identity.id();
 
-                    tracing::debug!(
+                    tracing::trace!(
                         target: LOG_TARGET,
-                        ?router,
+                        %router,
                         "connection established",
                     );
 
@@ -431,7 +396,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                         false => {
                             tracing::warn!(
                                 target: LOG_TARGET,
-                                ?router,
+                                %router,
                                 "router already connected, rejecting",
                             );
                             self.transports[index].reject(&router);
@@ -450,9 +415,6 @@ impl<R: Runtime> Future for TransportManager<R> {
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionFailure {})) => {
                     self.metrics_handle.counter(NUM_DIAL_FAILURES).increment(1);
-                }
-                Poll::Ready(Some(event)) => {
-                    tracing::warn!("unhandled event: {event:?}");
                 }
             }
 

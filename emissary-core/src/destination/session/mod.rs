@@ -26,7 +26,7 @@ use crate::{
         context::KeyContext,
         session::{PendingSession, PendingSessionEvent, Session},
     },
-    error::{Error, SessionError},
+    error::SessionError,
     i2np::{
         database::store::{
             DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
@@ -244,11 +244,6 @@ impl<R: Runtime> SessionManager<R> {
         self.remote_destinations.insert(destination_id, public_key);
     }
 
-    /// Remove remote destination from [`SessionKeyManager`].
-    pub fn remove_remote_destination(&mut self, destination_id: &DestinationId) {
-        self.remote_destinations.remove(destination_id);
-    }
-
     /// Remove session for `destination_id` from active sessions.
     fn remove_session(&mut self, destination_id: &DestinationId) {
         tracing::debug!(
@@ -285,13 +280,13 @@ impl<R: Runtime> SessionManager<R> {
         let database_store = DatabaseStoreBuilder::new(
             Bytes::from(self.destination_id.to_vec()),
             DatabaseStoreKind::LeaseSet2 {
-                lease_set: Bytes::from(self.lease_set.clone()),
+                lease_set: self.lease_set.clone(),
             },
         )
         .build();
 
         let hash = destination_id.to_vec();
-        let builder = GarlicMessageBuilder::new()
+        let builder = GarlicMessageBuilder::default()
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
@@ -343,7 +338,7 @@ impl<R: Runtime> SessionManager<R> {
                     out.put_slice(&message);
                     out
                 };
-                let mut builder = GarlicMessageBuilder::new().with_garlic_clove(
+                let mut builder = GarlicMessageBuilder::default().with_garlic_clove(
                     MessageType::Data,
                     MessageId::from(R::rng().next_u32()),
                     R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
@@ -379,7 +374,7 @@ impl<R: Runtime> SessionManager<R> {
                         let database_store = DatabaseStoreBuilder::new(
                             Bytes::from(self.destination_id.to_vec()),
                             DatabaseStoreKind::LeaseSet2 {
-                                lease_set: Bytes::from(lease_set.clone()),
+                                lease_set: lease_set.clone(),
                             },
                         )
                         .build();
@@ -477,7 +472,7 @@ impl<R: Runtime> SessionManager<R> {
                     // and create a pending outbound session
                     let (session, payload) = self.key_context.create_outbound_session(
                         destination_id.clone(),
-                        &public_key,
+                        public_key,
                         self.lease_set.clone(),
                         &message,
                     );
@@ -572,11 +567,14 @@ impl<R: Runtime> SessionManager<R> {
 
                 // locate `DatabaseStore` i2np message from the clove set
                 let Some(GarlicMessageBlock::GarlicClove { message_body, .. }) =
-                    clove_set.blocks.iter().find(|clove| match clove {
-                        GarlicMessageBlock::GarlicClove { message_type, .. }
-                            if message_type == &MessageType::DatabaseStore =>
-                            true,
-                        _ => false,
+                    clove_set.blocks.iter().find(|clove| {
+                        core::matches!(
+                            clove,
+                            GarlicMessageBlock::GarlicClove {
+                                message_type: MessageType::DatabaseStore,
+                                ..
+                            }
+                        )
                     })
                 else {
                     tracing::warn!(
@@ -592,7 +590,7 @@ impl<R: Runtime> SessionManager<R> {
                 let Some(DatabaseStore {
                     payload: DatabaseStorePayload::LeaseSet2 { lease_set },
                     ..
-                }) = DatabaseStore::<R>::parse(&message_body)
+                }) = DatabaseStore::<R>::parse(message_body)
                 else {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -802,8 +800,7 @@ impl<R: Runtime> SessionManager<R> {
     /// Removes all pending sessions that have expired and calls `Session::maintain()` for each
     /// active session which removes expired tags of the active session.
     fn maintain(&mut self) {
-        let remove = self
-            .pending
+        self.pending
             .iter()
             .filter_map(|(key, session)| session.is_expired().then_some(key.clone()))
             .collect::<Vec<_>>()
@@ -892,7 +889,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_inbound_session() {
-        let private_key = StaticPrivateKey::new(thread_rng());
+        let private_key = StaticPrivateKey::random(thread_rng());
         let public_key = private_key.public();
         let destination_id = DestinationId::random();
         let (leaseset, signing_key) = LeaseSet2::random();
@@ -901,7 +898,7 @@ mod tests {
             SessionManager::<MockRuntime>::new(destination_id.clone(), private_key, leaseset);
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -980,7 +977,7 @@ mod tests {
 
     #[tokio::test]
     async fn messages_out_of_order() {
-        let private_key = StaticPrivateKey::new(thread_rng());
+        let private_key = StaticPrivateKey::random(thread_rng());
         let public_key = private_key.public();
         let destination_id = DestinationId::random();
         let (leaseset, signing_key) = LeaseSet2::random();
@@ -989,7 +986,7 @@ mod tests {
             SessionManager::<MockRuntime>::new(destination_id.clone(), private_key, leaseset);
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1112,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn new_outbound_session() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1130,7 +1127,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1228,7 +1225,7 @@ mod tests {
     #[tokio::test]
     async fn two_simultaneous_inbound_sessions() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1246,7 +1243,7 @@ mod tests {
         );
 
         // create first outbound `SessionManager`
-        let outbound1_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound1_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound1_leaseset, outbound1_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound1_destination_id = leaseset.header.destination.id();
@@ -1265,7 +1262,7 @@ mod tests {
             .add_remote_destination(inbound_destination_id.clone(), inbound_public_key.clone());
 
         // create second outbound `SessionManager`
-        let outbound2_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound2_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound2_leaseset, outbound2_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound2_destination_id = leaseset.header.destination.id();
@@ -1459,7 +1456,7 @@ mod tests {
     #[tokio::test]
     async fn two_simultaneous_outbound_sessions() {
         // create first inbound `SessionManager`
-        let inbound1_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound1_private_key = StaticPrivateKey::random(thread_rng());
         let inbound1_public_key = inbound1_private_key.public();
         let (inbound1_leaseset, inbound1_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1477,7 +1474,7 @@ mod tests {
         );
 
         // create second inbound `SessionManager`
-        let inbound2_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound2_private_key = StaticPrivateKey::random(thread_rng());
         let inbound2_public_key = inbound2_private_key.public();
         let (inbound2_leaseset, inbound2_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1495,7 +1492,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1658,7 +1655,7 @@ mod tests {
     #[tokio::test]
     async fn tags_are_autogenerated() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1676,7 +1673,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1780,7 +1777,7 @@ mod tests {
     #[tokio::test]
     async fn dh_ratchet() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1798,7 +1795,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (outbound_leaseset, outbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
             let outbound_destination_id = leaseset.header.destination.id();
@@ -1921,7 +1918,7 @@ mod tests {
     #[tokio::test]
     async fn local_lease_set_bundled_with_data() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -1939,7 +1936,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2150,7 +2147,7 @@ mod tests {
     #[tokio::test]
     async fn local_lease_set_publish_timer_expires() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -2168,7 +2165,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2389,7 +2386,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_new_session_messages() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -2407,7 +2404,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2468,7 +2465,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_new_session_reply_messages() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -2486,7 +2483,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2545,7 +2542,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_new_session_and_new_session_reply_messages() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -2563,7 +2560,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2629,7 +2626,7 @@ mod tests {
     #[tokio::test]
     async fn new_session_retried() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -2647,7 +2644,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,
@@ -2699,7 +2696,7 @@ mod tests {
     #[tokio::test]
     async fn new_session_reply_retried() {
         // create inbound `SessionManager`
-        let inbound_private_key = StaticPrivateKey::new(thread_rng());
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
         let inbound_public_key = inbound_private_key.public();
         let (inbound_leaseset, inbound_destination_id) = {
             let (leaseset, signing_key) = LeaseSet2::random();
@@ -2717,7 +2714,7 @@ mod tests {
         );
 
         // create outbound `SessionManager`
-        let outbound_private_key = StaticPrivateKey::new(thread_rng());
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
         let (
             outbound_leaseset,
             outbound_destination_id,

@@ -1,6 +1,6 @@
 #![no_main]
 
-use emissary::i2np::tunnel::build::short::TunnelBuildRecord;
+use emissary_core::i2np::tunnel::build::short::TunnelBuildRecord;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|buffer: Vec<u8>| {

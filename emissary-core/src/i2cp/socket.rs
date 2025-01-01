@@ -18,8 +18,7 @@
 
 use crate::{
     i2cp::message::{Message, MessageType, I2CP_HEADER_SIZE},
-    runtime::{AsyncRead, AsyncWrite, Runtime, TcpStream},
-    Error,
+    runtime::{AsyncRead, AsyncWrite, Runtime},
 };
 
 use bytes::BytesMut;
@@ -145,7 +144,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
                             return Poll::Ready(None);
                         }
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 tracing::debug!(
                                     target: LOG_TARGET,
@@ -188,7 +187,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                     continue;
                                 };
 
-                                let Some(message) = Message::parse::<R>(msg_type, &[]) else {
+                                let Some(message) = Message::parse(msg_type, []) else {
                                     tracing::warn!(
                                         target: LOG_TARGET,
                                         ?msg_type,
@@ -225,7 +224,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
 
                             return Poll::Ready(None);
                         }
-                        Poll::Ready((Ok(nread))) => {
+                        Poll::Ready(Ok(nread)) => {
                             if nread == 0 {
                                 tracing::debug!(
                                     target: LOG_TARGET,
@@ -258,8 +257,7 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                                 continue;
                             };
 
-                            let Some(message) =
-                                Message::parse::<R>(msg_type, &this.read_buffer[..size])
+                            let Some(message) = Message::parse(msg_type, &this.read_buffer[..size])
                             else {
                                 tracing::warn!(
                                     target: LOG_TARGET,
@@ -296,8 +294,8 @@ impl<R: Runtime> Stream for I2cpSocket<R> {
                             this.write_state = WriteState::SendMessage { offset, message };
                             break;
                         }
-                        Poll::Ready(Err(error)) => return Poll::Ready(None),
-                        Poll::Ready(Ok(nwritten)) if nwritten == 0 => {
+                        Poll::Ready(Err(_)) => return Poll::Ready(None),
+                        Poll::Ready(Ok(0)) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 "wrote zero bytes to socket",

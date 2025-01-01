@@ -17,27 +17,27 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
-    error::Error,
+    config::{Config, I2cpConfig, MetricsConfig, SamConfig},
+    crypto::{SigningPrivateKey, StaticPrivateKey},
     i2cp::I2cpServer,
     netdb::NetDb,
-    primitives::{RouterInfo, TransportKind},
+    primitives::RouterInfo,
     profile::ProfileStorage,
-    runtime::{MetricType, Runtime},
+    runtime::Runtime,
     sam::SamServer,
+    shutdown::ShutdownContext,
     subsystem::SubsystemKind,
-    transports::TransportManager,
+    transports::{Ntcp2Transport, TransportManager},
     tunnel::{TunnelManager, TunnelManagerHandle},
-    Config, I2cpConfig, SamConfig,
 };
 
-use futures::{FutureExt, Stream, StreamExt};
-use hashbrown::HashMap;
-use thingbuf::mpsc;
+use bytes::Bytes;
+use futures::{FutureExt, Stream};
+use rand_core::RngCore;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
-    future::Future,
+    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -48,18 +48,42 @@ const LOG_TARGET: &str = "emissary::router";
 /// Default network ID.
 const NET_ID: u8 = 2u8;
 
+/// How many times [`Router::shutdown()`] needs to be called until the router is shutdown
+/// immediately, cancelling graceful shutdown.
+const IMMEDIATE_SHUTDOWN_COUNT: usize = 2usize;
+
+/// Protocol address information.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ProtocolAddressInfo {
+    /// Socket address of the SAMv3 TCP listener.
+    pub sam_tcp: Option<SocketAddr>,
+
+    /// Socket address of the SAMv3 UDP socket.
+    pub sam_udp: Option<SocketAddr>,
+}
+
+/// Events emitted by [`Router`].
 #[derive(Debug)]
-pub enum RouterEvent {}
+pub enum RouterEvent {
+    /// Router has been shut down.
+    Shutdown,
+}
 
 /// Router.
 pub struct Router<R: Runtime> {
+    /// Shutdown context.
+    shutdown_context: ShutdownContext<R>,
+
+    /// Number of times shutdown has been requested.
+    shutdown_count: usize,
+
     /// Transport manager
     ///
     /// Polls both NTCP2 and SSU2 transports.
     transport_manager: TransportManager<R>,
 
-    /// Local router info.
-    local_router_info: RouterInfo,
+    /// Protocol address information.
+    address_info: ProtocolAddressInfo,
 
     /// Handle to [`TunnelManager`].
     _tunnel_manager_handle: TunnelManagerHandle,
@@ -67,60 +91,97 @@ pub struct Router<R: Runtime> {
 
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
-    pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
-        let now = R::time_since_epoch().as_millis() as u64;
-        let local_key = StaticPrivateKey::from(config.static_key.clone());
-        let test = config.signing_key.clone();
-        let local_signing_key = SigningPrivateKey::new(&test).unwrap();
-        let ntcp2_config = match &config.ntcp2_config {
-            None => {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    "no transport enabled, cannot start router",
-                );
-                return Err(Error::InvalidData);
-            }
-            Some(config) => config.clone(),
-        };
-        let i2cp_config = config.i2cp_config.clone();
-        let sam_config = config.samv3_config.clone();
-        let exploratory_config = config.exploratory.clone();
-        let floodfill = config.floodfill;
-        let net_id = config.net_id.unwrap_or(NET_ID);
-        let insecure_tunnels = config.insecure_tunnels;
-        let profile_storage = ProfileStorage::<R>::new(&config.routers, &config.profiles);
-        let local_router_info = RouterInfo::new(now, config);
+    pub async fn new(mut config: Config) -> crate::Result<(Self, Vec<u8>)> {
+        // attempt to initialize the ntcp2 transport from the config
+        //
+        // this is done prior to constructing local router info case `config.ntcp1_config` contained
+        // an unspecified porrt so the listener can be bound to the listen address the correct port
+        // can be for the ntcp2's `RouterAddress`
+        let (ntcp2_context, ntcp2_address) =
+            Ntcp2Transport::<R>::initialize(config.ntcp2_config.take()).await?;
+
+        // create static/signing keypairs for the router
+        //
+        // if caller didn't supply keys, generate transient keypair
+        let local_static_key = StaticPrivateKey::from(config.static_key.unwrap_or_else(|| {
+            let mut key = [0u8; 32];
+            R::rng().fill_bytes(&mut key);
+            key
+        }));
+        let local_signing_key = SigningPrivateKey::from(config.signing_key.unwrap_or_else(|| {
+            let mut key = [0u8; 32];
+            R::rng().fill_bytes(&mut key);
+            key
+        }));
+
+        let local_router_info = RouterInfo::new::<R>(
+            &config,
+            ntcp2_address,
+            &local_static_key,
+            &local_signing_key,
+        );
+        let Config {
+            i2cp_config,
+            samv3_config,
+            floodfill,
+            net_id,
+            exploratory,
+            insecure_tunnels,
+            routers,
+            profiles,
+            allow_local,
+            metrics:
+                MetricsConfig {
+                    disable_metrics,
+                    metrics_server_port,
+                },
+            ..
+        } = config;
+
+        let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
+        let mut address_info = ProtocolAddressInfo::default();
 
-        let local_test = local_key.public().to_vec();
-        let ntcp_test = StaticPrivateKey::from(ntcp2_config.key.clone()).public().to_vec();
+        // create router shutdown context and allocate handle `TransitTunnelManager`
+        //
+        // `TransitTunnelManager` can take up to 10 minutes to shut down, depending on the age
+        // of the newest transit tunnel
+        let mut shutdown_context = ShutdownContext::<R>::new();
+        let transit_shutdown_handle = shutdown_context.handle();
 
         tracing::info!(
             target: LOG_TARGET,
-            local_router_hash = ?base64_encode(local_router_info.identity.hash()),
-            ?net_id,
-            "start emissary",
+            ?local_router_id,
+            net_id = ?net_id.unwrap_or(NET_ID),
+            "starting emissary",
         );
 
         // collect metrics from all subsystems, register them and acquire metrics handle
-        let metrics_handle = {
-            let metrics = TransportManager::<R>::metrics(Vec::new());
-            let metrics = TunnelManager::<R>::metrics(metrics);
-            let metrics = NetDb::<R>::metrics(metrics);
+        //
+        // if metrics are disabled, call `R::register_metrics()` with an empty vector which makes
+        // the runtime not start the metrics server and return a handle which doesn't update any
+        // metirics
+        let metrics_handle = match disable_metrics {
+            true => R::register_metrics(Vec::new(), None),
+            false => {
+                let metrics = TransportManager::<R>::metrics(Vec::new());
+                let metrics = TunnelManager::<R>::metrics(metrics);
+                let metrics = NetDb::<R>::metrics(metrics);
 
-            R::register_metrics(metrics)
+                R::register_metrics(metrics, metrics_server_port)
+            }
         };
 
         // create transport manager and initialize & start enabled transports
         //
         // note: order of initialization is important
         let mut transport_manager = TransportManager::new(
-            local_key.clone(),
             local_signing_key,
-            local_router_info.clone(), // TODO: zzz
+            local_router_info.clone(),
             profile_storage.clone(),
             metrics_handle.clone(),
+            allow_local,
         );
 
         // initialize and start tunnel manager
@@ -132,11 +193,12 @@ impl<R: Runtime> Router<R> {
                 TunnelManager::<R>::new(
                     transport_service,
                     local_router_info.clone(),
-                    local_key,
+                    local_static_key,
                     metrics_handle.clone(),
                     profile_storage.clone(),
-                    exploratory_config.into(),
+                    exploratory.into(),
                     insecure_tunnels,
+                    transit_shutdown_handle,
                 );
 
             R::spawn(tunnel_manager);
@@ -154,8 +216,9 @@ impl<R: Runtime> Router<R> {
                 profile_storage.clone(),
                 metrics_handle.clone(),
                 exploratory_pool_handle,
-                net_id,
+                net_id.unwrap_or(NET_ID),
                 netdb_msg_rx,
+                Bytes::from(serialized_router_info.clone()),
             );
 
             R::spawn(netdb);
@@ -176,7 +239,7 @@ impl<R: Runtime> Router<R> {
             tcp_port,
             udp_port,
             host,
-        }) = sam_config
+        }) = samv3_config
         {
             let sam_server = SamServer::<R>::new(
                 tcp_port,
@@ -188,27 +251,71 @@ impl<R: Runtime> Router<R> {
             )
             .await?;
 
+            address_info.sam_tcp = sam_server.tcp_local_address();
+            address_info.sam_udp = sam_server.udp_local_address();
+
             R::spawn(sam_server)
         }
 
-        // initialize and start ntcp2
-        transport_manager.register_transport(TransportKind::Ntcp2, ntcp2_config).await?;
+        if let Some(context) = ntcp2_context {
+            transport_manager.register_ntcp2(context);
+        }
 
         Ok((
             Self {
-                local_router_info,
+                address_info,
+                shutdown_context,
+                shutdown_count: 0usize,
                 transport_manager,
                 _tunnel_manager_handle: tunnel_manager_handle,
             },
             serialized_router_info,
         ))
     }
+
+    /// Shut down the router.
+    ///
+    /// The first request to shutdown the router starts a graceful shutdown and TOOD
+    pub fn shutdown(&mut self) {
+        self.shutdown_count += 1;
+
+        if self.shutdown_count == 1 {
+            tracing::info!(
+                target: LOG_TARGET,
+                "starting graceful shutdown",
+            );
+            self.shutdown_context.shutdown();
+        } else {
+            tracing::info!(
+                target: LOG_TARGET,
+                "shutting down router",
+            );
+        }
+    }
+
+    /// Get reference to [`ProtocolAddressInfo`].
+    pub fn protocol_address_info(&self) -> &ProtocolAddressInfo {
+        &self.address_info
+    }
 }
 
-impl<R: Runtime> Future for Router<R> {
-    type Output = ();
+impl<R: Runtime> Stream for Router<R> {
+    type Item = RouterEvent;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.transport_manager.poll_unpin(cx)
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.shutdown_count >= IMMEDIATE_SHUTDOWN_COUNT {
+            return Poll::Ready(Some(RouterEvent::Shutdown));
+        }
+
+        if self.shutdown_context.poll_unpin(cx).is_ready() {
+            return Poll::Ready(Some(RouterEvent::Shutdown));
+        }
+
+        match self.transport_manager.poll_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(()) => return Poll::Ready(None),
+        }
+
+        Poll::Pending
     }
 }

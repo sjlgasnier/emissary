@@ -51,7 +51,11 @@ use core::{
 };
 
 /// Tunnel rebuild timeout.
-const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+///
+/// Tunnel of a pool needs to be rebuilt before it expires as otherwise the pool may be not have any
+/// tunnels of that type. Start building a new tunnel to replace to old one 2 minutes before the old
+/// tunnel expires.
+const TUNNEL_REBUILD_TIMEOUT: Duration = Duration::from_secs(9 * 60);
 
 /// Tunnel kind.
 #[derive(Clone, Copy)]
