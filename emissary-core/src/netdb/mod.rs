@@ -1337,6 +1337,7 @@ impl<R: Runtime> NetDb<R> {
                     ),
                 }
             }
+            MessageType::DeliveryStatus => {}
             message_type => tracing::warn!(
                 target: LOG_TARGET,
                 ?message_type,
@@ -1554,6 +1555,7 @@ impl<R: Runtime> Future for NetDb<R> {
         loop {
             match self.service.poll_next_unpin(cx) {
                 Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
                     messages.into_iter().for_each(|message| {
                         if let Err(error) = self.on_message(message) {
@@ -1570,7 +1572,7 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_connection_closed(router),
                 Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })) =>
                     self.on_connection_failure(router),
-                _ => {}
+                Poll::Ready(Some(SubsystemEvent::Dummy)) => {}
             }
         }
 
