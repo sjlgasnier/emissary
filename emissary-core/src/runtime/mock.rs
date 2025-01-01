@@ -30,7 +30,6 @@ use flate2::{
 };
 use futures::Stream;
 use futures_io::{AsyncRead as _, AsyncWrite as _};
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use rand_core::{CryptoRng, RngCore};
 use tokio::{io::ReadBuf, net, task};
@@ -42,7 +41,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     pin::{pin, Pin},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     task::{Context, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
@@ -177,10 +176,10 @@ impl UdpSocket for MockUdpSocket {
 
 thread_local! {
     /// Counters and their values.
-    static COUNTERS: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+    static COUNTERS: LazyLock<Arc<RwLock<HashMap<&'static str, usize>>>> = LazyLock::new(|| Default::default());
 
     /// Gauges and their values.
-    static GAUGES: Lazy<Arc<RwLock<HashMap<&'static str, usize>>>> = Lazy::new(|| Default::default());
+    static GAUGES: LazyLock<Arc<RwLock<HashMap<&'static str, usize>>>> = LazyLock::new(|| Default::default());
 }
 
 pub struct MockMetricsCounter {

@@ -917,7 +917,6 @@ dependencies = [
  "hmac",
  "lazy_static",
  "nom",
- "once_cell",
  "parking_lot",
  "rand",
  "rand_core",
