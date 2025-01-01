@@ -737,6 +737,11 @@ impl<R: Runtime> Destination<R> {
             let _ = tunnel_sender.send_to_router(gateway, floodfills[1].0.clone(), message).await;
         })
     }
+
+    /// Shutdown session by shutting down the tunnel pool.
+    pub fn shutdown(&mut self) {
+        self.tunnel_pool_handle.shutdown();
+    }
 }
 
 impl<R: Runtime> Stream for Destination<R> {
@@ -746,9 +751,12 @@ impl<R: Runtime> Stream for Destination<R> {
         loop {
             match self.tunnel_pool_handle.poll_next_unpin(cx) {
                 Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) =>
-                    return Poll::Ready(Some(DestinationEvent::TunnelPoolShutDown)),
+                Poll::Ready(None) => {
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) => {
+                    return Poll::Ready(Some(DestinationEvent::TunnelPoolShutDown));
+                }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })) => {
                     tracing::trace!(
                         target: LOG_TARGET,

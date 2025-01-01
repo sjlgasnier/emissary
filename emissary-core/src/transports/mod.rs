@@ -382,9 +382,9 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
                     let router = router_info.identity.id();
 
-                    tracing::debug!(
+                    tracing::trace!(
                         target: LOG_TARGET,
-                        ?router,
+                        %router,
                         "connection established",
                     );
 
@@ -396,7 +396,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                         false => {
                             tracing::warn!(
                                 target: LOG_TARGET,
-                                ?router,
+                                %router,
                                 "router already connected, rejecting",
                             );
                             self.transports[index].reject(&router);

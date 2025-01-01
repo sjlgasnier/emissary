@@ -259,7 +259,6 @@ impl TunnelPoolHandle {
     /// Send shutdown signal to `TunnelPool`.
     ///
     /// [`TunnelPoolEvent::TunnelPoolShutDown`] is emitted before `TunnelPool` is shut down.
-    #[allow(unused)]
     pub fn shutdown(&mut self) {
         self.shutdown_tx.take().map(|tx| tx.send(()));
     }
@@ -274,8 +273,8 @@ impl TunnelPoolHandle {
         &self.sender
     }
 
-    #[cfg(test)]
     /// Create new [`TunnelPoolHandle`] for testing.
+    #[cfg(test)]
     pub fn create() -> (
         Self,
         mpsc::Receiver<TunnelMessage>,

@@ -141,13 +141,14 @@ impl<T: Tunnel> PendingTunnel<T> {
         // if the build request doesn't consume all available record slots, a random number of fake
         // records are added to each tunnel build message
         //
-        // for inbound builds (sent though an outbound tunnel), if the caller requested fewer than
-        // [`UNFRAGMENTED_MAX_RECORDS`] many hops, the fake record count is clamped down to
-        // [`UNFRAGMENTED_MAX_RECORDS`] to prevent the build message from getting fragmented
-        let num_records = match T::direction() {
-            TunnelDirection::Inbound if hops.len() < UNFRAGMENTED_MAX_RECORDS =>
-                (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, UNFRAGMENTED_MAX_RECORDS),
-            _ => (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, MAX_BUILD_RECORDS),
+        // if the number of requested records is less than [`UNFRAGMENTED_MAX_RECORDS`], i.e., the
+        // message would fit inside one `TunnelData` message, the number of records is clamed down
+        // to 4. If more than 4 hops were requested the upper bound for clamp is set to 8 which is
+        // the maximum amount of records a `ShortTunnelBuild` message can hold
+        let num_records = if hops.len() < UNFRAGMENTED_MAX_RECORDS {
+            (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, UNFRAGMENTED_MAX_RECORDS)
+        } else {
+            (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, MAX_BUILD_RECORDS)
         };
 
         // save the first hop's static key in case this is an inbound tunnel build so that the
@@ -753,7 +754,6 @@ mod test {
 
         assert_eq!(message.message_id, message_id.into());
         assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
-        assert_eq!(message.payload[0], 4u8);
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly

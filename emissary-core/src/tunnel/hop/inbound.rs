@@ -316,7 +316,7 @@ impl Future for InboundTunnel {
                     ),
                     Ok(messages) => messages.for_each(|message| {
                         if let Err(error) = self.handle.route_message(message) {
-                            tracing::error!(
+                            tracing::debug!(
                                 target: LOG_TARGET,
                                 tunnel = %self.tunnel_id,
                                 ?error,

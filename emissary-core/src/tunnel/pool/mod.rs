@@ -1107,16 +1107,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
             }
         }
 
-        futures::ready!(self.maintenance_timer.poll_unpin(cx));
-
-        // create new timer and register it into the executor
-        {
-            self.maintenance_timer = Box::pin(R::delay(TUNNEL_MAINTENANCE_INTERVAL));
-            let _ = self.maintenance_timer.poll_unpin(cx);
-        }
-
-        self.maintain_pool();
-
         // check if the pool owner has sent a shutdown signal to the tunnel pool
         //
         // currently `TunnelPool` doesn't do any graceful shutdown for its own tunnels
@@ -1133,9 +1123,23 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 );
                 let _ = self.context.register_tunnel_pool_shut_down();
 
+                self.inbound_tunnels.keys().chain(self.outbound.keys()).for_each(|tunnel_id| {
+                    self.routing_table.remove_tunnel(tunnel_id);
+                });
+
                 return Poll::Ready(());
             }
         }
+
+        futures::ready!(self.maintenance_timer.poll_unpin(cx));
+
+        // create new timer and register it into the executor
+        {
+            self.maintenance_timer = Box::pin(R::delay(TUNNEL_MAINTENANCE_INTERVAL));
+            let _ = self.maintenance_timer.poll_unpin(cx);
+        }
+
+        self.maintain_pool();
 
         Poll::Pending
     }
@@ -1782,6 +1786,8 @@ mod tests {
 
     #[tokio::test]
     async fn build_outbound_client_tunnel() {
+        crate::util::init_logger();
+
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
             .map(|i| {
@@ -1894,6 +1900,7 @@ mod tests {
                 num_inbound_hops: 0usize,
                 num_outbound: 1usize,
                 num_outbound_hops: 3usize,
+                name: Str::from("client"),
                 ..Default::default()
             };
             let parameters = TunnelPoolBuildParameters::new(pool_config);
@@ -1927,7 +1934,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -1943,7 +1952,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -1959,7 +1970,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -1975,7 +1988,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -1991,7 +2006,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -2007,7 +2024,9 @@ mod tests {
                 let mut router = routers.get_mut(&router_id).unwrap();
 
                 router.routing_table().route_message(message).unwrap();
-                assert!(tokio::time::timeout(Duration::from_secs(1), &mut router).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), &mut router).await.is_err()
+                );
 
                 let RoutingKind::External { router_id, message } =
                     router.message_rx().try_recv().unwrap()
@@ -2028,7 +2047,7 @@ mod tests {
                 }
             };
 
-            assert!(tokio::time::timeout(Duration::from_secs(1), future).await.is_err());
+            assert!(tokio::time::timeout(Duration::from_secs(4), future).await.is_err());
         }
 
         assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));

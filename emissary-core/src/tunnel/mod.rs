@@ -487,8 +487,7 @@ impl<R: Runtime> TunnelManager<R> {
         }
 
         match message.message_type {
-            MessageType::DeliveryStatus
-            | MessageType::TunnelData
+            MessageType::TunnelData
             | MessageType::TunnelGateway
             | MessageType::VariableTunnelBuild
             | MessageType::ShortTunnelBuild
@@ -499,7 +498,8 @@ impl<R: Runtime> TunnelManager<R> {
             MessageType::TunnelBuildReply
             | MessageType::Data
             | MessageType::VariableTunnelBuildReply => unimplemented!(),
-            MessageType::DatabaseStore
+            MessageType::DeliveryStatus
+            | MessageType::DatabaseStore
             | MessageType::DatabaseLookup
             | MessageType::DatabaseSearchReply => {
                 if let Err(error) = self.netdb_tx.try_send(message) {

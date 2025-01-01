@@ -28,7 +28,7 @@ use crate::{
             listener::{SocketKind, StreamListener, StreamListenerEvent},
             packet::{Packet, PacketBuilder},
             stream::{
-                active::{Stream, StreamContext, StreamKind},
+                active::{Stream, StreamContext, StreamEvent, StreamKind},
                 pending::{PendingStream, PendingStreamResult},
             },
         },
@@ -44,6 +44,7 @@ use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, format, vec::Vec};
 use core::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -74,6 +75,9 @@ const PENDING_STREAM_PRUNE_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// How long should a pending outbound stream wait before sending another `SYN`.
 const SYN_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for graceful shutdown.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum `SYN` retries before the remote destination is considered unreachable.
 const MAX_SYN_RETRIES: usize = 3usize;
@@ -121,6 +125,81 @@ pub enum StreamManagerEvent {
         /// Packet.
         packet: Vec<u8>,
     },
+
+    /// [`StreamManager`] has been shut down.
+    ShutDown,
+}
+
+/// Shutdown handler.
+enum ShutdownHandler {
+    /// Shutdown has not been requested.
+    Idle,
+
+    /// Shutdown has been requested and a timer for forcible shutdown has been started.
+    ShutdownRequested {
+        /// Shutdown timer.
+        ///
+        /// See [`GRACEFUL_SHUTDOWN_TIMEOUT`] for more details.
+        timer: BoxFuture<'static, ()>,
+    },
+
+    /// [`StreamManager`] has been shut down.
+    ShutDown,
+}
+
+impl ShutdownHandler {
+    /// Create new [`ShutdownHandler`].
+    fn new() -> Self {
+        ShutdownHandler::Idle
+    }
+
+    /// Is [`StreamManager`] shutting down.
+    fn shutting_down(&self) -> bool {
+        core::matches!(self, Self::ShutdownRequested { .. })
+    }
+
+    /// Shut down [`StreamManager`].
+    fn start_shutdown<R: Runtime>(&mut self) {
+        *self = ShutdownHandler::ShutdownRequested {
+            timer: Box::pin(R::delay(GRACEFUL_SHUTDOWN_TIMEOUT)),
+        };
+    }
+
+    /// Mark [`StreamManager`] as shut down.
+    ///
+    /// Any further calls to [`StreamManger::poll_next()`] will return `Poll::Pending`.
+    fn set_as_shutdown(&mut self) {
+        *self = ShutdownHandler::ShutDown;
+    }
+}
+
+/// Shutdown event.
+enum ShutdownEvent {
+    /// Forcibly shut down [`StreamManager`].
+    ShutDown,
+
+    /// [`StreamManager`] has already been shutdown.
+    AlreadyShutDown,
+}
+
+impl Future for ShutdownHandler {
+    type Output = ShutdownEvent;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = Pin::into_inner(self);
+
+        match this {
+            ShutdownHandler::Idle => Poll::Pending,
+            ShutdownHandler::ShutdownRequested { timer } => match timer.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(_) => {
+                    this.set_as_shutdown();
+                    return Poll::Ready(ShutdownEvent::ShutDown);
+                }
+            },
+            ShutdownHandler::ShutDown => return Poll::Ready(ShutdownEvent::AlreadyShutDown),
+        }
+    }
 }
 
 /// Pending outbound stream.
@@ -146,7 +225,7 @@ pub struct StreamManager<R: Runtime> {
     /// TX channels for sending [`Packet`]'s to active streams.
     ///
     /// Indexed with receive stream ID.
-    active: HashMap<u32, (DestinationId, Sender<Vec<u8>>)>,
+    active: HashMap<u32, (DestinationId, Sender<StreamEvent>)>,
 
     /// Destination of the session the stream manager is bound to.
     destination: Destination,
@@ -183,6 +262,9 @@ pub struct StreamManager<R: Runtime> {
     /// Timer for pruning stale pending streams.
     prune_timer: BoxFuture<'static, ()>,
 
+    /// Shutdown handler.
+    shutdown_handler: ShutdownHandler,
+
     /// Signing key.
     signing_key: SigningPrivateKey,
 
@@ -209,6 +291,7 @@ impl<R: Runtime> StreamManager<R> {
             pending_inbound: HashMap::new(),
             pending_outbound: HashMap::new(),
             prune_timer: Box::pin(R::delay(PENDING_STREAM_PRUNE_THRESHOLD)),
+            shutdown_handler: ShutdownHandler::new(),
             signing_key,
             streams: R::join_set(),
         }
@@ -591,7 +674,7 @@ impl<R: Runtime> StreamManager<R> {
 
         // forward received packet to an active handler if it exists
         if let Some((_, tx)) = self.active.get(&packet.recv_stream_id()) {
-            if let Err(error) = tx.try_send(payload) {
+            if let Err(error) = tx.try_send(StreamEvent::Packet { packet: payload }) {
                 tracing::debug!(
                     target: LOG_TARGET,
                     local = %self.destination_id,
@@ -654,7 +737,9 @@ impl<R: Runtime> StreamManager<R> {
         //
         // both deserialized packet and the original payload are returned
         // so the included signature can be verified
-        if packet.synchronize() {
+        //
+        // any new streams are ignored if stream manager is shutting down
+        if packet.synchronize() && !self.shutdown_handler.shutting_down() {
             return self.on_synchronize(payload);
         }
 
@@ -750,6 +835,35 @@ impl<R: Runtime> StreamManager<R> {
             self.pending_outbound.remove(&stream_id);
         });
     }
+
+    /// Shut down [`StreamManager`].
+    ///
+    /// Send shutdown signal for each active stream which causes them to send a `CLOSE` packet to
+    /// remote. After all streams have exited, the stream manager can be shut down.
+    ///
+    /// A timer is also started which
+    ///
+    /// If there are no active streams, the stream manager is shut down right away.
+    pub fn shutdown(&mut self) {
+        tracing::info!(
+            target: LOG_TARGET,
+            local = %self.destination_id,
+            "shut down stream manager",
+        );
+
+        self.active.values().for_each(|(_, tx)| {
+            if let Err(error) = tx.try_send(StreamEvent::ShutDown) {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    ?error,
+                    "failed to send shutdown signal to active stream",
+                );
+            }
+        });
+
+        self.shutdown_handler.start_shutdown::<R>();
+    }
 }
 
 impl<R: Runtime> futures::Stream for StreamManager<R> {
@@ -758,6 +872,35 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(event) = self.pending_events.pop_front() {
             return Poll::Ready(Some(event));
+        }
+
+        // poll shutdown handler
+        //
+        // if shutdown hasn't been requested or the graceful shutdown timer is active,
+        // `shutdown_handler` keeps returning `Poll::Pending`
+        //
+        // once the timer expires, a graceful shutdown is skipped and stream manager is forcibly
+        // shut down, without gracefully closing all open streams
+        //
+        // after that (or after all streams have been gracefully shut down), the `shutdown_handler`
+        // is set to a shut down state and it keeps returning [`ShutdownEvent::AlreadyShutdown`]
+        // which short-circuits this stream implementation and keeps returning `Poll::Pending`
+        //
+        // this is done so that stream manager doesn't get polled after it has been shut down which
+        // might happen because the stream manager is shut down before the sam session that owns the
+        // manager is shut down
+        match self.shutdown_handler.poll_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(ShutdownEvent::ShutDown) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    num_active = ?self.active.len(),
+                    "forcibly shutting down stream manager",
+                );
+                return Poll::Ready(Some(StreamManagerEvent::ShutDown));
+            }
+            Poll::Ready(ShutdownEvent::AlreadyShutDown) => return Poll::Pending,
         }
 
         match self.outbound_rx.poll_recv(cx) {
@@ -793,6 +936,17 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         );
                         continue;
                     };
+
+                    if self.streams.is_empty() && self.shutdown_handler.shutting_down() {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "stream manager has been shut down",
+                        );
+
+                        self.shutdown_handler.set_as_shutdown();
+                        self.pending_events.push_back(StreamManagerEvent::ShutDown);
+                    }
 
                     return Poll::Ready(Some(StreamManagerEvent::StreamClosed { destination_id }));
                 }
