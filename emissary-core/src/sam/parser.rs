@@ -17,8 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, SigningPrivateKey, StaticPrivateKey},
-    primitives::Destination,
+    crypto::{base32_decode, base64_decode, SigningPrivateKey, StaticPrivateKey},
+    primitives::{Destination, DestinationId},
     protocol::Protocol,
     runtime::Runtime,
 };
@@ -158,6 +158,55 @@ impl PartialEq for DestinationContext {
 
 impl Eq for DestinationContext {}
 
+/// Host kind.
+#[derive(Debug, Clone)]
+pub enum HostKind {
+    /// Destination.
+    Destination {
+        /// Destination.
+        destination: Destination,
+    },
+
+    /// Base32-encoded host, such as udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p.
+    B32Host {
+        /// Destination ID.
+        destination_id: DestinationId,
+    },
+
+    /// Regular host, such as host.i2p.
+    Host {
+        /// Host.
+        host: String,
+    },
+}
+
+impl PartialEq for HostKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Host { host: host1 }, Self::Host { host: host2 }) => host1 == host2,
+            (
+                Self::B32Host {
+                    destination_id: destination_id1,
+                },
+                Self::B32Host {
+                    destination_id: destination_id2,
+                },
+            ) => destination_id1 == destination_id2,
+            (
+                Self::Destination {
+                    destination: destination1,
+                },
+                Self::Destination {
+                    destination: destination2,
+                },
+            ) => destination1 == destination2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for HostKind {}
+
 /// SAMv3 commands received from the client.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SamCommand {
@@ -190,8 +239,8 @@ pub enum SamCommand {
         /// Session ID.
         session_id: String,
 
-        /// Destination.
-        destination: Destination,
+        /// Host where to connect to.
+        host: HostKind,
 
         /// Session options.
         options: HashMap<String, String>,
@@ -384,12 +433,45 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     );
                 })?;
 
-                let decoded = base64_decode(destination).ok_or(())?;
-                let destination = Destination::parse(&decoded).ok_or(())?;
+                let host = if let Some(index) = destination.find(".b32.i2p") {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %destination,
+                        "stream connect for .b32.i2p address",
+                    );
+
+                    let decoded = base32_decode(&destination[..index]).ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?destination,
+                            "invalid .b32.i2p address",
+                        );
+                    })?;
+
+                    HostKind::B32Host {
+                        destination_id: DestinationId::from(&decoded),
+                    }
+                } else if destination.ends_with(".i2p") {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %destination,
+                        "stream connect for .i2p address",
+                    );
+
+                    HostKind::Host {
+                        host: destination.to_string(),
+                    }
+                } else {
+                    let decoded = base64_decode(destination).ok_or(())?;
+
+                    HostKind::Destination {
+                        destination: Destination::parse(&decoded).ok_or(())?,
+                    }
+                };
 
                 Ok(SamCommand::Connect {
+                    host,
                     session_id: session_id.to_string(),
-                    destination,
                     options: value
                         .key_value_pairs
                         .into_iter()
@@ -721,10 +803,54 @@ mod tests {
             Some(SamCommand::Connect {
                 session_id,
                 options,
-                ..
+                host: HostKind::Destination { .. },
             }) => {
                 assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
                 assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // base32-encoded hostname
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT \
+            ID=MM9z52ZwnTTPwfeD \
+            DESTINATION=udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p \
+            SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                options,
+                host: HostKind::B32Host { destination_id },
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+                assert_eq!(
+                    destination_id,
+                    DestinationId::from(
+                        &base32_decode("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna")
+                            .unwrap()
+                    )
+                );
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // regular hostname
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT \
+            ID=MM9z52ZwnTTPwfeD \
+            DESTINATION=host.i2p \
+            SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                options,
+                host: HostKind::Host { host },
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+                assert_eq!(host.as_str(), "host.i2p");
             }
             response => panic!("invalid response: {response:?}"),
         }

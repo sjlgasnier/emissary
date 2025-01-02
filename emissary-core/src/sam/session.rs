@@ -73,8 +73,8 @@ pub enum SamSessionCommand<R: Runtime> {
         /// SAMv3 socket associated with the outbound stream.
         socket: SamSocket<R>,
 
-        /// Destination.
-        destination: Dest,
+        /// Destination ID.
+        destination_id: DestinationId,
 
         /// Options.
         options: HashMap<String, String>,
@@ -126,10 +126,6 @@ enum ProtocolKind<R: Runtime> {
     Stream {
         /// SAMv3 client socket.
         socket: SamSocket<R>,
-
-        /// Remote destination.
-        #[allow(unused)]
-        destination: Dest,
 
         /// Stream options.
         options: HashMap<String, String>,
@@ -412,7 +408,7 @@ impl<R: Runtime> SamSession<R> {
     fn on_stream_connect(
         &mut self,
         mut socket: SamSocket<R>,
-        destination: Dest,
+        destination_id: DestinationId,
         options: HashMap<String, String>,
     ) {
         let SessionKind::Stream = &self.session_kind else {
@@ -426,7 +422,7 @@ impl<R: Runtime> SamSession<R> {
             return drop(socket);
         };
 
-        if destination.id() == self.dest.id() {
+        if destination_id == self.dest.id() {
             tracing::warn!(
                 target: LOG_TARGET,
                 "tried to open connection to self",
@@ -443,10 +439,9 @@ impl<R: Runtime> SamSession<R> {
         tracing::info!(
             target: LOG_TARGET,
             session_id = %self.session_id,
-            destination_id = %destination.id(),
+            destination_id = %destination_id,
             "connect to destination",
         );
-        let destination_id = destination.id();
 
         match self.destination.query_lease_set(&destination_id) {
             LeaseSetStatus::Found => self.create_outbound_stream(destination_id, socket, options),
@@ -461,11 +456,7 @@ impl<R: Runtime> SamSession<R> {
                 self.pending_outbound.insert(
                     destination_id,
                     PendingSessionState::AwaitingLeaseSet {
-                        protocol: ProtocolKind::Stream {
-                            socket,
-                            destination,
-                            options,
-                        },
+                        protocol: ProtocolKind::Stream { socket, options },
                     },
                 );
             }
@@ -800,9 +791,9 @@ impl<R: Runtime> Future for SamSession<R> {
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
                 Poll::Ready(Some(SamSessionCommand::Connect {
                     socket,
-                    destination,
+                    destination_id,
                     options,
-                })) => self.on_stream_connect(socket, destination, options),
+                })) => self.on_stream_connect(socket, destination_id, options),
                 Poll::Ready(Some(SamSessionCommand::Accept { socket, options })) =>
                     self.on_stream_accept(socket, options),
                 Poll::Ready(Some(SamSessionCommand::Forward {
