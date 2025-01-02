@@ -79,6 +79,18 @@ pub struct MetricsOptions {
     pub disable_metrics: Option<bool>,
 }
 
+/// Http proxy options.
+#[derive(Args)]
+pub struct HttpProxyOptions {
+    /// HTTP proxy port.
+    #[arg(long, value_name = "PORT")]
+    pub http_proxy_port: Option<u16>,
+
+    /// HTTP proxy host.
+    #[arg(long, value_name = "HOST")]
+    pub http_proxy_host: Option<String>,
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Arguments {
@@ -128,4 +140,8 @@ pub struct Arguments {
     /// Metrics options.
     #[clap(flatten)]
     pub metrics: MetricsOptions,
+
+    /// HTTP proxy options.
+    #[clap(flatten)]
+    pub http_proxy: HttpProxyOptions,
 }

@@ -1290,7 +1290,7 @@ impl<R: Runtime> NetDb<R> {
                         routers
                             .into_iter()
                             .filter(|router_id| {
-                                self.profile_storage.get(&router_id).is_none()
+                                self.profile_storage.get(router_id).is_none()
                                     && router_id != &self.local_router_id
                             })
                             .map(|router_id| {

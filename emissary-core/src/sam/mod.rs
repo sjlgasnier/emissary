@@ -220,7 +220,7 @@ impl<R: Runtime> SamServer<R> {
 
         tracing::info!(
             target: LOG_TARGET,
-            ?host,
+            %host,
             tcp_port = ?listener.local_address().map(|address| address.port()),
             udp_port = ?socket.local_address().map(|address| address.port()),
             "starting sam server",

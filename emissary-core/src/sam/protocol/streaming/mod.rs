@@ -194,10 +194,10 @@ impl Future for ShutdownHandler {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(_) => {
                     this.set_as_shutdown();
-                    return Poll::Ready(ShutdownEvent::ShutDown);
+                    Poll::Ready(ShutdownEvent::ShutDown)
                 }
             },
-            ShutdownHandler::ShutDown => return Poll::Ready(ShutdownEvent::AlreadyShutDown),
+            ShutdownHandler::ShutDown => Poll::Ready(ShutdownEvent::AlreadyShutDown),
         }
     }
 }

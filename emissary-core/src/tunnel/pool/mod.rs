@@ -306,10 +306,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             target: LOG_TARGET,
             name = %self.config.name,
             num_outbound = ?self.outbound.len(),
-            num_pending_outbound = self.pending_outbound.len(),
             num_expiring_outbound = self.expiring_outbound.len(),
             num_inbound = ?self.inbound.len(),
-            num_pending_inbound = self.pending_inbound.len(),
             num_expiring_inbound = self.expiring_inbound.len(),
             "maintain tunnel pool",
         );

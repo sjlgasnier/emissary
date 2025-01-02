@@ -16,7 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{cli::Arguments, error::Error, LOG_TARGET};
+use crate::{
+    cli::{Arguments, HttpProxyOptions},
+    error::Error,
+    LOG_TARGET,
+};
 
 use home::home_dir;
 use rand::{rngs::OsRng, RngCore};
@@ -75,6 +79,12 @@ pub struct ReseedConfig {
     pub hosts: Option<Vec<String>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HttpProxyConfig {
+    pub port: u16,
+    pub host: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
     disable_metrics: bool,
@@ -98,6 +108,8 @@ struct EmissaryConfig {
     exploratory: Option<ExploratoryConfig>,
     #[serde(default)]
     floodfill: bool,
+    #[serde(rename = "http-proxy")]
+    http_proxy: Option<HttpProxyConfig>,
     i2cp: Option<I2cpConfig>,
     #[serde(default)]
     insecure_tunnels: bool,
@@ -152,6 +164,9 @@ pub struct Config {
 
     /// Router info.
     pub router_info: Option<Vec<u8>>,
+
+    /// HTTP proxy config.
+    pub http_proxy: Option<HttpProxyConfig>,
 
     /// Router info.
     pub routers: Vec<Vec<u8>>,
@@ -388,6 +403,10 @@ impl Config {
             caps: None,
             exploratory: None,
             floodfill: false,
+            http_proxy: Some(HttpProxyConfig {
+                host: "127.0.0.1".to_string(),
+                port: 4444u16,
+            }),
             i2cp: Some(I2cpConfig { port: 7654 }),
             insecure_tunnels: false,
             log: None,
@@ -424,6 +443,10 @@ impl Config {
             caps: None,
             exploratory: None,
             floodfill: false,
+            http_proxy: Some(HttpProxyConfig {
+                host: "127.0.0.1".to_string(),
+                port: 4444u16,
+            }),
             i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
             insecure_tunnels: false,
             log: None,
@@ -474,6 +497,10 @@ impl Config {
                     caps: None,
                     exploratory: None,
                     floodfill: false,
+                    http_proxy: Some(HttpProxyConfig {
+                        host: "127.0.0.1".to_string(),
+                        port: 4444u16,
+                    }),
                     i2cp: Some(I2cpConfig { port: 7654 }),
                     insecure_tunnels: false,
                     log: None,
@@ -514,6 +541,7 @@ impl Config {
                 outbound_count: config.outbound_count,
             }),
             floodfill: config.floodfill,
+            http_proxy: config.http_proxy,
             i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
             insecure_tunnels: config.insecure_tunnels,
             log: config.log,
@@ -668,6 +696,37 @@ impl Config {
             self.reseed.hosts = Some(hosts.clone());
         }
 
+        match (&mut self.http_proxy, &arguments.http_proxy) {
+            (
+                Some(config),
+                HttpProxyOptions {
+                    http_proxy_port,
+                    http_proxy_host,
+                },
+            ) => {
+                if let Some(port) = http_proxy_port {
+                    config.port = *port;
+                }
+
+                if let Some(host) = &http_proxy_host {
+                    config.host = host.clone();
+                }
+            }
+            (
+                None,
+                HttpProxyOptions {
+                    http_proxy_port: Some(port),
+                    http_proxy_host: Some(host),
+                },
+            ) => {
+                self.http_proxy = Some(HttpProxyConfig {
+                    port: *port,
+                    host: host.clone(),
+                });
+            }
+            _ => {}
+        }
+
         self.exploratory = match &mut self.exploratory {
             None => Some(emissary_core::ExploratoryConfig {
                 inbound_len: arguments.tunnel.exploratory_inbound_len,
@@ -775,6 +834,7 @@ mod tests {
             caps: None,
             exploratory: None,
             floodfill: false,
+            http_proxy: None,
             i2cp: Some(I2cpConfig { port: 0u16 }),
             insecure_tunnels: false,
             log: None,
