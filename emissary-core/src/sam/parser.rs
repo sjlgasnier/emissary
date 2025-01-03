@@ -433,14 +433,22 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     );
                 })?;
 
-                let host = if let Some(index) = destination.find(".b32.i2p") {
+                let host = if let Some(end) = destination.find(".b32.i2p") {
                     tracing::trace!(
                         target: LOG_TARGET,
                         %destination,
                         "stream connect for .b32.i2p address",
                     );
 
-                    let decoded = base32_decode(&destination[..index]).ok_or_else(|| {
+                    let start = if destination.starts_with("http://") {
+                        7usize
+                    } else if destination.starts_with("https://") {
+                        8usize
+                    } else {
+                        0usize
+                    };
+
+                    let decoded = base32_decode(&destination[start..end]).ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,
                             ?destination,
@@ -458,8 +466,16 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                         "stream connect for .i2p address",
                     );
 
+                    let start = if destination.starts_with("http://") {
+                        7usize
+                    } else if destination.starts_with("https://") {
+                        8usize
+                    } else {
+                        0usize
+                    };
+
                     HostKind::Host {
-                        host: destination.to_string(),
+                        host: destination[start..].to_string(),
                     }
                 } else {
                     let decoded = base64_decode(destination).ok_or(())?;
@@ -836,11 +852,99 @@ mod tests {
             response => panic!("invalid response: {response:?}"),
         }
 
+        // base32-encoded hostname
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT \
+            ID=MM9z52ZwnTTPwfeD \
+            DESTINATION=http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p \
+            SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                options,
+                host: HostKind::B32Host { destination_id },
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+                assert_eq!(
+                    destination_id,
+                    DestinationId::from(
+                        &base32_decode("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna")
+                            .unwrap()
+                    )
+                );
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // base32-encoded hostname
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT \
+            ID=MM9z52ZwnTTPwfeD \
+            DESTINATION=https://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p \
+            SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                options,
+                host: HostKind::B32Host { destination_id },
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+                assert_eq!(
+                    destination_id,
+                    DestinationId::from(
+                        &base32_decode("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna")
+                            .unwrap()
+                    )
+                );
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
         // regular hostname
         match SamCommand::parse::<MockRuntime>(
             "STREAM CONNECT \
             ID=MM9z52ZwnTTPwfeD \
             DESTINATION=host.i2p \
+            SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                options,
+                host: HostKind::Host { host },
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+                assert_eq!(host.as_str(), "host.i2p");
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // regular hostname
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT \
+            ID=MM9z52ZwnTTPwfeD \
+            DESTINATION=http://host.i2p \
+            SILENT=false",
+        ) {
+            Some(SamCommand::Connect {
+                session_id,
+                options,
+                host: HostKind::Host { host },
+            }) => {
+                assert_eq!(session_id.as_str(), "MM9z52ZwnTTPwfeD");
+                assert_eq!(options.get("SILENT"), Some(&"false".to_string()));
+                assert_eq!(host.as_str(), "host.i2p");
+            }
+            response => panic!("invalid response: {response:?}"),
+        }
+
+        // regular hostname
+        match SamCommand::parse::<MockRuntime>(
+            "STREAM CONNECT \
+            ID=MM9z52ZwnTTPwfeD \
+            DESTINATION=https://host.i2p \
             SILENT=false",
         ) {
             Some(SamCommand::Connect {
