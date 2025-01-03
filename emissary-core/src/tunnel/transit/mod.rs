@@ -503,7 +503,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 let garlic_tag = garlic_tag.expect("to exist");
 
                 let mut message = GarlicMessageBuilder::default()
-                    .with_date_time(R::time_since_epoch().as_secs() as u32)
                     .with_garlic_clove(
                         MessageType::OutboundTunnelBuildReply,
                         next_message_id,
@@ -511,6 +510,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                         DeliveryInstructions::Local,
                         &payload,
                     )
+                    .with_date_time(R::time_since_epoch().as_secs() as u32)
                     .build();
 
                 // message length + poly13055 tag + garlic tag + garlic message length
