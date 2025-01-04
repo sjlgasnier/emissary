@@ -122,6 +122,10 @@ impl<R: Runtime> I2cpSession<R> {
             tunnel_pool_handle,
             outbound.into_iter().collect(),
             inbound.into_values().collect(),
+            options
+                .get(&Str::from("i2cp.dontPublishLeaseSet"))
+                .map(|value| value.parse::<bool>().unwrap_or(true))
+                .unwrap_or(true),
         );
         destination.publish_lease_set(Bytes::from(destination_id.to_vec()), leaseset);
 

@@ -292,6 +292,10 @@ impl<R: Runtime> SamSession<R> {
                 tunnel_pool_handle,
                 outbound.into_iter().collect(),
                 inbound.into_values().collect(),
+                options
+                    .get("i2cp.dontPublishLeaseSet")
+                    .map(|value| value.parse::<bool>().unwrap_or(false))
+                    .unwrap_or(false),
             );
             session_destination
                 .publish_lease_set(Bytes::from(destination_id.to_vec()), local_leaseset.clone());
