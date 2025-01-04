@@ -23,6 +23,7 @@ metrics-exporter-prometheus = "0.15.3"
 serde = { version = "1.0.203", features = ["derive"] }
 thiserror = "1.0.61"
 toml = "0.8.14"
+url = "2.5.4"
 
 # workspace dependencies
 anyhow = { workspace = true }

@@ -20,7 +20,6 @@ use crate::config::HttpProxyConfig;
 
 use anyhow::anyhow;
 use futures::{AsyncReadExt, AsyncWriteExt};
-use httparse::EMPTY_HEADER;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -112,7 +111,7 @@ impl HttpProxy {
         loop {
             nread += stream.read(&mut buffer[nread..]).await?;
 
-            let mut headers = [EMPTY_HEADER; 64];
+            let mut headers = [httparse::EMPTY_HEADER; 64];
             if httparse::Request::new(&mut headers).parse(&buffer[..nread])?.is_complete() {
                 break;
             }
@@ -120,10 +119,35 @@ impl HttpProxy {
 
         // parse request and create a new request with sanitized headers
         let request = &buffer[..nread].to_vec();
-        let mut headers = [EMPTY_HEADER; 64];
+        let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         let body_start = req.parse(&request)?.unwrap();
-        let host = req.path.ok_or(anyhow!("path not specified"))?.to_owned();
+        let method = match req.method {
+            None => return Err(anyhow!("method missing")),
+            Some("GET") => "GET".to_string(),
+            Some("POST") => "POST".to_string(),
+            Some(method) => return Err(anyhow!("unsupported method {method}")),
+        };
+        let host = match req.headers.iter().find(|header| header.name.to_lowercase() == "host") {
+            Some(host) => {
+                let host = std::str::from_utf8(&host.value)?;
+                let host = host.strip_prefix("www.").unwrap_or(host).to_string();
+
+                if !host.ends_with(".i2p") {
+                    return Err(anyhow!("not .i2p host"));
+                }
+
+                host
+            }
+            None => return Err(anyhow!("host not specified")),
+        };
+        let path = match url::Url::parse(&req.path.ok_or(anyhow!("path not specified"))?) {
+            Ok(url) => match url.query() {
+                Some(query) => format!("{}?{query}", url.path()),
+                None => url.path().to_string(),
+            },
+            Err(_) => req.path.ok_or(anyhow!("path not specified"))?.to_string(),
+        };
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -136,7 +160,7 @@ impl HttpProxy {
         let builder = req.headers.into_iter().fold(
             http::Request::builder()
                 .method(req.method.ok_or(anyhow!("method not specified"))?)
-                .uri(host.clone()),
+                .uri(path),
             |builder, header| {
                 if header.name.to_lowercase() == "user-agent" {
                     return builder.header("User-Agent", "MYOB/6.66 (AN/ON)");
@@ -264,5 +288,189 @@ impl HttpProxy {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn make_connection() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (res1, res2) = tokio::join!(listener.accept(), TcpStream::connect(address));
+
+        (res1.unwrap().0, res2.unwrap())
+    }
+
+    #[tokio::test]
+    async fn get_accepted() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(&"GET / HTTP/1.1\r\nHost: host.i2p\r\n\r\n".as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let Request { host, request, .. } = HttpProxy::read_request(stream1).await.unwrap();
+        assert_eq!(host.as_str(), "host.i2p");
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        let body_start = req.parse(&request).unwrap().unwrap();
+
+        assert_eq!(req.method, Some("GET"));
+        assert_eq!(req.path, Some("/"));
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            "host.i2p".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn get_full_path() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(
+                    &"GET http://www.host.i2p HTTP/1.1\r\nHost: www.host.i2p\r\n\r\n".as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let Request { host, request, .. } = HttpProxy::read_request(stream1).await.unwrap();
+        assert_eq!(host.as_str(), "host.i2p");
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        let body_start = req.parse(&request).unwrap().unwrap();
+
+        assert_eq!(req.method, Some("GET"));
+        assert_eq!(req.path, Some("/"));
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            "www.host.i2p".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn www_stripped_from_host() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(&"GET / HTTP/1.1\r\nHost: www.host.i2p\r\n\r\n".as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let Request { host, request, .. } = HttpProxy::read_request(stream1).await.unwrap();
+        assert_eq!(host.as_str(), "host.i2p");
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        let body_start = req.parse(&request).unwrap().unwrap();
+
+        assert_eq!(req.method, Some("GET"));
+        assert_eq!(req.path, Some("/"));
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            "www.host.i2p".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn converted_to_relative_path() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(&"GET http://www.host.i2p/topics/new-topic?query=1 HTTP/1.1\r\nHost: www.host.i2p\r\n\r\n".as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let Request { host, request, .. } = HttpProxy::read_request(stream1).await.unwrap();
+        assert_eq!(host.as_str(), "host.i2p");
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        let body_start = req.parse(&request).unwrap().unwrap();
+
+        assert_eq!(req.method, Some("GET"));
+        assert_eq!(req.path, Some("/topics/new-topic?query=1"));
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            "www.host.i2p".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn post_accepted() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(
+                    &"POST /upload HTTP/1.1\r\n\
+                    Host: www.host.i2p\r\n\
+                    Content-Type: text/plain\r\n\
+                    Content-Length: 12\r\n\r\n\
+                    hello, world"
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let Request { host, request, .. } = HttpProxy::read_request(stream1).await.unwrap();
+        assert_eq!(host.as_str(), "host.i2p");
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        let body_start = req.parse(&request).unwrap().unwrap();
+
+        assert_eq!(req.method, Some("POST"));
+        assert_eq!(req.path, Some("/upload"));
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            "www.host.i2p".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_reject() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(
+                    "CONNECT www.host.i2p:443 HTTP/1.1\r\nHost: www.host.i2p:443\r\n\r\n"
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        assert!(HttpProxy::read_request(stream1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn non_i2p_host() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2
+                .write_all(&"GET / HTTP/1.1\r\nHost: host.com\r\n\r\n".as_bytes())
+                .await
+                .unwrap();
+        });
+
+        assert!(HttpProxy::read_request(stream1).await.is_err());
     }
 }

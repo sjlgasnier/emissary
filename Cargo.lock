@@ -892,6 +892,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "x25519-dalek",
  "yosemite",
 ]

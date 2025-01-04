@@ -20,7 +20,6 @@ use clap::{Args, Parser};
 
 use std::path::PathBuf;
 
-/// Tunnel options.
 #[derive(Args)]
 pub struct TunnelOptions {
     /// Length of an inbound exploratory tunnel
@@ -48,7 +47,6 @@ pub struct TunnelOptions {
     pub insecure_tunnels: Option<bool>,
 }
 
-/// Reseed options.
 #[derive(Args)]
 pub struct ReseedOptions {
     /// Comma-separated list of reseed hosts
@@ -67,7 +65,6 @@ pub struct ReseedOptions {
     pub force_reseed: Option<bool>,
 }
 
-/// Metrics options.
 #[derive(Args)]
 pub struct MetricsOptions {
     /// Metrics server port.
@@ -79,7 +76,6 @@ pub struct MetricsOptions {
     pub disable_metrics: Option<bool>,
 }
 
-/// Http proxy options.
 #[derive(Args)]
 pub struct HttpProxyOptions {
     /// HTTP proxy port.
