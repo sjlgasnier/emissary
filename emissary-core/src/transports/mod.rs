@@ -406,7 +406,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                 Poll::Ready(Some(TransportEvent::ConnectionClosed { router })) => {
                     tracing::debug!(
                         target: LOG_TARGET,
-                        ?router,
+                        %router,
                         "connection closed",
                     );
 

@@ -222,7 +222,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     Poll::Ready(handle) => {
                         tracing::trace!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             "tunnel pool for the session has been built",
                         );
 
@@ -292,7 +292,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })) => {
                         tracing::trace!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             %tunnel_id,
                             "inbound tunnel built for pending session",
                         );
@@ -322,7 +322,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         tracing::debug!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             num_inbound = ?inbound.len(),
                             num_outbound = ?outbound.len(),
                             "publish destination's lease set",
@@ -345,7 +345,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
                         tracing::trace!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             %tunnel_id,
                             "outbound tunnel built for pending session",
                         );
@@ -375,7 +375,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         tracing::debug!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             num_inbound = ?inbound.len(),
                             num_outbound = ?outbound.len(),
                             "publish destination's lease set",
@@ -398,7 +398,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
                         tracing::warn!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             %tunnel_id,
                             "inbound tunnel expired for pending session",
                         );
@@ -422,7 +422,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
                         tracing::warn!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             %tunnel_id,
                             "outbound tunnel expired for pending session",
                         );
@@ -446,7 +446,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     Poll::Ready(Some(event)) => {
                         tracing::warn!(
                             target: LOG_TARGET,
-                            ?session_id,
+                            %session_id,
                             ?event,
                             "unexpected event",
                         );

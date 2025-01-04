@@ -565,7 +565,11 @@ impl<R: Runtime> NetDb<R> {
                     "failed to connect to router",
                 ),
                 Ok(()) => {
-                    tracing::debug!(target: LOG_TARGET, %router_id, "staring to dial router");
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "staring to dial router",
+                    );
 
                     self.routers.insert(
                         router_id.clone(),
@@ -576,12 +580,9 @@ impl<R: Runtime> NetDb<R> {
                 }
             },
             Some(RouterState::Dialing { pending_messages }) => {
-                tracing::debug!(target: LOG_TARGET, %router_id, "router is already being dialed");
                 pending_messages.push(message.clone());
             }
             Some(RouterState::Connected) => {
-                tracing::debug!(target: LOG_TARGET, %router_id, "router is connected, send message");
-
                 if let Err(error) = self.service.send(router_id, message.clone().into_inner()) {
                     tracing::debug!(
                         target: LOG_TARGET,

@@ -763,6 +763,7 @@ impl<R: Runtime> Stream<R> {
                 remote = %self.remote,
                 recv_id = ?self.recv_stream_id,
                 send_id = ?self.send_stream_id,
+                payload_len = ?payload.len(),
                 "remote sent `CLOSE`",
             );
 

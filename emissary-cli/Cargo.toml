@@ -16,6 +16,7 @@ emissary-core = { path = "../emissary-core", features = ["std"] }
 emissary-util = { path = "../emissary-util", features = ["tokio"] }
 futures = "0.3.30"
 home = "0.5.9"
+http = "1.2.0"
 httparse = "1.9.5"
 metrics = "0.23.0"
 metrics-exporter-prometheus = "0.15.3"

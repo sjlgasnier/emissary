@@ -202,7 +202,7 @@ impl<R: Runtime> Ntcp2Session<R> {
 
         tracing::debug!(
             target: LOG_TARGET,
-            router = ?self.router,
+            router = %self.router,
             ?result,
             "connnection closed",
         );
@@ -227,6 +227,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         Poll::Ready(Err(error)) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
+                                router_id = %this.router,
                                 ?error,
                                 "socket error",
                             );
@@ -320,6 +321,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                         if message.is_expired::<R>() {
                                             tracing::trace!(
                                                 target: LOG_TARGET,
+                                                router_id = %this.router,
                                                 message_type = ?message.message_type,
                                                 message_id = ?message.message_id,
                                                 expiration = ?message.expiration,
@@ -345,6 +347,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                             if let Err(error) = this.subsystem_handle.dispatch_messages(messages) {
                                 tracing::warn!(
                                     target: LOG_TARGET,
+                                    router_id = %this.router,
                                     ?error,
                                     "failed to dispatch messages to subsystems",
                                 );
