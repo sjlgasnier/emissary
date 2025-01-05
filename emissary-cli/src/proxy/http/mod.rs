@@ -16,7 +16,13 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{config::HttpProxyConfig, proxy::http::error::HttpError};
+use crate::{
+    config::HttpProxyConfig,
+    proxy::http::{
+        error::HttpError,
+        response::{ResponseBuilder, Status},
+    },
+};
 
 use futures::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
@@ -29,6 +35,7 @@ use yosemite::{style, Session, SessionOptions, Stream};
 use std::{sync::LazyLock, time::Duration};
 
 mod error;
+mod response;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::proxy::http";
@@ -98,32 +105,6 @@ impl HttpProxy {
             })
             .await?,
         })
-    }
-
-    /// Create HTTP 400 error response.
-    fn create_http_error_response(error: &str) -> String {
-        let status_line = "HTTP/1.1 400 Bad Request";
-        let headers = "Content-Type: text/html; charset=UTF-8";
-        let body = format!(
-            r#"
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>400 Bad Request</title>
-            </head>
-            <body>
-                <h1>400 Bad Request</h1>
-                <p>{error}</p>
-            </body>
-            </html>
-        "#
-        );
-
-        // Combine status line, headers, and body
-        format!(
-            "{status_line}\r\n{headers}\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
     }
 
     /// Parse request.
@@ -314,9 +295,9 @@ impl HttpProxy {
                                         HttpError::Io(_) => return None,
                                         HttpError::InvalidHost => "Only .i2p and .b32.i2p hosts are supported",
                                         _ => "Malformed request",
-                                    };
+                                    }.to_string();
 
-                                    let response = Self::create_http_error_response(error);
+                                    let response = ResponseBuilder::new(Status::BadRequest).with_error(error).build();
                                     if let Err(error) = stream.write_all(&response.as_bytes()).await {
                                         tracing::debug!(
                                             target: LOG_TARGET,
@@ -339,15 +320,29 @@ impl HttpProxy {
                     }
                 },
                 request = self.requests.join_next(), if !self.requests.is_empty() => match request {
-                    Some(Ok(Some(request))) => match self.session.connect(&request.host).await {
-                        Ok(stream) => {
-                            self.responses.spawn(Self::send_response(request.stream, stream, request.request));
+                    Some(Ok(Some(Request { mut stream, host, request }))) => match self.session.connect(&host).await {
+                        Ok(i2p_stream) => {
+                            self.responses.spawn(Self::send_response(stream, i2p_stream, request));
                         }
-                        Err(error) => tracing::debug!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "failed to connect to destination",
-                        ),
+                        Err(error) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "failed to connect to destination",
+                            );
+
+                            let response = ResponseBuilder::new(Status::BadGateway)
+                                .with_error(format!("Failed to establish connection to {host}"))
+                                .build();
+
+                            if let Err(error) = stream.write_all(&response.as_bytes()).await {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    ?error,
+                                    "failed to send error response to client",
+                                );
+                            }
+                        }
                     },
                     Some(Ok(None)) => {},
                     Some(Err(error)) => tracing::debug!(
