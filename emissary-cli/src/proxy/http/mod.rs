@@ -16,9 +16,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::config::HttpProxyConfig;
+use crate::{config::HttpProxyConfig, proxy::http::error::HttpError};
 
-use anyhow::anyhow;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -28,6 +27,8 @@ use tokio::{
 use yosemite::{style, Session, SessionOptions, Stream};
 
 use std::{sync::LazyLock, time::Duration};
+
+mod error;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::proxy::http";
@@ -48,6 +49,7 @@ static ILLEGAL: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 });
 
 /// Parsed request.
+#[derive(Debug)]
 struct Request {
     /// TCP stream.
     stream: TcpStream,
@@ -65,7 +67,7 @@ pub struct HttpProxy {
     listener: TcpListener,
 
     /// Inbound requests.
-    requests: JoinSet<anyhow::Result<Request>>,
+    requests: JoinSet<Option<Request>>,
 
     /// Outbound responses.
     responses: JoinSet<anyhow::Result<()>>,
@@ -98,55 +100,74 @@ impl HttpProxy {
         })
     }
 
-    /// Read request from browser.
-    ///
-    /// Reads the full request received from browser, parses it, removes any "prohibited" headers
-    /// and reconstructs a new HTTP request that needs to be send to the requested destination,
-    /// specified in the `Host` field of the original request.
-    async fn read_request(mut stream: TcpStream) -> anyhow::Result<Request> {
-        let mut buffer = vec![0u8; 8192];
-        let mut nread = 0usize;
+    /// Create HTTP 400 error response.
+    fn create_http_error_response(error: &str) -> String {
+        let status_line = "HTTP/1.1 400 Bad Request";
+        let headers = "Content-Type: text/html; charset=UTF-8";
+        let body = format!(
+            r#"
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>400 Bad Request</title>
+            </head>
+            <body>
+                <h1>400 Bad Request</h1>
+                <p>{error}</p>
+            </body>
+            </html>
+        "#
+        );
 
-        // read from `stream` until complete request has been received
-        loop {
-            nread += stream.read(&mut buffer[nread..]).await?;
+        // Combine status line, headers, and body
+        format!(
+            "{status_line}\r\n{headers}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
 
-            let mut headers = [httparse::EMPTY_HEADER; 64];
-            if httparse::Request::new(&mut headers).parse(&buffer[..nread])?.is_complete() {
-                break;
-            }
-        }
-
+    /// Parse request.
+    fn parse_request(request: Vec<u8>) -> Result<(String, Vec<u8>), HttpError> {
         // parse request and create a new request with sanitized headers
-        let request = &buffer[..nread].to_vec();
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         let body_start = req.parse(&request)?.unwrap();
         let method = match req.method {
-            None => return Err(anyhow!("method missing")),
+            None => return Err(HttpError::MethodMissing),
             Some("GET") => "GET".to_string(),
             Some("POST") => "POST".to_string(),
-            Some(method) => return Err(anyhow!("unsupported method {method}")),
+            Some(method) => return Err(HttpError::MethodNotSupported(method.to_string())),
         };
         let host = match req.headers.iter().find(|header| header.name.to_lowercase() == "host") {
             Some(host) => {
-                let host = std::str::from_utf8(&host.value)?;
+                let host = std::str::from_utf8(&host.value).map_err(|_| HttpError::Malformed)?;
                 let host = host.strip_prefix("www.").unwrap_or(host).to_string();
 
                 if !host.ends_with(".i2p") {
-                    return Err(anyhow!("not .i2p host"));
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?host,
+                        "ignoring non-.i2p host",
+                    );
+                    return Err(HttpError::InvalidHost);
                 }
 
                 host
             }
-            None => return Err(anyhow!("host not specified")),
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "host missing",
+                );
+                return Err(HttpError::InvalidHost);
+            }
         };
-        let path = match url::Url::parse(&req.path.ok_or(anyhow!("path not specified"))?) {
+        let path = match url::Url::parse(&req.path.ok_or(HttpError::InvalidPath)?) {
             Ok(url) => match url.query() {
                 Some(query) => format!("{}?{query}", url.path()),
                 None => url.path().to_string(),
             },
-            Err(_) => req.path.ok_or(anyhow!("path not specified"))?.to_string(),
+            Err(_) => req.path.ok_or(HttpError::InvalidPath)?.to_string(),
         };
 
         tracing::trace!(
@@ -158,9 +179,7 @@ impl HttpProxy {
         );
 
         let builder = req.headers.into_iter().fold(
-            http::Request::builder()
-                .method(req.method.ok_or(anyhow!("method not specified"))?)
-                .uri(path),
+            http::Request::builder().method(method.as_str()).uri(path),
             |builder, header| {
                 if header.name.to_lowercase() == "user-agent" {
                     return builder.header("User-Agent", "MYOB/6.66 (AN/ON)");
@@ -186,33 +205,66 @@ impl HttpProxy {
             builder.body(request[body_start..].to_vec())
         } else {
             builder.body(Vec::new())
-        }?;
+        }
+        .expect("to succeed");
 
-        Ok(Request {
-            stream,
-            host,
-            request: {
-                // serialize request into a byte vector
-                let (parts, body) = request.into_parts();
-                let mut request = Vec::new();
+        Ok((host, {
+            // serialize request into a byte vector
+            let (parts, body) = request.into_parts();
+            let mut request = Vec::new();
 
-                request.extend_from_slice(&format!("{} ", parts.method.to_string()).as_bytes());
-                request.extend_from_slice(&format!("{} ", parts.uri.to_string()).as_bytes());
-                request.extend_from_slice(&"HTTP/1.1\r\n".as_bytes());
+            request.extend_from_slice(&format!("{} ", parts.method.to_string()).as_bytes());
+            request.extend_from_slice(&format!("{} ", parts.uri.to_string()).as_bytes());
+            request.extend_from_slice(&"HTTP/1.1\r\n".as_bytes());
 
-                for (name, value) in parts.headers {
-                    if let (Some(name), value) = (name, value) {
-                        request.extend_from_slice(&format!("{name}: ").as_bytes());
-                        request.extend_from_slice(value.as_bytes());
-                        request.extend_from_slice("\r\n".as_bytes());
-                    }
+            for (name, value) in parts.headers {
+                if let (Some(name), value) = (name, value) {
+                    request.extend_from_slice(&format!("{name}: ").as_bytes());
+                    request.extend_from_slice(value.as_bytes());
+                    request.extend_from_slice("\r\n".as_bytes());
                 }
-                request.extend_from_slice("\r\n".as_bytes());
-                request.extend_from_slice(&body);
+            }
+            request.extend_from_slice("\r\n".as_bytes());
+            request.extend_from_slice(&body);
 
-                request
-            },
-        })
+            request
+        }))
+    }
+
+    /// Read request from browser.
+    ///
+    /// Reads the full request received from browser, parses it, removes any "prohibited" headers
+    /// and reconstructs a new HTTP request that needs to be send to the requested destination,
+    /// specified in the `Host` field of the original request.
+    async fn read_request(mut stream: TcpStream) -> Result<Request, (TcpStream, HttpError)> {
+        let mut buffer = vec![0u8; 8192];
+        let mut nread = 0usize;
+
+        // read from `stream` until complete request has been received
+        loop {
+            nread += match stream.read(&mut buffer[nread..]).await {
+                Err(error) => return Err((stream, HttpError::Io(error.kind()))),
+                Ok(0) => return Err((stream, HttpError::Io(std::io::ErrorKind::BrokenPipe))),
+                Ok(nread) => nread,
+            };
+
+            let mut headers = [httparse::EMPTY_HEADER; 64];
+            match httparse::Request::new(&mut headers).parse(&buffer[..nread]) {
+                Err(_) => return Err((stream, HttpError::Malformed)),
+                Ok(request) if request.is_complete() => break,
+                Ok(_) => {}
+            }
+        }
+
+        // parse request and create a new request with sanitized headers
+        match Self::parse_request(buffer[..nread].to_vec()) {
+            Err(error) => Err((stream, error)),
+            Ok((host, request)) => Ok(Request {
+                stream,
+                host,
+                request,
+            }),
+        }
     }
 
     /// Send `request` to remote destination over `i2p_stream`, read the full HTTP response
@@ -249,9 +301,32 @@ impl HttpProxy {
                     Ok((stream, _)) => {
                         self.requests.spawn(async move {
                             match tokio::time::timeout(Duration::from_secs(10), Self::read_request(stream)).await {
-                                Err(_) => Err(anyhow!("timeout")),
-                                Ok(Err(error)) => Err(anyhow!(error)),
-                                Ok(Ok(request)) => Ok(request),
+                                Err(_) => None,
+                                Ok(Ok(request)) => Some(request),
+                                Ok(Err((mut stream, error))) => {
+                                    tracing::debug!(
+                                        target: LOG_TARGET,
+                                        ?error,
+                                        "failed to handle inbound http request",
+                                    );
+
+                                    let error = match error {
+                                        HttpError::Io(_) => return None,
+                                        HttpError::InvalidHost => "Only .i2p and .b32.i2p hosts are supported",
+                                        _ => "Malformed request",
+                                    };
+
+                                    let response = Self::create_http_error_response(error);
+                                    if let Err(error) = stream.write_all(&response.as_bytes()).await {
+                                        tracing::debug!(
+                                            target: LOG_TARGET,
+                                            ?error,
+                                            "failed to send error response to client",
+                                        );
+                                    }
+
+                                    None
+                                }
                             }
                         });
                     }
@@ -264,7 +339,7 @@ impl HttpProxy {
                     }
                 },
                 request = self.requests.join_next(), if !self.requests.is_empty() => match request {
-                    Some(Ok(Ok(request))) => match self.session.connect(&request.host).await {
+                    Some(Ok(Some(request))) => match self.session.connect(&request.host).await {
                         Ok(stream) => {
                             self.responses.spawn(Self::send_response(request.stream, stream, request.request));
                         }
@@ -274,11 +349,7 @@ impl HttpProxy {
                             "failed to connect to destination",
                         ),
                     },
-                    Some(Ok(Err(error))) => tracing::debug!(
-                        target: LOG_TARGET,
-                        ?error,
-                        "failed to read http request",
-                    ),
+                    Some(Ok(None)) => {},
                     Some(Err(error)) => tracing::debug!(
                         target: LOG_TARGET,
                         ?error,
@@ -320,7 +391,7 @@ mod tests {
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
-        let body_start = req.parse(&request).unwrap().unwrap();
+        let _body_start = req.parse(&request).unwrap().unwrap();
 
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/"));
@@ -348,7 +419,7 @@ mod tests {
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
-        let body_start = req.parse(&request).unwrap().unwrap();
+        let _body_start = req.parse(&request).unwrap().unwrap();
 
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/"));
@@ -374,7 +445,7 @@ mod tests {
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
-        let body_start = req.parse(&request).unwrap().unwrap();
+        let _body_start = req.parse(&request).unwrap().unwrap();
 
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/"));
@@ -400,7 +471,7 @@ mod tests {
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
-        let body_start = req.parse(&request).unwrap().unwrap();
+        let _body_start = req.parse(&request).unwrap().unwrap();
 
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/topics/new-topic?query=1"));
@@ -433,7 +504,7 @@ mod tests {
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
-        let body_start = req.parse(&request).unwrap().unwrap();
+        let _body_start = req.parse(&request).unwrap().unwrap();
 
         assert_eq!(req.method, Some("POST"));
         assert_eq!(req.path, Some("/upload"));
@@ -457,7 +528,10 @@ mod tests {
                 .unwrap();
         });
 
-        assert!(HttpProxy::read_request(stream1).await.is_err());
+        assert_eq!(
+            HttpProxy::read_request(stream1).await.unwrap_err().1,
+            HttpError::MethodNotSupported("CONNECT".to_string())
+        );
     }
 
     #[tokio::test]
@@ -471,6 +545,38 @@ mod tests {
                 .unwrap();
         });
 
-        assert!(HttpProxy::read_request(stream1).await.is_err());
+        assert_eq!(
+            HttpProxy::read_request(stream1).await.unwrap_err().1,
+            HttpError::InvalidHost,
+        );
+    }
+
+    #[tokio::test]
+    async fn read_partial_request() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2.write_all(&"GET / HTTP/1.1\r\nHost".as_bytes()).await.unwrap();
+            stream2.shutdown().await.unwrap();
+        });
+
+        assert!(std::matches!(
+            HttpProxy::read_request(stream1).await.unwrap_err().1,
+            HttpError::Io(_),
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_request() {
+        let (stream1, mut stream2) = make_connection().await;
+
+        tokio::spawn(async move {
+            stream2.write_all(&"hello, world\r\n".as_bytes()).await.unwrap();
+        });
+
+        assert_eq!(
+            HttpProxy::read_request(stream1).await.unwrap_err().1,
+            HttpError::Malformed,
+        );
     }
 }
