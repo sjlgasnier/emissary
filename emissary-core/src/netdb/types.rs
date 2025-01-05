@@ -23,10 +23,7 @@
 
 use crate::{primitives::RouterId, runtime::Runtime};
 
-use sha2::{
-    digest::generic_array::{typenum::U32, GenericArray},
-    Digest, Sha256,
-};
+use sha2::digest::generic_array::{typenum::U32, GenericArray};
 use uint::construct_uint;
 
 use alloc::vec::Vec;
@@ -97,7 +94,7 @@ impl<T: Clone> From<Key<T>> for KeyBytes {
 
 impl From<RouterId> for Key<RouterId> {
     fn from(router_id: RouterId) -> Self {
-        let bytes = KeyBytes(Sha256::digest(Into::<Vec<u8>>::into(router_id.clone())));
+        let bytes = KeyBytes(*GenericArray::from_slice(&router_id.to_vec()));
 
         Key {
             preimage: router_id,
@@ -143,7 +140,7 @@ impl KeyBytes {
     where
         T: Borrow<[u8]>,
     {
-        KeyBytes(Sha256::digest(value.borrow()))
+        KeyBytes(*GenericArray::from_slice(value.borrow()))
     }
 
     /// Computes the distance of the keys according to the XOR metric.
