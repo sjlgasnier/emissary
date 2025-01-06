@@ -65,7 +65,7 @@ pub struct Ntcp2Config {
     pub host: Option<Ipv4Addr>,
 
     /// Should NTCP2 be published in router info.
-    pub published: bool,
+    pub publish: bool,
 
     /// NTCP2 key.
     pub key: [u8; 32],

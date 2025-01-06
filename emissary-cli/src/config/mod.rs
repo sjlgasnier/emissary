@@ -58,7 +58,7 @@ struct ExploratoryConfig {
 struct Ntcp2Config {
     port: u16,
     host: Option<Ipv4Addr>,
-    published: Option<bool>,
+    publish: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,15 +87,15 @@ pub struct HttpProxyConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
-    disable_metrics: bool,
-    metrics_server_port: Option<u16>,
+    disable: bool,
+    port: Option<u16>,
 }
 
 impl From<MetricsConfig> for emissary_core::MetricsConfig {
     fn from(value: MetricsConfig) -> Self {
         emissary_core::MetricsConfig {
-            disable_metrics: value.disable_metrics,
-            metrics_server_port: value.metrics_server_port,
+            disable_metrics: value.disable,
+            metrics_server_port: value.port,
         }
     }
 }
@@ -411,14 +411,14 @@ impl Config {
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
-                disable_metrics: false,
-                metrics_server_port: None,
+                disable: false,
+                port: None,
             }),
             net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
                 host: None,
-                published: Some(false),
+                publish: Some(false),
             }),
             sam: Some(SamConfig {
                 tcp_port: 7656,
@@ -451,8 +451,8 @@ impl Config {
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
-                disable_metrics: false,
-                metrics_server_port: None,
+                disable: false,
+                port: None,
             }),
             net_id: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
@@ -460,7 +460,7 @@ impl Config {
                 host: Some("127.0.0.1".parse().expect("valid address")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
-                published: false,
+                publish: false,
             }),
             profiles: Vec::new(),
             reseed: ReseedConfig {
@@ -505,14 +505,14 @@ impl Config {
                     insecure_tunnels: false,
                     log: None,
                     metrics: Some(MetricsConfig {
-                        disable_metrics: false,
-                        metrics_server_port: None,
+                        disable: false,
+                        port: None,
                     }),
                     net_id: None,
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
-                        published: Some(false),
+                        publish: Some(false),
                     }),
                     reseed: None,
                     sam: Some(SamConfig {
@@ -550,7 +550,7 @@ impl Config {
             ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
                 host: config.host,
-                published: config.published.unwrap_or(false),
+                publish: config.publish.unwrap_or(false),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
@@ -661,14 +661,14 @@ impl Config {
         ) {
             (Some(true), _) => {
                 self.metrics = Some(MetricsConfig {
-                    disable_metrics: true,
-                    metrics_server_port: None,
+                    disable: true,
+                    port: None,
                 });
             }
             (Some(false), Some(port)) =>
                 self.metrics = Some(MetricsConfig {
-                    disable_metrics: false,
-                    metrics_server_port: Some(port),
+                    disable: false,
+                    port: Some(port),
                 }),
             _ => {}
         }
@@ -843,7 +843,7 @@ mod tests {
             ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
-                published: None,
+                publish: None,
             }),
             reseed: None,
             sam: None,

@@ -51,7 +51,7 @@ async fn make_router(
                 key
             },
             host: Some("127.0.0.1".parse().unwrap()),
-            published: true,
+            publish: true,
         }),
         routers,
         samv3_config: Some(SamConfig {

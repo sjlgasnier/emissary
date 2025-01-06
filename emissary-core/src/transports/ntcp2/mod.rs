@@ -169,7 +169,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
             Error::Connection(ConnectionError::BindFailure)
         })?;
 
-        let address = match (config.published, config.host) {
+        let address = match (config.publish, config.host) {
             (true, Some(host)) =>
                 RouterAddress::new_published(config.key, config.iv, socket_address.port(), host),
             (true, None) => {
@@ -337,7 +337,7 @@ mod tests {
         let config = Some(Ntcp2Config {
             port: 0u16,
             host: Some("8.8.8.8".parse().unwrap()),
-            published: true,
+            publish: true,
             key: [0xaa; 32],
             iv: [0xbb; 16],
         });
@@ -362,7 +362,7 @@ mod tests {
         let config = Some(Ntcp2Config {
             port: 0u16,
             host: None,
-            published: false,
+            publish: false,
             key: [0xaa; 32],
             iv: [0xbb; 16],
         });
@@ -380,7 +380,7 @@ mod tests {
         let config = Some(Ntcp2Config {
             port: 8888,
             host: Some("8.8.8.8".parse().unwrap()),
-            published: false,
+            publish: false,
             key: [0xaa; 32],
             iv: [0xbb; 16],
         });
@@ -398,7 +398,7 @@ mod tests {
         let config = Some(Ntcp2Config {
             port: 8888,
             host: None,
-            published: true,
+            publish: true,
             key: [0xaa; 32],
             iv: [0xbb; 16],
         });
@@ -416,7 +416,7 @@ mod tests {
         let config = Some(Ntcp2Config {
             port: 0u16,
             host: None,
-            published: true,
+            publish: true,
             key: [0xaa; 32],
             iv: [0xbb; 16],
         });
@@ -438,7 +438,7 @@ mod tests {
         let config = Some(Ntcp2Config {
             port: 0u16,
             host: Some("8.8.8.8".parse().unwrap()),
-            published: true,
+            publish: true,
             key: [0xaa; 32],
             iv: [0xbb; 16],
         });
