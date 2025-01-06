@@ -650,6 +650,9 @@ impl<R: Runtime> NetDb<R> {
                 Duration::from_millis(*router_info.published.date()),
             ),
         );
+        if router_info.is_floodfill() {
+            self.floodfill_dht.add_router(router_id.clone());
+        }
         self.profile_storage.add_router(router_info);
         self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
 
@@ -1221,6 +1224,9 @@ impl<R: Runtime> NetDb<R> {
                                 return Ok(());
                             }
 
+                            if router_info.is_floodfill() {
+                                self.floodfill_dht.add_router(router_id.clone());
+                            }
                             self.profile_storage.add_router(router_info);
                             self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
                         }
