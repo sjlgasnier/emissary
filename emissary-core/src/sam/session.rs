@@ -366,14 +366,6 @@ impl<R: Runtime> SamSession<R> {
                 .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
         );
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            session_id = ?self.session_id,
-            %destination_id,
-            ?stream_id,
-            "lease set found, create outbound stream",
-        );
-
         // mark the stream as pending & waiting for session to be opened
         //
         // from now on `StreamManager` will drive forward the stream progress and will
@@ -448,7 +440,16 @@ impl<R: Runtime> SamSession<R> {
         );
 
         match self.destination.query_lease_set(&destination_id) {
-            LeaseSetStatus::Found => self.create_outbound_stream(destination_id, socket, options),
+            LeaseSetStatus::Found => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    session_id = ?self.session_id,
+                    %destination_id,
+                    "lease set found, create outbound stream",
+                );
+
+                self.create_outbound_stream(destination_id, socket, options);
+            }
             LeaseSetStatus::NotFound => {
                 tracing::trace!(
                     target: LOG_TARGET,
