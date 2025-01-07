@@ -25,12 +25,11 @@ use crate::{
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
-    transports::metrics::*,
+    transports::{metrics::*, ntcp2::Ntcp2Context, ssu2::Ssu2Context},
 };
 
 use futures::{Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
-use ntcp2::Ntcp2Context;
 use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -45,6 +44,7 @@ mod ntcp2;
 mod ssu2;
 
 pub use ntcp2::Ntcp2Transport;
+pub use ssu2::Ssu2Transport;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::transport-manager";
@@ -324,8 +324,9 @@ impl<R: Runtime> TransportManager<R> {
     /// Collect `TransportManager`-related metric counters, gauges and histograms.
     pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
         let metrics = register_metrics(metrics);
+        let metrics = Ntcp2Transport::<R>::metrics(metrics);
 
-        Ntcp2Transport::<R>::metrics(metrics)
+        Ssu2Transport::<R>::metrics(metrics)
     }
 
     /// Register new subsystem to [`TransportManager`].
@@ -354,6 +355,19 @@ impl<R: Runtime> TransportManager<R> {
     /// Register NTCP2 as an active transport.
     pub fn register_ntcp2(&mut self, context: Ntcp2Context<R>) {
         self.transports.push(Box::new(Ntcp2Transport::new(
+            context,
+            self.allow_local,
+            self.local_signing_key.clone(),
+            self.local_router_info.clone(),
+            self.subsystem_handle.clone(),
+            self.profile_storage.clone(),
+            self.metrics_handle.clone(),
+        )))
+    }
+
+    /// Register SSU2 as an active transport.
+    pub fn register_ssu2(&mut self, context: Ssu2Context<R>) {
+        self.transports.push(Box::new(Ssu2Transport::new(
             context,
             self.allow_local,
             self.local_signing_key.clone(),
@@ -427,6 +441,7 @@ impl<R: Runtime> Future for TransportManager<R> {
             match futures::ready!(self.cmd_rx.poll_recv(cx)) {
                 None => return Poll::Ready(()),
                 Some(ProtocolCommand::Connect { router }) => {
+                    // TODO: compare transport costs
                     self.transports[0].connect(router);
                 }
                 Some(event) => {

@@ -74,6 +74,25 @@ pub struct Ntcp2Config {
     pub iv: [u8; 16],
 }
 
+/// SSU2 configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Ssu2Config {
+    /// SSU2 port.
+    pub port: u16,
+
+    /// SSU2 listen address.
+    pub host: Option<Ipv4Addr>,
+
+    /// Should SSU2 be published in router info.
+    pub publish: bool,
+
+    /// SSU2 static key.
+    pub static_key: [u8; 32],
+
+    /// SSU2 introduction key.
+    pub intro_key: [u8; 32],
+}
+
 /// I2CP configuration.
 #[derive(Debug, Clone)]
 pub struct I2cpConfig {
@@ -134,7 +153,10 @@ pub struct Config {
     pub net_id: Option<u8>,
 
     /// NTCP2 configuration.
-    pub ntcp2_config: Option<Ntcp2Config>,
+    pub ntcp2: Option<Ntcp2Config>,
+
+    /// SSU2 configuration.
+    pub ssu2: Option<Ssu2Config>,
 
     /// Known router profiles.
     pub profiles: Vec<(String, Profile)>,

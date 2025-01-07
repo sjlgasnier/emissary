@@ -19,6 +19,7 @@
 use crate::{
     config::{Config, I2cpConfig, MetricsConfig, SamConfig},
     crypto::{SigningPrivateKey, StaticPrivateKey},
+    error::Error,
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::RouterInfo,
@@ -27,7 +28,7 @@ use crate::{
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
-    transports::{Ntcp2Transport, TransportManager},
+    transports::{Ntcp2Transport, Ssu2Transport, TransportManager},
     tunnel::{TunnelManager, TunnelManagerHandle},
 };
 
@@ -92,13 +93,25 @@ pub struct Router<R: Runtime> {
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`].
     pub async fn new(mut config: Config) -> crate::Result<(Self, Vec<u8>)> {
-        // attempt to initialize the ntcp2 transport from the config
+        // attempt to initialize the ntcp2 transport from provided config
         //
-        // this is done prior to constructing local router info case `config.ntcp1_config` contained
-        // an unspecified porrt so the listener can be bound to the listen address the correct port
-        // can be for the ntcp2's `RouterAddress`
+        // this is done prior to constructing local router info in case ntcp2 config contained an
+        // unspecified port, meaning the actual socket address of the transport is available only
+        // after the listener has been created
         let (ntcp2_context, ntcp2_address) =
-            Ntcp2Transport::<R>::initialize(config.ntcp2_config.take()).await?;
+            Ntcp2Transport::<R>::initialize(config.ntcp2.take()).await?;
+
+        // attempt to initialize the ssu2 transport from provided config
+        let (ssu2_context, _ssu2_address) =
+            Ssu2Transport::<R>::initialize(config.ssu2.take()).await?;
+
+        if ntcp2_context.is_none() && ssu2_context.is_some() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "cannot start router, no active transport protocol",
+            );
+            return Err(Error::Custom("no transport".to_string()));
+        }
 
         // create static/signing keypairs for the router
         //
@@ -259,6 +272,10 @@ impl<R: Runtime> Router<R> {
 
         if let Some(context) = ntcp2_context {
             transport_manager.register_ntcp2(context);
+        }
+
+        if let Some(context) = ssu2_context {
+            transport_manager.register_ssu2(context);
         }
 
         Ok((

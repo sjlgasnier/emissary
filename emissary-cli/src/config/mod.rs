@@ -190,15 +190,16 @@ impl From<Config> for emissary_core::Config {
             floodfill: val.floodfill,
             i2cp_config: val.i2cp_config,
             insecure_tunnels: val.insecure_tunnels,
+            metrics: val.metrics.map(Into::into).unwrap_or_default(),
             net_id: val.net_id,
-            ntcp2_config: val.ntcp2_config,
+            ntcp2: val.ntcp2_config,
             profiles: val.profiles,
             router_info: val.router_info,
             routers: val.routers,
             samv3_config: val.sam_config,
             signing_key: Some(val.signing_key),
+            ssu2: None,
             static_key: Some(val.static_key),
-            metrics: val.metrics.map(Into::into).unwrap_or_default(),
         }
     }
 }
