@@ -471,6 +471,7 @@ impl<R: Runtime> SessionManager<R> {
                     // wrap the garlic message inside a `NewSession` message
                     // and create a pending outbound session
                     let (session, payload) = self.key_context.create_outbound_session(
+                        self.destination_id.clone(),
                         destination_id.clone(),
                         public_key,
                         self.lease_set.clone(),
@@ -588,6 +589,7 @@ impl<R: Runtime> SessionManager<R> {
 
                 // attempt to parse the `DatabaseStore` as `LeaseSet2`
                 let Some(DatabaseStore {
+                    key,
                     payload: DatabaseStorePayload::LeaseSet2 { lease_set },
                     ..
                 }) = DatabaseStore::<R>::parse(message_body)
@@ -601,6 +603,17 @@ impl<R: Runtime> SessionManager<R> {
                     return Err(SessionError::Malformed);
                 };
                 let destination_id = lease_set.header.destination.id();
+                let key = DestinationId::from(key);
+
+                if key != destination_id {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?destination_id,
+                        ?key,
+                        "key/lease set id mismatch for database store",
+                    );
+                    return Err(SessionError::InvalidKey);
+                }
 
                 match self.pending.get_mut(&destination_id) {
                     None => {

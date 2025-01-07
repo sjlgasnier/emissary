@@ -125,7 +125,8 @@ impl<R: Runtime> KeyContext<R> {
     /// https://geti2p.net/spec/ecies#f-kdfs-for-new-session-message
     pub fn create_outbound_session(
         &mut self,
-        destination_id: DestinationId,
+        local: DestinationId,
+        remote: DestinationId,
         remote_public_key: &StaticPublicKey,
         lease_set: Bytes,
         payload: &[u8],
@@ -140,14 +141,14 @@ impl<R: Runtime> KeyContext<R> {
         // this garlic message is wrapped inside a `NewSession` message
         // and sent to remote
         let database_store = DatabaseStoreBuilder::new(
-            Bytes::from(destination_id.to_vec()),
+            Bytes::from(local.to_vec()),
             DatabaseStoreKind::LeaseSet2 {
                 lease_set: lease_set.clone(),
             },
         )
         .build();
 
-        let hash = destination_id.to_vec();
+        let hash = remote.to_vec();
         let payload = GarlicMessageBuilder::default()
             .with_date_time(R::time_since_epoch().as_secs() as u32)
             .with_garlic_clove(
@@ -278,7 +279,7 @@ impl<R: Runtime> KeyContext<R> {
 
         (
             OutboundSession::new(
-                destination_id,
+                remote,
                 state,
                 self.private_key.clone(),
                 private_key,

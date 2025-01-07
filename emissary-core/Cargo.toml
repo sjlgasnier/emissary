@@ -42,7 +42,6 @@ x25519-dalek = { workspace = true, features = ["reusable_secrets", "static_secre
 
 [dev-dependencies]
 futures-io = "0.3.31"
-once_cell = "1.19.0"
 
 # workspace dependencies
 emissary-util = { path = "../emissary-util", features = ["tokio"] }
@@ -52,7 +51,7 @@ rand = { workspace = true }
 tokio-util = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
-yosemite = "0.3.0"
+yosemite = { workspace = true }
 
 [features]
 default = ["std"]

@@ -181,6 +181,9 @@ pub struct Destination<R: Runtime> {
     /// Handle to destination's [`TunnelPool`].
     tunnel_pool_handle: TunnelPoolHandle,
 
+    /// Is the destination unpublished, i.e., does the lease set get published to `NetDb`.
+    unpublished: bool,
+
     /// Waker.
     waker: Option<Waker>,
 }
@@ -198,14 +201,19 @@ impl<R: Runtime> Destination<R> {
         tunnel_pool_handle: TunnelPoolHandle,
         outbound_tunnels: Vec<TunnelId>,
         inbound_tunnels: Vec<Lease>,
+        unpublished: bool,
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
             inbound_tunnels,
             lease_set: lease_set.clone(),
-            lease_set_publish_timer: LeaseSetPublishTimer::new::<R>(),
-            noise: NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
+            lease_set_publish_timer: if unpublished {
+                LeaseSetPublishTimer::Inactive
+            } else {
+                LeaseSetPublishTimer::new::<R>()
+            },
             netdb_handle,
+            noise: NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
             outbound_tunnels,
             pending_inbound: Vec::new(),
             pending_queries: HashSet::new(),
@@ -214,6 +222,7 @@ impl<R: Runtime> Destination<R> {
             remote_destinations: HashMap::new(),
             session_manager: SessionManager::new(destination_id, private_key, lease_set),
             tunnel_pool_handle,
+            unpublished,
             waker: None,
         }
     }
@@ -537,14 +546,23 @@ impl<R: Runtime> Destination<R> {
 
     /// Attempt to publish new lease set to `NetDb`.
     pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
+        // store our new lease set proactively to `SessionManager` so it can be given to all active
+        // session right away while publishing the new lease set to NetDb in the background
+        self.session_manager.set_local_leaseset(lease_set.clone());
+
+        if self.unpublished {
+            tracing::debug!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "destination is unpublished, skipping lease set store to netdb",
+            );
+            return;
+        }
+
         let netdb_handle = self.netdb_handle.clone();
         let tunnel_sender = self.tunnel_pool_handle.sender().clone();
         let local = self.destination_id.clone();
         let noise = self.noise.clone();
-
-        // store our new lease set proactively to `SessionManager` so it can be given to all active
-        // session right away while publishing the new lease set to NetDb in the background
-        self.session_manager.set_local_leaseset(lease_set.clone());
 
         // attempt to get an outbound tunnel for sending the database store message
         //
@@ -1000,6 +1018,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // insert dummy lease set for `remote` into `Destination`
@@ -1023,6 +1042,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // query lease set and verify it's not found and that a query has been started
@@ -1049,6 +1069,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // query lease set and verify it's not found and that a query has been started
@@ -1081,6 +1102,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // spam the netdb handle full of queries
@@ -1125,6 +1147,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         destination.send_message(&DestinationId::random(), vec![1, 2, 3, 4]).unwrap();
@@ -1145,6 +1168,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // new inbound tunnel built
@@ -1198,6 +1222,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // set lease set timer to a more sensible value
@@ -1253,6 +1278,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // set lease set timer to a more sensible value
@@ -1431,6 +1457,7 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
+            false,
         );
 
         // set lease set timer to a more sensible value
@@ -1584,6 +1611,84 @@ mod tests {
         match tokio::time::timeout(Duration::from_secs(15), destination.next()).await {
             Err(_) => {}
             res => tracing::warn!("unexpected result = {res:?}"),
+        }
+        assert!(destination.pending_storage_verifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unpublished_destination() {
+        let (netdb_handle, _rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
+            num_inbound: 3usize,
+            ..Default::default()
+        });
+        let destination_id = DestinationId::random();
+        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+        let dest = Dest::new::<MockRuntime>(signing_key.public());
+        let mut destination = Destination::<MockRuntime>::new(
+            destination_id.clone(),
+            encryption_key.clone(),
+            Bytes::new(),
+            netdb_handle.clone(),
+            tp_handle,
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+
+        assert!(std::matches!(
+            destination.lease_set_publish_timer,
+            LeaseSetPublishTimer::Inactive
+        ));
+
+        // add one outbound tunnel
+        tp_tx
+            .send(TunnelPoolEvent::OutboundTunnelBuilt {
+                tunnel_id: TunnelId::random(),
+            })
+            .await
+            .unwrap();
+
+        // issue events for three new inbound tunnels
+        for _ in 0..3 {
+            tp_tx
+                .send(TunnelPoolEvent::InboundTunnelBuilt {
+                    tunnel_id: TunnelId::random(),
+                    lease: Lease {
+                        router_id: RouterId::random(),
+                        tunnel_id: TunnelId::random(),
+                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        assert!(destination.pending_storage_verifications.is_empty());
+
+        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            DestinationEvent::CreateLeaseSet { leases } => {
+                let lease_set = Bytes::from(
+                    LeaseSet2 {
+                        header: LeaseSet2Header {
+                            destination: dest.clone(),
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
+                            expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                        },
+                        public_keys: vec![encryption_key.public()],
+                        leases,
+                    }
+                    .serialize(&signing_key),
+                );
+
+                destination.publish_lease_set(Bytes::from(destination_id.to_vec()), lease_set);
+            }
+            _ => panic!("invalid event"),
         }
         assert!(destination.pending_storage_verifications.is_empty());
     }

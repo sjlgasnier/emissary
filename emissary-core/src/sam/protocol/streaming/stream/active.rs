@@ -94,7 +94,7 @@ const EXP_GROWTH_STOP_THRESHOLD: usize = 64;
 const MTU_SIZE: usize = 1812;
 
 /// Stream event.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub enum StreamEvent {
     /// Streaming packet received from remote.
     Packet {
@@ -103,13 +103,8 @@ pub enum StreamEvent {
     },
 
     /// [`StreamManager`] has asked the stream to be shut down.
+    #[default]
     ShutDown,
-}
-
-impl Default for StreamEvent {
-    fn default() -> Self {
-        StreamEvent::ShutDown
-    }
 }
 
 /// Measured RTT.
@@ -768,6 +763,7 @@ impl<R: Runtime> Stream<R> {
                 remote = %self.remote,
                 recv_id = ?self.recv_stream_id,
                 send_id = ?self.send_stream_id,
+                payload_len = ?payload.len(),
                 "remote sent `CLOSE`",
             );
 

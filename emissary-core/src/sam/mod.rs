@@ -26,7 +26,7 @@ use crate::{
     primitives::{DestinationId, Str},
     runtime::{JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
-        parser::Datagram,
+        parser::{Datagram, HostKind},
         pending::{
             connection::{ConnectionKind, PendingSamConnection},
             session::{PendingSamSession, SamSessionContext},
@@ -220,7 +220,7 @@ impl<R: Runtime> SamServer<R> {
 
         tracing::info!(
             target: LOG_TARGET,
-            ?host,
+            %host,
             tcp_port = ?listener.local_address().map(|address| address.port()),
             udp_port = ?socket.local_address().map(|address| address.port()),
             "starting sam server",
@@ -457,26 +457,52 @@ impl<R: Runtime> Future for SamServer<R> {
                     ConnectionKind::Stream {
                         session_id,
                         socket,
-                        destination,
+                        host,
                         options,
                         ..
-                    } => {
-                        if let Err(error) = this.active_sessions.send_command(
-                            &session_id,
-                            SamSessionCommand::Connect {
-                                socket,
-                                destination,
-                                options,
-                            },
-                        ) {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                %session_id,
-                                ?error,
-                                "failed to send `STREAM CONNECT` to active session",
-                            )
+                    } => match host {
+                        HostKind::Destination { destination } => {
+                            if let Err(error) = this.active_sessions.send_command(
+                                &session_id,
+                                SamSessionCommand::Connect {
+                                    socket,
+                                    destination_id: destination.id(),
+                                    options,
+                                },
+                            ) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %session_id,
+                                    ?error,
+                                    "failed to send `STREAM CONNECT` to active session",
+                                )
+                            }
                         }
-                    }
+                        HostKind::B32Host { destination_id } => {
+                            if let Err(error) = this.active_sessions.send_command(
+                                &session_id,
+                                SamSessionCommand::Connect {
+                                    socket,
+                                    destination_id,
+                                    options,
+                                },
+                            ) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %session_id,
+                                    ?error,
+                                    "failed to send `STREAM CONNECT` to active session",
+                                )
+                            }
+                        }
+                        HostKind::Host { host } => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                %host,
+                                "lookup host",
+                            );
+                        }
+                    },
                     ConnectionKind::Accept {
                         session_id,
                         socket,

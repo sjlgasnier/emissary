@@ -16,7 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{cli::Arguments, error::Error, LOG_TARGET};
+use crate::{
+    cli::{Arguments, HttpProxyOptions},
+    error::Error,
+    LOG_TARGET,
+};
 
 use home::home_dir;
 use rand::{rngs::OsRng, RngCore};
@@ -54,7 +58,7 @@ struct ExploratoryConfig {
 struct Ntcp2Config {
     port: u16,
     host: Option<Ipv4Addr>,
-    published: Option<bool>,
+    publish: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,17 +79,23 @@ pub struct ReseedConfig {
     pub hosts: Option<Vec<String>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HttpProxyConfig {
+    pub port: u16,
+    pub host: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
-    disable_metrics: bool,
-    metrics_server_port: Option<u16>,
+    disable: bool,
+    port: Option<u16>,
 }
 
 impl From<MetricsConfig> for emissary_core::MetricsConfig {
     fn from(value: MetricsConfig) -> Self {
         emissary_core::MetricsConfig {
-            disable_metrics: value.disable_metrics,
-            metrics_server_port: value.metrics_server_port,
+            disable_metrics: value.disable,
+            metrics_server_port: value.port,
         }
     }
 }
@@ -98,6 +108,8 @@ struct EmissaryConfig {
     exploratory: Option<ExploratoryConfig>,
     #[serde(default)]
     floodfill: bool,
+    #[serde(rename = "http-proxy")]
+    http_proxy: Option<HttpProxyConfig>,
     i2cp: Option<I2cpConfig>,
     #[serde(default)]
     insecure_tunnels: bool,
@@ -152,6 +164,9 @@ pub struct Config {
 
     /// Router info.
     pub router_info: Option<Vec<u8>>,
+
+    /// HTTP proxy config.
+    pub http_proxy: Option<HttpProxyConfig>,
 
     /// Router info.
     pub routers: Vec<Vec<u8>>,
@@ -388,18 +403,22 @@ impl Config {
             caps: None,
             exploratory: None,
             floodfill: false,
+            http_proxy: Some(HttpProxyConfig {
+                host: "127.0.0.1".to_string(),
+                port: 4444u16,
+            }),
             i2cp: Some(I2cpConfig { port: 7654 }),
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
-                disable_metrics: false,
-                metrics_server_port: None,
+                disable: false,
+                port: None,
             }),
             net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
                 host: None,
-                published: Some(false),
+                publish: Some(false),
             }),
             sam: Some(SamConfig {
                 tcp_port: 7656,
@@ -424,12 +443,16 @@ impl Config {
             caps: None,
             exploratory: None,
             floodfill: false,
+            http_proxy: Some(HttpProxyConfig {
+                host: "127.0.0.1".to_string(),
+                port: 4444u16,
+            }),
             i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
-                disable_metrics: false,
-                metrics_server_port: None,
+                disable: false,
+                port: None,
             }),
             net_id: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
@@ -437,7 +460,7 @@ impl Config {
                 host: Some("127.0.0.1".parse().expect("valid address")),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
-                published: false,
+                publish: false,
             }),
             profiles: Vec::new(),
             reseed: ReseedConfig {
@@ -474,18 +497,22 @@ impl Config {
                     caps: None,
                     exploratory: None,
                     floodfill: false,
+                    http_proxy: Some(HttpProxyConfig {
+                        host: "127.0.0.1".to_string(),
+                        port: 4444u16,
+                    }),
                     i2cp: Some(I2cpConfig { port: 7654 }),
                     insecure_tunnels: false,
                     log: None,
                     metrics: Some(MetricsConfig {
-                        disable_metrics: false,
-                        metrics_server_port: None,
+                        disable: false,
+                        port: None,
                     }),
                     net_id: None,
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
-                        published: Some(false),
+                        publish: Some(false),
                     }),
                     reseed: None,
                     sam: Some(SamConfig {
@@ -514,6 +541,7 @@ impl Config {
                 outbound_count: config.outbound_count,
             }),
             floodfill: config.floodfill,
+            http_proxy: config.http_proxy,
             i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
             insecure_tunnels: config.insecure_tunnels,
             log: config.log,
@@ -522,7 +550,7 @@ impl Config {
             ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
                 host: config.host,
-                published: config.published.unwrap_or(false),
+                publish: config.publish.unwrap_or(false),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
@@ -633,14 +661,14 @@ impl Config {
         ) {
             (Some(true), _) => {
                 self.metrics = Some(MetricsConfig {
-                    disable_metrics: true,
-                    metrics_server_port: None,
+                    disable: true,
+                    port: None,
                 });
             }
             (Some(false), Some(port)) =>
                 self.metrics = Some(MetricsConfig {
-                    disable_metrics: false,
-                    metrics_server_port: Some(port),
+                    disable: false,
+                    port: Some(port),
                 }),
             _ => {}
         }
@@ -666,6 +694,37 @@ impl Config {
 
         if let Some(hosts) = &arguments.reseed.reseed_hosts {
             self.reseed.hosts = Some(hosts.clone());
+        }
+
+        match (&mut self.http_proxy, &arguments.http_proxy) {
+            (
+                Some(config),
+                HttpProxyOptions {
+                    http_proxy_port,
+                    http_proxy_host,
+                },
+            ) => {
+                if let Some(port) = http_proxy_port {
+                    config.port = *port;
+                }
+
+                if let Some(host) = &http_proxy_host {
+                    config.host = host.clone();
+                }
+            }
+            (
+                None,
+                HttpProxyOptions {
+                    http_proxy_port: Some(port),
+                    http_proxy_host: Some(host),
+                },
+            ) => {
+                self.http_proxy = Some(HttpProxyConfig {
+                    port: *port,
+                    host: host.clone(),
+                });
+            }
+            _ => {}
         }
 
         self.exploratory = match &mut self.exploratory {
@@ -775,6 +834,7 @@ mod tests {
             caps: None,
             exploratory: None,
             floodfill: false,
+            http_proxy: None,
             i2cp: Some(I2cpConfig { port: 0u16 }),
             insecure_tunnels: false,
             log: None,
@@ -783,7 +843,7 @@ mod tests {
             ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
-                published: None,
+                publish: None,
             }),
             reseed: None,
             sam: None,

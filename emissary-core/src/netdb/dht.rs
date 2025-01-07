@@ -101,3 +101,59 @@ impl<R: Runtime> Dht<R> {
         self.routing_table.closest_with_ignore(target, limit, ignore)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::{
+        crypto::{base32_decode, base64_decode},
+        runtime::mock::MockRuntime,
+    };
+
+    #[test]
+    fn lookup() {
+        let routers = HashSet::from_iter([
+            RouterId::from(&base64_decode("4wlqrFG46mv7ujZi18KwEf9uJz2MgOIebdMMxDHsh~0=").unwrap()),
+            RouterId::from(&base64_decode("909NkRdvZz4UnYKrEdkcPR0-nyjgIyXfcltdus3KbvI=").unwrap()),
+            RouterId::from(&base64_decode("9FpLdQFPuslwleztm87UKZm9voRCErVkC5tQIzTIveE=").unwrap()),
+            RouterId::from(&base64_decode("A27bo5gy~L8C9dMPm24YNVkQkkPUqr3jz74-zkHjr4E=").unwrap()),
+            RouterId::from(&base64_decode("AFHNc~4qEeDC0pX35aKVZXlJYejqXlwIavJkb51X7Hw=").unwrap()),
+            RouterId::from(&base64_decode("gOcHmAy4wEnAwiB5MGdVZUFMSd8R4xVXShLlLMK33ak=").unwrap()),
+            RouterId::from(&base64_decode("-HrTE27w0UKFx98GgdKhZDtNzFAaqquctMvuUjwqKnw=").unwrap()),
+            RouterId::from(&base64_decode("JT58CgCdJNk9Y9PiykRx7wz9cZIEI7a68sDNV8MBsLk=").unwrap()),
+            RouterId::from(&base64_decode("o6~ANVCIdIiUomPN-GxHscI6KetllgsecHFFWNIzFYM=").unwrap()),
+            RouterId::from(&base64_decode("o6Ax4-AapSSlKGTzDW8R6qUldj7sg9AszSYlvTxApwI=").unwrap()),
+            RouterId::from(&base64_decode("O8Ih-eljywJJ-mQpn4Al1y~GQKU25nvlPRzktoeRnPQ=").unwrap()),
+            RouterId::from(&base64_decode("o8qvvGZroVu1Jlo-9ICTamn5t8XlnNq49oJ2QywLVUQ=").unwrap()),
+            RouterId::from(&base64_decode("QRbIdWrPvAp58Qf~asFdm1s-oz9NDmwimu61pndVpNY=").unwrap()),
+            RouterId::from(&base64_decode("QVGqliH7Pdye7P7UAtM~fKQIfjKOzKbMVvhdKVSGlQ8=").unwrap()),
+            RouterId::from(&base64_decode("x4Q9dpbvHfyUuIhK9xDiy1XL9lvrpe9Kmmy9Gg~wFeQ=").unwrap()),
+        ]);
+        let mut dht = Dht::<MockRuntime>::new(
+            RouterId::random(),
+            routers,
+            MockRuntime::register_metrics(Vec::new(), None),
+        );
+
+        let key = Bytes::from(
+            base32_decode("shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa").unwrap(),
+        );
+        let target = Key::from(Sha256::new().update(&key).update("20250105").finalize());
+        let closest = dht.routing_table.closest(target, 3usize).collect::<Vec<_>>();
+
+        assert_eq!(
+            closest[0],
+            RouterId::from(&base64_decode("o6~ANVCIdIiUomPN-GxHscI6KetllgsecHFFWNIzFYM=").unwrap())
+        );
+        assert_eq!(
+            closest[1],
+            RouterId::from(&base64_decode("o6Ax4-AapSSlKGTzDW8R6qUldj7sg9AszSYlvTxApwI=").unwrap())
+        );
+        assert_eq!(
+            closest[2],
+            RouterId::from(&base64_decode("o8qvvGZroVu1Jlo-9ICTamn5t8XlnNq49oJ2QywLVUQ=").unwrap())
+        );
+    }
+}

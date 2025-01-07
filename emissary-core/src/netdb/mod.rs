@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base32_encode, StaticPublicKey},
+    crypto::{base32_encode, base64_encode, StaticPublicKey},
     error::{Error, QueryError},
     i2np::{
         database::{
@@ -527,10 +527,10 @@ impl<R: Runtime> NetDb<R> {
                 "connection closed",
             ),
             Some(_) => {
-                tracing::debug!(
+                tracing::trace!(
                     target: LOG_TARGET,
                     %router_id,
-                    "floodfill disconnected",
+                    "connection closed",
                 );
                 self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
             }
@@ -565,7 +565,11 @@ impl<R: Runtime> NetDb<R> {
                     "failed to connect to router",
                 ),
                 Ok(()) => {
-                    tracing::debug!(target: LOG_TARGET, %router_id, "staring to dial router");
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "starting to dial router",
+                    );
 
                     self.routers.insert(
                         router_id.clone(),
@@ -576,12 +580,9 @@ impl<R: Runtime> NetDb<R> {
                 }
             },
             Some(RouterState::Dialing { pending_messages }) => {
-                tracing::debug!(target: LOG_TARGET, %router_id, "router is already being dialed");
                 pending_messages.push(message.clone());
             }
             Some(RouterState::Connected) => {
-                tracing::debug!(target: LOG_TARGET, %router_id, "router is connected, send message");
-
                 if let Err(error) = self.service.send(router_id, message.clone().into_inner()) {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -649,6 +650,9 @@ impl<R: Runtime> NetDb<R> {
                 Duration::from_millis(*router_info.published.date()),
             ),
         );
+        if router_info.is_floodfill() {
+            self.floodfill_dht.add_router(router_id.clone());
+        }
         self.profile_storage.add_router(router_info);
         self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
 
@@ -1171,12 +1175,14 @@ impl<R: Runtime> NetDb<R> {
                         DatabaseStorePayload::LeaseSet2 { lease_set } if self.floodfill => {
                             self.on_lease_set_store(key, reply, &message.payload, lease_set);
                         }
-                        DatabaseStorePayload::RouterInfo { .. } => tracing::trace!(
+                        DatabaseStorePayload::RouterInfo { router_info } => tracing::trace!(
                             target: LOG_TARGET,
-                            "router info received",
+                            router_id = %router_info.identity.id(),
+                            "ignoring router info database store",
                         ),
-                        DatabaseStorePayload::LeaseSet2 { .. } => tracing::warn!(
+                        DatabaseStorePayload::LeaseSet2 { lease_set } => tracing::warn!(
                             target: LOG_TARGET,
+                            destination_id = %lease_set.header.destination.id(),
                             "ignoring lease set database store",
                         ),
                     },
@@ -1220,6 +1226,9 @@ impl<R: Runtime> NetDb<R> {
                                 return Ok(());
                             }
 
+                            if router_info.is_floodfill() {
+                                self.floodfill_dht.add_router(router_id.clone());
+                            }
                             self.profile_storage.add_router(router_info);
                             self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
                         }
@@ -1272,70 +1281,77 @@ impl<R: Runtime> NetDb<R> {
                         );
                         Error::InvalidData
                     })?;
+                let router_id = RouterId::from(from);
 
                 match self.active.remove(&key) {
                     None => {}
                     Some(QueryKind::Exploration) => {
-                        let router_id = RouterId::from(from);
-
                         tracing::trace!(
                             target: LOG_TARGET,
                             %router_id,
                             num_routers = ?routers.len(),
                             "router exploration succeeded, send database lookups",
                         );
-
-                        // filter out routers we already know about and send database lookup queries
-                        // for the rest of routers
-                        routers
-                            .into_iter()
-                            .filter(|router_id| {
-                                self.profile_storage.get(&router_id).is_none()
-                                    && router_id != &self.local_router_id
-                            })
-                            .map(|router_id| {
-                                (
-                                    Bytes::from(router_id.to_vec()),
-                                    MessageBuilder::short()
-                                        .with_message_type(MessageType::DatabaseLookup)
-                                        .with_message_id(R::rng().next_u32())
-                                        .with_expiration(
-                                            R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                        )
-                                        .with_payload(
-                                            &DatabaseLookupBuilder::new(
-                                                Bytes::from(router_id.to_vec()),
-                                                LookupType::Router,
-                                            )
-                                            .with_reply_type(ReplyType::Router {
-                                                router_id: self.local_router_id.clone(),
-                                            })
-                                            .build(),
-                                        )
-                                        .build(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .for_each(|(key, message)| {
-                                self.active.insert(key.clone(), QueryKind::Router);
-                                self.query_timers.push(async move {
-                                    R::delay(QUERY_TIMEOUT).await;
-                                    key
-                                });
-                                self.send_message(
-                                    &[router_id.clone()],
-                                    MessageKind::NonExpiring { message },
-                                );
-                            });
                     }
-                    Some(kind) => tracing::debug!(
+                    Some(QueryKind::Leaseset { tx }) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            key = ?base32_encode(key),
+                            "lease set lookup failed",
+                        );
+
+                        let _ = tx.send(Err(QueryError::ValueNotFound));
+                    }
+                    Some(QueryKind::Router) => tracing::debug!(
                         target: LOG_TARGET,
-                        key = ?base32_encode(key),
-                        ?kind,
-                        "database lookup failed",
+                        %router_id,
+                        key = ?base64_encode(key),
+                        "router info lookup failed",
                     ),
                 }
+
+                // filter out routers we already know about and send database lookup queries
+                // for the rest of routers
+                routers
+                    .into_iter()
+                    .filter(|router_id| {
+                        self.profile_storage.get(router_id).is_none()
+                            && router_id != &self.local_router_id
+                    })
+                    .map(|router_id| {
+                        (
+                            Bytes::from(router_id.to_vec()),
+                            MessageBuilder::short()
+                                .with_message_type(MessageType::DatabaseLookup)
+                                .with_message_id(R::rng().next_u32())
+                                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                                .with_payload(
+                                    &DatabaseLookupBuilder::new(
+                                        Bytes::from(router_id.to_vec()),
+                                        LookupType::Router,
+                                    )
+                                    .with_reply_type(ReplyType::Router {
+                                        router_id: self.local_router_id.clone(),
+                                    })
+                                    .build(),
+                                )
+                                .build(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .for_each(|(key, message)| {
+                        self.active.insert(key.clone(), QueryKind::Router);
+                        self.query_timers.push(async move {
+                            R::delay(QUERY_TIMEOUT).await;
+                            key
+                        });
+                        self.send_message(
+                            &[router_id.clone()],
+                            MessageKind::NonExpiring { message },
+                        );
+                    });
             }
             MessageType::DeliveryStatus => {}
             message_type => tracing::warn!(
@@ -1349,7 +1365,7 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Query `LeaseSet2` under `key` from `NetDb` and return result to caller via `tx`
-    fn on_query_leaseset(
+    fn on_query_lease_set(
         &mut self,
         key: Bytes,
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
@@ -1360,7 +1376,7 @@ impl<R: Runtime> NetDb<R> {
             target: LOG_TARGET,
             key = ?base32_encode(&key),
             num_floodfills = ?floodfills.len(),
-            "query leaseset",
+            "query lease set",
         );
 
         let Some(Lease {
@@ -1621,7 +1637,7 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(NetDbAction::QueryLeaseSet2 { key, tx })) =>
-                    self.on_query_leaseset(key, tx),
+                    self.on_query_lease_set(key, tx),
                 Poll::Ready(Some(NetDbAction::GetClosestFloodfills { key, tx })) =>
                     self.on_get_closest_floodfills(key, tx),
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
@@ -1637,7 +1653,7 @@ impl<R: Runtime> Future for NetDb<R> {
                         QueryKind::Leaseset { tx } => {
                             tracing::debug!(
                                 target: LOG_TARGET,
-                                key = ?key[..4],
+                                key = %base32_encode(&key),
                                 "leaseset query timed out",
                             );
 
@@ -1649,11 +1665,7 @@ impl<R: Runtime> Future for NetDb<R> {
                             "query timed out",
                         ),
                     },
-                    None => tracing::trace!(
-                        target: LOG_TARGET,
-                        key = ?key[..4],
-                        "active query doesnt exist",
-                    ),
+                    None => {}
                 },
             }
         }

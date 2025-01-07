@@ -16,7 +16,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{cli::Arguments, config::Config, error::Error, signal::SignalHandler};
+use crate::{
+    cli::Arguments, config::Config, error::Error, proxy::http::HttpProxy, signal::SignalHandler,
+};
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -30,6 +32,7 @@ mod cli;
 mod config;
 mod error;
 mod logger;
+mod proxy;
 mod signal;
 
 /// Logging target for the file.
@@ -98,15 +101,48 @@ async fn main() -> anyhow::Result<()> {
                 ?error,
                 "failed to reseed, trying to start router anyway",
             ),
-        };
+        }
     }
 
     let path = config.base_path.clone();
+    let http = config.http_proxy.take();
     let (mut router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
 
-    // TODO: ugly
-    let mut file = File::create(path.join("router.info"))?;
-    file.write_all(&local_router_info)?;
+    // save newest router info to disk
+    File::create(path.join("router.info"))?.write_all(&local_router_info)?;
+
+    // start http proxy if it was enabled
+    //
+    // sam must also be enabled for the http proxy to work
+    match (http, router.protocol_address_info().sam_tcp) {
+        (Some(config), Some(address)) => {
+            tokio::spawn(async move {
+                match HttpProxy::new(config, address.port()).await {
+                    Ok(proxy) => {
+                        tokio::spawn(async move {
+                            if let Err(error) = proxy.run().await {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    ?error,
+                                    "http proxy exited",
+                                );
+                            }
+                        });
+                    }
+                    Err(error) => tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to start http proxy",
+                    ),
+                }
+            });
+        }
+        (Some(_), None) => tracing::warn!(
+            target: LOG_TARGET,
+            "sam not enabled, cannot start http proxy",
+        ),
+        (_, _) => {}
+    }
 
     loop {
         tokio::select! {

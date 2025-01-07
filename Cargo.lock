@@ -878,6 +878,8 @@ dependencies = [
  "flate2",
  "futures",
  "home",
+ "http",
+ "httparse",
  "metrics",
  "metrics-exporter-prometheus",
  "rand",
@@ -890,7 +892,9 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "x25519-dalek",
+ "yosemite",
 ]
 
 [[package]]
@@ -917,7 +921,6 @@ dependencies = [
  "hmac",
  "lazy_static",
  "nom",
- "once_cell",
  "parking_lot",
  "rand",
  "rand_core",
@@ -1313,9 +1316,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b9ddb458710bc376481b842f5da65cdf31522de232c1ca8146abce2a358258"
+checksum = "f16ca2af56261c99fba8bac40a10251ce8188205a4c448fbb745a2e4daa76fea"
 dependencies = [
  "bytes",
  "fnv",
@@ -1347,9 +1350,9 @@ dependencies = [
 
 [[package]]
 name = "httparse"
-version = "1.9.4"
+version = "1.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fcc0b4a115bf80b728eb8ea024ad5bd707b615bfed49e0665b6e0f86fd082d9"
+checksum = "7d71d3574edd2771538b901e6549113b4006ece66150fb69c0fb6d9a2adae946"
 
 [[package]]
 name = "httpdate"
@@ -1359,9 +1362,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "1.4.1"
+version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50dfd22e0e76d0f662d429a5f80fcaf3855009297eab6a0a9f8543834744ba05"
+checksum = "256fb8d4bd6413123cc9d91832d78325c48ff41677595be797d90f42969beae0"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -3494,9 +3497,9 @@ dependencies = [
 
 [[package]]
 name = "yosemite"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e88cd3105328a0bf1e0041377a8c33daae21662e9cb96c4dc33778062f16e1af"
+checksum = "1ca5611dd23a6378adff89071bbb982dfe34554197e54f0c53f54a13fd11553b"
 dependencies = [
  "futures",
  "nom",

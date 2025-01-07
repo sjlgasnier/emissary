@@ -5,10 +5,10 @@ version = "0.1.0"
 
 [dependencies]
 util = { path = "../../util" }
-yosemite = "0.3.0"
 
 # workspace dependencies
 futures = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
+yosemite = { workspace = true }

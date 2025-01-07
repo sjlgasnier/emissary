@@ -16,17 +16,35 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("I/O error: `{0:?}`")]
-    Io(#[from] std::io::Error),
+#[derive(Debug, PartialEq, Eq)]
+pub enum HttpError {
+    /// Invalid, non-.i2p host.
+    InvalidHost,
 
-    #[error("Invalid data")]
-    InvalidData,
+    // Invalid path.
+    InvalidPath,
 
-    #[error("Custom error: `{0}`")]
-    Custom(String),
+    /// I/O error.
+    Io(std::io::ErrorKind),
 
-    #[error("Yosemite: `{0}`")]
-    Yosemite(#[from] yosemite::Error),
+    /// Parse error.
+    Malformed,
+
+    /// Method missing.
+    MethodMissing,
+
+    /// Method not supported.
+    MethodNotSupported(String),
+}
+
+impl From<std::io::Error> for HttpError {
+    fn from(value: std::io::Error) -> Self {
+        HttpError::Io(value.kind())
+    }
+}
+
+impl From<httparse::Error> for HttpError {
+    fn from(_: httparse::Error) -> Self {
+        HttpError::Malformed
+    }
 }

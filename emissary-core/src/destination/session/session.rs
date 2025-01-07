@@ -338,6 +338,7 @@ impl<R: Runtime> PendingSession<R> {
                 );
 
                 let (session, message) = self.key_context.create_outbound_session(
+                    self.local.clone(),
                     self.remote.clone(),
                     &remote_public_key,
                     lease_set,
