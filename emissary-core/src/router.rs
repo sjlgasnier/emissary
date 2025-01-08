@@ -102,7 +102,7 @@ impl<R: Runtime> Router<R> {
             Ntcp2Transport::<R>::initialize(config.ntcp2.take()).await?;
 
         // attempt to initialize the ssu2 transport from provided config
-        let (ssu2_context, _ssu2_address) =
+        let (ssu2_context, ssu2_address) =
             Ssu2Transport::<R>::initialize(config.ssu2.take()).await?;
 
         if ntcp2_context.is_none() && ssu2_context.is_some() {
@@ -130,6 +130,7 @@ impl<R: Runtime> Router<R> {
         let local_router_info = RouterInfo::new::<R>(
             &config,
             ntcp2_address,
+            ssu2_address,
             &local_static_key,
             &local_signing_key,
         );

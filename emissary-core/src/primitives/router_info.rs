@@ -26,6 +26,7 @@ use crate::{
     runtime::Runtime,
 };
 
+use bytes::{BufMut, BytesMut};
 use hashbrown::HashMap;
 use nom::{
     error::{make_error, ErrorKind},
@@ -68,6 +69,7 @@ impl RouterInfo {
     pub fn new<R: Runtime>(
         config: &Config,
         ntcp2: Option<RouterAddress>,
+        ssu2: Option<RouterAddress>,
         static_key: &StaticPrivateKey,
         signing_key: &SigningPrivateKey,
     ) -> Self {
@@ -110,7 +112,19 @@ impl RouterInfo {
         let options = Mapping::into_hashmap(vec![net_id, caps_mapping, router_version]);
 
         RouterInfo {
-            addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2.expect("to eixst"))]),
+            addresses: {
+                let mut addresses = HashMap::<TransportKind, RouterAddress>::new();
+
+                if let Some(ntcp2) = ntcp2 {
+                    addresses.insert(TransportKind::Ntcp2, ntcp2);
+                }
+
+                if let Some(ssu2) = ssu2 {
+                    addresses.insert(TransportKind::Ssu2, ssu2);
+                }
+
+                addresses
+            },
             capabilities: Capabilities::parse(&caps).expect("to succeed"),
             identity,
             net_id: config.net_id.unwrap_or(2),
@@ -224,11 +238,14 @@ impl RouterInfo {
         ))
     }
 
-    // TODO: ugliest thing i've seen in my life
+    /// Serialize [`RouterInfo`] into a byte vector.
     pub fn serialize(&self, signing_key: &SigningPrivateKey) -> Vec<u8> {
         let identity = self.identity.serialize();
         let published = self.published.serialize();
-        let ntcp2 = self.addresses.get(&TransportKind::Ntcp2).unwrap().serialize();
+        let maybe_ntcp2 =
+            self.addresses.get(&TransportKind::Ntcp2).map(|address| address.serialize());
+        let maybe_ssu2 =
+            self.addresses.get(&TransportKind::Ssu2).map(|address| address.serialize());
         let options = {
             let mut options = self.options.clone().into_iter().collect::<Vec<_>>();
             options.sort_by(|a, b| a.0.cmp(&b.0));
@@ -239,24 +256,43 @@ impl RouterInfo {
                 .collect::<Vec<_>>()
         };
 
-        let size = identity.len() + published.len() + ntcp2.len() + options.len() + 4 + 64;
-        let mut out = vec![0u8; size];
+        let size = identity
+            .len()
+            .saturating_add(published.len())
+            .saturating_add(1usize) // field for router address count
+            .saturating_add(maybe_ntcp2.as_ref().map_or(0usize, |address| address.len()))
+            .saturating_add(maybe_ssu2.as_ref().map_or(0usize, |address| address.len()))
+            .saturating_add(options.len())
+            .saturating_add(1usize) // psize
+            .saturating_add(2usize) // field for options size
+            .saturating_add(64usize); // signature
 
-        out[..391].copy_from_slice(&identity);
-        out[391..399].copy_from_slice(&published);
-        out[399] = 1;
-        out[400..400 + ntcp2.len()].copy_from_slice(&ntcp2);
-        out[400 + ntcp2.len()] = 0;
+        let mut out = BytesMut::with_capacity(size);
 
-        let mapping_size = (options.len() as u16).to_be_bytes().to_vec();
-        out[400 + ntcp2.len() + 1..400 + ntcp2.len() + 3].copy_from_slice(&mapping_size);
-        out[400 + ntcp2.len() + 3..400 + ntcp2.len() + 3 + options.len()].copy_from_slice(&options);
+        out.put_slice(&identity);
+        out.put_slice(&published);
+
+        match (maybe_ntcp2, maybe_ssu2) {
+            (Some(ntcp2), Some(ssu2)) => {
+                out.put_u8(2u8);
+                out.put_slice(&ntcp2);
+                out.put_slice(&ssu2);
+            }
+            (Some(info), None) | (None, Some(info)) => {
+                out.put_u8(1u8);
+                out.put_slice(&info);
+            }
+            (None, None) => panic!("tried to publish router info with no addresses"),
+        }
+
+        out.put_u8(0u8); // psize
+        out.put_u16(options.len() as u16);
+        out.put_slice(&options);
 
         let signature = signing_key.sign(&out[..size - 64]);
-        out[400 + ntcp2.len() + 3 + options.len()..400 + ntcp2.len() + 3 + options.len() + 64]
-            .copy_from_slice(&signature);
+        out.put_slice(&signature);
 
-        out
+        out.to_vec()
     }
 
     /// Try to parse router information from `bytes`.
@@ -274,12 +310,27 @@ impl RouterInfo {
     /// Router is considered reachable if its caps don't specify otherwise and it has at least one
     /// published address.
     pub fn is_reachable(&self) -> bool {
-        // TODO: add ssu2 support
-        self.capabilities.is_reachable()
-            && self.addresses.get(&TransportKind::Ntcp2).map_or(false, |address| {
-                address.options.get(&Str::from("host")).is_some()
-                    && address.options.get(&Str::from("port")).is_some()
-            })
+        if !self.capabilities.is_reachable() {
+            return false;
+        }
+
+        if let Some(ntcp2) = self.addresses.get(&TransportKind::Ntcp2) {
+            if ntcp2.options.get(&Str::from("host")).is_some()
+                && ntcp2.options.get(&Str::from("port")).is_some()
+            {
+                return true;
+            }
+        }
+
+        if let Some(ssu2) = self.addresses.get(&TransportKind::Ssu2) {
+            if ssu2.options.get(&Str::from("host")).is_some()
+                && ssu2.options.get(&Str::from("port")).is_some()
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Get network ID of the [`RouterInfo`].
@@ -406,7 +457,7 @@ impl RouterInfo {
             iv_bytes
         };
 
-        let ntcp2 = RouterAddress::new_published(
+        let ntcp2 = RouterAddress::new_published_ntcp2(
             ntcp2_key,
             ntcp2_iv,
             ntcp2_port,
@@ -590,7 +641,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
+                RouterAddress::new_published_ntcp2(
                     [1u8; 32],
                     [2u8; 16],
                     8888,
@@ -617,7 +668,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
+                RouterAddress::new_published_ntcp2(
                     [1u8; 32],
                     [2u8; 16],
                     8888,
@@ -644,7 +695,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
+                RouterAddress::new_published_ntcp2(
                     [1u8; 32],
                     [2u8; 16],
                     8888,
@@ -674,7 +725,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
+                RouterAddress::new_published_ntcp2(
                     [1u8; 32],
                     [2u8; 16],
                     8888,
@@ -704,7 +755,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_unpublished([1u8; 32], 8888),
+                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
@@ -729,7 +780,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
+                RouterAddress::new_published_ntcp2(
                     [1u8; 32],
                     [2u8; 16],
                     8888,
@@ -760,7 +811,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published(
+                RouterAddress::new_published_ntcp2(
                     [1u8; 32],
                     [2u8; 16],
                     8888,
@@ -777,5 +828,113 @@ mod tests {
         .serialize(&sgk);
 
         assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn ssu2_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([
+                (
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
+                ),
+                (
+                    TransportKind::Ssu2,
+                    RouterAddress::new_published_ssu2(
+                        [1u8; 32],
+                        [2u8; 32],
+                        8888,
+                        "127.0.0.1".parse().unwrap(),
+                    ),
+                ),
+            ]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LR")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn ntcp2_reachable() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([
+                (
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_published_ntcp2(
+                        [1u8; 32],
+                        [2u8; 16],
+                        8888,
+                        "127.0.0.1".parse().unwrap(),
+                    ),
+                ),
+                (
+                    TransportKind::Ssu2,
+                    RouterAddress::new_published_ssu2(
+                        [1u8; 32],
+                        [2u8; 32],
+                        8888,
+                        "127.0.0.1".parse().unwrap(),
+                    ),
+                ),
+            ]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LR")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(RouterInfo::parse(&serialized).unwrap().is_reachable());
+    }
+
+    #[test]
+    fn both_transports_unpublished() {
+        let (identity, _sk, sgk) = RouterIdentity::random();
+
+        let serialized = RouterInfo {
+            identity,
+            published: Date::new(
+                (MockRuntime::time_since_epoch() - Duration::from_secs(60)).as_millis() as u64,
+            ),
+            addresses: HashMap::from_iter([
+                (
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
+                ),
+                (
+                    TransportKind::Ssu2,
+                    RouterAddress::new_unpublished_ssu2([1u8; 32], [2u8; 32], 8888),
+                ),
+            ]),
+            options: HashMap::from_iter([
+                (Str::from("netId"), Str::from("2")),
+                (Str::from("caps"), Str::from("LR")),
+            ]),
+            net_id: 2,
+            capabilities: Capabilities::parse(&Str::from("LU")).unwrap(),
+        }
+        .serialize(&sgk);
+
+        assert!(!RouterInfo::parse(&serialized).unwrap().is_reachable());
     }
 }

@@ -170,16 +170,20 @@ impl<R: Runtime> Ntcp2Transport<R> {
         })?;
 
         let address = match (config.publish, config.host) {
-            (true, Some(host)) =>
-                RouterAddress::new_published(config.key, config.iv, socket_address.port(), host),
+            (true, Some(host)) => RouterAddress::new_published_ntcp2(
+                config.key,
+                config.iv,
+                socket_address.port(),
+                host,
+            ),
             (true, None) => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     "ntcp2 requested to be published but no host provided",
                 );
-                RouterAddress::new_unpublished(config.key, socket_address.port())
+                RouterAddress::new_unpublished_ntcp2(config.key, socket_address.port())
             }
-            (_, _) => RouterAddress::new_unpublished(config.key, socket_address.port()),
+            (_, _) => RouterAddress::new_unpublished_ntcp2(config.key, socket_address.port()),
         };
 
         Ok((
@@ -378,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn dont_publish_ntcp_host_specified() {
         let config = Some(Ntcp2Config {
-            port: 8888,
+            port: 0u16,
             host: Some("8.8.8.8".parse().unwrap()),
             publish: false,
             key: [0xaa; 32],
@@ -396,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn publish_ntcp_but_no_host() {
         let config = Some(Ntcp2Config {
-            port: 8888,
+            port: 0u16,
             host: None,
             publish: true,
             key: [0xaa; 32],
