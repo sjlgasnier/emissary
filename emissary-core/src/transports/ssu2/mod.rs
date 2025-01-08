@@ -37,6 +37,7 @@ use core::{
     task::{Context, Poll},
 };
 
+mod message;
 mod socket;
 
 /// Logging target for the file.
