@@ -62,6 +62,13 @@ struct Ntcp2Config {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct Ssu2Config {
+    port: u16,
+    host: Option<Ipv4Addr>,
+    publish: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct I2cpConfig {
     port: u16,
 }
@@ -119,6 +126,7 @@ struct EmissaryConfig {
     ntcp2: Option<Ntcp2Config>,
     reseed: Option<ReseedConfig>,
     sam: Option<SamConfig>,
+    ssu2: Option<Ssu2Config>,
 }
 
 /// Router configuration.
@@ -137,6 +145,9 @@ pub struct Config {
 
     /// Should the node be run as a floodfill router.
     pub floodfill: bool,
+
+    /// HTTP proxy config.
+    pub http_proxy: Option<HttpProxyConfig>,
 
     /// I2CP config.
     pub i2cp_config: Option<emissary_core::I2cpConfig>,
@@ -165,9 +176,6 @@ pub struct Config {
     /// Router info.
     pub router_info: Option<Vec<u8>>,
 
-    /// HTTP proxy config.
-    pub http_proxy: Option<HttpProxyConfig>,
-
     /// Router info.
     pub routers: Vec<Vec<u8>>,
 
@@ -176,6 +184,9 @@ pub struct Config {
 
     /// Signing key.
     pub signing_key: [u8; 32],
+
+    /// SSU2 configuration.
+    pub ssu2_config: Option<emissary_core::Ssu2Config>,
 
     /// Static key.
     pub static_key: [u8; 32],
@@ -198,7 +209,7 @@ impl From<Config> for emissary_core::Config {
             routers: val.routers,
             samv3_config: val.sam_config,
             signing_key: Some(val.signing_key),
-            ssu2: None,
+            ssu2: val.ssu2_config,
             static_key: Some(val.static_key),
         }
     }
@@ -269,10 +280,23 @@ impl TryFrom<Option<PathBuf>> for Config {
                 tracing::debug!(
                     target: LOG_TARGET,
                     error = %error.to_string(),
-                    "failed to load ntcp2 iv, regenerating",
+                    "failed to load ntcp2 keys, regenerating",
                 );
 
                 Self::create_ntcp2_keys(path.clone())?
+            }
+        };
+
+        let (ssu2_static_key, ssu2_intro_key) = match Self::load_ssu2_keys(path.clone()) {
+            Ok((key, iv)) => (key, iv),
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    error = %error.to_string(),
+                    "failed to load ssu2 keys, regenerating",
+                );
+
+                Self::create_ssu2_keys(path.clone())?
             }
         };
 
@@ -286,6 +310,8 @@ impl TryFrom<Option<PathBuf>> for Config {
             signing_key,
             ntcp2_key,
             ntcp2_iv,
+            ssu2_static_key,
+            ssu2_intro_key,
             router_config,
             router_info,
         )?;
@@ -310,7 +336,7 @@ impl Config {
         Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes())
     }
 
-    /// Create NTCP2 key and store it on disk.
+    /// Create NTCP2 keys and store them on disk.
     fn create_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
         let key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
         let iv = {
@@ -331,6 +357,27 @@ impl Config {
         }
 
         Ok((TryInto::<[u8; 32]>::try_into(key).expect("to succeed"), iv))
+    }
+
+    /// Create SSU2 keys and store them on disk.
+    fn create_ssu2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 32])> {
+        let static_key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
+        let intro_key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
+
+        // append iv to key and write it to disk
+        {
+            let mut combined = vec![0u8; 32 + 32];
+            combined[..32].copy_from_slice(&static_key);
+            combined[32..].copy_from_slice(&intro_key);
+
+            let mut file = fs::File::create(path.join("ssu2.keys"))?;
+            file.write_all(combined.as_ref())?;
+        }
+
+        Ok((
+            TryInto::<[u8; 32]>::try_into(static_key).expect("to succeed"),
+            TryInto::<[u8; 32]>::try_into(intro_key).expect("to succeed"),
+        ))
     }
 
     /// Save key to disk.
@@ -366,6 +413,22 @@ impl Config {
         ))
     }
 
+    /// Load SSU2 static and introduction keys from disk.
+    fn load_ssu2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 32])> {
+        let key_bytes = {
+            let mut file = fs::File::open(path.join("ssu2.keys"))?;
+            let mut key_bytes = [0u8; 32 + 32];
+            file.read_exact(&mut key_bytes)?;
+
+            key_bytes
+        };
+
+        Ok((
+            TryInto::<[u8; 32]>::try_into(&key_bytes[..32]).expect("to succeed"),
+            TryInto::<[u8; 32]>::try_into(&key_bytes[32..]).expect("to succeed"),
+        ))
+    }
+
     fn load_router_config(path: PathBuf) -> crate::Result<EmissaryConfig> {
         // parse configuration, if it exists
         let mut file = fs::File::open(path.join("router.toml"))?;
@@ -398,6 +461,7 @@ impl Config {
         let static_key = Self::create_static_key(base_path.clone())?;
         let signing_key = Self::create_signing_key(base_path.clone())?;
         let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
+        let (ssu2_static_key, ssu2_intro_key) = Self::create_ssu2_keys(base_path.clone())?;
 
         let config = EmissaryConfig {
             allow_local: false,
@@ -417,6 +481,11 @@ impl Config {
             }),
             net_id: None,
             ntcp2: Some(Ntcp2Config {
+                port: 8888u16,
+                host: None,
+                publish: Some(false),
+            }),
+            ssu2: Some(Ssu2Config {
                 port: 8888u16,
                 host: None,
                 publish: Some(false),
@@ -476,6 +545,13 @@ impl Config {
                 host: String::from("127.0.0.1"),
             }),
             signing_key,
+            ssu2_config: Some(emissary_core::Ssu2Config {
+                port: 8888u16,
+                host: Some("127.0.0.1".parse().expect("valid address")),
+                static_key: ssu2_static_key,
+                intro_key: ssu2_intro_key,
+                publish: false,
+            }),
             static_key,
         })
     }
@@ -487,6 +563,8 @@ impl Config {
         signing_key: [u8; 32],
         ntcp2_key: [u8; 32],
         ntcp2_iv: [u8; 16],
+        ssu2_static_key: [u8; 32],
+        ssu2_intro_key: [u8; 32],
         config: Option<EmissaryConfig>,
         router_info: Option<Vec<u8>>,
     ) -> crate::Result<Self> {
@@ -511,6 +589,11 @@ impl Config {
                     }),
                     net_id: None,
                     ntcp2: Some(Ntcp2Config {
+                        port: 8888u16,
+                        host: None,
+                        publish: Some(false),
+                    }),
+                    ssu2: Some(Ssu2Config {
                         port: 8888u16,
                         host: None,
                         publish: Some(false),
@@ -554,6 +637,13 @@ impl Config {
                 publish: config.publish.unwrap_or(false),
                 key: ntcp2_key,
                 iv: ntcp2_iv,
+            }),
+            ssu2_config: config.ssu2.map(|config| emissary_core::Ssu2Config {
+                port: config.port,
+                host: config.host,
+                publish: config.publish.unwrap_or(false),
+                static_key: ssu2_static_key,
+                intro_key: ssu2_intro_key,
             }),
             profiles: Vec::new(),
             reseed: config.reseed.unwrap_or(ReseedConfig {
@@ -846,6 +936,7 @@ mod tests {
                 host: None,
                 publish: None,
             }),
+            ssu2: None,
             reseed: None,
             sam: None,
         };
