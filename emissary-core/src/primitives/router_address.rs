@@ -192,7 +192,7 @@ impl RouterAddress {
         Self {
             cost: 10,
             expires: Date::new(0),
-            transport: TransportKind::Ntcp2,
+            transport: TransportKind::Ssu2,
             options,
             socket_address: Some(SocketAddr::new(IpAddr::V4(host), port)),
         }

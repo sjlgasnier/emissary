@@ -180,7 +180,7 @@ pub struct ChaCha {
 }
 
 impl ChaCha {
-    /// Create new [`ChachaPoly`] instance with a custom `nonce`.
+    /// Create new [`ChaCha`] instance with a custom `nonce`.
     pub fn with_nonce(key: &[u8], nonce: u64) -> Self {
         let key: [u8; 32] = key.try_into().expect("valid chacha key");
         let key = GenericArray::from(key);
@@ -192,6 +192,22 @@ impl ChaCha {
                 use chacha20::cipher::KeyIvInit;
 
                 let mut cipher = ChaCha20::new(&key, &next_nonce);
+                cipher.seek(64);
+                cipher
+            },
+        }
+    }
+
+    /// Create new [`ChaCha`] instance with a custom IV.
+    pub fn with_iv(key: [u8; 32], iv: [u8; 12]) -> Self {
+        let key = GenericArray::from(key);
+        let iv = GenericArray::from(iv);
+
+        Self {
+            cipher: {
+                use chacha20::cipher::KeyIvInit;
+
+                let mut cipher = ChaCha20::new(&key, &iv);
                 cipher.seek(64);
                 cipher
             },

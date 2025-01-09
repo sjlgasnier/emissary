@@ -105,7 +105,7 @@ impl<R: Runtime> Router<R> {
         let (ssu2_context, ssu2_address) =
             Ssu2Transport::<R>::initialize(config.ssu2.take()).await?;
 
-        if ntcp2_context.is_none() && ssu2_context.is_some() {
+        if ntcp2_context.is_none() && ssu2_context.is_none() {
             tracing::warn!(
                 target: LOG_TARGET,
                 "cannot start router, no active transport protocol",

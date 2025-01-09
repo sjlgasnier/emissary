@@ -32,6 +32,8 @@ use nom::{
     Err, IResult,
 };
 
+use core::fmt;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::message";
 
@@ -96,7 +98,7 @@ impl BlockType {
         }
     }
 
-    fn from_u8(block: u8) -> Option<Self> {
+    pub fn from_u8(block: u8) -> Option<Self> {
         match block {
             0u8 => Some(Self::DateTime),
             1u8 => Some(Self::Options),
@@ -286,6 +288,102 @@ pub enum Block {
     ///
     /// Will be removed once all block types are supported.
     Unsupported,
+}
+
+impl fmt::Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            Self::DateTime { timestamp } =>
+                f.debug_struct("Block::DateTime").field("timestamp", &timestamp).finish(),
+            Self::Options {
+                t_min,
+                t_max,
+                r_min,
+                r_max,
+                t_dmy,
+                r_dmy,
+                t_delay,
+                r_delay,
+            } => f
+                .debug_struct("Block::Options")
+                .field("t_min", &t_min)
+                .field("t_max", &t_max)
+                .field("r_min", &r_min)
+                .field("r_max", &r_max)
+                .field("t_dmy", &t_dmy)
+                .field("r_dmy", &r_dmy)
+                .field("t_delay", &t_delay)
+                .field("r_deay", &r_delay)
+                .finish(),
+            Self::RouterInfo { router_info } =>
+                f.debug_struct("Block::RouterInfo").finish_non_exhaustive(),
+            Self::I2Np { message } =>
+                f.debug_struct("Block::I2NP").field("message", &message).finish(),
+            Self::Termination {
+                num_valid_pkts,
+                reason,
+            } => f
+                .debug_struct("Block::Termination")
+                .field("num_valid_pkts", &num_valid_pkts)
+                .field("reason", &reason)
+                .finish(),
+            Self::Padding => f.debug_struct("Block::Padding").finish(),
+            Self::FirstFragment {
+                message_type,
+                message_id,
+                expiration,
+                fragment,
+            } => f
+                .debug_struct("Block::FirstFragment")
+                .field("message_type", &message_type)
+                .field("message_id", &message_id)
+                .field("expiration", &expiration)
+                .field("fragment_len", &fragment.len())
+                .finish(),
+            Self::FollowOnFragment {
+                last,
+                message_id,
+                fragment_num,
+                fragmet,
+            } => f
+                .debug_struct("Block::FollowOnFragment")
+                .field("last", &last)
+                .field("message_id", &message_id)
+                .field("fragment_num", &fragment_num)
+                .field("fragmet_len", &fragmet.len())
+                .finish(),
+            Self::Termination {
+                num_valid_pkts,
+                reason,
+            } => f
+                .debug_struct("Block::Termination")
+                .field("num_valid_pkts", &num_valid_pkts)
+                .field("reason", &reason)
+                .finish(),
+            Self::Ack {
+                ack_through,
+                num_acks,
+                ranges,
+            } => f
+                .debug_struct("Block::Ack")
+                .field("ack_through", &ack_through)
+                .field("num_acks", &num_acks)
+                .field("ranges", &ranges)
+                .finish(),
+            Self::NewToken { expires, token } => f.debug_struct("Block::NewToken").finish(),
+            Self::PathChallenge { challenge } =>
+                f.debug_struct("Block::PathChallenge").field("challenge", &challenge).finish(),
+            Self::PathResponse { response } =>
+                f.debug_struct("Block::PathResponse").field("response", &response).finish(),
+            Self::FirstPacketNumber { first_pkt_num } => f
+                .debug_struct("Block::FirstPacketNumber")
+                .field("first_pkt_num", &first_pkt_num)
+                .finish(),
+            Self::Congestion { flag } =>
+                f.debug_struct("Block::Congestion").field("flag", &flag).finish(),
+            _ => f.debug_struct("Unsupported").finish(),
+        }
+    }
 }
 
 impl Block {
@@ -590,27 +688,27 @@ impl Block {
         let (rest, block_type) = be_u8(input)?;
 
         match BlockType::from_u8(block_type) {
-            Some(BlockType::DateTime) => Self::parse_date_time(input),
-            Some(BlockType::Options) => Self::parse_options(input),
-            Some(BlockType::RouterInfo) => Self::parse_router_info(input),
-            Some(BlockType::I2Np) => Self::parse_i2np(input),
-            Some(BlockType::FirstFragment) => Self::parse_first_fragment(input),
-            Some(BlockType::FollowOnFragment) => Self::parse_follow_on_fragment(input),
-            Some(BlockType::Termination) => Self::parse_termination(input),
-            Some(BlockType::Ack) => Self::parse_ack(input),
-            Some(BlockType::NewToken) => Self::parse_new_token(input),
-            Some(BlockType::PathChallenge) => Self::parse_path_challenge(input),
-            Some(BlockType::PathResponse) => Self::parse_path_response(input),
-            Some(BlockType::FirstPacketNumber) => Self::parse_first_packet_number(input),
-            Some(BlockType::Congestion) => Self::parse_congestion(input),
-            Some(BlockType::Padding) => Self::parse_padding(input),
+            Some(BlockType::DateTime) => Self::parse_date_time(rest),
+            Some(BlockType::Options) => Self::parse_options(rest),
+            Some(BlockType::RouterInfo) => Self::parse_router_info(rest),
+            Some(BlockType::I2Np) => Self::parse_i2np(rest),
+            Some(BlockType::FirstFragment) => Self::parse_first_fragment(rest),
+            Some(BlockType::FollowOnFragment) => Self::parse_follow_on_fragment(rest),
+            Some(BlockType::Termination) => Self::parse_termination(rest),
+            Some(BlockType::Ack) => Self::parse_ack(rest),
+            Some(BlockType::NewToken) => Self::parse_new_token(rest),
+            Some(BlockType::PathChallenge) => Self::parse_path_challenge(rest),
+            Some(BlockType::PathResponse) => Self::parse_path_response(rest),
+            Some(BlockType::FirstPacketNumber) => Self::parse_first_packet_number(rest),
+            Some(BlockType::Congestion) => Self::parse_congestion(rest),
+            Some(BlockType::Padding) => Self::parse_padding(rest),
             Some(block_type) => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     ?block_type,
                     "ignoring block",
                 );
-                Self::parse_unsupported_block(input)
+                Self::parse_unsupported_block(rest)
             }
             None => {
                 tracing::warn!(
