@@ -358,7 +358,7 @@ impl ShortInboundSession {
                             .unwrap();
                         record[202..218].copy_from_slice(&tag);
                     } else {
-                        ChaCha::with_nonce(tunnel_keys.reply_key(), idx as u64).encrypt(record);
+                        ChaCha::with_nonce(tunnel_keys.reply_key(), idx as u64).encrypt_ref(record);
                     }
                 });
                 self.state = ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys };

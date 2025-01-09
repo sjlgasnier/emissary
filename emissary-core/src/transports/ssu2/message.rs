@@ -21,10 +21,12 @@
 //! https://geti2p.net/spec/ssu2#noise-payload
 
 use crate::{
-    i2np::{Message, MessageType},
+    crypto::chachapoly::{ChaCha, ChaChaPoly},
+    i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
 };
 
+use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -32,7 +34,11 @@ use nom::{
     Err, IResult,
 };
 
-use core::fmt;
+use core::{
+    fmt,
+    net::{IpAddr, SocketAddr},
+    ops::Deref,
+};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::message";
@@ -174,7 +180,7 @@ pub enum Block {
     /// First fragment.
     FirstFragment {
         /// Message type.
-        message_type: MessageType,
+        message_type: I2npMessageType,
 
         /// Message ID.
         message_id: MessageId,
@@ -198,7 +204,7 @@ pub enum Block {
         fragment_num: u8,
 
         /// Fragment of an I2NP message.
-        fragmet: Vec<u8>,
+        fragment: Vec<u8>,
     },
 
     /// Termination.
@@ -240,7 +246,10 @@ pub enum Block {
     },
 
     /// Address.
-    Address {},
+    Address {
+        /// Socket address.
+        address: SocketAddr,
+    },
 
     /// Relay tag request.
     RelayTagRequest {},
@@ -282,7 +291,10 @@ pub enum Block {
     },
 
     /// Padding.
-    Padding,
+    Padding {
+        /// Padding.
+        padding: Vec<u8>,
+    },
 
     /// Unsupported block.
     ///
@@ -327,7 +339,8 @@ impl fmt::Debug for Block {
                 .field("num_valid_pkts", &num_valid_pkts)
                 .field("reason", &reason)
                 .finish(),
-            Self::Padding => f.debug_struct("Block::Padding").finish(),
+            Self::Padding { padding } =>
+                f.debug_struct("Block::Padding").field("padding_len", &padding.len()).finish(),
             Self::FirstFragment {
                 message_type,
                 message_id,
@@ -344,13 +357,13 @@ impl fmt::Debug for Block {
                 last,
                 message_id,
                 fragment_num,
-                fragmet,
+                fragment,
             } => f
                 .debug_struct("Block::FollowOnFragment")
                 .field("last", &last)
                 .field("message_id", &message_id)
                 .field("fragment_num", &fragment_num)
-                .field("fragmet_len", &fragmet.len())
+                .field("fragment_len", &fragment.len())
                 .finish(),
             Self::Termination {
                 num_valid_pkts,
@@ -501,9 +514,14 @@ impl Block {
     /// Parse [`MessageBlock::Padding`].
     fn parse_padding(input: &[u8]) -> IResult<&[u8], Block> {
         let (rest, size) = be_u16(input)?;
-        let (rest, _padding) = take(size)(rest)?;
+        let (rest, padding) = take(size)(rest)?;
 
-        Ok((rest, Block::Padding))
+        Ok((
+            rest,
+            Block::Padding {
+                padding: padding.to_vec(),
+            },
+        ))
     }
 
     /// Parse [`MessageBlock::FirstFragment`].
@@ -513,7 +531,7 @@ impl Block {
         let (rest, message_id) = be_u32(rest)?;
         let (rest, expiration) = be_u32(rest)?;
         let fragment_len = size.saturating_sub(9) as usize; // type + id + size + expiration
-        let message_type = MessageType::from_u8(message_type).ok_or_else(|| {
+        let message_type = I2npMessageType::from_u8(message_type).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?message_type,
@@ -580,7 +598,7 @@ impl Block {
                 last: frag & 1 == 1,
                 message_id: MessageId::from(message_id),
                 fragment_num: frag >> 1,
-                fragmet: fragment.to_vec(),
+                fragment: fragment.to_vec(),
             },
         ))
     }
@@ -736,5 +754,353 @@ impl Block {
     /// Attempt to parse `input` into one or more SSU2 message [`Block`]s.
     pub fn parse(input: &[u8]) -> Option<Vec<Block>> {
         Self::parse_multiple(input, Vec::new())
+    }
+
+    /// Get serialized length of a [`Block`].
+    pub fn serialized_len(&self) -> usize {
+        3usize // message type + size
+            + match self {
+                Block::DateTime { .. } => 4usize,
+                Block::Options { .. } => OPTIONS_MIN_SIZE as usize,
+                Block::RouterInfo { router_info } => todo!(),
+                Block::I2Np { message } => message.serialized_len_short(),
+                Block::FirstFragment { fragment, .. } => fragment
+                    .len()
+                    .saturating_add(1usize) // message type
+                    .saturating_add(4usize) // message id
+                    .saturating_add(4usize), // expiration
+                Block::FollowOnFragment { fragment, .. } => fragment
+                    .len()
+                    .saturating_add(1usize) // fragmentation info
+                    .saturating_add(4usize), // message id
+                Block::Termination { .. } => TERMINATION_MIN_SIZE as usize,
+                Block::Ack { ranges, .. } => 4usize // ack through
+                    .saturating_add(1usize) // ack count
+                    .saturating_add(ranges.len() * 2), // nack/ack ranges
+                Block::NewToken { .. } => 12usize, // expires + token
+                Block::PathChallenge { challenge } => challenge.len(),
+                Block::PathResponse { response } => response.len(),
+                Block::FirstPacketNumber { .. } => 4usize, // packet number
+                Block::Congestion { .. } => 1usize, // flag
+                Block::Padding { padding } => padding.len(),
+                Block::Address { address } => match address.ip() {
+                    IpAddr::V4(_) => 2usize + 4usize, // port + address
+                    IpAddr::V6(_) => 2usize + 16usize, // port + address
+                },
+                block_type => todo!("unsupported block type: {block_type:?}"),
+            }
+    }
+
+    /// Serialize [`Block`] into a byte vector.
+    pub fn serialize(self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(self.serialized_len());
+
+        match self {
+            Self::DateTime { timestamp } => {
+                out.put_u8(BlockType::DateTime.as_u8());
+                out.put_u16(4u16);
+                out.put_u32(timestamp);
+
+                out
+            }
+            Self::Address { address } => {
+                out.put_u8(BlockType::Address.as_u8());
+
+                match address {
+                    SocketAddr::V4(address) => {
+                        out.put_u16(6u16);
+                        out.put_u16(address.port());
+                        out.put_slice(&address.ip().octets());
+                    }
+                    SocketAddr::V6(address) => {
+                        out.put_u16(18u16);
+                        out.put_u16(address.port());
+                        out.put_slice(&address.ip().octets());
+                    }
+                }
+
+                out
+            }
+            block_type => todo!("unsupported block type: {block_type:?}"),
+        }
+    }
+}
+
+/// SSU2 message type.
+#[derive(Debug)]
+pub enum MessageType {
+    SessionRequest,
+    SessionCreated,
+    SessionConfirmed,
+    Data,
+    PeerTest,
+    Retry,
+    TokenRequest,
+    HolePunch,
+}
+
+impl Deref for MessageType {
+    type Target = u8;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::SessionRequest => &0u8,
+            Self::SessionCreated => &1u8,
+            Self::SessionConfirmed => &2u8,
+            Self::Data => &6u8,
+            Self::PeerTest => &7u8,
+            Self::Retry => &9u8,
+            Self::TokenRequest => &10u8,
+            Self::HolePunch => &11u8,
+        }
+    }
+}
+
+impl TryFrom<u8> for MessageType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0u8 => Ok(Self::SessionRequest),
+            1u8 => Ok(Self::SessionCreated),
+            2u8 => Ok(Self::SessionConfirmed),
+            6u8 => Ok(Self::Data),
+            7u8 => Ok(Self::PeerTest),
+            9u8 => Ok(Self::Retry),
+            10u8 => Ok(Self::TokenRequest),
+            11u8 => Ok(Self::HolePunch),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Flag for the message with short header.
+pub enum ShortHeaderFlag {
+    /// Short header for `Data`.
+    Data {
+        /// Should the message be immediately ACKed.
+        immediate_ack: bool,
+    },
+
+    /// Short header for `SessionConfirmed`.
+    SessionConfirmed {
+        /// Fragment number.
+        fragment_num: u8,
+
+        /// Fragment count.
+        fragment_count: u8,
+    },
+}
+
+/// SSU2 packet header.
+pub enum Header {
+    /// Long header.
+    Long {
+        /// Destination connection ID.
+        dest_id: u64,
+
+        /// Source connection ID.
+        src_id: u64,
+
+        /// Packet number.
+        pkt_num: u32,
+
+        /// Token.
+        token: u64,
+
+        /// Message type.
+        message_type: MessageType,
+
+        /// Network ID.
+        net_id: u8,
+    },
+
+    /// Short header.
+    Short {
+        /// Destination connection ID.
+        dest_id: u64,
+
+        /// Packet number.
+        pkt_num: u32,
+
+        /// Flag contents of the short header.
+        ///
+        /// Depends on message type.
+        flag: ShortHeaderFlag,
+    },
+}
+
+impl Header {
+    /// Get packet number.
+    fn pkt_num(&self) -> u32 {
+        match self {
+            Self::Long { pkt_num, .. } => *pkt_num,
+            Self::Short { pkt_num, .. } => *pkt_num,
+        }
+    }
+
+    /// Serialize [`Header`] into a byte vector.
+    fn serialize(&self) -> BytesMut {
+        match self {
+            Self::Long {
+                dest_id,
+                src_id,
+                pkt_num,
+                token,
+                message_type,
+                net_id,
+            } => {
+                let mut out = BytesMut::with_capacity(16usize);
+
+                out.put_u64(*dest_id);
+                out.put_u32(*pkt_num);
+                out.put_u8(**message_type);
+                out.put_u8(2u8);
+                out.put_u8(*net_id);
+                out.put_u8(0u8);
+                out.put_u64(*src_id);
+                out.put_u64(*token);
+
+                out
+            }
+            Self::Short {
+                dest_id,
+                pkt_num,
+                flag,
+            } => {
+                let mut out = BytesMut::with_capacity(8usize);
+
+                out.put_u64(*dest_id);
+                out.put_u32(*pkt_num);
+
+                match flag {
+                    ShortHeaderFlag::Data { immediate_ack } => {
+                        out.put_u8(*MessageType::Data);
+                        out.put_u8(*immediate_ack as u8);
+                        out.put_u16(0u16); // more flags
+                    }
+                    ShortHeaderFlag::SessionConfirmed {
+                        fragment_num,
+                        fragment_count,
+                    } => {
+                        out.put_u8(*MessageType::SessionConfirmed);
+                        out.put_u8(fragment_num << 4 | fragment_count);
+                        out.put_u16(0u16); // more flags
+                    }
+                }
+
+                out
+            }
+        }
+    }
+}
+
+pub struct MessageBuilder {
+    /// Message blocks.
+    blocks: Vec<Block>,
+
+    /// Header.
+    header: Header,
+
+    /// Header key 1.
+    key1: Option<[u8; 32]>,
+
+    /// Header key 2.
+    ///
+    /// May be `None` if `key1` is used.
+    key2: Option<[u8; 32]>,
+
+    /// Payload len.
+    payload_len: usize,
+}
+
+impl MessageBuilder {
+    /// Create new [`MessageBuilder`].
+    pub fn new(header: Header) -> Self {
+        Self {
+            blocks: Vec::new(),
+            header,
+            key1: None,
+            key2: None,
+            payload_len: 0usize,
+        }
+    }
+
+    /// Specify `key` to be both `key_header_1` and `key_header_2`.
+    pub fn with_key(mut self, key: [u8; 32]) -> Self {
+        self.key1 = Some(key);
+        self
+    }
+
+    /// Specify distinct keys for header encryption.
+    pub fn with_keypair(mut self, key1: [u8; 32], key2: [u8; 32]) -> Self {
+        self.key1 = Some(key1);
+        self.key2 = Some(key2);
+        self
+    }
+
+    /// Push `block` into the list of blocks.
+    pub fn with_block(mut self, block: Block) -> Self {
+        self.payload_len += block.serialized_len();
+        self.blocks.push(block);
+        self
+    }
+
+    /// Serialize [`MessageBuilder`] into a byte vector.
+    ///
+    /// Panics if no header encryption key is specified or `key_header_2` is missing
+    /// when it's supposed to exist (deduced based on message type).
+    pub fn build(mut self) -> BytesMut {
+        let key1 = self.key1.take().expect("to exist");
+        let key2 = self.key2.take().unwrap_or(key1);
+        let mut header = self.header.serialize();
+
+        // serialize payload
+        let mut payload = self
+            .blocks
+            .into_iter()
+            .fold(
+                BytesMut::with_capacity(self.payload_len),
+                |mut out, block| {
+                    out.put_slice(&block.serialize());
+
+                    out
+                },
+            )
+            .to_vec();
+
+        // encryption must succeed since the parameters are controlled by us
+        ChaChaPoly::with_nonce(&key1, self.header.pkt_num() as u64)
+            .encrypt_with_ad_new(&header, &mut payload)
+            .expect("to succeed");
+
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        payload[payload.len() - 24..]
+            .chunks(12usize)
+            .zip(header.chunks_mut(8usize))
+            .zip([key1, key2])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; 12]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        // encrypt rest of the header
+        ChaCha::with_iv(key2, [0u8; 12]).encrypt_ref(&mut header[16..32]);
+
+        let mut out = BytesMut::with_capacity(header.len() + payload.len());
+        out.put_slice(&header);
+        out.put_slice(&payload);
+
+        out
     }
 }

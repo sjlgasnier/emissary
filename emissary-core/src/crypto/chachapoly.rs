@@ -215,13 +215,19 @@ impl ChaCha {
     }
 
     /// Encrypt `plaintext` in place.
-    pub fn encrypt(&mut self, plaintext: &mut [u8]) {
+    pub fn encrypt_ref(&mut self, plaintext: &mut [u8]) {
         self.cipher.apply_keystream(plaintext);
     }
 
     /// Dencrypt `ciphertext` in place.
-    pub fn decrypt(&mut self, ciphertext: &mut [u8]) {
+    pub fn decrypt_ref(&mut self, ciphertext: &mut [u8]) {
         self.cipher.apply_keystream(ciphertext)
+    }
+
+    /// Decrypt constant-size `ciphertext` and return it after encryption.
+    pub fn decrypt<const SIZE: usize>(&mut self, mut ciphertext: [u8; SIZE]) -> [u8; SIZE] {
+        self.cipher.apply_keystream(&mut ciphertext);
+        ciphertext
     }
 }
 

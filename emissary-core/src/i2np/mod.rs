@@ -495,6 +495,16 @@ impl Message {
             .build()
     }
 
+    /// Get serialized length of [`Message`] with short header
+    pub fn serialized_len_short(&self) -> usize {
+        self.payload.len() + I2NP_SHORT_HEADER_LEN + 2 // length field
+    }
+
+    /// Get serialized length of [`Message`] with long header
+    pub fn serialized_len_long(&self) -> usize {
+        self.payload.len() + I2NP_STANDARD_HEADER_LEN
+    }
+
     /// Returns `true` if [`Message`] is expired.
     pub fn is_expired<R: Runtime>(&self) -> bool {
         self.expiration < R::time_since_epoch()

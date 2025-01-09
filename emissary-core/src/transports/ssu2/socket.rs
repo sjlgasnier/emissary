@@ -22,15 +22,18 @@ use crate::{
         StaticPrivateKey,
     },
     runtime::{Runtime, UdpSocket},
-    transports::ssu2::message::Block,
+    transports::ssu2::message::{Block, Header, MessageBuilder, MessageType},
 };
 
 use bytes::{Buf, BytesMut};
 use hashbrown::HashMap;
+use rand_core::RngCore;
 use thingbuf::mpsc::{Receiver, Sender};
 
+use alloc::collections::VecDeque;
 use core::{
     future::Future,
+    mem,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
@@ -49,6 +52,24 @@ pub enum Ssu2SessionEvent {
     Dummy,
 }
 
+/// Write state.
+enum WriteState {
+    /// Get next packet.
+    GetPacket,
+
+    /// Send packet.
+    SendPacket {
+        /// Packet.
+        pkt: BytesMut,
+
+        /// Target.
+        target: SocketAddr,
+    },
+
+    /// Poisoned.
+    Poisoned,
+}
+
 /// SSU2 socket.
 pub struct Ssu2Socket<R: Runtime> {
     /// Receive buffer.
@@ -60,17 +81,23 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Raw intro key bytes.
     intro_key_raw: [u8; 32],
 
-    /// SSU2 sessions.
-    sessions: HashMap<u64, ()>,
+    /// Pending outbound packets.
+    pending_pkts: VecDeque<(BytesMut, SocketAddr)>,
 
     /// TX channel for sending session events to [`Ssu2`].
     session_tx: Sender<Ssu2SessionEvent>,
+
+    /// SSU2 sessions.
+    sessions: HashMap<u64, ()>,
 
     /// UDP socket.
     socket: R::UdpSocket,
 
     /// Static key.
     static_key: StaticPrivateKey,
+
+    /// Write state.
+    write_state: WriteState,
 }
 
 impl<R: Runtime> Ssu2Socket<R> {
@@ -89,15 +116,17 @@ impl<R: Runtime> Ssu2Socket<R> {
             buffer: vec![0u8; READ_BUFFER_LEN],
             intro_key,
             intro_key_raw,
-            session_tx,
+            pending_pkts: VecDeque::new(),
             sessions: HashMap::new(),
+            session_tx,
             socket,
             static_key: StaticPrivateKey::from(static_key),
+            write_state: WriteState::GetPacket,
         }
     }
 
     /// Handle packet.
-    fn handle_packet(&mut self, nread: usize) {
+    fn handle_packet(&mut self, nread: usize, from: SocketAddr) {
         tracing::error!(
             target: LOG_TARGET,
             ?nread,
@@ -109,7 +138,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         let iv2 =
             TryInto::<[u8; 12]>::try_into(&self.buffer[nread - 12..nread]).expect("to succeed");
         let mut mask = [0u8; 8];
-        ChaCha::with_iv(self.intro_key_raw, iv1).decrypt(&mut mask);
+        ChaCha::with_iv(self.intro_key_raw, iv1).decrypt_ref(&mut mask);
 
         let connection_id = u64::from_be(mask.into_iter().zip(&mut self.buffer).fold(
             0u64,
@@ -131,13 +160,13 @@ impl<R: Runtime> Ssu2Socket<R> {
         }
 
         let mut mask = [0u8; 8];
-        ChaCha::with_iv(self.intro_key_raw, iv2).decrypt(&mut mask);
+        ChaCha::with_iv(self.intro_key_raw, iv2).decrypt_ref(&mut mask);
         mask.into_iter().zip(&mut self.buffer[8..]).for_each(|(a, b)| {
             *b ^= a;
         });
 
-        match self.buffer[12] {
-            10 => {
+        match MessageType::try_from(self.buffer[12]) {
+            Ok(MessageType::TokenRequest) => {
                 let pkt_num = u32::from_le_bytes(
                     TryInto::<[u8; 4]>::try_into(&self.buffer[8..12]).expect("to succeed"),
                 );
@@ -150,7 +179,8 @@ impl<R: Runtime> Ssu2Socket<R> {
                     "handle token request",
                 );
 
-                ChaCha::with_iv(self.intro_key_raw, [0u8; 12]).decrypt(&mut self.buffer[16..32]);
+                ChaCha::with_iv(self.intro_key_raw, [0u8; 12])
+                    .decrypt_ref(&mut self.buffer[16..32]);
 
                 let src_connection_id = u64::from_le_bytes(
                     TryInto::<[u8; 8]>::try_into(&self.buffer[16..24]).expect("to succeed"),
@@ -174,9 +204,36 @@ impl<R: Runtime> Ssu2Socket<R> {
                     ),
                 }
 
-                // TODO: send retry message
+                let token = R::rng().next_u64();
+                let pkt = MessageBuilder::new(Header::Long {
+                    dest_id: connection_id,
+                    src_id: src_connection_id,
+                    pkt_num: R::rng().next_u32(),
+                    token,
+                    message_type: MessageType::Retry,
+                    net_id: 2u8,
+                })
+                .with_key(self.intro_key_raw)
+                .with_block(Block::DateTime {
+                    timestamp: R::time_since_epoch().as_secs() as u32,
+                })
+                .with_block(Block::Address { address: from })
+                .build();
+
+                self.pending_pkts.push_back((pkt, from));
             }
-            msg_type => todo!("unsupported message type = {msg_type}"),
+            Ok(message_type) => {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    ?message_type,
+                    "support not implemented for message type",
+                );
+            }
+            Err(()) => tracing::warn!(
+                target: LOG_TARGET,
+                message_type = ?self.buffer[12],
+                "unrecognized message type",
+            ),
         }
     }
 }
@@ -198,8 +255,34 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                     return Poll::Ready(());
                 }
                 Poll::Ready(Some((nread, from))) => {
-                    this.handle_packet(nread);
+                    this.handle_packet(nread, from);
                 }
+            }
+        }
+
+        loop {
+            match mem::replace(&mut this.write_state, WriteState::Poisoned) {
+                WriteState::GetPacket => match this.pending_pkts.pop_front() {
+                    None => {
+                        this.write_state = WriteState::GetPacket;
+                        break;
+                    }
+                    Some((pkt, target)) => {
+                        this.write_state = WriteState::SendPacket { pkt, target };
+                    }
+                },
+                WriteState::SendPacket { pkt, target } =>
+                    match Pin::new(&mut this.socket).poll_send_to(cx, &pkt, target) {
+                        Poll::Ready(Some(_)) => {
+                            this.write_state = WriteState::GetPacket;
+                        }
+                        Poll::Ready(None) => return Poll::Ready(()),
+                        Poll::Pending => {
+                            this.write_state = WriteState::SendPacket { pkt, target };
+                            break;
+                        }
+                    },
+                WriteState::Poisoned => unreachable!(),
             }
         }
 
