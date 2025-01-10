@@ -24,6 +24,7 @@ use crate::{
     crypto::chachapoly::{ChaCha, ChaChaPoly},
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
+    runtime::Runtime,
 };
 
 use bytes::{BufMut, BytesMut};
@@ -33,6 +34,7 @@ use nom::{
     number::complete::{be_u16, be_u32, be_u64, be_u8},
     Err, IResult,
 };
+use rand_core::RngCore;
 
 use core::{
     fmt,
@@ -892,12 +894,191 @@ pub enum ShortHeaderFlag {
     },
 }
 
+/// Header builder.
+pub enum HeaderBuilder {
+    /// Long header.
+    Long {
+        /// Destination connection ID.
+        dst_id: Option<u64>,
+
+        /// Source connection ID.
+        src_id: Option<u64>,
+
+        /// Packet number.
+        pkt_num: Option<u32>,
+
+        /// Token.
+        token: Option<u64>,
+
+        /// Message type.
+        message_type: Option<MessageType>,
+
+        /// Network ID.
+        net_id: Option<u8>,
+    },
+
+    /// Short header.
+    Short {
+        /// Destination connection ID.
+        dst_id: Option<u64>,
+
+        /// Packet number.
+        pkt_num: Option<u32>,
+
+        /// Flag contents of the short header.
+        ///
+        /// Depends on message type.
+        flag: Option<ShortHeaderFlag>,
+    },
+}
+
+impl HeaderBuilder {
+    /// Create long header.
+    pub fn long() -> Self {
+        Self::Long {
+            src_id: None,
+            dst_id: None,
+            pkt_num: None,
+            token: None,
+            message_type: None,
+            net_id: None,
+        }
+    }
+
+    /// Create short header.
+    pub fn short() -> Self {
+        Self::Short {
+            dst_id: None,
+            flag: None,
+            pkt_num: None,
+        }
+    }
+
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, value: u64) -> Self {
+        match &mut self {
+            Self::Long { dst_id, .. } => {
+                *dst_id = Some(value);
+            }
+            Self::Short { dst_id, .. } => {
+                *dst_id = Some(value);
+            }
+        }
+
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, value: u64) -> Self {
+        match &mut self {
+            Self::Long { src_id, .. } => {
+                *src_id = Some(value);
+            }
+            Self::Short { .. } => unreachable!(),
+        }
+
+        self
+    }
+
+    /// Specify packet number.
+    pub fn with_pkt_num(mut self, value: u32) -> Self {
+        match &mut self {
+            Self::Long { pkt_num, .. } => {
+                *pkt_num = Some(value);
+            }
+            Self::Short { pkt_num, .. } => {
+                *pkt_num = Some(value);
+            }
+        }
+
+        self
+    }
+
+    /// Specify flag for short header.
+    pub fn with_short_header_flag(mut self, value: ShortHeaderFlag) -> Self {
+        match &mut self {
+            Self::Short { flag, .. } => {
+                *flag = Some(value);
+            }
+            Self::Long { .. } => unreachable!(),
+        }
+
+        self
+    }
+
+    /// Specify token.
+    pub fn with_token(mut self, value: u64) -> Self {
+        match &mut self {
+            Self::Long { token, .. } => {
+                *token = Some(value);
+            }
+            Self::Short { .. } => unreachable!(),
+        }
+
+        self
+    }
+
+    /// Specify message type.
+    pub fn with_message_type(mut self, value: MessageType) -> Self {
+        match &mut self {
+            Self::Long { message_type, .. } => {
+                *message_type = Some(value);
+            }
+            Self::Short { .. } => unreachable!(),
+        }
+
+        self
+    }
+
+    /// Specify network ID.
+    pub fn with_net_id(mut self, value: u8) -> Self {
+        match &mut self {
+            Self::Long { net_id, .. } => {
+                *net_id = Some(value);
+            }
+            Self::Short { .. } => unreachable!(),
+        }
+
+        self
+    }
+
+    /// Build [`HeaderBuilder`] into [`Header`].
+    pub fn build<R: Runtime>(self) -> Header {
+        match self {
+            Self::Long {
+                dst_id,
+                src_id,
+                pkt_num,
+                token,
+                message_type,
+                net_id,
+            } => Header::Long {
+                dst_id: dst_id.expect("to exist"),
+                src_id: src_id.expect("to exist"),
+                pkt_num: pkt_num.unwrap_or(R::rng().next_u32()),
+                token: token.expect("to exist"),
+                message_type: message_type.expect("to exist"),
+                net_id: net_id.unwrap_or(2u8),
+            },
+            Self::Short {
+                dst_id,
+                pkt_num,
+                flag,
+            } => Header::Short {
+                dst_id: dst_id.expect("to exist"),
+                pkt_num: pkt_num.unwrap_or(R::rng().next_u32()),
+                flag: flag.expect("to exist"),
+            },
+        }
+    }
+}
+
 /// SSU2 packet header.
 pub enum Header {
     /// Long header.
     Long {
         /// Destination connection ID.
-        dest_id: u64,
+        dst_id: u64,
 
         /// Source connection ID.
         src_id: u64,
@@ -918,7 +1099,7 @@ pub enum Header {
     /// Short header.
     Short {
         /// Destination connection ID.
-        dest_id: u64,
+        dst_id: u64,
 
         /// Packet number.
         pkt_num: u32,
@@ -943,7 +1124,7 @@ impl Header {
     fn serialize(&self) -> BytesMut {
         match self {
             Self::Long {
-                dest_id,
+                dst_id,
                 src_id,
                 pkt_num,
                 token,
@@ -952,7 +1133,7 @@ impl Header {
             } => {
                 let mut out = BytesMut::with_capacity(16usize);
 
-                out.put_u64(*dest_id);
+                out.put_u64(*dst_id);
                 out.put_u32(*pkt_num);
                 out.put_u8(**message_type);
                 out.put_u8(2u8);
@@ -964,13 +1145,13 @@ impl Header {
                 out
             }
             Self::Short {
-                dest_id,
+                dst_id,
                 pkt_num,
                 flag,
             } => {
                 let mut out = BytesMut::with_capacity(8usize);
 
-                out.put_u64(*dest_id);
+                out.put_u64(*dst_id);
                 out.put_u32(*pkt_num);
 
                 match flag {

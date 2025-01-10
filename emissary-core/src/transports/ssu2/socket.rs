@@ -22,7 +22,7 @@ use crate::{
         StaticPrivateKey,
     },
     runtime::{Runtime, UdpSocket},
-    transports::ssu2::message::{Block, Header, MessageBuilder, MessageType},
+    transports::ssu2::message::{Block, HeaderBuilder, MessageBuilder, MessageType},
 };
 
 use bytes::{Buf, BytesMut};
@@ -126,6 +126,8 @@ impl<R: Runtime> Ssu2Socket<R> {
     }
 
     /// Handle packet.
+    //
+    // TODO: needs as lot of refactoring
     fn handle_packet(&mut self, nread: usize, from: SocketAddr) {
         tracing::error!(
             target: LOG_TARGET,
@@ -205,14 +207,14 @@ impl<R: Runtime> Ssu2Socket<R> {
                 }
 
                 let token = R::rng().next_u64();
-                let pkt = MessageBuilder::new(Header::Long {
-                    dest_id: connection_id,
-                    src_id: src_connection_id,
-                    pkt_num: R::rng().next_u32(),
-                    token,
-                    message_type: MessageType::Retry,
-                    net_id: 2u8,
-                })
+                let pkt = MessageBuilder::new(
+                    HeaderBuilder::long()
+                        .with_dst_id(connection_id)
+                        .with_src_id(src_connection_id)
+                        .with_token(token)
+                        .with_message_type(MessageType::Retry)
+                        .build::<R>(),
+                )
                 .with_key(self.intro_key_raw)
                 .with_block(Block::DateTime {
                     timestamp: R::time_since_epoch().as_secs() as u32,
