@@ -247,7 +247,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     timestamp: R::time_since_epoch().as_secs() as u32,
                 })
                 .with_block(Block::Address { address })
-                .build();
+                .build::<R>();
 
                 self.pending_pkts.push_back((pkt, address));
             }
@@ -345,7 +345,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     timestamp: R::time_since_epoch().as_secs() as u32,
                 })
                 .with_block(Block::Address { address })
-                .build();
+                .build::<R>();
 
                 self.pending_pkts.push_back((BytesMut::from(&pkt[..]), address));
 

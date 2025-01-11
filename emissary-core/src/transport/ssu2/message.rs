@@ -43,6 +43,7 @@ use rand_core::RngCore;
 use core::{
     fmt,
     net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     ops::Deref,
 };
 
@@ -57,6 +58,9 @@ const TERMINATION_MIN_SIZE: u16 = 9u16;
 
 /// IV size for header encryption.
 const IV_SIZE: usize = 12usize;
+
+/// Maximum amount of padding added to messages.
+const MAX_PADDING: usize = 128usize;
 
 /// SSU2 block type.
 #[derive(Debug)]
@@ -830,6 +834,13 @@ impl Block {
 
                 out
             }
+            Self::Padding { padding } => {
+                out.put_u8(BlockType::Padding.as_u8());
+                out.put_u16(padding.len() as u16);
+                out.put_slice(&padding);
+
+                out
+            }
             block_type => todo!("unsupported block type: {block_type:?}"),
         }
     }
@@ -1236,6 +1247,13 @@ pub struct MessageBuilder<'a> {
 
     /// Payload len.
     payload_len: usize,
+
+    /// Minimum amount of padding the message should have.
+    ///
+    /// Maximum padding is capped at [`MAX_PADDING`].
+    ///
+    /// If `None`, the message shouldn't have any padding.
+    min_padding: Option<NonZeroUsize>,
 }
 
 impl<'a> MessageBuilder<'a> {
@@ -1251,6 +1269,39 @@ impl<'a> MessageBuilder<'a> {
             key1: None,
             key2: None,
             payload_len: 0usize,
+            min_padding: Some(NonZeroUsize::new(10).expect("non-zero value")),
+        }
+    }
+
+    /// Create new [`MessageBuilder`] but don't insert padding block.
+    pub fn new_without_padding(header: Header) -> Self {
+        Self {
+            aead_state: None,
+            blocks: Vec::new(),
+            ephemeral_key: None,
+            header,
+            key1: None,
+            key2: None,
+            payload_len: 0usize,
+            min_padding: None,
+        }
+    }
+
+    /// Create new [`MessageBuilder`] and specify minimum size for the padding block.
+    pub fn new_with_min_padding(header: Header, min_padding: NonZeroUsize) -> Self {
+        Self {
+            aead_state: None,
+            blocks: Vec::new(),
+            ephemeral_key: None,
+            header,
+            key1: None,
+            key2: None,
+            payload_len: 0usize,
+            min_padding: if min_padding.get() >= MAX_PADDING {
+                Some(NonZeroUsize::new(min_padding.get() + MAX_PADDING).expect("non-zero value"))
+            } else {
+                Some(min_padding)
+            },
         }
     }
 
@@ -1290,11 +1341,24 @@ impl<'a> MessageBuilder<'a> {
     ///
     /// Panics if no header encryption key is specified or `key_header_2` is missing
     /// when it's supposed to exist (deduced based on message type).
-    pub fn build(mut self) -> BytesMut {
+    pub fn build<R: Runtime>(mut self) -> BytesMut {
         let key1 = self.key1.take().expect("to exist");
         let key2 = self.key2.take().unwrap_or(key1);
         let message_type = self.header.message_type();
         let mut header = self.header.serialize();
+
+        // add padding to block unless specifically requested not to
+        //
+        // padding length is between [`self.min_padding`..`MAX_PADDING`]
+        if let Some(min_padding) = self.min_padding.take() {
+            self.blocks.push({
+                let padding_len = R::rng().next_u32() as usize % MAX_PADDING + min_padding.get();
+                let mut padding = vec![0u8; padding_len];
+                R::rng().fill_bytes(&mut padding);
+
+                Block::Padding { padding }
+            });
+        }
 
         // serialize payload
         let mut payload = self
