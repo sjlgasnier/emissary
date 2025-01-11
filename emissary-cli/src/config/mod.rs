@@ -23,7 +23,7 @@ use crate::{
 };
 
 use home::home_dir;
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -362,7 +362,12 @@ impl Config {
     /// Create SSU2 keys and store them on disk.
     fn create_ssu2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 32])> {
         let static_key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
-        let intro_key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
+        let intro_key = {
+            let mut intro_key = [0u8; 32];
+            thread_rng().fill_bytes(&mut intro_key);
+
+            intro_key
+        };
 
         // append iv to key and write it to disk
         {

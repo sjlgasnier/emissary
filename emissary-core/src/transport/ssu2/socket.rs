@@ -86,11 +86,8 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Inbound state.
     inbound_state: Bytes,
 
-    /// Intro key.
-    intro_key: StaticPrivateKey,
-
-    /// Raw intro key bytes.
-    intro_key_raw: [u8; 32],
+    /// Introduction key.
+    intro_key: [u8; 32],
 
     /// Outbound state.
     outbound_state: Bytes,
@@ -119,7 +116,7 @@ impl<R: Runtime> Ssu2Socket<R> {
     pub fn new(
         socket: R::UdpSocket,
         static_key: StaticPrivateKey,
-        intro_key: StaticPrivateKey,
+        intro_key: [u8; 32],
         session_tx: Sender<Ssu2SessionEvent>,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
@@ -130,15 +127,11 @@ impl<R: Runtime> Ssu2Socket<R> {
             .update(static_key.public().to_vec())
             .finalize();
 
-        let intro_key_raw =
-            TryInto::<[u8; 32]>::try_into(intro_key.public().to_vec()).expect("to succeed");
-
         Self {
             buffer: vec![0u8; READ_BUFFER_LEN],
             chaining_key: Bytes::from(chaining_key),
             inbound_state: Bytes::from(inbound_state),
             intro_key,
-            intro_key_raw,
             outbound_state: Bytes::from(outbound_state),
             pending_pkts: VecDeque::new(),
             sessions: HashMap::new(),
@@ -164,7 +157,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         let iv2 =
             TryInto::<[u8; 12]>::try_into(&self.buffer[nread - 12..nread]).expect("to succeed");
         let mut mask = [0u8; 8];
-        ChaCha::with_iv(self.intro_key_raw, iv1).decrypt_ref(&mut mask);
+        ChaCha::with_iv(self.intro_key, iv1).decrypt_ref(&mut mask);
 
         let connection_id = u64::from_be(mask.into_iter().zip(&mut self.buffer).fold(
             0u64,
@@ -186,7 +179,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             todo!();
         }
 
-        ChaCha::with_iv(self.intro_key_raw, iv2)
+        ChaCha::with_iv(self.intro_key, iv2)
             .decrypt([0u8; 8])
             .into_iter()
             .zip(&mut self.buffer[8..])
@@ -208,8 +201,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     "handle token request",
                 );
 
-                ChaCha::with_iv(self.intro_key_raw, [0u8; 12])
-                    .decrypt_ref(&mut self.buffer[16..32]);
+                ChaCha::with_iv(self.intro_key, [0u8; 12]).decrypt_ref(&mut self.buffer[16..32]);
 
                 let src_connection_id = u64::from_le_bytes(
                     TryInto::<[u8; 8]>::try_into(&self.buffer[16..24]).expect("to succeed"),
@@ -219,7 +211,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                 );
 
                 let mut payload = self.buffer[32..nread].to_vec();
-                ChaChaPoly::with_nonce(&self.intro_key_raw, pkt_num.to_be() as u64)
+                ChaChaPoly::with_nonce(&self.intro_key, pkt_num.to_be() as u64)
                     .decrypt_with_ad(&self.buffer[..32], &mut payload)
                     .unwrap();
 
@@ -242,7 +234,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                         .with_message_type(MessageType::Retry)
                         .build::<R>(),
                 )
-                .with_key(self.intro_key_raw)
+                .with_key(self.intro_key)
                 .with_block(Block::DateTime {
                     timestamp: R::time_since_epoch().as_secs() as u32,
                 })
@@ -264,8 +256,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     "handle session request",
                 );
 
-                ChaCha::with_iv(self.intro_key_raw, [0u8; 12])
-                    .decrypt_ref(&mut self.buffer[16..64]);
+                ChaCha::with_iv(self.intro_key, [0u8; 12]).decrypt_ref(&mut self.buffer[16..64]);
 
                 let src_connection_id = u64::from_le_bytes(
                     TryInto::<[u8; 8]>::try_into(&self.buffer[16..24]).expect("to succeed"),
@@ -338,7 +329,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                         .with_message_type(MessageType::SessionCreated)
                         .build::<R>(),
                 )
-                .with_keypair(self.intro_key_raw, k_header_2)
+                .with_keypair(self.intro_key, k_header_2)
                 .with_ephemeral_key(pk)
                 .with_aead_state(&mut aead_state)
                 .with_block(Block::DateTime {

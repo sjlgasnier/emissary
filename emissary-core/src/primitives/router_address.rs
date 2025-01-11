@@ -135,10 +135,7 @@ impl RouterAddress {
             let static_key = StaticPrivateKey::from(static_key).public();
             base64_encode(&static_key)
         };
-        let intro_key = {
-            let intro_key = StaticPrivateKey::from(intro_key).public();
-            base64_encode(&intro_key)
-        };
+        let intro_key = base64_encode(&intro_key);
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
@@ -171,10 +168,7 @@ impl RouterAddress {
             let static_key = StaticPrivateKey::from(static_key).public();
             base64_encode(&static_key)
         };
-        let intro_key = {
-            let intro_key = StaticPrivateKey::from(intro_key).public();
-            base64_encode(&intro_key)
-        };
+        let intro_key = base64_encode(&intro_key);
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from("v"), Str::from("2"));

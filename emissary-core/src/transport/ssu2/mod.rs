@@ -103,7 +103,7 @@ impl<R: Runtime> Ssu2Transport<R> {
         R::spawn(Ssu2Socket::<R>::new(
             socket,
             StaticPrivateKey::from(config.static_key),
-            StaticPrivateKey::from(config.intro_key),
+            config.intro_key,
             socket_tx,
         ));
 
