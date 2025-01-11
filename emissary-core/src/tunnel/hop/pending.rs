@@ -276,7 +276,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         .build();
 
                     let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-                    let ephemeral_public = ephemeral_secret.public_key();
+                    let ephemeral_public = ephemeral_secret.public();
                     let (key, tag) =
                         noise.derive_outbound_garlic_key(first_hop_static_key, ephemeral_secret);
 

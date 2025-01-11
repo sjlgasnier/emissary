@@ -687,7 +687,7 @@ impl NoiseContext {
         hop_role: HopRole,
     ) -> OutboundSession {
         let local_ephemeral = EphemeralPrivateKey::random(R::rng());
-        let local_ephemeral_public = local_ephemeral.public_key().to_vec();
+        let local_ephemeral_public = local_ephemeral.public().to_vec();
         let state = {
             let state = Sha256::new()
                 .update(&self.outbound_state)
@@ -781,7 +781,7 @@ impl NoiseContext {
         remote_public: StaticPublicKey,
         ephemeral_secret: EphemeralPrivateKey,
     ) -> (Vec<u8>, Vec<u8>) {
-        let ephemeral_public = ephemeral_secret.public_key();
+        let ephemeral_public = ephemeral_secret.public();
         let state = Sha256::new()
             .update(
                 Sha256::new()

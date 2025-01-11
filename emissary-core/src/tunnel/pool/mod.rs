@@ -694,7 +694,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         .build();
 
                     let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-                    let ephemeral_public = ephemeral_secret.public_key();
+                    let ephemeral_public = ephemeral_secret.public();
                     let (key, tag) = self.noise.derive_outbound_garlic_key(
                         self.noise.local_public_key(),
                         ephemeral_secret,

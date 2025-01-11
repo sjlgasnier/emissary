@@ -19,13 +19,15 @@
 use crate::{
     crypto::{
         chachapoly::{ChaCha, ChaChaPoly},
-        StaticPrivateKey,
+        hmac::Hmac,
+        sha256::Sha256,
+        EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey,
     },
     runtime::{Runtime, UdpSocket},
-    transports::ssu2::message::{Block, HeaderBuilder, MessageBuilder, MessageType},
+    transports::ssu2::message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
 };
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use hashbrown::HashMap;
 use rand_core::RngCore;
 use thingbuf::mpsc::{Receiver, Sender};
@@ -44,6 +46,9 @@ const LOG_TARGET: &str = "emissary::ssu2::socket";
 
 /// Read buffer length.
 const READ_BUFFER_LEN: usize = 2048usize;
+
+/// Protocol name.
+const PROTOCOL_NAME: &str = "Noise_XKchaobfse+hs1+hs2+hs3_25519_ChaChaPoly_SHA256";
 
 /// Events emitted by [`Ssu2Socket`].
 #[derive(Debug, Default, Clone)]
@@ -75,11 +80,20 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Receive buffer.
     buffer: Vec<u8>,
 
+    /// Chaining key.
+    chaining_key: Bytes,
+
+    /// Inbound state.
+    inbound_state: Bytes,
+
     /// Intro key.
     intro_key: StaticPrivateKey,
 
     /// Raw intro key bytes.
     intro_key_raw: [u8; 32],
+
+    /// Outbound state.
+    outbound_state: Bytes,
 
     /// Pending outbound packets.
     pending_pkts: VecDeque<(BytesMut, SocketAddr)>,
@@ -104,18 +118,28 @@ impl<R: Runtime> Ssu2Socket<R> {
     /// Create new [`Ssu2Socket`].
     pub fn new(
         socket: R::UdpSocket,
-        static_key: [u8; 32],
-        intro_key: [u8; 32],
+        static_key: StaticPrivateKey,
+        intro_key: StaticPrivateKey,
         session_tx: Sender<Ssu2SessionEvent>,
     ) -> Self {
-        let intro_key = StaticPrivateKey::from(intro_key);
+        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
+        let chaining_key = state.clone();
+        let outbound_state = Sha256::new().update(&state).finalize();
+        let inbound_state = Sha256::new()
+            .update(&outbound_state)
+            .update(static_key.public().to_vec())
+            .finalize();
+
         let intro_key_raw =
             TryInto::<[u8; 32]>::try_into(intro_key.public().to_vec()).expect("to succeed");
 
         Self {
             buffer: vec![0u8; READ_BUFFER_LEN],
+            chaining_key: Bytes::from(chaining_key),
+            inbound_state: Bytes::from(inbound_state),
             intro_key,
             intro_key_raw,
+            outbound_state: Bytes::from(outbound_state),
             pending_pkts: VecDeque::new(),
             sessions: HashMap::new(),
             session_tx,
@@ -128,8 +152,8 @@ impl<R: Runtime> Ssu2Socket<R> {
     /// Handle packet.
     //
     // TODO: needs as lot of refactoring
-    fn handle_packet(&mut self, nread: usize, from: SocketAddr) {
-        tracing::error!(
+    fn handle_packet(&mut self, nread: usize, address: SocketAddr) {
+        tracing::trace!(
             target: LOG_TARGET,
             ?nread,
             "handle packet",
@@ -158,14 +182,17 @@ impl<R: Runtime> Ssu2Socket<R> {
         );
 
         if self.sessions.contains_key(&connection_id) {
+            tracing::info!("handle message for active session");
             todo!();
         }
 
-        let mut mask = [0u8; 8];
-        ChaCha::with_iv(self.intro_key_raw, iv2).decrypt_ref(&mut mask);
-        mask.into_iter().zip(&mut self.buffer[8..]).for_each(|(a, b)| {
-            *b ^= a;
-        });
+        ChaCha::with_iv(self.intro_key_raw, iv2)
+            .decrypt([0u8; 8])
+            .into_iter()
+            .zip(&mut self.buffer[8..])
+            .for_each(|(a, b)| {
+                *b ^= a;
+            });
 
         match MessageType::try_from(self.buffer[12]) {
             Ok(MessageType::TokenRequest) => {
@@ -198,7 +225,7 @@ impl<R: Runtime> Ssu2Socket<R> {
 
                 match Block::parse(&payload) {
                     Some(blocks) => blocks.into_iter().for_each(|block| {
-                        tracing::info!(target: LOG_TARGET, "block = {block:?}");
+                        tracing::trace!(target: LOG_TARGET, "block = {block:?}");
                     }),
                     None => tracing::error!(
                         target: LOG_TARGET,
@@ -219,16 +246,116 @@ impl<R: Runtime> Ssu2Socket<R> {
                 .with_block(Block::DateTime {
                     timestamp: R::time_since_epoch().as_secs() as u32,
                 })
-                .with_block(Block::Address { address: from })
+                .with_block(Block::Address { address })
                 .build();
 
-                self.pending_pkts.push_back((pkt, from));
+                self.pending_pkts.push_back((pkt, address));
+            }
+            Ok(MessageType::SessionRequest) => {
+                let pkt_num = u32::from_le_bytes(
+                    TryInto::<[u8; 4]>::try_into(&self.buffer[8..12]).expect("to succeed"),
+                );
+
+                tracing::info!(
+                    target: LOG_TARGET,
+                    ?pkt_num,
+                    version = ?self.buffer[13],
+                    net_id = ?self.buffer[14],
+                    "handle session request",
+                );
+
+                ChaCha::with_iv(self.intro_key_raw, [0u8; 12])
+                    .decrypt_ref(&mut self.buffer[16..64]);
+
+                let src_connection_id = u64::from_le_bytes(
+                    TryInto::<[u8; 8]>::try_into(&self.buffer[16..24]).expect("to succeed"),
+                );
+
+                // TODO: extract token and verify it's valid
+
+                let state =
+                    Sha256::new().update(&self.inbound_state).update(&self.buffer[..32]).finalize();
+                let state = Sha256::new().update(state).update(&self.buffer[32..64]).finalize();
+
+                let public_key =
+                    EphemeralPublicKey::from_bytes(&self.buffer[32..64]).expect("to succeed");
+                let shared = self.static_key.diffie_hellman(&public_key);
+
+                let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
+                let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+                let mut cipher_key =
+                    Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+                // TODO: derive sessioncreated header keyfrom `cipher_key` (??)
+                // HKDF(chainKey, ZEROLEN, "SessCreateHeader", 32)
+                let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+                let k_header_2 =
+                    Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize();
+                let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).unwrap();
+
+                // state for `SessionCreated`
+                let new_state =
+                    Sha256::new().update(&state).update(&self.buffer[64..nread]).finalize();
+
+                let mut payload = self.buffer[64..nread].to_vec();
+                ChaChaPoly::with_nonce(&cipher_key, 0u64)
+                    .decrypt_with_ad(&state, &mut payload)
+                    .unwrap();
+
+                match Block::parse(&payload) {
+                    Some(blocks) => blocks.into_iter().for_each(|block| {
+                        tracing::trace!(target: LOG_TARGET, "block = {block:?}");
+                    }),
+                    None => tracing::error!(
+                        target: LOG_TARGET,
+                        "failed to parse blocks",
+                    ),
+                }
+
+                let sk = EphemeralPrivateKey::random(R::rng());
+                let pk = sk.public();
+
+                let shared = sk.diffie_hellman(&public_key);
+
+                let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
+                let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+                let mut cipher_key =
+                    Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+                let token = R::rng().next_u64();
+                // TODO: probably unnecessary memory copies here and below
+                let pkt = MessageBuilder::new(
+                    HeaderBuilder::long()
+                        .with_dst_id(connection_id)
+                        .with_src_id(src_connection_id)
+                        .with_token(0u64)
+                        .with_message_type(MessageType::SessionCreated)
+                        .build::<R>(),
+                )
+                .with_keypair(self.intro_key_raw, k_header_2)
+                .with_ephemeral_key(pk)
+                .with_aead_state(AeadState {
+                    state: new_state,
+                    cipher_key,
+                    nonce: 0u64,
+                })
+                .with_block(Block::DateTime {
+                    timestamp: R::time_since_epoch().as_secs() as u32,
+                })
+                .with_block(Block::Address { address })
+                .build();
+
+                self.pending_pkts.push_back((BytesMut::from(&pkt[..]), address));
+
+                // TODO: create new session
+
+                tracing::error!("-------------------------------------------------------------");
             }
             Ok(message_type) => {
                 tracing::error!(
                     target: LOG_TARGET,
                     ?message_type,
-                    "support not implemented for message type",
+                    "not supported",
                 );
             }
             Err(()) => tracing::warn!(

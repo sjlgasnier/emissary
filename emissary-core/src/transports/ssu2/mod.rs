@@ -102,8 +102,8 @@ impl<R: Runtime> Ssu2Transport<R> {
         // it's responsible for what?
         R::spawn(Ssu2Socket::<R>::new(
             socket,
-            config.static_key,
-            config.intro_key,
+            StaticPrivateKey::from(config.static_key),
+            StaticPrivateKey::from(config.intro_key),
             socket_tx,
         ));
 

@@ -21,7 +21,11 @@
 //! https://geti2p.net/spec/ssu2#noise-payload
 
 use crate::{
-    crypto::chachapoly::{ChaCha, ChaChaPoly},
+    crypto::{
+        chachapoly::{ChaCha, ChaChaPoly},
+        sha256::Sha256,
+        EphemeralPublicKey,
+    },
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
     runtime::Runtime,
@@ -50,6 +54,9 @@ const OPTIONS_MIN_SIZE: u16 = 12u16;
 
 /// Minimum size for [`Block::Termination`].
 const TERMINATION_MIN_SIZE: u16 = 9u16;
+
+/// IV size for header encryption.
+const IV_SIZE: usize = 12usize;
 
 /// SSU2 block type.
 #[derive(Debug)]
@@ -829,7 +836,7 @@ impl Block {
 }
 
 /// SSU2 message type.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum MessageType {
     SessionRequest,
     SessionCreated,
@@ -1120,6 +1127,17 @@ impl Header {
         }
     }
 
+    /// Get message type.
+    fn message_type(&self) -> MessageType {
+        match self {
+            Self::Long { message_type, .. } => *message_type,
+            Self::Short { flag, .. } => match flag {
+                ShortHeaderFlag::Data { .. } => MessageType::Data,
+                ShortHeaderFlag::SessionConfirmed { .. } => MessageType::SessionConfirmed,
+            },
+        }
+    }
+
     /// Serialize [`Header`] into a byte vector.
     fn serialize(&self) -> BytesMut {
         match self {
@@ -1131,7 +1149,11 @@ impl Header {
                 message_type,
                 net_id,
             } => {
-                let mut out = BytesMut::with_capacity(16usize);
+                let mut out = BytesMut::with_capacity(match message_type {
+                    MessageType::Retry => 16usize,
+                    MessageType::SessionCreated => 16usize + 32usize, // header + ephemeral key
+                    _ => todo!("not supported"),
+                });
 
                 out.put_u64(*dst_id);
                 out.put_u32(*pkt_num);
@@ -1176,9 +1198,30 @@ impl Header {
     }
 }
 
+/// AEAD state.
+///
+/// Used to encrypt the payload.
+pub struct AeadState {
+    /// ChaCha20Poly1305 cipher key.
+    pub cipher_key: Vec<u8>,
+
+    /// Nonce.
+    pub nonce: u64,
+
+    /// Associated data.
+    pub state: Vec<u8>,
+}
+
+/// Message builder.
 pub struct MessageBuilder {
+    /// AEAD state.
+    aead_state: Option<AeadState>,
+
     /// Message blocks.
     blocks: Vec<Block>,
+
+    /// Ephemeral public key.
+    ephemeral_key: Option<EphemeralPublicKey>,
 
     /// Header.
     header: Header,
@@ -1197,9 +1240,13 @@ pub struct MessageBuilder {
 
 impl MessageBuilder {
     /// Create new [`MessageBuilder`].
+    ///
+    /// Automatically inserts 1 - 128 bytes of padding.
     pub fn new(header: Header) -> Self {
         Self {
+            aead_state: None,
             blocks: Vec::new(),
+            ephemeral_key: None,
             header,
             key1: None,
             key2: None,
@@ -1220,6 +1267,18 @@ impl MessageBuilder {
         self
     }
 
+    /// Specify ephemeral public key which included after the header
+    pub fn with_ephemeral_key(mut self, key: EphemeralPublicKey) -> Self {
+        self.ephemeral_key = Some(key);
+        self
+    }
+
+    /// Specify state for payload encryption.
+    pub fn with_aead_state(mut self, state: AeadState) -> Self {
+        self.aead_state = Some(state);
+        self
+    }
+
     /// Push `block` into the list of blocks.
     pub fn with_block(mut self, block: Block) -> Self {
         self.payload_len += block.serialized_len();
@@ -1234,6 +1293,7 @@ impl MessageBuilder {
     pub fn build(mut self) -> BytesMut {
         let key1 = self.key1.take().expect("to exist");
         let key2 = self.key2.take().unwrap_or(key1);
+        let message_type = self.header.message_type();
         let mut header = self.header.serialize();
 
         // serialize payload
@@ -1250,22 +1310,54 @@ impl MessageBuilder {
             )
             .to_vec();
 
+        // encrypt payload
+        //
+        // TODO: explain in more detail
+        // TODO: use message type to safeguard?
+        //
         // encryption must succeed since the parameters are controlled by us
-        ChaChaPoly::with_nonce(&key1, self.header.pkt_num() as u64)
-            .encrypt_with_ad_new(&header, &mut payload)
-            .expect("to succeed");
+        match self.aead_state.take() {
+            None => {
+                ChaChaPoly::with_nonce(&key1, self.header.pkt_num() as u64)
+                    .encrypt_with_ad_new(&header, &mut payload)
+                    .expect("to succeed");
+            }
+            Some(AeadState {
+                cipher_key,
+                nonce,
+                state,
+            }) => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    ?cipher_key,
+                    ?state,
+                    ?nonce,
+                    "aead encrypt payload",
+                );
+
+                let state = Sha256::new().update(&state).update(&header).finalize();
+                let state = Sha256::new()
+                    .update(&state)
+                    .update(&self.ephemeral_key.as_ref().unwrap().to_vec())
+                    .finalize();
+
+                ChaChaPoly::with_nonce(&cipher_key, nonce)
+                    .encrypt_with_ad_new(&state, &mut payload)
+                    .expect("to succeed");
+            }
+        }
 
         // encrypt first 16 bytes of the long header
         //
         // https://geti2p.net/spec/ssu2#header-encryption-kdf
         payload[payload.len() - 24..]
-            .chunks(12usize)
+            .chunks(IV_SIZE)
             .zip(header.chunks_mut(8usize))
             .zip([key1, key2])
             .for_each(|((chunk, header_chunk), key)| {
                 ChaCha::with_iv(
                     key,
-                    TryInto::<[u8; 12]>::try_into(chunk).expect("to succeed"),
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
                 )
                 .decrypt([0u8; 8])
                 .iter()
@@ -1275,9 +1367,23 @@ impl MessageBuilder {
                 });
             });
 
-        // encrypt rest of the header
-        ChaCha::with_iv(key2, [0u8; 12]).encrypt_ref(&mut header[16..32]);
+        // encrypt third part of the header, if long header was used
+        //
+        // how the header is encrypted depends on the message type
+        match message_type {
+            MessageType::Retry => {
+                ChaCha::with_iv(key2, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..32]);
+            }
+            MessageType::SessionCreated => {
+                header.put_slice(&self.ephemeral_key.expect("to exist").as_ref());
 
+                ChaCha::with_iv(key2, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..64]);
+            }
+            _ => todo!("not supported"),
+        }
+
+        // allocate extra space for poly13055 authentication tag
+        // if the message type indicates that the message will be encrypted
         let mut out = BytesMut::with_capacity(header.len() + payload.len());
         out.put_slice(&header);
         out.put_slice(&payload);

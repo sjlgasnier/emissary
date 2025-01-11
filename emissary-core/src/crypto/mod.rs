@@ -181,7 +181,7 @@ impl EphemeralPrivateKey {
     }
 
     /// Get associated public key.
-    pub fn public_key(&self) -> EphemeralPublicKey {
+    pub fn public(&self) -> EphemeralPublicKey {
         match self {
             Self::X25519(key) => EphemeralPublicKey::X25519(x25519_dalek::PublicKey::from(key)),
         }

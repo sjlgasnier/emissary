@@ -268,7 +268,7 @@ mod tests {
 
         let ciphertext = ChaChaPoly::with_nonce(&key, 1337).encrypt(&plaintext).unwrap();
 
-        ChaCha::with_nonce(&key, 1337u64).encrypt(&mut plaintext);
+        ChaCha::with_nonce(&key, 1337u64).encrypt_ref(&mut plaintext);
 
         assert_eq!(ciphertext[..ciphertext.len() - 16], plaintext);
     }
