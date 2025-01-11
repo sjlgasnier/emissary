@@ -48,7 +48,7 @@ mod profile;
 mod sam;
 mod shutdown;
 mod subsystem;
-mod transports;
+mod transport;
 mod tunnel;
 mod util;
 

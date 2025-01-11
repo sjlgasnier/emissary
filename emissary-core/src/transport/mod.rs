@@ -25,7 +25,7 @@ use crate::{
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
-    transports::{metrics::*, ntcp2::Ntcp2Context, ssu2::Ssu2Context},
+    transport::{metrics::*, ntcp2::Ntcp2Context, ssu2::Ssu2Context},
 };
 
 use futures::{Stream, StreamExt};

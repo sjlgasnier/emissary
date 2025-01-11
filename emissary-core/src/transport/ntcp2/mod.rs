@@ -24,7 +24,7 @@ use crate::{
     profile::ProfileStorage,
     runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener},
     subsystem::SubsystemHandle,
-    transports::{
+    transport::{
         metrics::*,
         ntcp2::{
             listener::Ntcp2Listener,

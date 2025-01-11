@@ -26,7 +26,7 @@ use crate::{
     profile::ProfileStorage,
     runtime::{MetricType, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
-    transports::{
+    transport::{
         ssu2::socket::{Ssu2SessionEvent, Ssu2Socket},
         Transport, TransportEvent,
     },

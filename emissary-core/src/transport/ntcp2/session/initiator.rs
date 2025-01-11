@@ -28,7 +28,7 @@ use crate::{
         siphash::SipHash, EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     runtime::Runtime,
-    transports::ntcp2::{
+    transport::ntcp2::{
         message::MessageBlock,
         options::{InitiatorOptions, ResponderOptions},
         session::KeyContext,

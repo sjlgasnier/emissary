@@ -28,7 +28,7 @@ use crate::{
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
-    transports::{Ntcp2Transport, Ssu2Transport, TransportManager},
+    transport::{Ntcp2Transport, Ssu2Transport, TransportManager},
     tunnel::{TunnelManager, TunnelManagerHandle},
 };
 

@@ -37,7 +37,7 @@ use crate::{
     profile::{Bucket, ProfileStorage},
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
-    transports::TransportService,
+    transport::TransportService,
     tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 

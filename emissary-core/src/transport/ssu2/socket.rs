@@ -24,7 +24,7 @@ use crate::{
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey,
     },
     runtime::{Runtime, UdpSocket},
-    transports::ssu2::message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
+    transport::ssu2::message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
 };
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -322,6 +322,12 @@ impl<R: Runtime> Ssu2Socket<R> {
                 let mut cipher_key =
                     Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
+                let mut aead_state = AeadState {
+                    cipher_key,
+                    nonce: 0u64,
+                    state: new_state,
+                };
+
                 let token = R::rng().next_u64();
                 // TODO: probably unnecessary memory copies here and below
                 let pkt = MessageBuilder::new(
@@ -334,11 +340,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                 )
                 .with_keypair(self.intro_key_raw, k_header_2)
                 .with_ephemeral_key(pk)
-                .with_aead_state(AeadState {
-                    state: new_state,
-                    cipher_key,
-                    nonce: 0u64,
-                })
+                .with_aead_state(&mut aead_state)
                 .with_block(Block::DateTime {
                     timestamp: R::time_since_epoch().as_secs() as u32,
                 })
@@ -348,6 +350,9 @@ impl<R: Runtime> Ssu2Socket<R> {
                 self.pending_pkts.push_back((BytesMut::from(&pkt[..]), address));
 
                 // TODO: create new session
+                // Header protection keys for next message (Session Confirmed)
+                // k_header_1 = bik
+                // k_header_2 = HKDF(chainKey, ZEROLEN, "SessionConfirmed", 32)
 
                 tracing::error!("-------------------------------------------------------------");
             }

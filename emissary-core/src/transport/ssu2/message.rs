@@ -1213,9 +1213,9 @@ pub struct AeadState {
 }
 
 /// Message builder.
-pub struct MessageBuilder {
+pub struct MessageBuilder<'a> {
     /// AEAD state.
-    aead_state: Option<AeadState>,
+    aead_state: Option<&'a mut AeadState>,
 
     /// Message blocks.
     blocks: Vec<Block>,
@@ -1238,7 +1238,7 @@ pub struct MessageBuilder {
     payload_len: usize,
 }
 
-impl MessageBuilder {
+impl<'a> MessageBuilder<'a> {
     /// Create new [`MessageBuilder`].
     ///
     /// Automatically inserts 1 - 128 bytes of padding.
@@ -1274,7 +1274,7 @@ impl MessageBuilder {
     }
 
     /// Specify state for payload encryption.
-    pub fn with_aead_state(mut self, state: AeadState) -> Self {
+    pub fn with_aead_state(mut self, state: &'a mut AeadState) -> Self {
         self.aead_state = Some(state);
         self
     }
@@ -1322,28 +1322,24 @@ impl MessageBuilder {
                     .encrypt_with_ad_new(&header, &mut payload)
                     .expect("to succeed");
             }
-            Some(AeadState {
-                cipher_key,
-                nonce,
-                state,
-            }) => {
+            Some(aead_state) => {
                 tracing::info!(
                     target: LOG_TARGET,
-                    ?cipher_key,
-                    ?state,
-                    ?nonce,
+                    state = ?aead_state.state,
                     "aead encrypt payload",
                 );
 
-                let state = Sha256::new().update(&state).update(&header).finalize();
+                let state = Sha256::new().update(&aead_state.state).update(&header).finalize();
                 let state = Sha256::new()
                     .update(&state)
                     .update(&self.ephemeral_key.as_ref().unwrap().to_vec())
                     .finalize();
 
-                ChaChaPoly::with_nonce(&cipher_key, nonce)
+                ChaChaPoly::with_nonce(&aead_state.cipher_key, aead_state.nonce)
                     .encrypt_with_ad_new(&state, &mut payload)
                     .expect("to succeed");
+
+                aead_state.state = state;
             }
         }
 

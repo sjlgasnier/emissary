@@ -39,7 +39,7 @@ use crate::{
     primitives::{RouterInfo, Str, TransportKind},
     profile::ProfileStorage,
     runtime::{Runtime, TcpStream},
-    transports::{
+    transport::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
         SubsystemHandle,
     },

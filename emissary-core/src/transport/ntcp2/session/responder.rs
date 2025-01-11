@@ -29,7 +29,7 @@ use crate::{
     },
     primitives::RouterInfo,
     runtime::Runtime,
-    transports::ntcp2::{
+    transport::ntcp2::{
         message::MessageBlock,
         options::{InitiatorOptions, ResponderOptions},
         session::KeyContext,

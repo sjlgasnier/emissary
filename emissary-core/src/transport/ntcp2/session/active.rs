@@ -26,7 +26,7 @@ use crate::{
     primitives::{RouterId, RouterInfo},
     runtime::{AsyncRead, AsyncWrite, Runtime},
     subsystem::SubsystemCommand,
-    transports::{
+    transport::{
         ntcp2::{
             message::MessageBlock,
             session::{KeyContext, Role},

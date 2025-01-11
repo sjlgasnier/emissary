@@ -26,7 +26,7 @@ use crate::{
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     shutdown::ShutdownHandle,
     subsystem::SubsystemEvent,
-    transports::TransportService,
+    transport::TransportService,
     tunnel::{
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
