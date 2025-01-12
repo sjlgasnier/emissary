@@ -27,7 +27,7 @@ use crate::{
     runtime::{MetricType, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
     transport::{
-        ssu2::socket::{Ssu2SessionEvent, Ssu2Socket},
+        ssu2::socket::{Ssu2SessionCommand, Ssu2SessionEvent, Ssu2Socket},
         Transport, TransportEvent,
     },
 };
@@ -36,7 +36,7 @@ use futures::Stream;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use core::{
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -48,8 +48,26 @@ mod socket;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2";
 
-/// Size for the socket event channel.
-const CHANNEL_SIZE: usize = 2048usize;
+/// Size for the socket event/command channel.
+const CHANNEL_SIZE: usize = 1024usize;
+
+#[derive(Debug, Clone)]
+pub struct Packet {
+    /// Packet.
+    pub pkt: Vec<u8>,
+
+    /// Socket address of the remote router.
+    pub address: SocketAddr,
+}
+
+impl Default for Packet {
+    fn default() -> Self {
+        Self {
+            pkt: Default::default(),
+            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        }
+    }
+}
 
 /// SSU2 context.
 pub struct Ssu2Context<R: Runtime> {
@@ -68,8 +86,11 @@ pub struct Ssu2Transport<R: Runtime> {
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
-    /// RX channel for receiving socket events.
+    /// RX channel for receiving events from [`Ssu2Socket`].
     socket_rx: Receiver<Ssu2SessionEvent>,
+
+    /// TX channel for sending commands to [`Ssu2Socket`].
+    command_tx: Sender<Ssu2SessionCommand>,
 }
 
 impl<R: Runtime> Ssu2Transport<R> {
@@ -97,6 +118,7 @@ impl<R: Runtime> Ssu2Transport<R> {
         );
 
         let (socket_tx, socket_rx) = channel(CHANNEL_SIZE);
+        let (command_tx, command_rx) = channel(CHANNEL_SIZE);
 
         // spawn ssu2 socket task in the background
         //
@@ -106,9 +128,14 @@ impl<R: Runtime> Ssu2Transport<R> {
             StaticPrivateKey::from(config.static_key),
             config.intro_key,
             socket_tx,
+            command_rx,
         ));
 
-        Self { metrics, socket_rx }
+        Self {
+            command_tx,
+            metrics,
+            socket_rx,
+        }
     }
 
     /// Collect `Ssu2Transport`-related metric counters, gauges and histograms.
@@ -181,15 +208,59 @@ impl<R: Runtime> Ssu2Transport<R> {
 }
 
 impl<R: Runtime> Transport for Ssu2Transport<R> {
-    fn connect(&mut self, _router: RouterInfo) {}
-    fn accept(&mut self, _router_id: &RouterId) {}
-    fn reject(&mut self, _router_id: &RouterId) {}
+    fn connect(&mut self, router_info: RouterInfo) {
+        if let Err(error) = self.command_tx.try_send(Ssu2SessionCommand::Connect { router_info }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to send `Connect` to ssu2 socket",
+            );
+            debug_assert!(false);
+        }
+    }
+
+    fn accept(&mut self, router_id: &RouterId) {
+        if let Err(error) = self.command_tx.try_send(Ssu2SessionCommand::Accept {
+            router_id: router_id.clone(),
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to send `Accept` to ssu2 socket",
+            );
+            debug_assert!(false);
+        }
+    }
+
+    fn reject(&mut self, router_id: &RouterId) {
+        if let Err(error) = self.command_tx.try_send(Ssu2SessionCommand::Reject {
+            router_id: router_id.clone(),
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to send `Reject` to ssu2 socket",
+            );
+            debug_assert!(false);
+        }
+    }
 }
 
 impl<R: Runtime> Stream for Ssu2Transport<R> {
     type Item = TransportEvent;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.socket_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Ssu2SessionEvent::ConnectionEstablished { router_id })) => {
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                }
+                Poll::Ready(Some(Ssu2SessionEvent::Dummy)) => unreachable!(),
+            }
+        }
+
         Poll::Pending
     }
 }

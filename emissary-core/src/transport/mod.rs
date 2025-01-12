@@ -54,14 +54,14 @@ const LOG_TARGET: &str = "emissary::transport-manager";
 pub enum TransportEvent {
     /// Connection successfully established to router.
     ConnectionEstablished {
-        /// `RouterInfo` for the connected peer.
-        router_info: RouterInfo,
+        /// ID of the connected router.
+        router_id: RouterId,
     },
 
     /// Connection closed to router.
     ConnectionClosed {
-        /// Router ID.
-        router: RouterId,
+        /// ID of the disconnected router.
+        router_id: RouterId,
     },
 
     /// Failed to dial peer.
@@ -393,38 +393,36 @@ impl<R: Runtime> Future for TransportManager<R> {
             match self.transports[index].poll_next_unpin(cx) {
                 Poll::Pending => {}
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_info })) => {
-                    let router = router_info.identity.id();
-
+                Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id })) => {
                     tracing::trace!(
                         target: LOG_TARGET,
-                        %router,
+                        %router_id,
                         "connection established",
                     );
 
-                    match self.routers.insert(router.clone()) {
+                    match self.routers.insert(router_id.clone()) {
                         true => {
-                            self.transports[index].accept(&router);
+                            self.transports[index].accept(&router_id);
                             self.metrics_handle.gauge(NUM_CONNECTIONS).increment(1);
                         }
                         false => {
                             tracing::warn!(
                                 target: LOG_TARGET,
-                                %router,
+                                %router_id,
                                 "router already connected, rejecting",
                             );
-                            self.transports[index].reject(&router);
+                            self.transports[index].reject(&router_id);
                         }
                     }
                 }
-                Poll::Ready(Some(TransportEvent::ConnectionClosed { router })) => {
+                Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })) => {
                     tracing::debug!(
                         target: LOG_TARGET,
-                        %router,
+                        %router_id,
                         "connection closed",
                     );
 
-                    self.routers.remove(&router);
+                    self.routers.remove(&router_id);
                     self.metrics_handle.gauge(NUM_CONNECTIONS).decrement(1);
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionFailure {})) => {

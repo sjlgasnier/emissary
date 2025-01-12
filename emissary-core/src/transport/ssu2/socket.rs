@@ -23,12 +23,15 @@ use crate::{
         sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey,
     },
+    primitives::{RouterId, RouterInfo},
     runtime::{JoinSet, Runtime, UdpSocket},
     transport::ssu2::{
         message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
-        session::pending::{
-            PendingSsu2Session, PendingSsu2SessionContext, PendingSsu2SessionStatus,
+        session::{
+            active::{Ssu2Session, Ssu2SessionContext},
+            pending::{PendingSsu2Session, PendingSsu2SessionContext, PendingSsu2SessionStatus},
         },
+        Packet,
     },
 };
 
@@ -61,9 +64,45 @@ const READ_BUFFER_LEN: usize = 2048usize;
 /// This is the channel from [`Ssu2Socket`] to a pending/active SSU2 session.
 const CHANNEL_SIZE: usize = 256usize;
 
+/// SSU2 packet channel size.
+///
+/// Used to receive datagrams from active sessions.
+const PKT_CHANNEL_SIZE: usize = 8192usize;
+
 /// Events emitted by [`Ssu2Socket`].
 #[derive(Debug, Default, Clone)]
 pub enum Ssu2SessionEvent {
+    /// Connection established to router.
+    ConnectionEstablished {
+        /// Router ID.
+        router_id: RouterId,
+    },
+
+    #[default]
+    Dummy,
+}
+
+/// Events emitted by [`Ssu2Socket`].
+#[derive(Debug, Default, Clone)]
+pub enum Ssu2SessionCommand {
+    /// Accept connection.
+    Accept {
+        /// Router ID.
+        router_id: RouterId,
+    },
+
+    /// Reject connection.
+    Reject {
+        /// Router ID.
+        router_id: RouterId,
+    },
+
+    /// Connect to router.
+    Connect {
+        /// Router info.
+        router_info: RouterInfo,
+    },
+
     #[default]
     Dummy,
 }
@@ -88,11 +127,19 @@ enum WriteState {
 
 /// SSU2 socket.
 pub struct Ssu2Socket<R: Runtime> {
+    /// Active sessions.
+    ///
+    /// The session returns a `(RouterId, destination connection ID)` tuple when it exits.
+    active_sessions: R::JoinSet<(RouterId, u64)>,
+
     /// Receive buffer.
     buffer: Vec<u8>,
 
     /// Chaining key.
     chaining_key: Bytes,
+
+    /// RX channel for receiving commands from [`Ssu2Transport`].
+    command_rx: Receiver<Ssu2SessionCommand>,
 
     /// Inbound state.
     inbound_state: Bytes,
@@ -106,20 +153,29 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Pending outbound packets.
     pending_pkts: VecDeque<(BytesMut, SocketAddr)>,
 
-    /// TX channel for sending session events to [`Ssu2`].
+    /// Pending SSU2 sessions.
+    pending_sessions: R::JoinSet<PendingSsu2SessionStatus>,
+
+    /// TX channel for sending session events to [`Ssu2Transport`].
     session_tx: Sender<Ssu2SessionEvent>,
 
     /// SSU2 sessions.
-    sessions: HashMap<u64, Sender<Vec<u8>>>,
+    sessions: HashMap<u64, Sender<Packet>>,
 
-    /// Pending SSU2 sessions.
-    pending_sessions: R::JoinSet<PendingSsu2SessionStatus>,
+    /// RX channel for receiving packets from active sessions.
+    pkt_rx: Receiver<Packet>,
+
+    /// TX channel given to active sessions.
+    pkt_tx: Sender<Packet>,
 
     /// UDP socket.
     socket: R::UdpSocket,
 
     /// Static key.
     static_key: StaticPrivateKey,
+
+    /// Unvalidated sessions.
+    unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
 
     /// Write state.
     write_state: WriteState,
@@ -132,6 +188,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         static_key: StaticPrivateKey,
         intro_key: [u8; 32],
         session_tx: Sender<Ssu2SessionEvent>,
+        command_rx: Receiver<Ssu2SessionCommand>,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
         let chaining_key = state.clone();
@@ -141,18 +198,29 @@ impl<R: Runtime> Ssu2Socket<R> {
             .update(static_key.public().to_vec())
             .finalize();
 
+        // create channel pair which is used to exchange outbound packets
+        // with active sessions and `Ssu2Socket`
+        //
+        // TODO: implement `Clone` for `R::UdpSocket`
+        let (pkt_tx, pkt_rx) = channel(PKT_CHANNEL_SIZE);
+
         Self {
+            active_sessions: R::join_set(),
             buffer: vec![0u8; READ_BUFFER_LEN],
             chaining_key: Bytes::from(chaining_key),
+            command_rx,
             inbound_state: Bytes::from(inbound_state),
             intro_key,
             outbound_state: Bytes::from(outbound_state),
             pending_pkts: VecDeque::new(),
             pending_sessions: R::join_set(),
+            pkt_rx,
+            pkt_tx,
             sessions: HashMap::new(),
             session_tx,
             socket,
             static_key: StaticPrivateKey::from(static_key),
+            unvalidated_sessions: HashMap::new(),
             write_state: WriteState::GetPacket,
         }
     }
@@ -183,7 +251,10 @@ impl<R: Runtime> Ssu2Socket<R> {
         );
 
         if let Some(tx) = self.sessions.get_mut(&connection_id) {
-            if let Err(error) = tx.try_send(self.buffer[..nread].to_vec()) {
+            if let Err(error) = tx.try_send(Packet {
+                pkt: self.buffer[..nread].to_vec(),
+                address,
+            }) {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?connection_id,
@@ -408,6 +479,54 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
         let this = &mut *self;
 
         loop {
+            match this.command_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(Ssu2SessionCommand::Accept { router_id })) =>
+                    match this.unvalidated_sessions.remove(&router_id) {
+                        None => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "non-existent unvalidated session accepted",
+                            );
+                            debug_assert!(false);
+                        }
+                        Some(context) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "session accepted",
+                            );
+                            this.active_sessions
+                                .push(Ssu2Session::<R>::new(context, this.pkt_tx.clone()));
+                        }
+                    },
+                Poll::Ready(Some(Ssu2SessionCommand::Reject { router_id })) =>
+                    match this.unvalidated_sessions.remove(&router_id) {
+                        None => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "non-existent unvalidated session rejected",
+                            );
+                            debug_assert!(false);
+                        }
+                        Some(context) => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "session rejected",
+                            );
+                            // TODO: send termination
+                        }
+                    },
+                Poll::Ready(Some(Ssu2SessionCommand::Connect { router_info })) => todo!(),
+                Poll::Ready(Some(Ssu2SessionCommand::Dummy)) => unreachable!(),
+            }
+        }
+
+        loop {
             match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.buffer.as_mut()) {
                 Poll::Pending => break,
                 Poll::Ready(None) => {
@@ -458,16 +577,33 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                     pkt,
                     target,
                 })) => {
-                    tracing::error!(
+                    let router_id = context.router_id.clone();
+
+                    tracing::trace!(
                         target: LOG_TARGET,
+                        %router_id,
                         "inbound session negotiated",
                     );
+
                     this.pending_pkts.push_back((pkt, target));
+                    this.unvalidated_sessions.insert(router_id.clone(), context);
+
+                    if let Err(error) = this
+                        .session_tx
+                        .try_send(Ssu2SessionEvent::ConnectionEstablished { router_id })
+                    {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to report inbound session to `Ssu2Transport`",
+                        );
+                        debug_assert!(false);
+                    }
+
+                    // call waker so the ack is sent to remote router immediately
                     cx.waker().wake_by_ref();
                 }
-                Poll::Ready(Some(
-                    PendingSsu2SessionStatus::Dummy | PendingSsu2SessionStatus::SocketClosed,
-                )) => unreachable!(),
+                Poll::Ready(Some(PendingSsu2SessionStatus::SocketClosed)) => return Poll::Ready(()),
             }
         }
 

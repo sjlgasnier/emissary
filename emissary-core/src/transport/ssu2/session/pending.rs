@@ -29,6 +29,7 @@ use crate::{
     transport::ssu2::{
         message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, ShortHeaderFlag},
         session::active::{KeyContext, Ssu2SessionContext},
+        Packet,
     },
 };
 
@@ -76,7 +77,7 @@ pub enum PendingSsu2SessionContext {
         k_session_created: [u8; 32],
 
         /// RX channel for receiving datagrams from `Ssu2Socket`.
-        rx: Receiver<Vec<u8>>,
+        rx: Receiver<Packet>,
 
         /// Source connection ID.
         src_id: u64,
@@ -105,8 +106,6 @@ pub enum PendingSsu2SessionStatus {
 
     /// [`SSu2Socket`] has been closed.
     SocketClosed,
-
-    Dummy,
 }
 
 /// Pending session state.
@@ -145,7 +144,7 @@ pub struct PendingSsu2Session<R: Runtime> {
     intro_key: [u8; 32],
 
     /// RX channel for receiving datagrams from `Ssu2Socket`.
-    rx: Option<Receiver<Vec<u8>>>,
+    rx: Option<Receiver<Packet>>,
 
     /// Pending session state.
     state: PendingSsu2SessionState,
@@ -402,7 +401,7 @@ impl<R: Runtime> Future for PendingSsu2Session<R> {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(None) =>
                         return Poll::Ready(PendingSsu2SessionStatus::SocketClosed),
-                    Poll::Ready(Some(pkt)) => pkt,
+                    Poll::Ready(Some(Packet { pkt, .. })) => pkt,
                 },
             };
 

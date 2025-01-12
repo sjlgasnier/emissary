@@ -272,8 +272,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(router)) =>
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router })),
+            Poll::Ready(Some(router_id)) =>
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })),
         }
 
         match self.listener.poll_next_unpin(cx) {
@@ -307,13 +307,11 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     //
                     // `TransportManager` will either accept or reject the session
                     let router_info = session.router();
-                    let router = router_info.identity.id();
+                    let router_id = router_info.identity.id();
 
-                    self.pending_connections.insert(router, session);
+                    self.pending_connections.insert(router_id.clone(), session);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
-                        router_info,
-                    }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
                 Some(Err(error)) => {
                     tracing::debug!(
