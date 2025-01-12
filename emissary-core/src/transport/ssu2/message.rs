@@ -182,7 +182,10 @@ pub enum Block {
     },
 
     /// Router info.
-    RouterInfo { router_info: RouterInfo },
+    RouterInfo {
+        /// Router info.
+        router_info: RouterInfo,
+    },
 
     /// I2NP message.
     I2Np {
@@ -467,7 +470,7 @@ impl Block {
         }
         let (rest, flag) = be_u8(rest)?;
         let (rest, _frag) = be_u8(rest)?;
-        let (rest, router_info) = take(size - 1)(rest)?;
+        let (rest, router_info) = take(size - 2)(rest)?;
 
         if flag & 1 == 1 {
             tracing::warn!(
@@ -841,6 +844,22 @@ impl Block {
 
                 out
             }
+            Self::Ack {
+                ack_through,
+                num_acks,
+                ranges,
+            } => {
+                out.put_u8(BlockType::Ack.as_u8());
+                out.put_u16((4usize + 1usize + ranges.len() * 2) as u16);
+                out.put_u32(ack_through);
+                out.put_u8(num_acks);
+                ranges.into_iter().for_each(|(nack, ack)| {
+                    out.put_u8(nack);
+                    out.put_u8(ack);
+                });
+
+                out
+            }
             block_type => todo!("unsupported block type: {block_type:?}"),
         }
     }
@@ -1166,6 +1185,8 @@ impl Header {
                     _ => todo!("not supported"),
                 });
 
+                // TODO: endiannes?
+
                 out.put_u64(*dst_id);
                 out.put_u32(*pkt_num);
                 out.put_u8(**message_type);
@@ -1182,9 +1203,10 @@ impl Header {
                 pkt_num,
                 flag,
             } => {
-                let mut out = BytesMut::with_capacity(8usize);
+                let mut out = BytesMut::with_capacity(16usize);
 
-                out.put_u64(*dst_id);
+                // TODO: explain
+                out.put_u64_le(*dst_id);
                 out.put_u32(*pkt_num);
 
                 match flag {
@@ -1368,11 +1390,11 @@ impl<'a> MessageBuilder<'a> {
                 BytesMut::with_capacity(self.payload_len),
                 |mut out, block| {
                     out.put_slice(&block.serialize());
-
                     out
                 },
             )
             .to_vec();
+        debug_assert!(payload.len() >= 24);
 
         // encrypt payload
         //
@@ -1386,35 +1408,37 @@ impl<'a> MessageBuilder<'a> {
                     .encrypt_with_ad_new(&header, &mut payload)
                     .expect("to succeed");
             }
-            Some(aead_state) => {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    state = ?aead_state.state,
-                    "aead encrypt payload",
-                );
+            Some(aead_state) =>
+                if aead_state.state.is_empty() {
+                    ChaChaPoly::with_nonce(&aead_state.cipher_key, aead_state.nonce)
+                        .encrypt_with_ad_new(&header, &mut payload)
+                        .expect("to succeed");
+                } else {
+                    let state = Sha256::new().update(&aead_state.state).update(&header).finalize();
+                    let state = Sha256::new()
+                        .update(&state)
+                        .update(&self.ephemeral_key.as_ref().unwrap().to_vec())
+                        .finalize();
 
-                let state = Sha256::new().update(&aead_state.state).update(&header).finalize();
-                let state = Sha256::new()
-                    .update(&state)
-                    .update(&self.ephemeral_key.as_ref().unwrap().to_vec())
-                    .finalize();
+                    ChaChaPoly::with_nonce(&aead_state.cipher_key, aead_state.nonce)
+                        .encrypt_with_ad_new(&state, &mut payload)
+                        .expect("to succeed");
 
-                ChaChaPoly::with_nonce(&aead_state.cipher_key, aead_state.nonce)
-                    .encrypt_with_ad_new(&state, &mut payload)
-                    .expect("to succeed");
-
-                aead_state.state = state;
-            }
+                    aead_state.state = Sha256::new().update(&state).update(&payload).finalize();
+                },
         }
 
         // encrypt first 16 bytes of the long header
         //
         // https://geti2p.net/spec/ssu2#header-encryption-kdf
-        payload[payload.len() - 24..]
+        payload[payload.len() - 2 * IV_SIZE..]
             .chunks(IV_SIZE)
             .zip(header.chunks_mut(8usize))
             .zip([key1, key2])
             .for_each(|((chunk, header_chunk), key)| {
+                tracing::error!("conn id = {header_chunk:?}",);
+                tracing::error!("key = {key:?}");
+
                 ChaCha::with_iv(
                     key,
                     TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
@@ -1439,6 +1463,7 @@ impl<'a> MessageBuilder<'a> {
 
                 ChaCha::with_iv(key2, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..64]);
             }
+            MessageType::Data => {}
             _ => todo!("not supported"),
         }
 

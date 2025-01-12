@@ -23,14 +23,20 @@ use crate::{
         sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey,
     },
-    runtime::{Runtime, UdpSocket},
-    transport::ssu2::message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
+    runtime::{JoinSet, Runtime, UdpSocket},
+    transport::ssu2::{
+        message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
+        session::pending::{
+            PendingSsu2Session, PendingSsu2SessionContext, PendingSsu2SessionStatus,
+        },
+    },
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+use futures::StreamExt;
 use hashbrown::HashMap;
 use rand_core::RngCore;
-use thingbuf::mpsc::{Receiver, Sender};
+use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::collections::VecDeque;
 use core::{
@@ -44,11 +50,16 @@ use core::{
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::socket";
 
+/// Protocol name.
+const PROTOCOL_NAME: &str = "Noise_XKchaobfse+hs1+hs2+hs3_25519_ChaChaPoly_SHA256";
+
 /// Read buffer length.
 const READ_BUFFER_LEN: usize = 2048usize;
 
-/// Protocol name.
-const PROTOCOL_NAME: &str = "Noise_XKchaobfse+hs1+hs2+hs3_25519_ChaChaPoly_SHA256";
+/// SSU2 session channel size.
+///
+/// This is the channel from [`Ssu2Socket`] to a pending/active SSU2 session.
+const CHANNEL_SIZE: usize = 256usize;
 
 /// Events emitted by [`Ssu2Socket`].
 #[derive(Debug, Default, Clone)]
@@ -99,7 +110,10 @@ pub struct Ssu2Socket<R: Runtime> {
     session_tx: Sender<Ssu2SessionEvent>,
 
     /// SSU2 sessions.
-    sessions: HashMap<u64, ()>,
+    sessions: HashMap<u64, Sender<Vec<u8>>>,
+
+    /// Pending SSU2 sessions.
+    pending_sessions: R::JoinSet<PendingSsu2SessionStatus>,
 
     /// UDP socket.
     socket: R::UdpSocket,
@@ -134,6 +148,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             intro_key,
             outbound_state: Bytes::from(outbound_state),
             pending_pkts: VecDeque::new(),
+            pending_sessions: R::join_set(),
             sessions: HashMap::new(),
             session_tx,
             socket,
@@ -156,28 +171,34 @@ impl<R: Runtime> Ssu2Socket<R> {
             .expect("to succeed");
         let iv2 =
             TryInto::<[u8; 12]>::try_into(&self.buffer[nread - 12..nread]).expect("to succeed");
-        let mut mask = [0u8; 8];
-        ChaCha::with_iv(self.intro_key, iv1).decrypt_ref(&mut mask);
-
-        let connection_id = u64::from_be(mask.into_iter().zip(&mut self.buffer).fold(
-            0u64,
-            |connection_id, (a, b)| {
+        ChaCha::with_iv(self.intro_key, iv1)
+            .decrypt([0u8; 8])
+            .into_iter()
+            .zip(&mut self.buffer[..8])
+            .for_each(|(a, b)| {
                 *b ^= a;
+            });
+        let connection_id = u64::from_le_bytes(
+            TryInto::<[u8; 8]>::try_into(&self.buffer[..8]).expect("to succeed"),
+        );
 
-                (connection_id << 8) | (*b as u64)
-            },
-        ));
+        if let Some(tx) = self.sessions.get_mut(&connection_id) {
+            if let Err(error) = tx.try_send(self.buffer[..nread].to_vec()) {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?connection_id,
+                    ?error,
+                    "failed to send datagram to ssu2 session",
+                );
+            }
+            return;
+        }
 
         tracing::info!(
             target: LOG_TARGET,
             ?connection_id,
             "received message"
         );
-
-        if self.sessions.contains_key(&connection_id) {
-            tracing::info!("handle message for active session");
-            todo!();
-        }
 
         ChaCha::with_iv(self.intro_key, iv2)
             .decrypt([0u8; 8])
@@ -314,7 +335,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
                 let mut aead_state = AeadState {
-                    cipher_key,
+                    cipher_key: cipher_key.clone(),
                     nonce: 0u64,
                     state: new_state,
                 };
@@ -340,12 +361,29 @@ impl<R: Runtime> Ssu2Socket<R> {
 
                 self.pending_pkts.push_back((BytesMut::from(&pkt[..]), address));
 
-                // TODO: create new session
-                // Header protection keys for next message (Session Confirmed)
-                // k_header_1 = bik
-                // k_header_2 = HKDF(chainKey, ZEROLEN, "SessionConfirmed", 32)
+                // create new session
+                let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+                let k_header_2 =
+                    Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize();
+                let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).unwrap();
+                let k_session_created = TryInto::<[u8; 32]>::try_into(cipher_key).unwrap();
 
-                tracing::error!("-------------------------------------------------------------");
+                let (tx, rx) = channel(CHANNEL_SIZE);
+                self.sessions.insert(connection_id, tx);
+                self.pending_sessions.push(PendingSsu2Session::<R>::new(
+                    PendingSsu2SessionContext::Inbound {
+                        address,
+                        dst_id: connection_id,
+                        src_id: src_connection_id,
+                        k_header_1: self.intro_key.clone(),
+                        k_header_2,
+                        k_session_created,
+                        chaining_key,
+                        ephemeral_key: sk,
+                        rx,
+                        state: aead_state.state,
+                    },
+                ));
             }
             Ok(message_type) => {
                 tracing::error!(
@@ -408,6 +446,28 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                         }
                     },
                 WriteState::Poisoned => unreachable!(),
+            }
+        }
+
+        loop {
+            match this.pending_sessions.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(Some(PendingSsu2SessionStatus::NewSession {
+                    context,
+                    pkt,
+                    target,
+                })) => {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        "inbound session negotiated",
+                    );
+                    this.pending_pkts.push_back((pkt, target));
+                    cx.waker().wake_by_ref();
+                }
+                Poll::Ready(Some(
+                    PendingSsu2SessionStatus::Dummy | PendingSsu2SessionStatus::SocketClosed,
+                )) => unreachable!(),
             }
         }
 

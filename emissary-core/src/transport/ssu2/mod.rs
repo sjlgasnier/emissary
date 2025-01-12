@@ -42,6 +42,7 @@ use core::{
 };
 
 mod message;
+mod session;
 mod socket;
 
 /// Logging target for the file.
