@@ -18,7 +18,8 @@
 
 use crate::{
     crypto::chachapoly::{ChaCha, ChaChaPoly},
-    primitives::RouterId,
+    i2np::{Message, MessageType as I2npMessageType},
+    primitives::{MessageId, RouterId},
     runtime::Runtime,
     subsystem::{SubsystemCommand, SubsystemHandle},
     transport::ssu2::{
@@ -29,14 +30,18 @@ use crate::{
     },
 };
 
+use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
+use alloc::collections::BTreeMap;
 use core::{
     future::Future,
+    iter,
     marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 /// Logging target for the file.
@@ -55,6 +60,117 @@ impl KeyContext {
     /// Create new [`KeyContext`].
     pub fn new(k_data: [u8; 32], k_header_2: [u8; 32]) -> Self {
         Self { k_data, k_header_2 }
+    }
+}
+
+/// Fragmented I2NP message.
+#[derive(Default)]
+struct Fragment {
+    /// Fragments.
+    fragments: BTreeMap<u8, Vec<u8>>,
+
+    /// Total of fragments.
+    ///
+    /// `None` if last fragment hasn't been received.
+    num_fragments: Option<usize>,
+
+    /// Message info.
+    ///
+    /// `None` if the first fragment hasn't been received.
+    info: Option<(I2npMessageType, MessageId, u32)>,
+
+    /// Total size of the I2NP message.
+    total_size: usize,
+}
+
+impl Fragment {
+    /// Check if [`Fragment`] is ready for assembly.
+    pub fn is_ready(&self) -> bool {
+        self.num_fragments.is_some()
+            && self.info.is_some()
+            && self.num_fragments == Some(self.fragments.len())
+    }
+
+    /// Construct I2NP message from received fragments.
+    pub fn construct(mut self) -> Option<Message> {
+        let (message_type, message_id, expiration) = self.info.take()?;
+        let payload = self.fragments.into_values().fold(
+            Vec::<u8>::with_capacity(self.total_size),
+            |mut payload, fragment| {
+                payload.extend_from_slice(&fragment);
+                payload
+            },
+        );
+
+        tracing::error!(target: LOG_TARGET, "construct fragment");
+
+        Some(Message {
+            message_type,
+            message_id: *message_id,
+            expiration: Duration::from_secs(expiration as u64),
+            payload,
+        })
+    }
+}
+
+/// Fragment handler.
+#[derive(Default)]
+struct FragmentHandler {
+    /// Fragmented messages.
+    messages: HashMap<MessageId, Fragment>,
+}
+
+impl FragmentHandler {
+    /// Handle first fragment.
+    ///
+    /// If all fragments have been received, the constructed message is received.
+    pub fn first_fragment(
+        &mut self,
+        message_type: I2npMessageType,
+        message_id: MessageId,
+        expiration: u32,
+        payload: Vec<u8>,
+    ) -> Option<Message> {
+        let message = self.messages.entry(message_id).or_default();
+
+        message.total_size += payload.len();
+        message.fragments.insert(0u8, payload.to_vec());
+        message.info = Some((message_type, message_id, expiration));
+
+        tracing::error!(target: LOG_TARGET, "first fragment");
+
+        message
+            .is_ready()
+            .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
+            .flatten()
+    }
+
+    /// Handle follow-on fragment.
+    ///
+    /// If all fragments have been received, the constructed message is received.
+    pub fn follow_on_fragment(
+        &mut self,
+        message_id: MessageId,
+        sequence: u8,
+        last: bool,
+        payload: Vec<u8>,
+    ) -> Option<Message> {
+        let message = self.messages.entry(message_id).or_default();
+
+        message.total_size += payload.len();
+        message.fragments.insert(sequence, payload.to_vec());
+
+        if last {
+            // +1 one for the first fragment
+            message.num_fragments = Some(sequence as usize + 1usize);
+        }
+
+        tracing::error!(target: LOG_TARGET, "follow-on fragment");
+
+        message
+            .is_ready()
+            .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
+            .flatten()
     }
 }
 
@@ -114,6 +230,9 @@ pub struct Ssu2Session<R: Runtime> {
     // TODO: `R::UdpSocket` should be clonable
     pkt_tx: Sender<Packet>,
 
+    /// Fragment handler.
+    fragment_handler: FragmentHandler,
+
     /// Key context for inbound packets.
     recv_key_ctx: KeyContext,
 
@@ -157,6 +276,7 @@ impl<R: Runtime> Ssu2Session<R> {
             cmd_rx,
             cmd_tx,
             dst_id: context.dst_id,
+            fragment_handler: FragmentHandler::default(),
             pkt_highest_seen: 0u32,
             num_unacked: 0u8,
             intro_key: context.intro_key,
@@ -187,12 +307,12 @@ impl<R: Runtime> Ssu2Session<R> {
                 *b ^= a;
             });
 
-        match MessageType::try_from(pkt[12]) {
-            Ok(msg_type) => tracing::trace!("msg type = {msg_type:?}"),
-            Err(()) => {
-                tracing::error!("unknown message");
-            }
-        }
+        // match MessageType::try_from(pkt[12]) {
+        //     Ok(msg_type) => tracing::trace!("msg type = {msg_type:?}"),
+        //     Err(()) => {
+        //         tracing::error!("unknown message");
+        //     }
+        // }
 
         let pkt_num = u32::from_be_bytes(TryInto::<[u8; 4]>::try_into(&pkt[8..12]).unwrap());
 
@@ -243,6 +363,28 @@ impl<R: Runtime> Ssu2Session<R> {
                         Some(message)
                     },
                 Block::Padding { .. } => None,
+                Block::FirstFragment {
+                    message_type,
+                    message_id,
+                    expiration,
+                    fragment,
+                } => self.fragment_handler.first_fragment(
+                    message_type,
+                    message_id,
+                    expiration,
+                    fragment,
+                ),
+                Block::FollowOnFragment {
+                    last,
+                    message_id,
+                    fragment_num,
+                    fragment,
+                } => self.fragment_handler.follow_on_fragment(
+                    message_id,
+                    fragment_num,
+                    last,
+                    fragment,
+                ),
                 message => {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -287,8 +429,6 @@ impl<R: Runtime> Ssu2Session<R> {
             )
             .build()
         {
-            tracing::error!(target: LOG_TARGET, "send message, len = {}", message.len());
-
             if let Err(error) = self.pkt_tx.try_send(Packet {
                 pkt: message.to_vec(),
                 address: self.address,

@@ -1572,7 +1572,6 @@ impl<'a> DataMessageBuilder<'a> {
                 BytesMut::with_capacity(self.payload_len + 16usize), // poly13055
                 |mut out, i2np| {
                     out.put_u8(BlockType::I2Np.as_u8());
-                    out.put_u16(i2np.len() as u16);
                     out.put_slice(&i2np);
 
                     out
@@ -1606,10 +1605,6 @@ impl<'a> DataMessageBuilder<'a> {
         // encrypt payload and headers, and build the full message
         let (intro_key, KeyContext { k_data, k_header_2 }) =
             self.key_context.take().expect("to exist");
-
-        tracing::error!("key = {k_data:?}");
-        tracing::error!("header = {:?}", header.to_vec());
-        tracing::error!("pkt num = {pkt_num}");
 
         ChaChaPoly::with_nonce(k_data, *pkt_num as u64)
             .encrypt_with_ad_new(&header, &mut payload)
