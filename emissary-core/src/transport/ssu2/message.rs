@@ -29,9 +29,11 @@ use crate::{
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
     runtime::Runtime,
+    transport::ssu2::session::active::KeyContext,
 };
 
 use bytes::{BufMut, BytesMut};
+use chrono::format::Numeric;
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -1436,9 +1438,6 @@ impl<'a> MessageBuilder<'a> {
             .zip(header.chunks_mut(8usize))
             .zip([key1, key2])
             .for_each(|((chunk, header_chunk), key)| {
-                tracing::error!("conn id = {header_chunk:?}",);
-                tracing::error!("key = {key:?}");
-
                 ChaCha::with_iv(
                     key,
                     TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
@@ -1474,5 +1473,172 @@ impl<'a> MessageBuilder<'a> {
         out.put_slice(&payload);
 
         out
+    }
+}
+
+/// Data message
+#[derive(Default)]
+pub struct DataMessageBuilder<'a> {
+    /// ACK information.
+    acks: Option<(u32, u8, Option<Vec<(u8, u8)>>)>,
+
+    // Destination connection ID.
+    dst_id: Option<u64>,
+
+    /// I2NP messages.
+    i2np: Vec<Vec<u8>>,
+
+    /// Key context for the message.
+    key_context: Option<([u8; 32], &'a KeyContext)>,
+
+    /// Payload length.
+    payload_len: usize,
+
+    /// Packet number.
+    pkt_num: Option<&'a mut u32>,
+}
+
+impl<'a> DataMessageBuilder<'a> {
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, value: u64) -> Self {
+        self.dst_id = Some(value);
+        self
+    }
+
+    /// Specify packet number.
+    pub fn with_pkt_num(mut self, value: &'a mut u32) -> Self {
+        self.pkt_num = Some(value);
+        self
+    }
+
+    /// Specify key context.
+    pub fn with_key_context(mut self, intro_key: [u8; 32], key_ctx: &'a KeyContext) -> Self {
+        self.key_context = Some((intro_key, key_ctx));
+        self
+    }
+
+    /// Specify I2NP message.
+    pub fn with_i2np(mut self, value: Vec<u8>) -> Self {
+        self.payload_len = self
+            .payload_len
+            .saturating_add(1usize) // type
+            .saturating_add(2usize) // len
+            .saturating_add(value.len());
+        self.i2np.push(value);
+        self
+    }
+
+    /// Specify ACK information.
+    pub fn with_ack(
+        mut self,
+        ack_through: u32,
+        num_acks: u8,
+        ranges: Option<Vec<(u8, u8)>>,
+    ) -> Self {
+        self.payload_len = self
+            .payload_len
+            .saturating_add(1usize) // type
+            .saturating_add(2usize) // len
+            .saturating_add(4usize) // ack through
+            .saturating_add(1usize) // num acks
+            .saturating_add(ranges.as_ref().map_or(0usize, |ranges| ranges.len() * 2)); // ranges
+        self.acks = Some((ack_through, num_acks, ranges));
+        self
+    }
+
+    /// Build message into one or more packets.
+    pub fn build(mut self) -> impl Iterator<Item = BytesMut> {
+        let pkt_num = self.pkt_num.expect("to exist");
+
+        // TODO: construct header only after fragmentation has been determined
+        let mut header = {
+            let mut out = BytesMut::with_capacity(16usize);
+
+            out.put_u64_le(self.dst_id.expect("to exist"));
+            out.put_u32(*pkt_num);
+
+            out.put_u8(*MessageType::Data);
+            out.put_u8(0u8); // immediate ack
+            out.put_u16(0u16); // more flags
+
+            out
+        };
+
+        // build payload
+        //
+        // TODO: add fragmentation support
+        let mut payload = {
+            let mut out = self.i2np.into_iter().fold(
+                BytesMut::with_capacity(self.payload_len + 16usize), // poly13055
+                |mut out, i2np| {
+                    out.put_u8(BlockType::I2Np.as_u8());
+                    out.put_u16(i2np.len() as u16);
+                    out.put_slice(&i2np);
+
+                    out
+                },
+            );
+
+            match self.acks.take() {
+                None => {}
+                Some((ack_through, num_acks, None)) => {
+                    out.put_u8(BlockType::Ack.as_u8());
+                    out.put_u16(5u16);
+                    out.put_u32(ack_through);
+                    out.put_u8(num_acks);
+                }
+                Some((ack_through, num_acks, Some(ranges))) => {
+                    out.put_u8(BlockType::Ack.as_u8());
+                    out.put_u16((5usize + ranges.len() * 2) as u16);
+                    out.put_u32(ack_through);
+                    out.put_u8(num_acks);
+
+                    ranges.into_iter().for_each(|(nack, ack)| {
+                        out.put_u8(nack);
+                        out.put_u8(ack);
+                    });
+                }
+            }
+
+            out.to_vec()
+        };
+
+        // encrypt payload and headers, and build the full message
+        let (intro_key, KeyContext { k_data, k_header_2 }) =
+            self.key_context.take().expect("to exist");
+
+        tracing::error!("key = {k_data:?}");
+        tracing::error!("header = {:?}", header.to_vec());
+        tracing::error!("pkt num = {pkt_num}");
+
+        ChaChaPoly::with_nonce(k_data, *pkt_num as u64)
+            .encrypt_with_ad_new(&header, &mut payload)
+            .expect("to succeed");
+
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        payload[payload.len() - 2 * IV_SIZE..]
+            .chunks(IV_SIZE)
+            .zip(header.chunks_mut(8usize))
+            .zip([intro_key, *k_header_2])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        let mut out = BytesMut::with_capacity(header.len() + payload.len());
+        out.put_slice(&header);
+        out.put_slice(&payload);
+
+        vec![out].into_iter()
     }
 }

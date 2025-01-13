@@ -25,6 +25,7 @@ use crate::{
     },
     primitives::{RouterId, RouterInfo},
     runtime::{JoinSet, Runtime, UdpSocket},
+    subsystem::SubsystemHandle,
     transport::ssu2::{
         message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
         session::{
@@ -156,23 +157,26 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Pending SSU2 sessions.
     pending_sessions: R::JoinSet<PendingSsu2SessionStatus>,
 
-    /// TX channel for sending session events to [`Ssu2Transport`].
-    session_tx: Sender<Ssu2SessionEvent>,
-
-    /// SSU2 sessions.
-    sessions: HashMap<u64, Sender<Packet>>,
-
     /// RX channel for receiving packets from active sessions.
     pkt_rx: Receiver<Packet>,
 
     /// TX channel given to active sessions.
     pkt_tx: Sender<Packet>,
 
+    /// TX channel for sending session events to [`Ssu2Transport`].
+    session_tx: Sender<Ssu2SessionEvent>,
+
+    /// SSU2 sessions.
+    sessions: HashMap<u64, Sender<Packet>>,
+
     /// UDP socket.
     socket: R::UdpSocket,
 
     /// Static key.
     static_key: StaticPrivateKey,
+
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
 
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
@@ -189,6 +193,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         intro_key: [u8; 32],
         session_tx: Sender<Ssu2SessionEvent>,
         command_rx: Receiver<Ssu2SessionCommand>,
+        subsystem_handle: SubsystemHandle,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
         let chaining_key = state.clone();
@@ -220,6 +225,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             session_tx,
             socket,
             static_key: StaticPrivateKey::from(static_key),
+            subsystem_handle,
             unvalidated_sessions: HashMap::new(),
             write_state: WriteState::GetPacket,
         }
@@ -229,12 +235,7 @@ impl<R: Runtime> Ssu2Socket<R> {
     //
     // TODO: needs as lot of refactoring
     fn handle_packet(&mut self, nread: usize, address: SocketAddr) {
-        tracing::trace!(
-            target: LOG_TARGET,
-            ?nread,
-            "handle packet",
-        );
-
+        // TODO: ensure size
         let iv1 = TryInto::<[u8; 12]>::try_into(&self.buffer[nread - 24..nread - 12])
             .expect("to succeed");
         let iv2 =
@@ -498,8 +499,14 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                                 %router_id,
                                 "session accepted",
                             );
-                            this.active_sessions
-                                .push(Ssu2Session::<R>::new(context, this.pkt_tx.clone()));
+                            this.active_sessions.push(
+                                Ssu2Session::<R>::new(
+                                    context,
+                                    this.pkt_tx.clone(),
+                                    this.subsystem_handle.clone(),
+                                )
+                                .run(),
+                            );
                         }
                     },
                 Poll::Ready(Some(Ssu2SessionCommand::Reject { router_id })) =>
@@ -539,6 +546,16 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                 Poll::Ready(Some((nread, from))) => {
                     this.handle_packet(nread, from);
                 }
+            }
+        }
+
+        loop {
+            match this.pkt_rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                // TODO: useless conversion from vec to bytesmut
+                Poll::Ready(Some(Packet { pkt, address })) =>
+                    this.pending_pkts.push_back((BytesMut::from(&pkt[..]), address)),
             }
         }
 

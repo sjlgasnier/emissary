@@ -186,7 +186,7 @@ impl<R: Runtime> Ntcp2Session<R> {
     pub async fn run(mut self) -> RouterId {
         tracing::trace!(
             target: LOG_TARGET,
-            router = %self.router,
+            router_id = %self.router,
             "start ntcp2 event loop",
         );
 
@@ -202,7 +202,7 @@ impl<R: Runtime> Ntcp2Session<R> {
 
         tracing::debug!(
             target: LOG_TARGET,
-            router = %self.router,
+            router_id = %self.router,
             ?result,
             "connnection closed",
         );

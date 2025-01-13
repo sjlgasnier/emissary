@@ -100,7 +100,7 @@ impl<R: Runtime> Ssu2Transport<R> {
         allow_local: bool,
         _local_signing_key: SigningPrivateKey,
         _local_router_info: RouterInfo,
-        _subsystem_handle: SubsystemHandle,
+        subsystem_handle: SubsystemHandle,
         _profile_storage: ProfileStorage<R>,
         metrics: R::MetricsHandle,
     ) -> Self {
@@ -129,6 +129,7 @@ impl<R: Runtime> Ssu2Transport<R> {
             config.intro_key,
             socket_tx,
             command_rx,
+            subsystem_handle,
         ));
 
         Self {

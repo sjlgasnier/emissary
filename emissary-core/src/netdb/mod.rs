@@ -1716,7 +1716,7 @@ mod tests {
         },
         runtime::mock::MockRuntime,
         subsystem::{InnerSubsystemEvent, SubsystemCommand},
-        transports::ProtocolCommand,
+        transport::ProtocolCommand,
         tunnel::TunnelMessage,
     };
     use thingbuf::mpsc::channel;

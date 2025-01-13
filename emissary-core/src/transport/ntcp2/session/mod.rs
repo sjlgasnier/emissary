@@ -409,7 +409,7 @@ mod tests {
             Runtime, TcpListener as _,
         },
         subsystem::{InnerSubsystemEvent, SubsystemCommand, SubsystemHandle},
-        transports::ntcp2::{listener::Ntcp2Listener, session::SessionManager},
+        transport::ntcp2::{listener::Ntcp2Listener, session::SessionManager},
     };
     use futures::StreamExt;
     use hashbrown::HashMap;

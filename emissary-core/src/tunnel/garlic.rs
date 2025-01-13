@@ -309,7 +309,7 @@ mod tests {
         // derive outbound garlic context
         let local_noise = NoiseContext::new(local_key, local_router_id);
         let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
-        let ephemeral_public = ephemeral_secret.public_key();
+        let ephemeral_public = ephemeral_secret.public();
         let (local_key, local_state) =
             local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
 
@@ -420,7 +420,7 @@ mod tests {
         // derive outbound garlic context
         let local_noise = NoiseContext::new(local_key, local_router_id);
         let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
-        let ephemeral_public = ephemeral_secret.public_key();
+        let ephemeral_public = ephemeral_secret.public();
         let (local_key, local_state) =
             local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
 

@@ -361,7 +361,8 @@ impl<R: Runtime> PendingSsu2Session<R> {
 
                         return Some(PendingSsu2SessionStatus::NewSession {
                             context: Ssu2SessionContext {
-                                dst_id: self.dst_id,
+                                address: self.address,
+                                dst_id: *src_id,
                                 intro_key,
                                 recv_key_ctx: KeyContext::new(k_data_ab, k_header_2_ab),
                                 send_key_ctx: KeyContext::new(k_data_ba, k_header_2_ba),
