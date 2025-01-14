@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::chachapoly::{ChaCha, ChaChaPoly},
+    error::Ssu2Error,
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterId},
     runtime::Runtime,
@@ -292,7 +293,7 @@ impl<R: Runtime> Ssu2Session<R> {
     }
 
     /// Handle received `pkt` for this session.
-    fn on_packet(&mut self, pkt: Packet) {
+    fn on_packet(&mut self, pkt: Packet) -> Result<(), Ssu2Error> {
         let Packet { mut pkt, address } = pkt;
 
         // TODO: upate address if it has changed
@@ -319,17 +320,9 @@ impl<R: Runtime> Ssu2Session<R> {
         // TODO: unnecessary memory copy
         let mut payload = pkt[16..].to_vec();
         ChaChaPoly::with_nonce(&self.recv_key_ctx.k_data, pkt_num as u64)
-            .decrypt_with_ad(&pkt[..16], &mut payload)
-            .unwrap();
+            .decrypt_with_ad(&pkt[..16], &mut payload)?;
 
-        let Some(blocks) = Block::parse(&payload) else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "failed to parse ssu2 message blocks",
-            );
-            debug_assert!(false);
-            return;
-        };
+        let blocks = Block::parse(&payload).ok_or_else(|| Ssu2Error::Malformed)?;
 
         // TODO: shut down the sesssion
         // TODO: iterate only once?
@@ -342,7 +335,7 @@ impl<R: Runtime> Ssu2Session<R> {
                 ?reason,
                 "session terminated by remote router",
             );
-            return;
+            return Err(Ssu2Error::SessionTerminated);
         }
 
         let messages = blocks
@@ -411,11 +404,16 @@ impl<R: Runtime> Ssu2Session<R> {
 
         // TODO: handle fragments
         // TODO: start ack timer?
+
+        Ok(())
     }
 
     /// Handle outbound `message`.
     fn on_send_message(&mut self, message: Vec<u8>) {
-        debug_assert!(message.len() < 1000);
+        if message.len() > 1000 {
+            return;
+        }
+        // debug_assert!(message.len() < 1000);
 
         for message in DataMessageBuilder::default()
             .with_dst_id(self.dst_id)
@@ -482,7 +480,25 @@ impl<R: Runtime> Future for Ssu2Session<R> {
             match self.pkt_rx.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(pkt)) => self.on_packet(pkt),
+                Poll::Ready(Some(pkt)) => match self.on_packet(pkt) {
+                    Ok(()) => {}
+                    Err(Ssu2Error::Malformed) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to parse ssu2 message blocks",
+                        );
+                        debug_assert!(false);
+                    }
+                    Err(Ssu2Error::SessionTerminated) => return Poll::Ready(()),
+                    Err(Ssu2Error::Chacha) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            router_id = %self.router_id,
+                            "encryption/decryption failure, shutting down session",
+                        );
+                        return Poll::Ready(());
+                    }
+                },
             }
         }
 

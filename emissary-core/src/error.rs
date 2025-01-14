@@ -24,6 +24,29 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// SSU2 error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ssu2Error {
+    /// Session terminated.
+    SessionTerminated,
+
+    /// Malformed packet.
+    Malformed,
+
+    /// Encryption/decryption error.
+    Chacha,
+}
+
+impl fmt::Display for Ssu2Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionTerminated => write!(f, "session forcibly terminated"),
+            Self::Malformed => write!(f, "malformed packet"),
+            Self::Chacha => write!(f, "encryption/decryption error"),
+        }
+    }
+}
+
 /// Connection error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SessionError {
@@ -361,6 +384,7 @@ pub enum Error {
     Expired,
     Routing(RoutingError),
     Duplicate,
+    Ssu2(Ssu2Error),
 }
 
 impl fmt::Display for Error {
@@ -387,8 +411,9 @@ impl fmt::Display for Error {
             Self::Session(error) => write!(f, "session error: {error}"),
             Self::NetworkMismatch => write!(f, "network mismatch"),
             Self::Expired => write!(f, "message has expired"),
-            Self::Routing(error) => write!(f, "{error}"),
+            Self::Routing(error) => write!(f, "routing: {error}"),
             Self::Duplicate => write!(f, "duplicate message"),
+            Self::Ssu2(error) => write!(f, "ssu2: {error}"),
         }
     }
 }
@@ -405,9 +430,17 @@ impl From<chacha20poly1305::Error> for Error {
     }
 }
 
+// TODO: not good, fix chacha error
 impl From<Error> for SessionError {
     fn from(_: Error) -> Self {
         SessionError::Chacha
+    }
+}
+
+// TODO: not good, fix chacha error
+impl From<Error> for Ssu2Error {
+    fn from(_: Error) -> Self {
+        Ssu2Error::Chacha
     }
 }
 
