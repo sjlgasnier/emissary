@@ -109,7 +109,7 @@ pub enum MessageType {
 
 impl MessageType {
     /// Serialize [`MessageType`].
-    fn as_u8(&self) -> u8 {
+    pub fn as_u8(&self) -> u8 {
         match self {
             Self::DatabaseStore => 1,
             Self::DatabaseLookup => 2,

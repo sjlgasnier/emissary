@@ -34,7 +34,7 @@ use crate::{
 use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use core::{
     future::Future,
     iter,
@@ -103,8 +103,6 @@ impl Fragment {
             },
         );
 
-        tracing::error!(target: LOG_TARGET, "construct fragment");
-
         Some(Message {
             message_type,
             message_id: *message_id,
@@ -138,8 +136,6 @@ impl FragmentHandler {
         message.fragments.insert(0u8, payload.to_vec());
         message.info = Some((message_type, message_id, expiration));
 
-        tracing::error!(target: LOG_TARGET, "first fragment");
-
         message
             .is_ready()
             .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
@@ -165,8 +161,6 @@ impl FragmentHandler {
             // +1 one for the first fragment
             message.num_fragments = Some(sequence as usize + 1usize);
         }
-
-        tracing::error!(target: LOG_TARGET, "follow-on fragment");
 
         message
             .is_ready()
@@ -292,6 +286,16 @@ impl<R: Runtime> Ssu2Session<R> {
         }
     }
 
+    /// Get next outbound packet number.
+    //
+    // TODO: check for overflow and terminate session
+    fn next_pkt_num(&mut self) -> u32 {
+        let pkt_num = self.pkt_num;
+        self.pkt_num += 1;
+
+        pkt_num
+    }
+
     /// Handle received `pkt` for this session.
     fn on_packet(&mut self, pkt: Packet) -> Result<(), Ssu2Error> {
         let Packet { mut pkt, address } = pkt;
@@ -378,6 +382,7 @@ impl<R: Runtime> Ssu2Session<R> {
                     last,
                     fragment,
                 ),
+                Block::Ack { .. } => None,
                 message => {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -410,23 +415,29 @@ impl<R: Runtime> Ssu2Session<R> {
 
     /// Handle outbound `message`.
     fn on_send_message(&mut self, message: Vec<u8>) {
-        if message.len() > 1000 {
-            return;
-        }
-        // debug_assert!(message.len() < 1000);
+        tracing::trace!(
+            target: LOG_TARGET,
+            router_id = %self.router_id,
+            message_len = ?message.len(),
+            "send i2np message",
+        );
 
-        for message in DataMessageBuilder::default()
-            .with_dst_id(self.dst_id)
-            .with_pkt_num(&mut self.pkt_num)
-            .with_key_context(self.intro_key, &self.send_key_ctx)
-            .with_i2np(message)
-            .with_ack(
-                self.pkt_highest_seen,
-                self.num_unacked.saturating_sub(1), // TODO: explain
-                None,
-            )
-            .build()
-        {
+        let msg = Message::parse_short(&message).unwrap();
+        let message_id = msg.message_id;
+
+        if message.len() <= 1200 {
+            let message = DataMessageBuilder::default()
+                .with_dst_id(self.dst_id)
+                .with_pkt_num(self.next_pkt_num())
+                .with_key_context(self.intro_key, &self.send_key_ctx)
+                .with_i2np(&message)
+                .with_ack(
+                    self.pkt_highest_seen,
+                    self.num_unacked.saturating_sub(1), // TODO: explain
+                    None,
+                )
+                .build();
+
             if let Err(error) = self.pkt_tx.try_send(Packet {
                 pkt: message.to_vec(),
                 address: self.address,
@@ -437,9 +448,70 @@ impl<R: Runtime> Ssu2Session<R> {
                     "failed to send packet",
                 );
             }
-        }
+        } else {
+            let mut fragments = msg.payload.chunks(1200).collect::<VecDeque<_>>();
+            let num_fragments = fragments.len();
 
-        self.pkt_num += 1;
+            let first_fragment = DataMessageBuilder::default()
+                .with_dst_id(self.dst_id)
+                .with_pkt_num(self.next_pkt_num())
+                .with_key_context(self.intro_key, &self.send_key_ctx)
+                .with_first_fragment(
+                    msg.message_type,
+                    msg.message_id,
+                    msg.expiration.as_secs() as u32,
+                    fragments.pop_front().expect("to exist"),
+                )
+                .with_ack(
+                    self.pkt_highest_seen,
+                    self.num_unacked.saturating_sub(1), // TODO: explain
+                    None,
+                )
+                .build();
+
+            if let Err(error) = self.pkt_tx.try_send(Packet {
+                pkt: first_fragment.to_vec(),
+                address: self.address,
+            }) {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to send packet",
+                );
+            }
+
+            let fragments = fragments.into_iter().enumerate().for_each(|(i, fragment)| {
+                let message = DataMessageBuilder::default()
+                    .with_dst_id(self.dst_id)
+                    .with_pkt_num(self.next_pkt_num())
+                    .with_key_context(self.intro_key, &self.send_key_ctx)
+                    .with_follow_on_fragment(
+                        message_id,
+                        i as u8 + 1u8,
+                        i == num_fragments - 2,
+                        fragment,
+                    )
+                    .with_ack(
+                        self.pkt_highest_seen,
+                        self.num_unacked.saturating_sub(1), // TODO: explain
+                        None,
+                    )
+                    .build()
+                    .to_vec();
+
+                if let Err(error) = self.pkt_tx.try_send(Packet {
+                    pkt: message,
+                    address: self.address,
+                }) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to send packet",
+                    );
+                }
+            });
+        };
+
         self.num_unacked = 0;
     }
 
