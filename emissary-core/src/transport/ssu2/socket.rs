@@ -26,18 +26,23 @@ use crate::{
     primitives::{RouterId, RouterInfo},
     runtime::{JoinSet, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
-    transport::ssu2::{
-        message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
-        session::{
-            active::{Ssu2Session, Ssu2SessionContext},
-            pending::{PendingSsu2Session, PendingSsu2SessionContext, PendingSsu2SessionStatus},
+    transport::{
+        ssu2::{
+            message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType},
+            session::{
+                active::{Ssu2Session, Ssu2SessionContext},
+                pending::{
+                    PendingSsu2Session, PendingSsu2SessionContext, PendingSsu2SessionStatus,
+                },
+            },
+            Packet,
         },
-        Packet,
+        TransportEvent,
     },
 };
 
 use bytes::{Buf, Bytes, BytesMut};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use rand_core::RngCore;
 use thingbuf::mpsc::{channel, Receiver, Sender};
@@ -69,19 +74,6 @@ const CHANNEL_SIZE: usize = 256usize;
 ///
 /// Used to receive datagrams from active sessions.
 const PKT_CHANNEL_SIZE: usize = 8192usize;
-
-/// Events emitted by [`Ssu2Socket`].
-#[derive(Debug, Default, Clone)]
-pub enum Ssu2SessionEvent {
-    /// Connection established to router.
-    ConnectionEstablished {
-        /// Router ID.
-        router_id: RouterId,
-    },
-
-    #[default]
-    Dummy,
-}
 
 /// Events emitted by [`Ssu2Socket`].
 #[derive(Debug, Default, Clone)]
@@ -139,9 +131,6 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Chaining key.
     chaining_key: Bytes,
 
-    /// RX channel for receiving commands from [`Ssu2Transport`].
-    command_rx: Receiver<Ssu2SessionCommand>,
-
     /// Inbound state.
     inbound_state: Bytes,
 
@@ -162,9 +151,6 @@ pub struct Ssu2Socket<R: Runtime> {
 
     /// TX channel given to active sessions.
     pkt_tx: Sender<Packet>,
-
-    /// TX channel for sending session events to [`Ssu2Transport`].
-    session_tx: Sender<Ssu2SessionEvent>,
 
     /// SSU2 sessions.
     sessions: HashMap<u64, Sender<Packet>>,
@@ -191,8 +177,6 @@ impl<R: Runtime> Ssu2Socket<R> {
         socket: R::UdpSocket,
         static_key: StaticPrivateKey,
         intro_key: [u8; 32],
-        session_tx: Sender<Ssu2SessionEvent>,
-        command_rx: Receiver<Ssu2SessionCommand>,
         subsystem_handle: SubsystemHandle,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
@@ -213,7 +197,6 @@ impl<R: Runtime> Ssu2Socket<R> {
             active_sessions: R::join_set(),
             buffer: vec![0u8; READ_BUFFER_LEN],
             chaining_key: Bytes::from(chaining_key),
-            command_rx,
             inbound_state: Bytes::from(inbound_state),
             intro_key,
             outbound_state: Bytes::from(outbound_state),
@@ -222,7 +205,6 @@ impl<R: Runtime> Ssu2Socket<R> {
             pkt_rx,
             pkt_tx,
             sessions: HashMap::new(),
-            session_tx,
             socket,
             static_key: StaticPrivateKey::from(static_key),
             subsystem_handle,
@@ -256,12 +238,12 @@ impl<R: Runtime> Ssu2Socket<R> {
                 pkt: self.buffer[..nread].to_vec(),
                 address,
             }) {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    ?connection_id,
-                    ?error,
-                    "failed to send datagram to ssu2 session",
-                );
+                // tracing::debug!(
+                //     target: LOG_TARGET,
+                //     ?connection_id,
+                //     ?error,
+                //     "failed to send datagram to ssu2 session",
+                // );
             }
             return;
         }
@@ -471,67 +453,64 @@ impl<R: Runtime> Ssu2Socket<R> {
             ),
         }
     }
-}
 
-impl<R: Runtime> Future for Ssu2Socket<R> {
-    type Output = ();
+    pub fn connect(&mut self, router_info: RouterInfo) {}
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-
-        loop {
-            match this.command_rx.poll_recv(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(Ssu2SessionCommand::Accept { router_id })) =>
-                    match this.unvalidated_sessions.remove(&router_id) {
-                        None => {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                %router_id,
-                                "non-existent unvalidated session accepted",
-                            );
-                            debug_assert!(false);
-                        }
-                        Some(context) => {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                %router_id,
-                                "session accepted",
-                            );
-                            this.active_sessions.push(
-                                Ssu2Session::<R>::new(
-                                    context,
-                                    this.pkt_tx.clone(),
-                                    this.subsystem_handle.clone(),
-                                )
-                                .run(),
-                            );
-                        }
-                    },
-                Poll::Ready(Some(Ssu2SessionCommand::Reject { router_id })) =>
-                    match this.unvalidated_sessions.remove(&router_id) {
-                        None => {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                %router_id,
-                                "non-existent unvalidated session rejected",
-                            );
-                            debug_assert!(false);
-                        }
-                        Some(context) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                %router_id,
-                                "session rejected",
-                            );
-                            // TODO: send termination
-                        }
-                    },
-                Poll::Ready(Some(Ssu2SessionCommand::Connect { router_info })) => todo!(),
-                Poll::Ready(Some(Ssu2SessionCommand::Dummy)) => unreachable!(),
+    pub fn accept(&mut self, router_id: &RouterId) {
+        match self.unvalidated_sessions.remove(router_id) {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "non-existent unvalidated session accepted",
+                );
+                debug_assert!(false);
+            }
+            Some(context) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "session accepted",
+                );
+                self.active_sessions.push(
+                    Ssu2Session::<R>::new(
+                        context,
+                        self.pkt_tx.clone(),
+                        self.subsystem_handle.clone(),
+                    )
+                    .run(),
+                );
             }
         }
+    }
+
+    pub fn reject(&mut self, router_id: &RouterId) {
+        match self.unvalidated_sessions.remove(router_id) {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "non-existent unvalidated session rejected",
+                );
+                debug_assert!(false);
+            }
+            Some(context) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "session rejected",
+                );
+                // TODO: send termination
+            }
+        }
+    }
+}
+
+impl<R: Runtime> Stream for Ssu2Socket<R> {
+    type Item = TransportEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
 
         loop {
             match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.buffer.as_mut()) {
@@ -541,7 +520,7 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                         target: LOG_TARGET,
                         "socket closed",
                     );
-                    return Poll::Ready(());
+                    return Poll::Ready(None);
                 }
                 Poll::Ready(Some((nread, from))) => {
                     this.handle_packet(nread, from);
@@ -550,9 +529,45 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
         }
 
         loop {
+            match this.active_sessions.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some((router_id, dst_id))) =>
+                    return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })),
+            }
+        }
+
+        loop {
+            match this.pending_sessions.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(PendingSsu2SessionStatus::NewSession {
+                    context,
+                    pkt,
+                    target,
+                })) => {
+                    let router_id = context.router_id.clone();
+
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "inbound session negotiated",
+                    );
+
+                    this.pending_pkts.push_back((pkt, target));
+                    this.unvalidated_sessions.insert(router_id.clone(), context);
+
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                }
+                Poll::Ready(Some(PendingSsu2SessionStatus::SocketClosed)) =>
+                    return Poll::Ready(None),
+            }
+        }
+
+        loop {
             match this.pkt_rx.poll_recv(cx) {
                 Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(None) => return Poll::Ready(None),
                 // TODO: useless conversion from vec to bytesmut
                 Poll::Ready(Some(Packet { pkt, address })) =>
                     this.pending_pkts.push_back((BytesMut::from(&pkt[..]), address)),
@@ -575,52 +590,13 @@ impl<R: Runtime> Future for Ssu2Socket<R> {
                         Poll::Ready(Some(_)) => {
                             this.write_state = WriteState::GetPacket;
                         }
-                        Poll::Ready(None) => return Poll::Ready(()),
+                        Poll::Ready(None) => return Poll::Ready(None),
                         Poll::Pending => {
                             this.write_state = WriteState::SendPacket { pkt, target };
                             break;
                         }
                     },
                 WriteState::Poisoned => unreachable!(),
-            }
-        }
-
-        loop {
-            match this.pending_sessions.poll_next_unpin(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(PendingSsu2SessionStatus::NewSession {
-                    context,
-                    pkt,
-                    target,
-                })) => {
-                    let router_id = context.router_id.clone();
-
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        %router_id,
-                        "inbound session negotiated",
-                    );
-
-                    this.pending_pkts.push_back((pkt, target));
-                    this.unvalidated_sessions.insert(router_id.clone(), context);
-
-                    if let Err(error) = this
-                        .session_tx
-                        .try_send(Ssu2SessionEvent::ConnectionEstablished { router_id })
-                    {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "failed to report inbound session to `Ssu2Transport`",
-                        );
-                        debug_assert!(false);
-                    }
-
-                    // call waker so the ack is sent to remote router immediately
-                    cx.waker().wake_by_ref();
-                }
-                Poll::Ready(Some(PendingSsu2SessionStatus::SocketClosed)) => return Poll::Ready(()),
             }
         }
 

@@ -445,12 +445,6 @@ impl<R: Runtime> Ssu2Session<R> {
 
     /// Run the event loop of an active SSU2 session.
     pub async fn run(mut self) -> (RouterId, u64) {
-        tracing::trace!(
-            target: LOG_TARGET,
-            router_id = %self.router_id,
-            "start ntcp2 event loop",
-        );
-
         self.subsystem_handle
             .report_connection_established(self.router_id.clone(), self.cmd_tx.clone())
             .await;

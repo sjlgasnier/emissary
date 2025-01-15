@@ -27,12 +27,12 @@ use crate::{
     runtime::{MetricType, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
     transport::{
-        ssu2::socket::{Ssu2SessionCommand, Ssu2SessionEvent, Ssu2Socket},
+        ssu2::socket::{Ssu2SessionCommand, Ssu2Socket},
         Transport, TransportEvent,
     },
 };
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use core::{
@@ -86,11 +86,8 @@ pub struct Ssu2Transport<R: Runtime> {
     /// Metrics handle.
     metrics: R::MetricsHandle,
 
-    /// RX channel for receiving events from [`Ssu2Socket`].
-    socket_rx: Receiver<Ssu2SessionEvent>,
-
-    /// TX channel for sending commands to [`Ssu2Socket`].
-    command_tx: Sender<Ssu2SessionCommand>,
+    /// SSU2 server socket.
+    socket: Ssu2Socket<R>,
 }
 
 impl<R: Runtime> Ssu2Transport<R> {
@@ -117,25 +114,14 @@ impl<R: Runtime> Ssu2Transport<R> {
             "starting ssu2",
         );
 
-        let (socket_tx, socket_rx) = channel(CHANNEL_SIZE);
-        let (command_tx, command_rx) = channel(CHANNEL_SIZE);
-
-        // spawn ssu2 socket task in the background
-        //
-        // it's responsible for what?
-        R::spawn(Ssu2Socket::<R>::new(
-            socket,
-            StaticPrivateKey::from(config.static_key),
-            config.intro_key,
-            socket_tx,
-            command_rx,
-            subsystem_handle,
-        ));
-
         Self {
-            command_tx,
+            socket: Ssu2Socket::<R>::new(
+                socket,
+                StaticPrivateKey::from(config.static_key),
+                config.intro_key,
+                subsystem_handle,
+            ),
             metrics,
-            socket_rx,
         }
     }
 
@@ -210,58 +196,22 @@ impl<R: Runtime> Ssu2Transport<R> {
 
 impl<R: Runtime> Transport for Ssu2Transport<R> {
     fn connect(&mut self, router_info: RouterInfo) {
-        if let Err(error) = self.command_tx.try_send(Ssu2SessionCommand::Connect { router_info }) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?error,
-                "failed to send `Connect` to ssu2 socket",
-            );
-            debug_assert!(false);
-        }
+        self.socket.connect(router_info);
     }
 
     fn accept(&mut self, router_id: &RouterId) {
-        if let Err(error) = self.command_tx.try_send(Ssu2SessionCommand::Accept {
-            router_id: router_id.clone(),
-        }) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?error,
-                "failed to send `Accept` to ssu2 socket",
-            );
-            debug_assert!(false);
-        }
+        self.socket.accept(router_id);
     }
 
     fn reject(&mut self, router_id: &RouterId) {
-        if let Err(error) = self.command_tx.try_send(Ssu2SessionCommand::Reject {
-            router_id: router_id.clone(),
-        }) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?error,
-                "failed to send `Reject` to ssu2 socket",
-            );
-            debug_assert!(false);
-        }
+        self.socket.reject(router_id);
     }
 }
 
 impl<R: Runtime> Stream for Ssu2Transport<R> {
     type Item = TransportEvent;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match self.socket_rx.poll_recv(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(Ssu2SessionEvent::ConnectionEstablished { router_id })) => {
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
-                }
-                Poll::Ready(Some(Ssu2SessionEvent::Dummy)) => unreachable!(),
-            }
-        }
-
-        Poll::Pending
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.socket.poll_next_unpin(cx)
     }
 }
