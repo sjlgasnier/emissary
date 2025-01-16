@@ -23,8 +23,9 @@
 use crate::{
     crypto::{
         chachapoly::{ChaCha, ChaChaPoly},
+        hmac::Hmac,
         sha256::Sha256,
-        EphemeralPublicKey,
+        EphemeralPrivateKey, EphemeralPublicKey, StaticPublicKey,
     },
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
@@ -32,7 +33,7 @@ use crate::{
     transport::ssu2::session::active::KeyContext,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use chrono::format::Numeric;
 use nom::{
     bytes::complete::take,
@@ -71,6 +72,23 @@ const POLY13055_MAC_LEN: usize = 16usize;
 
 /// Long header length.
 const LONG_HEADER_LEN: usize = 16usize;
+
+/// Public key length.
+const PUBLIC_KEY_LEN: usize = 32usize;
+
+pub struct NoiseContext {
+    pub chaining_key: Bytes,
+    pub static_key: StaticPublicKey,
+    pub state: Vec<u8>,
+    pub eph: EphemeralPrivateKey,
+}
+
+impl NoiseContext {
+    pub fn mix_hash(&mut self, input: impl AsRef<[u8]>) -> &mut Self {
+        self.state = Sha256::new().update(&self.state).update(input.as_ref()).finalize();
+        self
+    }
+}
 
 /// SSU2 block type.
 #[derive(Debug)]
@@ -1277,7 +1295,7 @@ pub struct MessageBuilder<'a> {
     /// May be `None` if `key1` is used.
     key2: Option<[u8; 32]>,
 
-    /// Payload len.
+    /// Payload length.
     payload_len: usize,
 
     /// Minimum amount of padding the message should have.
@@ -1753,8 +1771,8 @@ impl<'a> DataMessageBuilder<'a> {
 #[derive(Default)]
 pub struct TokenRequestBuilder {
     dst_id: Option<u64>,
-    src_id: Option<u64>,
     intro_key: Option<[u8; 32]>,
+    src_id: Option<u64>,
 }
 
 impl TokenRequestBuilder {
@@ -1781,8 +1799,7 @@ impl TokenRequestBuilder {
         let intro_key = self.intro_key.take().expect("to exist");
         let mut rng = R::rng();
         let mut padding = {
-            let padding_len = 10usize;
-            // let mut padding_len = rng.next_u32() % 128 + 8;
+            let mut padding_len = rng.next_u32() % MAX_PADDING as u32 + 8;
             let mut padding = vec![0u8; padding_len as usize];
             rng.fill_bytes(&mut padding);
 
@@ -1819,8 +1836,6 @@ impl TokenRequestBuilder {
             .encrypt_with_ad_new(&header, &mut payload)
             .expect("to succeed");
 
-        tracing::error!("payload len = {}", payload.len());
-
         // encrypt first 16 bytes of the long header
         //
         // https://geti2p.net/spec/ssu2#header-encryption-kdf
@@ -1843,6 +1858,137 @@ impl TokenRequestBuilder {
 
         // encrypt last 16 bytes of the header
         ChaCha::with_iv(intro_key, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..32]);
+
+        let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + payload.len());
+        out.put_slice(&header);
+        out.put_slice(&payload);
+
+        out
+    }
+}
+
+#[derive(Default)]
+pub struct SessionRequestBuilder<'a> {
+    dst_id: Option<u64>,
+    ephemeral_key: Option<EphemeralPublicKey>,
+    noise_ctx: Option<&'a mut NoiseContext>,
+    intro_key: Option<[u8; 32]>,
+    src_id: Option<u64>,
+    token: Option<u64>,
+}
+
+impl<'a> SessionRequestBuilder<'a> {
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
+        self.dst_id = Some(dst_id);
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, src_id: u64) -> Self {
+        self.src_id = Some(src_id);
+        self
+    }
+
+    /// Specify remote router's intro key.
+    pub fn with_intro_key(mut self, intro_key: [u8; 32]) -> Self {
+        self.intro_key = Some(intro_key);
+        self
+    }
+
+    /// Specify token.
+    pub fn with_token(mut self, token: u64) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    /// Specify noise context.
+    pub fn with_noise_ctx(mut self, noise_ctx: &'a mut NoiseContext) -> Self {
+        self.noise_ctx = Some(noise_ctx);
+        self
+    }
+
+    /// Build [`SessionRequestBuilder`] into a byte vector.
+    pub fn build<R: Runtime>(mut self) -> BytesMut {
+        let intro_key = self.intro_key.take().expect("to exist");
+        let noise_ctx = self.noise_ctx.take().expect("to exist");
+
+        let mut rng = R::rng();
+        let mut padding = {
+            let mut padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
+            let mut padding = vec![0u8; padding_len as usize];
+            rng.fill_bytes(&mut padding);
+
+            padding
+        };
+
+        let ephemeral_key = noise_ctx.eph.public().to_vec();
+        let mut header = {
+            let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + PUBLIC_KEY_LEN);
+            let pkt_num = rng.next_u32();
+
+            out.put_u64_le(self.dst_id.take().expect("to exist"));
+            out.put_u32(pkt_num);
+            out.put_u8(*MessageType::SessionRequest);
+            out.put_u8(2u8); // version
+            out.put_u8(2u8); // net id TODO: make configurable
+            out.put_u8(0u8); // flag
+            out.put_u64_le(self.src_id.take().expect("to exist"));
+            out.put_u64_le(self.token.take().expect("to exist"));
+            out.put_slice(ephemeral_key.as_ref());
+
+            out
+        };
+
+        // mixhash
+        noise_ctx.mix_hash(&header[..32]).mix_hash(&ephemeral_key);
+
+        // TODO: do diffie-hellman
+        let shared = noise_ctx.eph.diffie_hellman(&noise_ctx.static_key);
+        let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let mut cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+        let mut payload = Vec::with_capacity(10 + padding.len() + POLY13055_MAC_LEN);
+        payload.extend_from_slice(
+            &Block::DateTime {
+                timestamp: R::time_since_epoch().as_secs() as u32,
+            }
+            .serialize(),
+        );
+        payload.extend_from_slice(&Block::Padding { padding }.serialize());
+
+        // must succeed since all the parameters are controlled by us
+        ChaChaPoly::with_nonce(&cipher_key, 0u64)
+            .encrypt_with_ad_new(&noise_ctx.state, &mut payload)
+            .expect("to succeed");
+
+        // update noise state
+        noise_ctx.chaining_key = chaining_key.into();
+        noise_ctx.mix_hash(&payload);
+
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        payload[payload.len() - 2 * IV_SIZE..]
+            .chunks(IV_SIZE)
+            .zip(header.chunks_mut(8usize))
+            .zip([intro_key, intro_key])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        // encrypt last 16 bytes of the header
+        ChaCha::with_iv(intro_key, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..64]);
 
         let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + payload.len());
         out.put_slice(&header);

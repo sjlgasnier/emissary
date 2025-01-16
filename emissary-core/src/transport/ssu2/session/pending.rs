@@ -28,8 +28,8 @@ use crate::{
     runtime::Runtime,
     transport::ssu2::{
         message::{
-            AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, ShortHeaderFlag,
-            TokenRequestBuilder,
+            AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, NoiseContext,
+            SessionRequestBuilder, ShortHeaderFlag, TokenRequestBuilder,
         },
         session::active::{KeyContext, Ssu2SessionContext},
         Packet,
@@ -42,6 +42,7 @@ use thingbuf::mpsc::{Receiver, Sender};
 use core::{
     future::Future,
     marker::PhantomData,
+    mem,
     net::SocketAddr,
     num::NonZeroUsize,
     pin::Pin,
@@ -182,6 +183,17 @@ enum PendingSsu2SessionState {
         /// Remote router's static key.
         static_key: [u8; 32],
     },
+
+    /// Awaiting `SessionCreated` message from remote router.
+    AwaitingSessionCreated {
+        noise_ctx: NoiseContext,
+        intro_key: [u8; 32],
+        pkt_tx: Sender<Packet>,
+        src_id: u64,
+    },
+
+    /// State has been poisoned.
+    Poisoned,
 }
 
 /// Pending SSU2 session.
@@ -295,7 +307,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
             "handle pending session, pkt len = {}", pkt.len()
         );
 
-        match &self.state {
+        match mem::replace(&mut self.state, PendingSsu2SessionState::Poisoned) {
             PendingSsu2SessionState::AwaitingSessionConfirmed {
                 chaining_key,
                 ephemeral_key,
@@ -307,7 +319,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                 let iv2 = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
                     .expect("to succeed");
 
-                ChaCha::with_iv(*k_header_2, iv2)
+                ChaCha::with_iv(k_header_2, iv2)
                     .decrypt([0u8; 8])
                     .into_iter()
                     .zip(&mut pkt[8..])
@@ -331,7 +343,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                             Sha256::new().update(&state).update(&pkt[16..64]).finalize();
 
                         let mut static_key = pkt[16..64].to_vec();
-                        ChaChaPoly::with_nonce(k_session_created, 1u64)
+                        ChaChaPoly::with_nonce(&k_session_created, 1u64)
                             .decrypt_with_ad(&state, &mut static_key)
                             .unwrap();
                         let static_key = StaticPublicKey::from_bytes(&static_key).unwrap();
@@ -427,7 +439,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                                 .with_short_header_flag(ShortHeaderFlag::Data {
                                     immediate_ack: false,
                                 })
-                                .with_dst_id(*src_id)
+                                .with_dst_id(src_id)
                                 .build::<R>(),
                             NonZeroUsize::new(8usize).expect("non-zero value"),
                         )
@@ -459,7 +471,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                         return Some(PendingSsu2SessionStatus::NewSession {
                             context: Ssu2SessionContext {
                                 address: self.address,
-                                dst_id: *src_id,
+                                dst_id: src_id,
                                 intro_key,
                                 recv_key_ctx: KeyContext::new(k_data_ab, k_header_2_ab),
                                 send_key_ctx: KeyContext::new(k_data_ba, k_header_2_ba),
@@ -502,18 +514,52 @@ impl<R: Runtime> PendingSsu2Session<R> {
                     .decrypt_with_ad(&pkt[..32], &mut payload)
                     .unwrap();
 
-                // TODO: create header
-                // TODO: mixhash header
-                // TODO: generate eph key
-                // TODO: mixhash public key
-                // TODO: do diffie-hellman between ephk and `static_key`
-                // TODO: derive keys
-                // TODO: encrypt payload
-                // TODO: derive `SessCreateHeader` key
+                let mut noise_ctx = NoiseContext {
+                    chaining_key: chaining_key.clone(),
+                    static_key: StaticPublicKey::from(static_key),
+                    state: state.clone(),
+                    eph: EphemeralPrivateKey::random(R::rng()),
+                };
 
-                // TODO: create session request message
-                // TODO: move to `AwaitingSessionCreated` state
+                let pkt = SessionRequestBuilder::default()
+                    .with_dst_id(self.dst_id)
+                    .with_src_id(src_id)
+                    .with_intro_key(self.intro_key)
+                    .with_token(token)
+                    .with_noise_ctx(&mut noise_ctx)
+                    .build::<R>()
+                    .to_vec();
+
+                // TODO: retransmissions
+                if let Err(error) = pkt_tx.try_send(Packet {
+                    pkt,
+                    address: self.address,
+                }) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        address = ?self.address,
+                        "failed to send `SessionRequest`",
+                    );
+                }
+
+                self.state = PendingSsu2SessionState::AwaitingSessionCreated {
+                    noise_ctx,
+                    intro_key: self.intro_key,
+                    pkt_tx,
+                    src_id,
+                }
             }
+            PendingSsu2SessionState::AwaitingSessionCreated {
+                noise_ctx,
+                intro_key,
+                pkt_tx,
+                src_id,
+            } => {
+                todo!();
+            }
+            // TODO: handle correctly
+            PendingSsu2SessionState::Poisoned => unreachable!(),
         }
 
         None
