@@ -45,6 +45,7 @@ use tracing::Instrument;
 
 use core::{
     fmt,
+    marker::PhantomData,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     ops::Deref,
@@ -67,6 +68,9 @@ const MAX_PADDING: usize = 128usize;
 
 /// Poly13055 MAC size.
 const POLY13055_MAC_LEN: usize = 16usize;
+
+/// Long header length.
+const LONG_HEADER_LEN: usize = 16usize;
 
 /// SSU2 block type.
 #[derive(Debug)]
@@ -1739,6 +1743,108 @@ impl<'a> DataMessageBuilder<'a> {
             });
 
         let mut out = BytesMut::with_capacity(header.len() + payload.len());
+        out.put_slice(&header);
+        out.put_slice(&payload);
+
+        out
+    }
+}
+
+#[derive(Default)]
+pub struct TokenRequestBuilder {
+    dst_id: Option<u64>,
+    src_id: Option<u64>,
+    intro_key: Option<[u8; 32]>,
+}
+
+impl TokenRequestBuilder {
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
+        self.dst_id = Some(dst_id);
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, src_id: u64) -> Self {
+        self.src_id = Some(src_id);
+        self
+    }
+
+    /// Specify remote router's intro key.
+    pub fn with_intro_key(mut self, intro_key: [u8; 32]) -> Self {
+        self.intro_key = Some(intro_key);
+        self
+    }
+
+    /// Build [`TokenRequestBuilder`] into a byte vector.
+    pub fn build<R: Runtime>(mut self) -> BytesMut {
+        let intro_key = self.intro_key.take().expect("to exist");
+        let mut rng = R::rng();
+        let mut padding = {
+            let padding_len = 10usize;
+            // let mut padding_len = rng.next_u32() % 128 + 8;
+            let mut padding = vec![0u8; padding_len as usize];
+            rng.fill_bytes(&mut padding);
+
+            padding
+        };
+
+        let (mut header, pkt_num) = {
+            let mut out = BytesMut::with_capacity(LONG_HEADER_LEN);
+            let pkt_num = rng.next_u32();
+
+            out.put_u64_le(self.dst_id.take().expect("to exist"));
+            out.put_u32(pkt_num);
+            out.put_u8(*MessageType::TokenRequest);
+            out.put_u8(2u8); // version
+            out.put_u8(2u8); // net id TODO: make configurable
+            out.put_u8(0u8); // flag
+            out.put_u64_le(self.src_id.take().expect("to exist"));
+            out.put_u64(0u64);
+
+            (out, pkt_num)
+        };
+
+        let mut payload = Vec::with_capacity(10 + padding.len() + POLY13055_MAC_LEN);
+        payload.extend_from_slice(
+            &Block::DateTime {
+                timestamp: R::time_since_epoch().as_secs() as u32,
+            }
+            .serialize(),
+        );
+        payload.extend_from_slice(&Block::Padding { padding }.serialize());
+
+        // must succeed since all the parameters are controlled by us
+        ChaChaPoly::with_nonce(&intro_key, pkt_num as u64)
+            .encrypt_with_ad_new(&header, &mut payload)
+            .expect("to succeed");
+
+        tracing::error!("payload len = {}", payload.len());
+
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        payload[payload.len() - 2 * IV_SIZE..]
+            .chunks(IV_SIZE)
+            .zip(header.chunks_mut(8usize))
+            .zip([intro_key, intro_key])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        // encrypt last 16 bytes of the header
+        ChaCha::with_iv(intro_key, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..32]);
+
+        let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + payload.len());
         out.put_slice(&header);
         out.put_slice(&payload);
 

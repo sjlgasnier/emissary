@@ -18,12 +18,13 @@
 
 use crate::{
     crypto::{
+        base64_decode,
         chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
         sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey,
     },
-    primitives::{RouterId, RouterInfo},
+    primitives::{RouterId, RouterInfo, Str, TransportKind},
     runtime::{JoinSet, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
     transport::{
@@ -53,7 +54,7 @@ use core::{
     mem,
     net::SocketAddr,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 /// Logging target for the file.
@@ -140,6 +141,11 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Outbound state.
     outbound_state: Bytes,
 
+    /// Pending outbound sessions.
+    ///
+    /// Remote routers' intro keys indexed by their socket addresses.
+    pending_outbound: HashMap<SocketAddr, [u8; 32]>,
+
     /// Pending outbound packets.
     pending_pkts: VecDeque<(BytesMut, SocketAddr)>,
 
@@ -166,6 +172,9 @@ pub struct Ssu2Socket<R: Runtime> {
 
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
+
+    /// Waker.
+    waker: Option<Waker>,
 
     /// Write state.
     write_state: WriteState,
@@ -200,6 +209,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             inbound_state: Bytes::from(inbound_state),
             intro_key,
             outbound_state: Bytes::from(outbound_state),
+            pending_outbound: HashMap::new(),
             pending_pkts: VecDeque::new(),
             pending_sessions: R::join_set(),
             pkt_rx,
@@ -209,6 +219,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             static_key: StaticPrivateKey::from(static_key),
             subsystem_handle,
             unvalidated_sessions: HashMap::new(),
+            waker: None,
             write_state: WriteState::GetPacket,
         }
     }
@@ -446,15 +457,123 @@ impl<R: Runtime> Ssu2Socket<R> {
                     "not supported",
                 );
             }
-            Err(()) => tracing::warn!(
-                target: LOG_TARGET,
-                message_type = ?self.buffer[12],
-                "unrecognized message type",
-            ),
+            Err(()) => match self.pending_outbound.get(&address) {
+                Some(intro_key) => {
+                    ChaCha::with_iv(self.intro_key, iv1)
+                        .decrypt([0u8; 8])
+                        .into_iter()
+                        .zip(&mut self.buffer[..8])
+                        .for_each(|(a, b)| {
+                            *b ^= a;
+                        });
+                    ChaCha::with_iv(self.intro_key, iv2)
+                        .decrypt([0u8; 8])
+                        .into_iter()
+                        .zip(&mut self.buffer[8..])
+                        .for_each(|(a, b)| {
+                            *b ^= a;
+                        });
+                    ChaCha::with_iv(*intro_key, iv1)
+                        .decrypt([0u8; 8])
+                        .into_iter()
+                        .zip(&mut self.buffer[..8])
+                        .for_each(|(a, b)| {
+                            *b ^= a;
+                        });
+                    ChaCha::with_iv(*intro_key, iv2)
+                        .decrypt([0u8; 8])
+                        .into_iter()
+                        .zip(&mut self.buffer[8..])
+                        .for_each(|(a, b)| {
+                            *b ^= a;
+                        });
+
+                    let connection_id = u64::from_le_bytes(
+                        TryInto::<[u8; 8]>::try_into(&self.buffer[..8]).expect("to succeed"),
+                    );
+
+                    if let Some(tx) = self.sessions.get_mut(&connection_id) {
+                        if let Err(error) = tx.try_send(Packet {
+                            pkt: self.buffer[..nread].to_vec(),
+                            address,
+                        }) {
+                            // tracing::debug!(
+                            //     target: LOG_TARGET,
+                            //     ?connection_id,
+                            //     ?error,
+                            //     "failed to send datagram to ssu2 session",
+                            // );
+                        }
+                        return;
+                    } else {
+                        tracing::error!("not found after check");
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        message_type = ?self.buffer[12],
+                        "unrecognized message type",
+                    );
+                }
+            },
         }
     }
 
-    pub fn connect(&mut self, router_info: RouterInfo) {}
+    pub fn connect(&mut self, router_info: RouterInfo) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            router_id = %router_info.identity.id(),
+            "establish outbound session",
+        );
+
+        // must succeed since `TransportManager` has ensured `router_info` contains
+        // a valid and reachable ssu2 router address
+        //
+        // TODO: add helper code for all of this in `RouterAddress`
+        let address = router_info.addresses.get(&TransportKind::Ssu2).expect("to exist");
+        let intro_key = {
+            let intro_key = address.options.get(&Str::from("i")).expect("to exist");
+            let intro_key = base64_decode(&intro_key.as_bytes()).expect("to succeed");
+
+            TryInto::<[u8; 32]>::try_into(intro_key).expect("to succeed")
+        };
+        let static_key = {
+            let static_key = address.options.get(&Str::from("s")).expect("to exist");
+            let static_key = base64_decode(&static_key.as_bytes()).expect("to succeed");
+
+            TryInto::<[u8; 32]>::try_into(static_key).expect("to succeed")
+        };
+        let address = address.socket_address.expect("to exist");
+
+        let state = Sha256::new().update(&self.outbound_state).update(static_key).finalize();
+        let src_id = R::rng().next_u64();
+        let dst_id = R::rng().next_u64();
+
+        let (tx, rx) = channel(CHANNEL_SIZE);
+        self.sessions.insert(src_id, tx);
+
+        tracing::error!(target: LOG_TARGET, "start future");
+
+        self.pending_outbound.insert(address, intro_key);
+        self.pending_sessions.push(PendingSsu2Session::<R>::new(
+            PendingSsu2SessionContext::Outbound {
+                address,
+                chaining_key: self.chaining_key.clone(),
+                dst_id,
+                intro_key,
+                pkt_tx: self.pkt_tx.clone(),
+                rx,
+                src_id,
+                state,
+                static_key,
+            },
+        ));
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
+        }
+    }
 
     pub fn accept(&mut self, router_id: &RouterId) {
         match self.unvalidated_sessions.remove(router_id) {
@@ -472,6 +591,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     %router_id,
                     "session accepted",
                 );
+
                 self.active_sessions.push(
                     Ssu2Session::<R>::new(
                         context,
@@ -480,6 +600,10 @@ impl<R: Runtime> Ssu2Socket<R> {
                     )
                     .run(),
                 );
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
             }
         }
     }
@@ -600,6 +724,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             }
         }
 
+        self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
 }

@@ -27,14 +27,17 @@ use crate::{
     primitives::{RouterId, Str, TransportKind},
     runtime::Runtime,
     transport::ssu2::{
-        message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, ShortHeaderFlag},
+        message::{
+            AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, ShortHeaderFlag,
+            TokenRequestBuilder,
+        },
         session::active::{KeyContext, Ssu2SessionContext},
         Packet,
     },
 };
 
-use bytes::BytesMut;
-use thingbuf::mpsc::Receiver;
+use bytes::{Bytes, BytesMut};
+use thingbuf::mpsc::{Receiver, Sender};
 
 use core::{
     future::Future,
@@ -47,6 +50,7 @@ use core::{
 
 // TODO: no unwraps
 // TODO: refactor
+// TODO: separate inbound/outbound handling to separate files
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::session::pending";
@@ -84,6 +88,36 @@ pub enum PendingSsu2SessionContext {
 
         /// AEAD state.
         state: Vec<u8>,
+    },
+
+    /// Pending outbound session.
+    Outbound {
+        /// Socket address of the remote router.
+        address: SocketAddr,
+
+        /// Chaining key.
+        chaining_key: Bytes,
+
+        /// Destination connection ID.
+        dst_id: u64,
+
+        /// Remote router's intro key.
+        intro_key: [u8; 32],
+
+        /// TX channel for sending packets to [`Ssu2Socket`].
+        pkt_tx: Sender<Packet>,
+
+        /// RX channel for receiving datagrams from `Ssu2Socket`.
+        rx: Receiver<Packet>,
+
+        /// Source connection ID.
+        src_id: u64,
+
+        /// AEAD state.
+        state: Vec<u8>,
+
+        /// Remote router's static key.
+        static_key: [u8; 32],
     },
 }
 
@@ -129,6 +163,24 @@ enum PendingSsu2SessionState {
 
         /// AEAD state from `SessionCreated` message.
         state: Vec<u8>,
+    },
+
+    /// Send `TokenRequest` to remote router.
+    SendTokenRequest {
+        /// Chaining key.
+        chaining_key: Bytes,
+
+        /// TX channel for sending packets to [`Ssu2Socket`].
+        pkt_tx: Sender<Packet>,
+
+        /// Source connection ID.
+        src_id: u64,
+
+        /// AEAD state.
+        state: Vec<u8>,
+
+        /// Remote router's static key.
+        static_key: [u8; 32],
     },
 }
 
@@ -183,6 +235,51 @@ impl<R: Runtime> PendingSsu2Session<R> {
                 },
                 _runtime: Default::default(),
             },
+            PendingSsu2SessionContext::Outbound {
+                address,
+                chaining_key,
+                dst_id,
+                intro_key,
+                pkt_tx,
+                rx,
+                src_id,
+                state,
+                static_key,
+            } => {
+                tracing::info!(target: LOG_TARGET, "send token request");
+
+                let pkt = TokenRequestBuilder::default()
+                    .with_dst_id(dst_id)
+                    .with_src_id(src_id)
+                    .with_intro_key(intro_key)
+                    .build::<R>()
+                    .to_vec();
+
+                // TODO: retransmissions
+                if let Err(error) = pkt_tx.try_send(Packet { pkt, address }) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        ?address,
+                        "failed to send `TokenRequest`",
+                    );
+                }
+
+                Self {
+                    address,
+                    dst_id,
+                    intro_key,
+                    rx: Some(rx),
+                    state: PendingSsu2SessionState::SendTokenRequest {
+                        chaining_key,
+                        pkt_tx,
+                        src_id,
+                        state,
+                        static_key,
+                    },
+                    _runtime: Default::default(),
+                }
+            }
         }
     }
 
@@ -384,6 +481,38 @@ impl<R: Runtime> PendingSsu2Session<R> {
                         "received an unknown message",
                     ),
                 }
+            }
+            PendingSsu2SessionState::SendTokenRequest {
+                chaining_key,
+                pkt_tx,
+                src_id,
+                state,
+                static_key,
+            } => {
+                // encrypt last 16 bytes of the header
+                ChaCha::with_iv(self.intro_key, [0u8; 12usize]).encrypt_ref(&mut pkt[16..32]);
+                let token: [u8; 8] = TryInto::try_into(pkt[24..32].to_vec()).unwrap();
+                let token = u64::from_le_bytes(token);
+                let pkt_num = u32::from_le_bytes(
+                    TryInto::<[u8; 4]>::try_into(&pkt[8..12]).expect("to succeed"),
+                );
+
+                let mut payload = pkt[32..].to_vec();
+                ChaChaPoly::with_nonce(&self.intro_key, pkt_num.to_be() as u64)
+                    .decrypt_with_ad(&pkt[..32], &mut payload)
+                    .unwrap();
+
+                // TODO: create header
+                // TODO: mixhash header
+                // TODO: generate eph key
+                // TODO: mixhash public key
+                // TODO: do diffie-hellman between ephk and `static_key`
+                // TODO: derive keys
+                // TODO: encrypt payload
+                // TODO: derive `SessCreateHeader` key
+
+                // TODO: create session request message
+                // TODO: move to `AwaitingSessionCreated` state
             }
         }
 
