@@ -25,7 +25,7 @@ use crate::{
         chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
         sha256::Sha256,
-        EphemeralPrivateKey, EphemeralPublicKey, StaticPublicKey,
+        EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
@@ -71,16 +71,22 @@ const MAX_PADDING: usize = 128usize;
 const POLY13055_MAC_LEN: usize = 16usize;
 
 /// Long header length.
-const LONG_HEADER_LEN: usize = 16usize;
+const LONG_HEADER_LEN: usize = 32usize;
+
+/// Short header length.
+const SHORT_HEADER_LEN: usize = 16usize;
 
 /// Public key length.
 const PUBLIC_KEY_LEN: usize = 32usize;
 
 pub struct NoiseContext {
     pub chaining_key: Bytes,
-    pub static_key: StaticPublicKey,
+    pub static_key: StaticPublicKey, // remote
     pub state: Vec<u8>,
-    pub eph: EphemeralPrivateKey,
+    pub eph: EphemeralPrivateKey, // local
+    pub local_static_key: StaticPrivateKey,
+    pub cipher_key: Vec<u8>,
+    pub remote_eph: Option<EphemeralPublicKey>,
 }
 
 impl NoiseContext {
@@ -1965,6 +1971,7 @@ impl<'a> SessionRequestBuilder<'a> {
 
         // update noise state
         noise_ctx.chaining_key = chaining_key.into();
+        // noise_ctx.cipher_key = cipher_key;
         noise_ctx.mix_hash(&payload);
 
         // encrypt first 16 bytes of the long header
@@ -1987,11 +1994,148 @@ impl<'a> SessionRequestBuilder<'a> {
                 });
             });
 
-        // encrypt last 16 bytes of the header
+        // encrypt last 16 bytes of the header and the public key
         ChaCha::with_iv(intro_key, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..64]);
 
         let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + payload.len());
         out.put_slice(&header);
+        out.put_slice(&payload);
+
+        out
+    }
+}
+
+#[derive(Default)]
+pub struct SessionConfirmedBuilder<'a> {
+    dst_id: Option<u64>,
+    ephemeral_key: Option<EphemeralPublicKey>,
+    noise_ctx: Option<&'a mut NoiseContext>,
+    intro_key: Option<[u8; 32]>,
+    src_id: Option<u64>,
+    token: Option<u64>,
+    router_info: Option<Vec<u8>>,
+    k_header_2: Option<[u8; 32]>,
+}
+
+impl<'a> SessionConfirmedBuilder<'a> {
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
+        self.dst_id = Some(dst_id);
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, src_id: u64) -> Self {
+        self.src_id = Some(src_id);
+        self
+    }
+
+    /// Specify remote router's intro key.
+    pub fn with_intro_key(mut self, intro_key: [u8; 32]) -> Self {
+        self.intro_key = Some(intro_key);
+        self
+    }
+
+    /// Specify noise context.
+    pub fn with_noise_ctx(mut self, noise_ctx: &'a mut NoiseContext) -> Self {
+        self.noise_ctx = Some(noise_ctx);
+        self
+    }
+
+    /// Specify router info.
+    pub fn with_router_info(mut self, router_info: Vec<u8>) -> Self {
+        self.router_info = Some(router_info);
+        self
+    }
+
+    /// Specify `k_header_2`.
+    pub fn with_k_header_2(mut self, k_header_2: [u8; 32]) -> Self {
+        self.k_header_2 = Some(k_header_2);
+        self
+    }
+
+    /// Build [`SessionConfirmedBuilder`] into a byte vector.
+    pub fn build<R: Runtime>(mut self) -> BytesMut {
+        let intro_key = self.intro_key.take().expect("to exist");
+        let noise_ctx = self.noise_ctx.take().expect("to exist");
+
+        let mut rng = R::rng();
+        let mut padding = {
+            let mut padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
+            let mut padding = vec![0u8; padding_len as usize];
+            rng.fill_bytes(&mut padding);
+
+            padding
+        };
+
+        let mut header = {
+            let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN);
+
+            out.put_u64_le(self.dst_id.take().expect("to exist"));
+            out.put_u32(0u32);
+            out.put_u8(*MessageType::SessionConfirmed);
+            out.put_u8(1u8); // 1 fragment
+            out.put_u16(0u16); // flags
+
+            out
+        };
+        noise_ctx.mix_hash(&header);
+
+        // must succeed since all the parameters are controlled by us
+        let mut public_key = noise_ctx.local_static_key.public().to_vec();
+        ChaChaPoly::with_nonce(&noise_ctx.cipher_key, 1u64)
+            .encrypt_with_ad_new(&noise_ctx.state, &mut public_key)
+            .expect("to succeed");
+
+        noise_ctx.mix_hash(&public_key);
+
+        let shared = noise_ctx
+            .local_static_key
+            .diffie_hellman(noise_ctx.remote_eph.as_ref().expect("to exist"));
+        let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
+        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+        let mut cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+        let router_info = self.router_info.take().expect("to exist");
+        let mut payload = {
+            let mut out = BytesMut::with_capacity(5 + router_info.len());
+            out.put_u8(BlockType::RouterInfo.as_u8());
+            out.put_u16((2 + router_info.len()) as u16);
+            out.put_u8(0u8);
+            out.put_u8(1u8);
+            out.put_slice(&router_info);
+
+            out.to_vec()
+        };
+
+        ChaChaPoly::with_nonce(&cipher_key, 0u64)
+            .encrypt_with_ad_new(&noise_ctx.state, &mut payload)
+            .expect("to succeed");
+        noise_ctx.mix_hash(&payload);
+
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        payload[payload.len() - 2 * IV_SIZE..]
+            .chunks(IV_SIZE)
+            .zip(header.chunks_mut(8usize))
+            .zip([intro_key, self.k_header_2.take().expect("to exist")])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN + public_key.len() + payload.len());
+        out.put_slice(&header);
+        out.put_slice(&public_key);
         out.put_slice(&payload);
 
         out

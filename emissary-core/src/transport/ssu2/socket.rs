@@ -170,6 +170,11 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
 
+    /// Local router info.
+    //
+    // TODO: bytes
+    router_info: Vec<u8>,
+
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
 
@@ -187,6 +192,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         static_key: StaticPrivateKey,
         intro_key: [u8; 32],
         subsystem_handle: SubsystemHandle,
+        router_info: Vec<u8>,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
         let chaining_key = state.clone();
@@ -220,6 +226,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             subsystem_handle,
             unvalidated_sessions: HashMap::new(),
             waker: None,
+            router_info,
             write_state: WriteState::GetPacket,
         }
     }
@@ -459,6 +466,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             }
             Err(()) => match self.pending_outbound.get(&address) {
                 Some(intro_key) => {
+                    // undo header decryption done with incorrect key
                     ChaCha::with_iv(self.intro_key, iv1)
                         .decrypt([0u8; 8])
                         .into_iter()
@@ -473,17 +481,12 @@ impl<R: Runtime> Ssu2Socket<R> {
                         .for_each(|(a, b)| {
                             *b ^= a;
                         });
+
+                    // re-decrypt
                     ChaCha::with_iv(*intro_key, iv1)
                         .decrypt([0u8; 8])
                         .into_iter()
                         .zip(&mut self.buffer[..8])
-                        .for_each(|(a, b)| {
-                            *b ^= a;
-                        });
-                    ChaCha::with_iv(*intro_key, iv2)
-                        .decrypt([0u8; 8])
-                        .into_iter()
-                        .zip(&mut self.buffer[8..])
                         .for_each(|(a, b)| {
                             *b ^= a;
                         });
@@ -560,6 +563,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             PendingSsu2SessionContext::Outbound {
                 address,
                 chaining_key: self.chaining_key.clone(),
+                local_static_key: self.static_key.clone(),
                 dst_id,
                 intro_key,
                 pkt_tx: self.pkt_tx.clone(),
@@ -567,6 +571,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                 src_id,
                 state,
                 static_key,
+                router_info: self.router_info.clone(),
             },
         ));
 

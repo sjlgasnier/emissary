@@ -22,14 +22,14 @@ use crate::{
         chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
         sha256::Sha256,
-        EphemeralPrivateKey, StaticPublicKey,
+        EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
     primitives::{RouterId, Str, TransportKind},
     runtime::Runtime,
     transport::ssu2::{
         message::{
             AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, NoiseContext,
-            SessionRequestBuilder, ShortHeaderFlag, TokenRequestBuilder,
+            SessionConfirmedBuilder, SessionRequestBuilder, ShortHeaderFlag, TokenRequestBuilder,
         },
         session::active::{KeyContext, Ssu2SessionContext},
         Packet,
@@ -119,6 +119,10 @@ pub enum PendingSsu2SessionContext {
 
         /// Remote router's static key.
         static_key: [u8; 32],
+
+        /// Local static key.
+        local_static_key: StaticPrivateKey,
+        router_info: Vec<u8>,
     },
 }
 
@@ -182,15 +186,23 @@ enum PendingSsu2SessionState {
 
         /// Remote router's static key.
         static_key: [u8; 32],
+
+        /// Local static key.
+        local_static_key: StaticPrivateKey,
+        router_info: Vec<u8>,
     },
 
     /// Awaiting `SessionCreated` message from remote router.
     AwaitingSessionCreated {
+        router_info: Vec<u8>,
         noise_ctx: NoiseContext,
         intro_key: [u8; 32],
         pkt_tx: Sender<Packet>,
         src_id: u64,
     },
+
+    /// Awaiting first ACK to be received.
+    AwaitingFirstAck,
 
     /// State has been poisoned.
     Poisoned,
@@ -253,10 +265,12 @@ impl<R: Runtime> PendingSsu2Session<R> {
                 dst_id,
                 intro_key,
                 pkt_tx,
+                router_info,
                 rx,
                 src_id,
                 state,
                 static_key,
+                local_static_key,
             } => {
                 tracing::info!(target: LOG_TARGET, "send token request");
 
@@ -284,10 +298,12 @@ impl<R: Runtime> PendingSsu2Session<R> {
                     rx: Some(rx),
                     state: PendingSsu2SessionState::SendTokenRequest {
                         chaining_key,
+                        local_static_key,
                         pkt_tx,
                         src_id,
                         state,
                         static_key,
+                        router_info,
                     },
                     _runtime: Default::default(),
                 }
@@ -500,7 +516,19 @@ impl<R: Runtime> PendingSsu2Session<R> {
                 src_id,
                 state,
                 static_key,
+                router_info,
+                local_static_key,
             } => {
+                let iv = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
+                    .expect("to succeed");
+                ChaCha::with_iv(self.intro_key, iv)
+                    .decrypt([0u8; 8])
+                    .into_iter()
+                    .zip(&mut pkt[8..])
+                    .for_each(|(a, b)| {
+                        *b ^= a;
+                    });
+
                 // encrypt last 16 bytes of the header
                 ChaCha::with_iv(self.intro_key, [0u8; 12usize]).encrypt_ref(&mut pkt[16..32]);
                 let token: [u8; 8] = TryInto::try_into(pkt[24..32].to_vec()).unwrap();
@@ -515,10 +543,13 @@ impl<R: Runtime> PendingSsu2Session<R> {
                     .unwrap();
 
                 let mut noise_ctx = NoiseContext {
+                    local_static_key,
                     chaining_key: chaining_key.clone(),
                     static_key: StaticPublicKey::from(static_key),
                     state: state.clone(),
                     eph: EphemeralPrivateKey::random(R::rng()),
+                    cipher_key: Vec::new(),
+                    remote_eph: None,
                 };
 
                 let pkt = SessionRequestBuilder::default()
@@ -545,17 +576,96 @@ impl<R: Runtime> PendingSsu2Session<R> {
 
                 self.state = PendingSsu2SessionState::AwaitingSessionCreated {
                     noise_ctx,
+                    router_info,
                     intro_key: self.intro_key,
                     pkt_tx,
                     src_id,
                 }
             }
             PendingSsu2SessionState::AwaitingSessionCreated {
-                noise_ctx,
+                mut noise_ctx,
                 intro_key,
+
                 pkt_tx,
                 src_id,
+                router_info,
             } => {
+                let iv = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
+                    .expect("to succeed");
+                let temp_key = Hmac::new(&noise_ctx.chaining_key).update([]).finalize();
+                let k_header_2 =
+                    Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize();
+                let k_header_2: [u8; 32] = TryInto::try_into(k_header_2).unwrap();
+
+                ChaCha::with_iv(k_header_2, iv)
+                    .decrypt([0u8; 8])
+                    .into_iter()
+                    .zip(&mut pkt[8..])
+                    .for_each(|(a, b)| {
+                        *b ^= a;
+                    });
+
+                // decrypt last 16 bytes of the header + ephemeral public key
+                ChaCha::with_iv(k_header_2, [0u8; 12usize]).encrypt_ref(&mut pkt[16..64]);
+
+                // TODO: validate header
+
+                noise_ctx.mix_hash(&pkt[..32]).mix_hash(&pkt[32..64]);
+                let eph = EphemeralPublicKey::from_bytes(&pkt[32..64]).unwrap();
+
+                let shared = noise_ctx.eph.diffie_hellman(&eph);
+                let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
+                let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
+                let mut cipher_key =
+                    Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+                let state = noise_ctx.state.clone();
+                noise_ctx.mix_hash(&pkt[64..]);
+                noise_ctx.remote_eph = Some(eph);
+                noise_ctx.cipher_key = cipher_key.clone();
+                noise_ctx.chaining_key = chaining_key.clone().into();
+
+                let mut payload = pkt[64..].to_vec();
+                ChaChaPoly::with_nonce(&cipher_key, 0u64)
+                    .decrypt_with_ad(&state, &mut payload)
+                    .expect("to succeed");
+
+                // TODO: validate datetime
+                // TODO: get our address
+                // TODO: get token
+
+                let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+                let k_header_2 =
+                    Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize();
+                let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).unwrap();
+
+                let pkt = SessionConfirmedBuilder::default()
+                    .with_dst_id(self.dst_id)
+                    .with_src_id(src_id)
+                    .with_intro_key(self.intro_key)
+                    .with_noise_ctx(&mut noise_ctx)
+                    .with_k_header_2(k_header_2)
+                    .with_router_info(router_info)
+                    .build::<R>()
+                    .to_vec();
+
+                // TODO: retransmissions
+                if let Err(error) = pkt_tx.try_send(Packet {
+                    pkt,
+                    address: self.address,
+                }) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        address = ?self.address,
+                        "failed to send `SessionConfirmed`",
+                    );
+                }
+
+                self.state = PendingSsu2SessionState::AwaitingFirstAck;
+            }
+            PendingSsu2SessionState::AwaitingFirstAck => {
+                tracing::error!("not implemented");
                 todo!();
             }
             // TODO: handle correctly

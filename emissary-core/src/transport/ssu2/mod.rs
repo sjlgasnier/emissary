@@ -95,8 +95,8 @@ impl<R: Runtime> Ssu2Transport<R> {
     pub fn new(
         context: Ssu2Context<R>,
         allow_local: bool,
-        _local_signing_key: SigningPrivateKey,
-        _local_router_info: RouterInfo,
+        local_signing_key: SigningPrivateKey,
+        local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
         _profile_storage: ProfileStorage<R>,
         metrics: R::MetricsHandle,
@@ -120,6 +120,7 @@ impl<R: Runtime> Ssu2Transport<R> {
                 StaticPrivateKey::from(config.static_key),
                 config.intro_key,
                 subsystem_handle,
+                local_router_info.serialize(&local_signing_key),
             ),
             metrics,
         }
