@@ -216,3 +216,109 @@ impl<R: Runtime> Stream for Ssu2Transport<R> {
         self.socket.poll_next_unpin(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::mock::MockRuntime;
+
+    #[tokio::test]
+    async fn connect_ssu2() {
+        crate::util::init_logger();
+
+        let (ctx1, address1) = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
+            port: 0u16,
+            host: Some("127.0.0.1".parse().unwrap()),
+            publish: true,
+            static_key: [0xaa; 32],
+            intro_key: [0xbb; 32],
+        }))
+        .await
+        .unwrap();
+        let (ctx2, address2) = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
+            port: 0u16,
+            host: Some("127.0.0.1".parse().unwrap()),
+            publish: true,
+            static_key: [0xcc; 32],
+            intro_key: [0xdd; 32],
+        }))
+        .await
+        .unwrap();
+
+        let (static1, signing1) = (
+            StaticPrivateKey::random(MockRuntime::rng()),
+            SigningPrivateKey::random(MockRuntime::rng()),
+        );
+        let (static2, signing2) = (
+            StaticPrivateKey::random(MockRuntime::rng()),
+            SigningPrivateKey::random(MockRuntime::rng()),
+        );
+        let router_info1 = RouterInfo::new::<MockRuntime>(
+            &Default::default(),
+            None,
+            address1,
+            &static1,
+            &signing1,
+        );
+        let router_info2 = RouterInfo::new::<MockRuntime>(
+            &Default::default(),
+            None,
+            address2,
+            &static2,
+            &signing2,
+        );
+        let (handle1, event_rx1) = {
+            let (tx, rx) = channel(64);
+            let mut handle = SubsystemHandle::new();
+            handle.register_subsystem(tx);
+
+            (handle, rx)
+        };
+        let (handle2, event_rx2) = {
+            let (tx, rx) = channel(64);
+            let mut handle = SubsystemHandle::new();
+            handle.register_subsystem(tx);
+
+            (handle, rx)
+        };
+
+        let mut transport1 = Ssu2Transport::<MockRuntime>::new(
+            ctx1.unwrap(),
+            true,
+            signing1,
+            router_info1,
+            handle1,
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            MockRuntime::register_metrics(Vec::new(), None),
+        );
+        let mut transport2 = Ssu2Transport::<MockRuntime>::new(
+            ctx2.unwrap(),
+            true,
+            signing2,
+            router_info2.clone(),
+            handle2,
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            MockRuntime::register_metrics(Vec::new(), None),
+        );
+        tokio::spawn(async move {
+            loop {
+                match transport2.next().await.unwrap() {
+                    TransportEvent::ConnectionEstablished { router_id } =>
+                        transport2.accept(&router_id),
+                    _ => {}
+                }
+            }
+        });
+
+        transport1.connect(router_info2);
+        loop {
+            match transport1.next().await.unwrap() {
+                TransportEvent::ConnectionEstablished { router_id } => {
+                    transport1.accept(&router_id);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+}

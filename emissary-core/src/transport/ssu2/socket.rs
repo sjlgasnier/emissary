@@ -321,8 +321,8 @@ impl<R: Runtime> Ssu2Socket<R> {
                 let token = R::rng().next_u64();
                 let pkt = MessageBuilder::new(
                     HeaderBuilder::long()
-                        .with_dst_id(connection_id)
-                        .with_src_id(src_connection_id)
+                        .with_src_id(connection_id)
+                        .with_dst_id(src_connection_id)
                         .with_token(token)
                         .with_message_type(MessageType::Retry)
                         .build::<R>(),
@@ -416,8 +416,8 @@ impl<R: Runtime> Ssu2Socket<R> {
                 // TODO: probably unnecessary memory copies here and below
                 let pkt = MessageBuilder::new(
                     HeaderBuilder::long()
-                        .with_dst_id(connection_id)
-                        .with_src_id(src_connection_id)
+                        .with_src_id(connection_id)
+                        .with_dst_id(src_connection_id)
                         .with_token(0u64)
                         .with_message_type(MessageType::SessionCreated)
                         .build::<R>(),

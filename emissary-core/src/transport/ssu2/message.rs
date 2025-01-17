@@ -1221,13 +1221,13 @@ impl Header {
 
                 // TODO: endiannes?
 
-                out.put_u64(*dst_id);
+                out.put_u64_le(*dst_id);
                 out.put_u32(*pkt_num);
                 out.put_u8(**message_type);
                 out.put_u8(2u8);
                 out.put_u8(*net_id);
                 out.put_u8(0u8);
-                out.put_u64(*src_id);
+                out.put_u64_le(*src_id);
                 out.put_u64(*token);
 
                 out
