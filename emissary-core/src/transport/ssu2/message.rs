@@ -2112,6 +2112,7 @@ impl<'a> SessionConfirmedBuilder<'a> {
             .encrypt_with_ad_new(&noise_ctx.state, &mut payload)
             .expect("to succeed");
         noise_ctx.mix_hash(&payload);
+        noise_ctx.chaining_key = chaining_key.into();
 
         // encrypt first 16 bytes of the long header
         //

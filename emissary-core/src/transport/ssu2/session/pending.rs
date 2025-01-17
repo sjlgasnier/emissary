@@ -99,6 +99,9 @@ pub enum PendingSsu2SessionContext {
         /// Chaining key.
         chaining_key: Bytes,
 
+        /// ID of the remote router.
+        router_id: RouterId,
+
         /// Destination connection ID.
         dst_id: u64,
 
@@ -132,7 +135,7 @@ pub enum PendingSsu2SessionStatus {
     ///
     /// Session info is forwaded to [`Ssu2Socket`] and to [`TransportManager`] for validation and
     /// if the session is accepted, a new future is started for the session.
-    NewSession {
+    NewInboundSession {
         /// Context for the active session.
         context: Ssu2SessionContext,
 
@@ -141,6 +144,12 @@ pub enum PendingSsu2SessionStatus {
 
         /// Socket address of the remote router.
         target: SocketAddr,
+    },
+
+    /// New outbound session.
+    NewOutboundSession {
+        /// Context for the active session.
+        context: Ssu2SessionContext,
     },
 
     /// [`SSu2Socket`] has been closed.
@@ -175,21 +184,24 @@ enum PendingSsu2SessionState {
         /// Chaining key.
         chaining_key: Bytes,
 
+        /// Local static key.
+        local_static_key: StaticPrivateKey,
+
         /// TX channel for sending packets to [`Ssu2Socket`].
         pkt_tx: Sender<Packet>,
+
+        /// Router ID.
+        router_id: RouterId,
+
+        router_info: Vec<u8>,
 
         /// Source connection ID.
         src_id: u64,
 
         /// AEAD state.
         state: Vec<u8>,
-
         /// Remote router's static key.
         static_key: [u8; 32],
-
-        /// Local static key.
-        local_static_key: StaticPrivateKey,
-        router_info: Vec<u8>,
     },
 
     /// Awaiting `SessionCreated` message from remote router.
@@ -199,10 +211,16 @@ enum PendingSsu2SessionState {
         intro_key: [u8; 32],
         pkt_tx: Sender<Packet>,
         src_id: u64,
+        router_id: RouterId,
     },
 
     /// Awaiting first ACK to be received.
-    AwaitingFirstAck,
+    AwaitingFirstAck {
+        /// Noise context.
+        noise_ctx: NoiseContext,
+        router_id: RouterId,
+        intro_key: [u8; 32],
+    },
 
     /// State has been poisoned.
     Poisoned,
@@ -270,6 +288,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                 src_id,
                 state,
                 static_key,
+                router_id,
                 local_static_key,
             } => {
                 tracing::info!(target: LOG_TARGET, "send token request");
@@ -298,6 +317,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                     rx: Some(rx),
                     state: PendingSsu2SessionState::SendTokenRequest {
                         chaining_key,
+                        router_id,
                         local_static_key,
                         pkt_tx,
                         src_id,
@@ -318,11 +338,6 @@ impl<R: Runtime> PendingSsu2Session<R> {
     //
     // TODO: ensure packet has enough bytes
     fn on_packet(&mut self, mut pkt: Vec<u8>) -> Option<PendingSsu2SessionStatus> {
-        tracing::info!(
-            target: LOG_TARGET,
-            "handle pending session, pkt len = {}", pkt.len()
-        );
-
         match mem::replace(&mut self.state, PendingSsu2SessionState::Poisoned) {
             PendingSsu2SessionState::AwaitingSessionConfirmed {
                 chaining_key,
@@ -484,7 +499,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                             },
                         ));
 
-                        return Some(PendingSsu2SessionStatus::NewSession {
+                        return Some(PendingSsu2SessionStatus::NewInboundSession {
                             context: Ssu2SessionContext {
                                 address: self.address,
                                 dst_id: src_id,
@@ -517,6 +532,7 @@ impl<R: Runtime> PendingSsu2Session<R> {
                 state,
                 static_key,
                 router_info,
+                router_id,
                 local_static_key,
             } => {
                 let iv = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
@@ -578,17 +594,18 @@ impl<R: Runtime> PendingSsu2Session<R> {
                     noise_ctx,
                     router_info,
                     intro_key: self.intro_key,
+                    router_id,
                     pkt_tx,
                     src_id,
                 }
             }
             PendingSsu2SessionState::AwaitingSessionCreated {
                 mut noise_ctx,
-                intro_key,
-
                 pkt_tx,
                 src_id,
                 router_info,
+                router_id,
+                intro_key,
             } => {
                 let iv = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
                     .expect("to succeed");
@@ -662,11 +679,74 @@ impl<R: Runtime> PendingSsu2Session<R> {
                     );
                 }
 
-                self.state = PendingSsu2SessionState::AwaitingFirstAck;
+                self.state = PendingSsu2SessionState::AwaitingFirstAck {
+                    noise_ctx,
+                    router_id,
+                    intro_key,
+                };
             }
-            PendingSsu2SessionState::AwaitingFirstAck => {
-                tracing::error!("not implemented");
-                todo!();
+            PendingSsu2SessionState::AwaitingFirstAck {
+                noise_ctx,
+                intro_key,
+                router_id,
+            } => {
+                let temp_key = Hmac::new(&noise_ctx.chaining_key).update([]).finalize();
+                let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
+                let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();
+
+                let mut temp_key = Hmac::new(&k_ab).update([]).finalize();
+                let k_data_ab = TryInto::<[u8; 32]>::try_into(
+                    Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
+                )
+                .unwrap();
+                let k_header_2_ab = TryInto::<[u8; 32]>::try_into(
+                    Hmac::new(&temp_key)
+                        .update(&k_data_ab)
+                        .update(b"HKDFSSU2DataKeys")
+                        .update([0x02])
+                        .finalize(),
+                )
+                .unwrap();
+
+                let mut temp_key = Hmac::new(&k_ba).update([]).finalize();
+                let k_data_ba = TryInto::<[u8; 32]>::try_into(
+                    Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
+                )
+                .unwrap();
+                let k_header_2_ba = TryInto::<[u8; 32]>::try_into(
+                    Hmac::new(&temp_key)
+                        .update(&k_data_ba)
+                        .update(b"HKDFSSU2DataKeys")
+                        .update([0x02])
+                        .finalize(),
+                )
+                .unwrap();
+
+                let iv = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
+                    .expect("to succeed");
+
+                ChaCha::with_iv(k_header_2_ba, iv)
+                    .decrypt([0u8; 8])
+                    .into_iter()
+                    .zip(&mut pkt[8..])
+                    .for_each(|(a, b)| {
+                        *b ^= a;
+                    });
+
+                let pkt_num: [u8; 4] = TryInto::try_into(pkt[8..12].to_vec()).unwrap();
+                let pkt_num = u32::from_be_bytes(pkt_num);
+
+                return Some(PendingSsu2SessionStatus::NewOutboundSession {
+                    context: Ssu2SessionContext {
+                        address: self.address,
+                        dst_id: self.dst_id,
+                        intro_key,
+                        recv_key_ctx: KeyContext::new(k_data_ba, k_header_2_ba),
+                        send_key_ctx: KeyContext::new(k_data_ab, k_header_2_ab),
+                        router_id,
+                        pkt_rx: self.rx.take().expect("to exist"),
+                    },
+                });
             }
             // TODO: handle correctly
             PendingSsu2SessionState::Poisoned => unreachable!(),

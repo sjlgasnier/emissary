@@ -556,14 +556,13 @@ impl<R: Runtime> Ssu2Socket<R> {
         let (tx, rx) = channel(CHANNEL_SIZE);
         self.sessions.insert(src_id, tx);
 
-        tracing::error!(target: LOG_TARGET, "start future");
-
         self.pending_outbound.insert(address, intro_key);
         self.pending_sessions.push(PendingSsu2Session::<R>::new(
             PendingSsu2SessionContext::Outbound {
                 address,
                 chaining_key: self.chaining_key.clone(),
                 local_static_key: self.static_key.clone(),
+                router_id: router_info.identity.id(),
                 dst_id,
                 intro_key,
                 pkt_tx: self.pkt_tx.clone(),
@@ -670,7 +669,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             match this.pending_sessions.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(PendingSsu2SessionStatus::NewSession {
+                Poll::Ready(Some(PendingSsu2SessionStatus::NewInboundSession {
                     context,
                     pkt,
                     target,
@@ -684,6 +683,19 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                     );
 
                     this.pending_pkts.push_back((pkt, target));
+                    this.unvalidated_sessions.insert(router_id.clone(), context);
+
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                }
+                Poll::Ready(Some(PendingSsu2SessionStatus::NewOutboundSession { context })) => {
+                    let router_id = context.router_id.clone();
+
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "outbound session negotiated",
+                    );
+
                     this.unvalidated_sessions.insert(router_id.clone(), context);
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
