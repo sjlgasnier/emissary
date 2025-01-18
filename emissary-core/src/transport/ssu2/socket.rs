@@ -33,7 +33,9 @@ use crate::{
             session::{
                 active::{Ssu2Session, Ssu2SessionContext},
                 pending::{
-                    PendingSsu2Session, PendingSsu2SessionContext, PendingSsu2SessionStatus,
+                    inbound::{InboundSsu2Context, InboundSsu2Session},
+                    outbound::{OutboundSsu2Context, OutboundSsu2Session},
+                    PendingSsu2SessionStatus,
                 },
             },
             Packet,
@@ -442,20 +444,18 @@ impl<R: Runtime> Ssu2Socket<R> {
 
                 let (tx, rx) = channel(CHANNEL_SIZE);
                 self.sessions.insert(connection_id, tx);
-                self.pending_sessions.push(PendingSsu2Session::<R>::new(
-                    PendingSsu2SessionContext::Inbound {
-                        address,
-                        dst_id: connection_id,
-                        src_id: src_connection_id,
-                        k_header_1: self.intro_key.clone(),
-                        k_header_2,
-                        k_session_created,
-                        chaining_key,
-                        ephemeral_key: sk,
-                        rx,
-                        state: aead_state.state,
-                    },
-                ));
+                self.pending_sessions.push(InboundSsu2Session::<R>::new(InboundSsu2Context {
+                    address,
+                    dst_id: connection_id,
+                    src_id: src_connection_id,
+                    k_header_1: self.intro_key.clone(),
+                    k_header_2,
+                    k_session_created,
+                    chaining_key,
+                    ephemeral_key: sk,
+                    rx,
+                    state: aead_state.state,
+                }));
             }
             Ok(message_type) => {
                 tracing::error!(
@@ -557,22 +557,20 @@ impl<R: Runtime> Ssu2Socket<R> {
         self.sessions.insert(src_id, tx);
 
         self.pending_outbound.insert(address, intro_key);
-        self.pending_sessions.push(PendingSsu2Session::<R>::new(
-            PendingSsu2SessionContext::Outbound {
-                address,
-                chaining_key: self.chaining_key.clone(),
-                local_static_key: self.static_key.clone(),
-                router_id: router_info.identity.id(),
-                dst_id,
-                intro_key,
-                pkt_tx: self.pkt_tx.clone(),
-                rx,
-                src_id,
-                state,
-                static_key,
-                router_info: self.router_info.clone(),
-            },
-        ));
+        self.pending_sessions.push(OutboundSsu2Session::<R>::new(OutboundSsu2Context {
+            address,
+            chaining_key: self.chaining_key.clone(),
+            local_static_key: self.static_key.clone(),
+            router_id: router_info.identity.id(),
+            dst_id,
+            intro_key,
+            pkt_tx: self.pkt_tx.clone(),
+            rx,
+            src_id,
+            state,
+            static_key,
+            router_info: self.router_info.clone(),
+        }));
 
         if let Some(waker) = self.waker.take() {
             waker.wake_by_ref();
@@ -700,6 +698,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
+                Poll::Ready(Some(PendingSsu2SessionStatus::SessionTermianted {})) => todo!(),
                 Poll::Ready(Some(PendingSsu2SessionStatus::SocketClosed)) =>
                     return Poll::Ready(None),
             }
