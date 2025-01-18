@@ -16,8 +16,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![allow(unused)]
-
 use crate::{
     config::Ssu2Config,
     crypto::{SigningPrivateKey, StaticPrivateKey},
@@ -26,14 +24,10 @@ use crate::{
     profile::ProfileStorage,
     runtime::{MetricType, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
-    transport::{
-        ssu2::socket::{Ssu2SessionCommand, Ssu2Socket},
-        Transport, TransportEvent,
-    },
+    transport::{ssu2::socket::Ssu2Socket, Transport, TransportEvent},
 };
 
 use futures::{Stream, StreamExt};
-use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -47,9 +41,6 @@ mod socket;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2";
-
-/// Size for the socket event/command channel.
-const CHANNEL_SIZE: usize = 1024usize;
 
 #[derive(Debug, Clone)]
 pub struct Packet {
@@ -84,7 +75,7 @@ pub struct Ssu2Context<R: Runtime> {
 /// SSU2 transport.
 pub struct Ssu2Transport<R: Runtime> {
     /// Metrics handle.
-    metrics: R::MetricsHandle,
+    _metrics: R::MetricsHandle,
 
     /// SSU2 server socket.
     socket: Ssu2Socket<R>,
@@ -99,7 +90,7 @@ impl<R: Runtime> Ssu2Transport<R> {
         local_router_info: RouterInfo,
         subsystem_handle: SubsystemHandle,
         _profile_storage: ProfileStorage<R>,
-        metrics: R::MetricsHandle,
+        _metrics: R::MetricsHandle,
     ) -> Self {
         let Ssu2Context {
             socket_address,
@@ -122,7 +113,7 @@ impl<R: Runtime> Ssu2Transport<R> {
                 subsystem_handle,
                 local_router_info.serialize(&local_signing_key),
             ),
-            metrics,
+            _metrics,
         }
     }
 
@@ -221,6 +212,7 @@ impl<R: Runtime> Stream for Ssu2Transport<R> {
 mod tests {
     use super::*;
     use crate::runtime::mock::MockRuntime;
+    use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn connect_ssu2() {
@@ -267,14 +259,14 @@ mod tests {
             &static2,
             &signing2,
         );
-        let (handle1, event_rx1) = {
+        let (handle1, _event_rx1) = {
             let (tx, rx) = channel(64);
             let mut handle = SubsystemHandle::new();
             handle.register_subsystem(tx);
 
             (handle, rx)
         };
-        let (handle2, event_rx2) = {
+        let (handle2, _event_rx2) = {
             let (tx, rx) = channel(64);
             let mut handle = SubsystemHandle::new();
             handle.register_subsystem(tx);

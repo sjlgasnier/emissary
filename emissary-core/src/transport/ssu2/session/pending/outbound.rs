@@ -18,18 +18,15 @@
 
 use crate::{
     crypto::{
-        base64_decode,
         chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
-        sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
-    primitives::{RouterId, Str, TransportKind},
+    primitives::RouterId,
     runtime::Runtime,
     transport::ssu2::{
         message::{
-            AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, NoiseContext,
-            SessionConfirmedBuilder, SessionRequestBuilder, ShortHeaderFlag, TokenRequestBuilder,
+            NoiseContext, SessionConfirmedBuilder, SessionRequestBuilder, TokenRequestBuilder,
         },
         session::{
             active::{KeyContext, Ssu2SessionContext},
@@ -39,15 +36,15 @@ use crate::{
     },
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use thingbuf::mpsc::{Receiver, Sender};
+use zeroize::Zeroize;
 
 use core::{
     future::Future,
     marker::PhantomData,
     mem,
     net::SocketAddr,
-    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -331,10 +328,10 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 noise_ctx.mix_hash(&pkt[..32]).mix_hash(&pkt[32..64]);
                 let eph = EphemeralPublicKey::from_bytes(&pkt[32..64]).unwrap();
 
-                let shared = noise_ctx.eph.diffie_hellman(&eph);
+                let mut shared = noise_ctx.eph.diffie_hellman(&eph);
                 let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
                 let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-                let mut cipher_key =
+                let cipher_key =
                     Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
                 let state = noise_ctx.state.clone();
@@ -347,6 +344,9 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 ChaChaPoly::with_nonce(&cipher_key, 0u64)
                     .decrypt_with_ad(&state, &mut payload)
                     .expect("to succeed");
+
+                shared.zeroize();
+                temp_key.zeroize();
 
                 // TODO: validate datetime
                 // TODO: get our address
@@ -395,7 +395,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
                 let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();
 
-                let mut temp_key = Hmac::new(&k_ab).update([]).finalize();
+                let temp_key = Hmac::new(&k_ab).update([]).finalize();
                 let k_data_ab = TryInto::<[u8; 32]>::try_into(
                     Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
                 )
@@ -409,7 +409,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 )
                 .unwrap();
 
-                let mut temp_key = Hmac::new(&k_ba).update([]).finalize();
+                let temp_key = Hmac::new(&k_ba).update([]).finalize();
                 let k_data_ba = TryInto::<[u8; 32]>::try_into(
                     Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
                 )
@@ -435,7 +435,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                     });
 
                 let pkt_num: [u8; 4] = TryInto::try_into(pkt[8..12].to_vec()).unwrap();
-                let pkt_num = u32::from_be_bytes(pkt_num);
+                let _pkt_num = u32::from_be_bytes(pkt_num);
 
                 return Some(PendingSsu2SessionStatus::NewOutboundSession {
                     context: Ssu2SessionContext {

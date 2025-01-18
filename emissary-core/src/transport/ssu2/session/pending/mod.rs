@@ -16,38 +16,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    crypto::{
-        base64_decode,
-        chachapoly::{ChaCha, ChaChaPoly},
-        hmac::Hmac,
-        sha256::Sha256,
-        EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
-    },
-    primitives::{RouterId, Str, TransportKind},
-    runtime::Runtime,
-    transport::ssu2::{
-        message::{
-            AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, NoiseContext,
-            SessionConfirmedBuilder, SessionRequestBuilder, ShortHeaderFlag, TokenRequestBuilder,
-        },
-        session::active::{KeyContext, Ssu2SessionContext},
-        Packet,
-    },
-};
+use crate::transport::ssu2::session::active::Ssu2SessionContext;
 
-use bytes::{Bytes, BytesMut};
-use thingbuf::mpsc::{Receiver, Sender};
+use bytes::BytesMut;
 
-use core::{
-    future::Future,
-    marker::PhantomData,
-    mem,
-    net::SocketAddr,
-    num::NonZeroUsize,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use core::net::SocketAddr;
 
 pub mod inbound;
 pub mod outbound;
@@ -76,6 +49,7 @@ pub enum PendingSsu2SessionStatus {
     },
 
     /// Pending session terminated due to fatal error, e.g., decryption error.
+    #[allow(unused)]
     SessionTermianted {},
 
     /// [`SSu2Socket`] has been closed.

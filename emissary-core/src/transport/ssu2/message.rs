@@ -34,7 +34,6 @@ use crate::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use chrono::format::Numeric;
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -42,11 +41,10 @@ use nom::{
     Err, IResult,
 };
 use rand_core::RngCore;
-use tracing::Instrument;
+use zeroize::Zeroize;
 
 use core::{
     fmt,
-    marker::PhantomData,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     ops::Deref,
@@ -181,6 +179,7 @@ impl BlockType {
 }
 
 /// SSU2 message block.
+#[allow(unused)]
 pub enum Block {
     /// Date time.
     DateTime {
@@ -377,8 +376,7 @@ impl fmt::Debug for Block {
                 .field("t_delay", &t_delay)
                 .field("r_deay", &r_delay)
                 .finish(),
-            Self::RouterInfo { router_info } =>
-                f.debug_struct("Block::RouterInfo").finish_non_exhaustive(),
+            Self::RouterInfo { .. } => f.debug_struct("Block::RouterInfo").finish_non_exhaustive(),
             Self::I2Np { message } =>
                 f.debug_struct("Block::I2NP").field("message", &message).finish(),
             Self::Termination {
@@ -415,14 +413,6 @@ impl fmt::Debug for Block {
                 .field("fragment_num", &fragment_num)
                 .field("fragment_len", &fragment.len())
                 .finish(),
-            Self::Termination {
-                num_valid_pkts,
-                reason,
-            } => f
-                .debug_struct("Block::Termination")
-                .field("num_valid_pkts", &num_valid_pkts)
-                .field("reason", &reason)
-                .finish(),
             Self::Ack {
                 ack_through,
                 num_acks,
@@ -433,7 +423,11 @@ impl fmt::Debug for Block {
                 .field("num_acks", &num_acks)
                 .field("ranges", &ranges)
                 .finish(),
-            Self::NewToken { expires, token } => f.debug_struct("Block::NewToken").finish(),
+            Self::NewToken { expires, token } => f
+                .debug_struct("Block::NewToken")
+                .field("expires", &expires)
+                .field("token", &token)
+                .finish(),
             Self::PathChallenge { challenge } =>
                 f.debug_struct("Block::PathChallenge").field("challenge", &challenge).finish(),
             Self::PathResponse { response } =>
@@ -693,7 +687,7 @@ impl Block {
 
     /// Parse [`MessageBlock::NewToken`].
     fn parse_new_token(input: &[u8]) -> IResult<&[u8], Block> {
-        let (rest, size) = be_u16(input)?;
+        let (rest, _size) = be_u16(input)?;
         let (rest, expires) = be_u32(rest)?;
         let (rest, token) = be_u64(rest)?;
 
@@ -728,16 +722,16 @@ impl Block {
 
     /// Parse [`MessageBlock::FirstPacketNumber`].
     fn parse_first_packet_number(input: &[u8]) -> IResult<&[u8], Block> {
-        let (rest, size) = be_u16(input)?;
-        let (rest, first_pkt_num) = be_u32(input)?;
+        let (rest, _size) = be_u16(input)?;
+        let (rest, first_pkt_num) = be_u32(rest)?;
 
         Ok((rest, Block::FirstPacketNumber { first_pkt_num }))
     }
 
     /// Parse [`MessageBlock::Congestion`].
     fn parse_congestion(input: &[u8]) -> IResult<&[u8], Block> {
-        let (rest, size) = be_u16(input)?;
-        let (rest, flag) = be_u8(input)?;
+        let (rest, _size) = be_u16(input)?;
+        let (rest, flag) = be_u8(rest)?;
 
         Ok((rest, Block::Congestion { flag }))
     }
@@ -812,7 +806,7 @@ impl Block {
             + match self {
                 Block::DateTime { .. } => 4usize,
                 Block::Options { .. } => OPTIONS_MIN_SIZE as usize,
-                Block::RouterInfo { router_info } => todo!(),
+                Block::RouterInfo { .. } => todo!(),
                 Block::I2Np { message } => message.serialized_len_short(),
                 Block::FirstFragment { fragment, .. } => fragment
                     .len()
@@ -956,6 +950,7 @@ pub enum ShortHeaderFlag {
     },
 
     /// Short header for `SessionConfirmed`.
+    #[allow(unused)]
     SessionConfirmed {
         /// Fragment number.
         fragment_num: u8,
@@ -1102,6 +1097,7 @@ impl HeaderBuilder {
     }
 
     /// Specify network ID.
+    #[allow(unused)]
     pub fn with_net_id(mut self, value: u8) -> Self {
         match &mut self {
             Self::Long { net_id, .. } => {
@@ -1330,6 +1326,7 @@ impl<'a> MessageBuilder<'a> {
     }
 
     /// Create new [`MessageBuilder`] but don't insert padding block.
+    #[allow(unused)]
     pub fn new_without_padding(header: Header) -> Self {
         Self {
             aead_state: None,
@@ -1804,8 +1801,8 @@ impl TokenRequestBuilder {
     pub fn build<R: Runtime>(mut self) -> BytesMut {
         let intro_key = self.intro_key.take().expect("to exist");
         let mut rng = R::rng();
-        let mut padding = {
-            let mut padding_len = rng.next_u32() % MAX_PADDING as u32 + 8;
+        let padding = {
+            let padding_len = rng.next_u32() % MAX_PADDING as u32 + 8;
             let mut padding = vec![0u8; padding_len as usize];
             rng.fill_bytes(&mut padding);
 
@@ -1876,6 +1873,7 @@ impl TokenRequestBuilder {
 #[derive(Default)]
 pub struct SessionRequestBuilder<'a> {
     dst_id: Option<u64>,
+    #[allow(unused)]
     ephemeral_key: Option<EphemeralPublicKey>,
     noise_ctx: Option<&'a mut NoiseContext>,
     intro_key: Option<[u8; 32]>,
@@ -1920,8 +1918,8 @@ impl<'a> SessionRequestBuilder<'a> {
         let noise_ctx = self.noise_ctx.take().expect("to exist");
 
         let mut rng = R::rng();
-        let mut padding = {
-            let mut padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
+        let padding = {
+            let padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
             let mut padding = vec![0u8; padding_len as usize];
             rng.fill_bytes(&mut padding);
 
@@ -1950,7 +1948,7 @@ impl<'a> SessionRequestBuilder<'a> {
         noise_ctx.mix_hash(&header[..32]).mix_hash(&ephemeral_key);
 
         // TODO: do diffie-hellman
-        let shared = noise_ctx.eph.diffie_hellman(&noise_ctx.static_key);
+        let mut shared = noise_ctx.eph.diffie_hellman(&noise_ctx.static_key);
         let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
         let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
         let mut cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
@@ -1968,6 +1966,10 @@ impl<'a> SessionRequestBuilder<'a> {
         ChaChaPoly::with_nonce(&cipher_key, 0u64)
             .encrypt_with_ad_new(&noise_ctx.state, &mut payload)
             .expect("to succeed");
+
+        shared.zeroize();
+        temp_key.zeroize();
+        cipher_key.zeroize();
 
         // update noise state
         noise_ctx.chaining_key = chaining_key.into();
@@ -2008,11 +2010,9 @@ impl<'a> SessionRequestBuilder<'a> {
 #[derive(Default)]
 pub struct SessionConfirmedBuilder<'a> {
     dst_id: Option<u64>,
-    ephemeral_key: Option<EphemeralPublicKey>,
     noise_ctx: Option<&'a mut NoiseContext>,
     intro_key: Option<[u8; 32]>,
     src_id: Option<u64>,
-    token: Option<u64>,
     router_info: Option<Vec<u8>>,
     k_header_2: Option<[u8; 32]>,
 }
@@ -2059,15 +2059,6 @@ impl<'a> SessionConfirmedBuilder<'a> {
         let intro_key = self.intro_key.take().expect("to exist");
         let noise_ctx = self.noise_ctx.take().expect("to exist");
 
-        let mut rng = R::rng();
-        let mut padding = {
-            let mut padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
-            let mut padding = vec![0u8; padding_len as usize];
-            rng.fill_bytes(&mut padding);
-
-            padding
-        };
-
         let mut header = {
             let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN);
 
@@ -2089,7 +2080,7 @@ impl<'a> SessionConfirmedBuilder<'a> {
 
         noise_ctx.mix_hash(&public_key);
 
-        let shared = noise_ctx
+        let mut shared = noise_ctx
             .local_static_key
             .diffie_hellman(noise_ctx.remote_eph.as_ref().expect("to exist"));
         let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
@@ -2113,6 +2104,10 @@ impl<'a> SessionConfirmedBuilder<'a> {
             .expect("to succeed");
         noise_ctx.mix_hash(&payload);
         noise_ctx.chaining_key = chaining_key.into();
+
+        shared.zeroize();
+        temp_key.zeroize();
+        cipher_key.zeroize();
 
         // encrypt first 16 bytes of the long header
         //

@@ -22,15 +22,12 @@ use crate::{
         chachapoly::{ChaCha, ChaChaPoly},
         hmac::Hmac,
         sha256::Sha256,
-        EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
+        EphemeralPrivateKey, StaticPublicKey,
     },
-    primitives::{RouterId, Str, TransportKind},
+    primitives::{Str, TransportKind},
     runtime::Runtime,
     transport::ssu2::{
-        message::{
-            AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, NoiseContext,
-            SessionConfirmedBuilder, SessionRequestBuilder, ShortHeaderFlag, TokenRequestBuilder,
-        },
+        message::{AeadState, Block, HeaderBuilder, MessageBuilder, MessageType, ShortHeaderFlag},
         session::{
             active::{KeyContext, Ssu2SessionContext},
             pending::PendingSsu2SessionStatus,
@@ -39,8 +36,8 @@ use crate::{
     },
 };
 
-use bytes::{Bytes, BytesMut};
-use thingbuf::mpsc::{Receiver, Sender};
+use thingbuf::mpsc::Receiver;
+use zeroize::Zeroize;
 
 use core::{
     future::Future,
@@ -121,10 +118,10 @@ pub struct InboundSsu2Session<R: Runtime> {
     address: SocketAddr,
 
     /// Destination connection ID.
-    dst_id: u64,
+    _dst_id: u64,
 
     /// Intro key.
-    intro_key: [u8; 32],
+    _intro_key: [u8; 32],
 
     /// RX channel for receiving datagrams from `Ssu2Socket`.
     rx: Option<Receiver<Packet>>,
@@ -153,8 +150,8 @@ impl<R: Runtime> InboundSsu2Session<R> {
         } = context;
         Self {
             address,
-            intro_key: k_header_1,
-            dst_id,
+            _intro_key: k_header_1,
+            _dst_id: dst_id,
             rx: Some(rx),
             state: PendingSessionState::AwaitingSessionConfirmed {
                 chaining_key,
@@ -215,7 +212,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                             .decrypt_with_ad(&state, &mut static_key)
                             .unwrap();
                         let static_key = StaticPublicKey::from_bytes(&static_key).unwrap();
-                        let shared = ephemeral_key.diffie_hellman(&static_key);
+                        let mut shared = ephemeral_key.diffie_hellman(&static_key);
 
                         let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
                         let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
@@ -226,6 +223,10 @@ impl<R: Runtime> InboundSsu2Session<R> {
                         ChaChaPoly::with_nonce(&cipher_key, 0u64)
                             .decrypt_with_ad(&new_state, &mut payload)
                             .unwrap();
+
+                        shared.zeroize();
+                        temp_key.zeroize();
+                        cipher_key.zeroize();
 
                         let Some(blocks) = Block::parse(&payload) else {
                             tracing::warn!(
@@ -261,7 +262,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                         let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
                         let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();
 
-                        let mut temp_key = Hmac::new(&k_ab).update([]).finalize();
+                        let temp_key = Hmac::new(&k_ab).update([]).finalize();
                         let k_data_ab = TryInto::<[u8; 32]>::try_into(
                             Hmac::new(&temp_key)
                                 .update(b"HKDFSSU2DataKeys")
@@ -278,7 +279,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                         )
                         .unwrap();
 
-                        let mut temp_key = Hmac::new(&k_ba).update([]).finalize();
+                        let temp_key = Hmac::new(&k_ba).update([]).finalize();
                         let k_data_ba = TryInto::<[u8; 32]>::try_into(
                             Hmac::new(&temp_key)
                                 .update(b"HKDFSSU2DataKeys")
@@ -327,7 +328,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                         )
                         .unwrap();
                         ChaCha::with_iv(intro_key, iv1).decrypt_ref(&mut mask);
-                        let connection_id = u64::from_be(mask.into_iter().zip(&mut test).fold(
+                        let _connection_id = u64::from_be(mask.into_iter().zip(&mut test).fold(
                             0u64,
                             |connection_id, (a, b)| {
                                 *b ^= a;

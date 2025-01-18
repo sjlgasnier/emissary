@@ -24,9 +24,7 @@ use crate::{
     runtime::Runtime,
     subsystem::{SubsystemCommand, SubsystemHandle},
     transport::ssu2::{
-        message::{
-            Block, DataMessageBuilder, HeaderBuilder, MessageBuilder, MessageType, ShortHeaderFlag,
-        },
+        message::{Block, DataMessageBuilder},
         Packet,
     },
 };
@@ -38,7 +36,6 @@ use thingbuf::mpsc::{channel, Receiver, Sender};
 use alloc::collections::{BTreeMap, VecDeque};
 use core::{
     future::Future,
-    iter,
     marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
@@ -340,7 +337,7 @@ impl<R: Runtime> Ssu2Session<R> {
 
     /// Handle received `pkt` for this session.
     fn on_packet(&mut self, pkt: Packet) -> Result<(), Ssu2Error> {
-        let Packet { mut pkt, address } = pkt;
+        let Packet { mut pkt, .. } = pkt;
 
         // TODO: upate address if it has changed
         // TODO: handle duplicate pkts correctly
@@ -523,7 +520,7 @@ impl<R: Runtime> Ssu2Session<R> {
                 );
             }
 
-            let fragments = fragments.into_iter().enumerate().for_each(|(i, fragment)| {
+            fragments.into_iter().enumerate().for_each(|(i, fragment)| {
                 let message = DataMessageBuilder::default()
                     .with_dst_id(self.dst_id)
                     .with_pkt_num(self.next_pkt_num())
@@ -568,7 +565,7 @@ impl<R: Runtime> Ssu2Session<R> {
         // the peer has disconnected or an error was encoutered
         //
         // inform other subsystems of the disconnection
-        let result = (&mut self).await;
+        (&mut self).await;
 
         tracing::debug!(
             target: LOG_TARGET,

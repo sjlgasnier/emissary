@@ -44,7 +44,7 @@ use crate::{
     },
 };
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use rand_core::RngCore;
@@ -52,12 +52,12 @@ use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::collections::VecDeque;
 use core::{
-    future::Future,
     mem,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll, Waker},
 };
+use zeroize::Zeroize;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::socket";
@@ -77,31 +77,6 @@ const CHANNEL_SIZE: usize = 256usize;
 ///
 /// Used to receive datagrams from active sessions.
 const PKT_CHANNEL_SIZE: usize = 8192usize;
-
-/// Events emitted by [`Ssu2Socket`].
-#[derive(Debug, Default, Clone)]
-pub enum Ssu2SessionCommand {
-    /// Accept connection.
-    Accept {
-        /// Router ID.
-        router_id: RouterId,
-    },
-
-    /// Reject connection.
-    Reject {
-        /// Router ID.
-        router_id: RouterId,
-    },
-
-    /// Connect to router.
-    Connect {
-        /// Router info.
-        router_info: RouterInfo,
-    },
-
-    #[default]
-    Dummy,
-}
 
 /// Write state.
 enum WriteState {
@@ -254,7 +229,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         );
 
         if let Some(tx) = self.sessions.get_mut(&connection_id) {
-            if let Err(error) = tx.try_send(Packet {
+            if let Err(_error) = tx.try_send(Packet {
                 pkt: self.buffer[..nread].to_vec(),
                 address,
             }) {
@@ -301,7 +276,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                 let src_connection_id = u64::from_le_bytes(
                     TryInto::<[u8; 8]>::try_into(&self.buffer[16..24]).expect("to succeed"),
                 );
-                let token = u64::from_le_bytes(
+                let _token = u64::from_le_bytes(
                     TryInto::<[u8; 8]>::try_into(&self.buffer[24..32]).expect("to succeed"),
                 );
 
@@ -365,12 +340,15 @@ impl<R: Runtime> Ssu2Socket<R> {
 
                 let public_key =
                     EphemeralPublicKey::from_bytes(&self.buffer[32..64]).expect("to succeed");
-                let shared = self.static_key.diffie_hellman(&public_key);
+                let mut shared = self.static_key.diffie_hellman(&public_key);
 
                 let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize();
                 let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
                 let mut cipher_key =
                     Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+                shared.zeroize();
+                temp_key.zeroize();
 
                 // TODO: derive sessioncreated header keyfrom `cipher_key` (??)
                 // HKDF(chainKey, ZEROLEN, "SessCreateHeader", 32)
@@ -388,6 +366,8 @@ impl<R: Runtime> Ssu2Socket<R> {
                     .decrypt_with_ad(&state, &mut payload)
                     .unwrap();
 
+                cipher_key.zeroize();
+
                 match Block::parse(&payload) {
                     Some(blocks) => blocks.into_iter().for_each(|block| {
                         tracing::trace!(target: LOG_TARGET, "block = {block:?}");
@@ -401,12 +381,15 @@ impl<R: Runtime> Ssu2Socket<R> {
                 let sk = EphemeralPrivateKey::random(R::rng());
                 let pk = sk.public();
 
-                let shared = sk.diffie_hellman(&public_key);
+                let mut shared = sk.diffie_hellman(&public_key);
 
                 let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
                 let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-                let mut cipher_key =
+                let cipher_key =
                     Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+
+                temp_key.zeroize();
+                shared.zeroize();
 
                 let mut aead_state = AeadState {
                     cipher_key: cipher_key.clone(),
@@ -414,7 +397,6 @@ impl<R: Runtime> Ssu2Socket<R> {
                     state: new_state,
                 };
 
-                let token = R::rng().next_u64();
                 // TODO: probably unnecessary memory copies here and below
                 let pkt = MessageBuilder::new(
                     HeaderBuilder::long()
@@ -496,7 +478,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     );
 
                     if let Some(tx) = self.sessions.get_mut(&connection_id) {
-                        if let Err(error) = tx.try_send(Packet {
+                        if let Err(_error) = tx.try_send(Packet {
                             pkt: self.buffer[..nread].to_vec(),
                             address,
                         }) {
@@ -620,7 +602,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                 );
                 debug_assert!(false);
             }
-            Some(context) => {
+            Some(_) => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
@@ -658,8 +640,10 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             match this.active_sessions.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some((router_id, dst_id))) =>
-                    return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })),
+                Poll::Ready(Some((router_id, _dst_id))) => {
+                    // TODO: remove channel
+                    return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id }));
+                }
             }
         }
 
