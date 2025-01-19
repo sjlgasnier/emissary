@@ -361,7 +361,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                     dst_id = ?self.dst_id,
                     src_id = ?self.src_id,
                     ?kind,
-                    "invalid message, expected `Retry`",
+                    "invalid message, expected `SessionCreated`",
                 );
                 return Err(Ssu2Error::UnexpectedMessage);
             }

@@ -26,8 +26,8 @@ use crate::{
     runtime::Runtime,
     transport::ssu2::{
         message::{
-            AeadState, Block, HeaderBuilder, HeaderKind, HeaderReader, MessageBuilder, MessageType,
-            ShortHeaderFlag,
+            Block, DataMessageBuilder, HeaderKind, HeaderReader, RetryBuilder,
+            SessionCreatedBuilder,
         },
         session::{
             active::{KeyContext, Ssu2SessionContext},
@@ -47,7 +47,6 @@ use core::{
     marker::PhantomData,
     mem,
     net::SocketAddr,
-    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -205,21 +204,14 @@ impl<R: Runtime> InboundSsu2Session<R> {
         })?;
 
         let token = R::rng().next_u64();
-        let pkt = MessageBuilder::new(
-            HeaderBuilder::long()
-                .with_src_id(dst_id)
-                .with_dst_id(src_id)
-                .with_token(token)
-                .with_message_type(MessageType::Retry)
-                .build::<R>(),
-        )
-        .with_key(intro_key)
-        .with_block(Block::DateTime {
-            timestamp: R::time_since_epoch().as_secs() as u32,
-        })
-        .with_block(Block::Address { address })
-        .build::<R>()
-        .to_vec();
+        let pkt = RetryBuilder::default()
+            .with_k_header_1(intro_key)
+            .with_src_id(dst_id)
+            .with_dst_id(src_id)
+            .with_token(token)
+            .with_address(address)
+            .build::<R>()
+            .to_vec();
 
         // TODO: retries
         if let Err(error) = pkt_tx.try_send(Packet { pkt, address }) {
@@ -328,6 +320,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                 target: LOG_TARGET,
                 dst_id = ?self.dst_id,
                 src_id = ?self.src_id,
+                "malformed `SessionRequest` payload",
             );
             debug_assert!(false);
             return Err(Ssu2Error::Malformed);
@@ -344,33 +337,21 @@ impl<R: Runtime> InboundSsu2Session<R> {
         temp_key.zeroize();
         shared.zeroize();
 
-        // TODO: ugly
-        let mut aead_state = AeadState {
-            cipher_key: cipher_key.clone(),
-            nonce: 0u64,
-            state: new_state,
-        };
+        let mut message = SessionCreatedBuilder::default()
+            .with_address(self.address)
+            .with_dst_id(self.src_id)
+            .with_src_id(self.dst_id)
+            .with_ephemeral_key(pk.clone())
+            .build::<R>();
 
-        // TODO: probably unnecessary memory copies here and below
-        let pkt = MessageBuilder::new(
-            HeaderBuilder::long()
-                .with_src_id(self.dst_id)
-                .with_dst_id(self.src_id)
-                .with_token(0u64)
-                .with_message_type(MessageType::SessionCreated)
-                .build::<R>(),
-        )
-        .with_keypair(self.intro_key, k_header_2)
-        .with_ephemeral_key(pk)
-        .with_aead_state(&mut aead_state)
-        .with_block(Block::DateTime {
-            timestamp: R::time_since_epoch().as_secs() as u32,
-        })
-        .with_block(Block::Address {
-            address: self.address,
-        })
-        .build::<R>()
-        .to_vec();
+        let state = Sha256::new().update(&new_state).update(message.header()).finalize();
+        let state = Sha256::new().update(&state).update::<&[u8]>(pk.as_ref()).finalize();
+
+        message.encrypt_payload(&cipher_key, 0u64, &state);
+        message.encrypt_header(self.intro_key, k_header_2);
+
+        let state = Sha256::new().update(&state).update(&message.payload()).finalize();
+        let pkt = message.build().to_vec();
 
         // TODO: retries
         if let Err(error) = self.pkt_tx.try_send(Packet {
@@ -398,7 +379,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
             ephemeral_key: sk,
             k_header_2,
             k_session_created,
-            state: aead_state.state,
+            state,
         };
 
         Ok(None)
@@ -543,30 +524,18 @@ impl<R: Runtime> InboundSsu2Session<R> {
         )
         .expect("to succeed");
 
-        let mut state = AeadState {
-            cipher_key: k_data_ba.to_vec(),
-            nonce: 0u64,
-            state: Vec::new(),
-        };
-
-        let pkt = MessageBuilder::new_with_min_padding(
-            HeaderBuilder::short()
-                .with_pkt_num(0u32)
-                .with_short_header_flag(ShortHeaderFlag::Data {
-                    immediate_ack: false,
-                })
-                .with_dst_id(self.src_id)
-                .build::<R>(),
-            NonZeroUsize::new(8usize).expect("non-zero value"),
-        )
-        .with_keypair(intro_key, k_header_2_ba)
-        .with_aead_state(&mut state)
-        .with_block(Block::Ack {
-            ack_through: 0,
-            num_acks: 0,
-            ranges: Vec::new(),
-        })
-        .build::<R>();
+        let pkt = DataMessageBuilder::default()
+            .with_dst_id(self.src_id)
+            .with_pkt_num(0u32)
+            .with_key_context(
+                intro_key,
+                &KeyContext {
+                    k_data: k_data_ba,
+                    k_header_2: k_header_2_ba,
+                },
+            )
+            .with_ack(0u32, 0u8, None)
+            .build();
 
         Ok(Some(PendingSsu2SessionStatus::NewInboundSession {
             context: Ssu2SessionContext {

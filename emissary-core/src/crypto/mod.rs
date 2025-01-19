@@ -203,6 +203,7 @@ impl EphemeralPrivateKey {
 }
 
 /// Ephemeral public key.
+#[derive(Clone)]
 pub enum EphemeralPublicKey {
     /// X25519.
     X25519(x25519_dalek::PublicKey),

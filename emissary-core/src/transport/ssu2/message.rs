@@ -47,7 +47,6 @@ use zeroize::Zeroize;
 use core::{
     fmt,
     net::{IpAddr, SocketAddr},
-    num::NonZeroUsize,
     ops::{Deref, Range},
 };
 
@@ -948,570 +947,6 @@ impl TryFrom<u8> for MessageType {
     }
 }
 
-/// Flag for the message with short header.
-pub enum ShortHeaderFlag {
-    /// Short header for `Data`.
-    Data {
-        /// Should the message be immediately ACKed.
-        immediate_ack: bool,
-    },
-
-    /// Short header for `SessionConfirmed`.
-    #[allow(unused)]
-    SessionConfirmed {
-        /// Fragment number.
-        fragment_num: u8,
-
-        /// Fragment count.
-        fragment_count: u8,
-    },
-}
-
-/// Header builder.
-pub enum HeaderBuilder {
-    /// Long header.
-    Long {
-        /// Destination connection ID.
-        dst_id: Option<u64>,
-
-        /// Source connection ID.
-        src_id: Option<u64>,
-
-        /// Packet number.
-        pkt_num: Option<u32>,
-
-        /// Token.
-        token: Option<u64>,
-
-        /// Message type.
-        message_type: Option<MessageType>,
-
-        /// Network ID.
-        net_id: Option<u8>,
-    },
-
-    /// Short header.
-    Short {
-        /// Destination connection ID.
-        dst_id: Option<u64>,
-
-        /// Packet number.
-        pkt_num: Option<u32>,
-
-        /// Flag contents of the short header.
-        ///
-        /// Depends on message type.
-        flag: Option<ShortHeaderFlag>,
-    },
-}
-
-impl HeaderBuilder {
-    /// Create long header.
-    pub fn long() -> Self {
-        Self::Long {
-            src_id: None,
-            dst_id: None,
-            pkt_num: None,
-            token: None,
-            message_type: None,
-            net_id: None,
-        }
-    }
-
-    /// Create short header.
-    pub fn short() -> Self {
-        Self::Short {
-            dst_id: None,
-            flag: None,
-            pkt_num: None,
-        }
-    }
-
-    /// Specify destination connection ID.
-    pub fn with_dst_id(mut self, value: u64) -> Self {
-        match &mut self {
-            Self::Long { dst_id, .. } => {
-                *dst_id = Some(value);
-            }
-            Self::Short { dst_id, .. } => {
-                *dst_id = Some(value);
-            }
-        }
-
-        self
-    }
-
-    /// Specify source connection ID.
-    pub fn with_src_id(mut self, value: u64) -> Self {
-        match &mut self {
-            Self::Long { src_id, .. } => {
-                *src_id = Some(value);
-            }
-            Self::Short { .. } => unreachable!(),
-        }
-
-        self
-    }
-
-    /// Specify packet number.
-    pub fn with_pkt_num(mut self, value: u32) -> Self {
-        match &mut self {
-            Self::Long { pkt_num, .. } => {
-                *pkt_num = Some(value);
-            }
-            Self::Short { pkt_num, .. } => {
-                *pkt_num = Some(value);
-            }
-        }
-
-        self
-    }
-
-    /// Specify flag for short header.
-    pub fn with_short_header_flag(mut self, value: ShortHeaderFlag) -> Self {
-        match &mut self {
-            Self::Short { flag, .. } => {
-                *flag = Some(value);
-            }
-            Self::Long { .. } => unreachable!(),
-        }
-
-        self
-    }
-
-    /// Specify token.
-    pub fn with_token(mut self, value: u64) -> Self {
-        match &mut self {
-            Self::Long { token, .. } => {
-                *token = Some(value);
-            }
-            Self::Short { .. } => unreachable!(),
-        }
-
-        self
-    }
-
-    /// Specify message type.
-    pub fn with_message_type(mut self, value: MessageType) -> Self {
-        match &mut self {
-            Self::Long { message_type, .. } => {
-                *message_type = Some(value);
-            }
-            Self::Short { .. } => unreachable!(),
-        }
-
-        self
-    }
-
-    /// Specify network ID.
-    #[allow(unused)]
-    pub fn with_net_id(mut self, value: u8) -> Self {
-        match &mut self {
-            Self::Long { net_id, .. } => {
-                *net_id = Some(value);
-            }
-            Self::Short { .. } => unreachable!(),
-        }
-
-        self
-    }
-
-    /// Build [`HeaderBuilder`] into [`Header`].
-    pub fn build<R: Runtime>(self) -> Header {
-        match self {
-            Self::Long {
-                dst_id,
-                src_id,
-                pkt_num,
-                token,
-                message_type,
-                net_id,
-            } => Header::Long {
-                dst_id: dst_id.expect("to exist"),
-                src_id: src_id.expect("to exist"),
-                pkt_num: pkt_num.unwrap_or(R::rng().next_u32()),
-                token: token.expect("to exist"),
-                message_type: message_type.expect("to exist"),
-                net_id: net_id.unwrap_or(2u8),
-            },
-            Self::Short {
-                dst_id,
-                pkt_num,
-                flag,
-            } => Header::Short {
-                dst_id: dst_id.expect("to exist"),
-                pkt_num: pkt_num.unwrap_or(R::rng().next_u32()),
-                flag: flag.expect("to exist"),
-            },
-        }
-    }
-}
-
-/// SSU2 packet header.
-pub enum Header {
-    /// Long header.
-    Long {
-        /// Destination connection ID.
-        dst_id: u64,
-
-        /// Source connection ID.
-        src_id: u64,
-
-        /// Packet number.
-        pkt_num: u32,
-
-        /// Token.
-        token: u64,
-
-        /// Message type.
-        message_type: MessageType,
-
-        /// Network ID.
-        net_id: u8,
-    },
-
-    /// Short header.
-    Short {
-        /// Destination connection ID.
-        dst_id: u64,
-
-        /// Packet number.
-        pkt_num: u32,
-
-        /// Flag contents of the short header.
-        ///
-        /// Depends on message type.
-        flag: ShortHeaderFlag,
-    },
-}
-
-impl Header {
-    /// Get packet number.
-    fn pkt_num(&self) -> u32 {
-        match self {
-            Self::Long { pkt_num, .. } => *pkt_num,
-            Self::Short { pkt_num, .. } => *pkt_num,
-        }
-    }
-
-    /// Get message type.
-    fn message_type(&self) -> MessageType {
-        match self {
-            Self::Long { message_type, .. } => *message_type,
-            Self::Short { flag, .. } => match flag {
-                ShortHeaderFlag::Data { .. } => MessageType::Data,
-                ShortHeaderFlag::SessionConfirmed { .. } => MessageType::SessionConfirmed,
-            },
-        }
-    }
-
-    /// Serialize [`Header`] into a byte vector.
-    fn serialize(&self) -> BytesMut {
-        match self {
-            Self::Long {
-                dst_id,
-                src_id,
-                pkt_num,
-                token,
-                message_type,
-                net_id,
-            } => {
-                let mut out = BytesMut::with_capacity(match message_type {
-                    MessageType::Retry => 16usize,
-                    MessageType::SessionCreated => 16usize + 32usize, // header + ephemeral key
-                    _ => todo!("not supported"),
-                });
-
-                // TODO: endiannes?
-
-                out.put_u64_le(*dst_id);
-                out.put_u32(*pkt_num);
-                out.put_u8(**message_type);
-                out.put_u8(2u8);
-                out.put_u8(*net_id);
-                out.put_u8(0u8);
-                out.put_u64_le(*src_id);
-                out.put_u64(*token);
-
-                out
-            }
-            Self::Short {
-                dst_id,
-                pkt_num,
-                flag,
-            } => {
-                let mut out = BytesMut::with_capacity(16usize);
-
-                // TODO: explain
-                out.put_u64_le(*dst_id);
-                out.put_u32(*pkt_num);
-
-                match flag {
-                    ShortHeaderFlag::Data { immediate_ack } => {
-                        out.put_u8(*MessageType::Data);
-                        out.put_u8(*immediate_ack as u8);
-                        out.put_u16(0u16); // more flags
-                    }
-                    ShortHeaderFlag::SessionConfirmed {
-                        fragment_num,
-                        fragment_count,
-                    } => {
-                        out.put_u8(*MessageType::SessionConfirmed);
-                        out.put_u8(fragment_num << 4 | fragment_count);
-                        out.put_u16(0u16); // more flags
-                    }
-                }
-
-                out
-            }
-        }
-    }
-}
-
-/// AEAD state.
-///
-/// Used to encrypt the payload.
-pub struct AeadState {
-    /// ChaCha20Poly1305 cipher key.
-    pub cipher_key: Vec<u8>,
-
-    /// Nonce.
-    pub nonce: u64,
-
-    /// Associated data.
-    pub state: Vec<u8>,
-}
-
-/// Message builder.
-pub struct MessageBuilder<'a> {
-    /// AEAD state.
-    aead_state: Option<&'a mut AeadState>,
-
-    /// Message blocks.
-    blocks: Vec<Block>,
-
-    /// Ephemeral public key.
-    ephemeral_key: Option<EphemeralPublicKey>,
-
-    /// Header.
-    header: Header,
-
-    /// Header key 1.
-    key1: Option<[u8; 32]>,
-
-    /// Header key 2.
-    ///
-    /// May be `None` if `key1` is used.
-    key2: Option<[u8; 32]>,
-
-    /// Payload length.
-    payload_len: usize,
-
-    /// Minimum amount of padding the message should have.
-    ///
-    /// Maximum padding is capped at [`MAX_PADDING`].
-    ///
-    /// If `None`, the message shouldn't have any padding.
-    min_padding: Option<NonZeroUsize>,
-}
-
-impl<'a> MessageBuilder<'a> {
-    /// Create new [`MessageBuilder`].
-    ///
-    /// Automatically inserts 1 - 128 bytes of padding.
-    pub fn new(header: Header) -> Self {
-        Self {
-            aead_state: None,
-            blocks: Vec::new(),
-            ephemeral_key: None,
-            header,
-            key1: None,
-            key2: None,
-            payload_len: 0usize,
-            min_padding: Some(NonZeroUsize::new(10).expect("non-zero value")),
-        }
-    }
-
-    /// Create new [`MessageBuilder`] but don't insert padding block.
-    #[allow(unused)]
-    pub fn new_without_padding(header: Header) -> Self {
-        Self {
-            aead_state: None,
-            blocks: Vec::new(),
-            ephemeral_key: None,
-            header,
-            key1: None,
-            key2: None,
-            payload_len: 0usize,
-            min_padding: None,
-        }
-    }
-
-    /// Create new [`MessageBuilder`] and specify minimum size for the padding block.
-    pub fn new_with_min_padding(header: Header, min_padding: NonZeroUsize) -> Self {
-        Self {
-            aead_state: None,
-            blocks: Vec::new(),
-            ephemeral_key: None,
-            header,
-            key1: None,
-            key2: None,
-            payload_len: 0usize,
-            min_padding: if min_padding.get() >= MAX_PADDING {
-                Some(NonZeroUsize::new(min_padding.get() + MAX_PADDING).expect("non-zero value"))
-            } else {
-                Some(min_padding)
-            },
-        }
-    }
-
-    /// Specify `key` to be both `key_header_1` and `key_header_2`.
-    pub fn with_key(mut self, key: [u8; 32]) -> Self {
-        self.key1 = Some(key);
-        self
-    }
-
-    /// Specify distinct keys for header encryption.
-    pub fn with_keypair(mut self, key1: [u8; 32], key2: [u8; 32]) -> Self {
-        self.key1 = Some(key1);
-        self.key2 = Some(key2);
-        self
-    }
-
-    /// Specify ephemeral public key which included after the header
-    pub fn with_ephemeral_key(mut self, key: EphemeralPublicKey) -> Self {
-        self.ephemeral_key = Some(key);
-        self
-    }
-
-    /// Specify state for payload encryption.
-    pub fn with_aead_state(mut self, state: &'a mut AeadState) -> Self {
-        self.aead_state = Some(state);
-        self
-    }
-
-    /// Push `block` into the list of blocks.
-    pub fn with_block(mut self, block: Block) -> Self {
-        self.payload_len += block.serialized_len();
-        self.blocks.push(block);
-        self
-    }
-
-    /// Serialize [`MessageBuilder`] into a byte vector.
-    ///
-    /// Panics if no header encryption key is specified or `key_header_2` is missing
-    /// when it's supposed to exist (deduced based on message type).
-    pub fn build<R: Runtime>(mut self) -> BytesMut {
-        let key1 = self.key1.take().expect("to exist");
-        let key2 = self.key2.take().unwrap_or(key1);
-        let message_type = self.header.message_type();
-        let mut header = self.header.serialize();
-
-        // add padding to block unless specifically requested not to
-        //
-        // padding length is between [`self.min_padding`..`MAX_PADDING`]
-        if let Some(min_padding) = self.min_padding.take() {
-            self.blocks.push({
-                let padding_len = R::rng().next_u32() as usize % MAX_PADDING + min_padding.get();
-                let mut padding = vec![0u8; padding_len];
-                R::rng().fill_bytes(&mut padding);
-
-                Block::Padding { padding }
-            });
-        }
-
-        // serialize payload
-        let mut payload = self
-            .blocks
-            .into_iter()
-            .fold(
-                BytesMut::with_capacity(self.payload_len),
-                |mut out, block| {
-                    out.put_slice(&block.serialize());
-                    out
-                },
-            )
-            .to_vec();
-        debug_assert!(payload.len() >= 24);
-
-        // encrypt payload
-        //
-        // TODO: explain in more detail
-        // TODO: use message type to safeguard?
-        //
-        // encryption must succeed since the parameters are controlled by us
-        match self.aead_state.take() {
-            None => {
-                ChaChaPoly::with_nonce(&key1, self.header.pkt_num() as u64)
-                    .encrypt_with_ad_new(&header, &mut payload)
-                    .expect("to succeed");
-            }
-            Some(aead_state) =>
-                if aead_state.state.is_empty() {
-                    ChaChaPoly::with_nonce(&aead_state.cipher_key, aead_state.nonce)
-                        .encrypt_with_ad_new(&header, &mut payload)
-                        .expect("to succeed");
-                } else {
-                    let state = Sha256::new().update(&aead_state.state).update(&header).finalize();
-                    let state = Sha256::new()
-                        .update(&state)
-                        .update(&self.ephemeral_key.as_ref().unwrap().to_vec())
-                        .finalize();
-
-                    ChaChaPoly::with_nonce(&aead_state.cipher_key, aead_state.nonce)
-                        .encrypt_with_ad_new(&state, &mut payload)
-                        .expect("to succeed");
-
-                    aead_state.state = Sha256::new().update(&state).update(&payload).finalize();
-                },
-        }
-
-        // encrypt first 16 bytes of the long header
-        //
-        // https://geti2p.net/spec/ssu2#header-encryption-kdf
-        payload[payload.len() - 2 * IV_SIZE..]
-            .chunks(IV_SIZE)
-            .zip(header.chunks_mut(8usize))
-            .zip([key1, key2])
-            .for_each(|((chunk, header_chunk), key)| {
-                ChaCha::with_iv(
-                    key,
-                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
-                )
-                .decrypt([0u8; 8])
-                .iter()
-                .zip(header_chunk.iter_mut())
-                .for_each(|(mask_byte, header_byte)| {
-                    *header_byte ^= mask_byte;
-                });
-            });
-
-        // encrypt third part of the header, if long header was used
-        //
-        // how the header is encrypted depends on the message type
-        match message_type {
-            MessageType::Retry => {
-                ChaCha::with_iv(key2, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..32]);
-            }
-            MessageType::SessionCreated => {
-                header.put_slice(&self.ephemeral_key.expect("to exist").as_ref());
-
-                ChaCha::with_iv(key2, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..64]);
-            }
-            MessageType::Data => {}
-            _ => todo!("not supported"),
-        }
-
-        // allocate extra space for poly13055 authentication tag
-        // if the message type indicates that the message will be encrypted
-        let mut out = BytesMut::with_capacity(header.len() + payload.len());
-        out.put_slice(&header);
-        out.put_slice(&payload);
-
-        out
-    }
-}
-
 /// Message kind for [`DataMessageBuilder`].
 enum MessageKind<'a> {
     UnFragmented {
@@ -2237,7 +1672,7 @@ impl fmt::Debug for HeaderKind {
                 token,
                 ..
             } => f
-                .debug_struct("HeaderKind::TokenRequest")
+                .debug_struct("HeaderKind::SessionRequest")
                 .field("net_id", &net_id)
                 .field("pkt_num", &pkt_num)
                 .field("token", &token)
@@ -2424,5 +1859,288 @@ impl<'a> HeaderReader<'a> {
                 None
             }
         }
+    }
+}
+
+#[derive(Default)]
+pub struct RetryBuilder {
+    /// Remote's socket address.
+    address: Option<SocketAddr>,
+
+    /// Destination connection ID.
+    dst_id: Option<u64>,
+
+    /// Remote's intro key.
+    k_header_1: Option<[u8; 32]>,
+
+    /// Source connection ID.
+    src_id: Option<u64>,
+
+    /// Token.
+    token: Option<u64>,
+}
+
+impl RetryBuilder {
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
+        self.dst_id = Some(dst_id);
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, src_id: u64) -> Self {
+        self.src_id = Some(src_id);
+        self
+    }
+
+    /// Specify remote router's intro key.
+    pub fn with_k_header_1(mut self, k_header_1: [u8; 32]) -> Self {
+        self.k_header_1 = Some(k_header_1);
+        self
+    }
+
+    /// Specify token.
+    pub fn with_token(mut self, token: u64) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    /// Specify remote socket address.
+    pub fn with_address(mut self, address: SocketAddr) -> Self {
+        self.address = Some(address);
+        self
+    }
+
+    /// Build [`SessionConfirmedBuilder`] into a byte vector.
+    pub fn build<R: Runtime>(self) -> BytesMut {
+        let (mut header, pkt_num) = {
+            let mut out = BytesMut::with_capacity(LONG_HEADER_LEN);
+            let pkt_num = R::rng().next_u32();
+
+            out.put_u64_le(self.dst_id.expect("to exist"));
+            out.put_u32(pkt_num);
+            out.put_u8(*MessageType::Retry);
+            out.put_u8(2u8);
+            out.put_u8(2u8); // TODO: make configurable
+            out.put_u8(0u8);
+            out.put_u64_le(self.src_id.expect("to exist"));
+            out.put_u64(self.token.expect("to exist"));
+
+            (out, pkt_num)
+        };
+        let padding = {
+            let padding_len = R::rng().next_u32() as usize % MAX_PADDING + 1;
+            let mut padding = vec![0u8; padding_len];
+            R::rng().fill_bytes(&mut padding);
+
+            padding
+        };
+        let payload_size = 3 * 3 + 4 + 6 + padding.len() + POLY13055_MAC_LEN;
+        let k_header_1 = self.k_header_1.expect("to exist");
+
+        let mut payload = [
+            Block::DateTime {
+                timestamp: R::time_since_epoch().as_secs() as u32,
+            },
+            Block::Address {
+                address: self.address.expect("to exist"),
+            },
+            Block::Padding { padding },
+        ]
+        .into_iter()
+        .fold(BytesMut::with_capacity(payload_size), |mut out, block| {
+            out.put_slice(&block.serialize());
+            out
+        })
+        .to_vec();
+
+        // expected to succeed since the parameters are controlled by us
+        ChaChaPoly::with_nonce(&k_header_1, pkt_num as u64)
+            .encrypt_with_ad_new(&header, &mut payload)
+            .expect("to succeed");
+
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        payload[payload.len() - 2 * IV_SIZE..]
+            .chunks(IV_SIZE)
+            .zip(header.chunks_mut(8usize))
+            .zip([k_header_1, k_header_1])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        // encrypt third part of the header
+        ChaCha::with_iv(k_header_1, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..32]);
+
+        let mut out = BytesMut::with_capacity(header.len() + payload.len());
+        out.put_slice(&header);
+        out.put_slice(&payload);
+
+        out
+    }
+}
+
+/// Unserialized `SessionCreated` message.
+pub struct SessionCreated {
+    /// Serialized, unencrypted header.
+    pub header: BytesMut,
+
+    /// Serialized, unencrypted payload
+    pub payload: Vec<u8>,
+}
+
+impl SessionCreated {
+    /// Get reference to header.
+    pub fn header(&self) -> &[u8] {
+        &self.header[..32]
+    }
+
+    /// Get reference to payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Encrypt header.
+    pub fn encrypt_header(&mut self, k_header_1: [u8; 32], k_header_2: [u8; 32]) {
+        // encrypt first 16 bytes of the long header
+        //
+        // https://geti2p.net/spec/ssu2#header-encryption-kdf
+        self.payload[self.payload.len() - 2 * IV_SIZE..]
+            .chunks(IV_SIZE)
+            .zip(self.header.chunks_mut(8usize))
+            .zip([k_header_1, k_header_2])
+            .for_each(|((chunk, header_chunk), key)| {
+                ChaCha::with_iv(
+                    key,
+                    TryInto::<[u8; IV_SIZE]>::try_into(chunk).expect("to succeed"),
+                )
+                .decrypt([0u8; 8])
+                .iter()
+                .zip(header_chunk.iter_mut())
+                .for_each(|(mask_byte, header_byte)| {
+                    *header_byte ^= mask_byte;
+                });
+            });
+
+        ChaCha::with_iv(k_header_2, [0u8; IV_SIZE]).encrypt_ref(&mut self.header[16..64]);
+    }
+
+    /// Encrypt payload.
+    pub fn encrypt_payload(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
+        // expected to succeed as the parameters are controlled by us
+        ChaChaPoly::with_nonce(&cipher_key, nonce)
+            .encrypt_with_ad_new(&state, &mut self.payload)
+            .expect("to succeed");
+    }
+
+    /// Serialize [`SessionCreated`] into a byte vector.
+    pub fn build(self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(self.header.len() + self.payload.len());
+        out.put_slice(&self.header);
+        out.put_slice(&self.payload);
+
+        out
+    }
+}
+
+/// `SessionCreated` message builder.
+#[derive(Default)]
+pub struct SessionCreatedBuilder {
+    /// Remote router's address.
+    address: Option<SocketAddr>,
+
+    /// Destination connection ID.
+    dst_id: Option<u64>,
+
+    /// Our ephemeral public key.
+    ephemeral_key: Option<EphemeralPublicKey>,
+
+    /// Source connection ID.
+    src_id: Option<u64>,
+}
+
+impl SessionCreatedBuilder {
+    /// Specify remote's socket address.
+    pub fn with_address(mut self, address: SocketAddr) -> Self {
+        self.address = Some(address);
+        self
+    }
+
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
+        self.dst_id = Some(dst_id);
+        self
+    }
+
+    /// Specify local ephemeral public key.
+    pub fn with_ephemeral_key(mut self, ephemeral_key: EphemeralPublicKey) -> Self {
+        self.ephemeral_key = Some(ephemeral_key);
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, src_id: u64) -> Self {
+        self.src_id = Some(src_id);
+        self
+    }
+
+    /// Build [`SessionCreatedBuilder`] into [`SessionCreated`] by creating a long header
+    /// and a payload with needed blocks.
+    ///
+    /// This function doesn't return a serialized `SessionCreated` message as the caller needs to
+    /// encrypt the payload with "non-static" key/state which future encryption/decryption is
+    /// depended on.
+    pub fn build<R: Runtime>(mut self) -> SessionCreated {
+        let header = {
+            let mut out = BytesMut::with_capacity(LONG_HEADER_LEN);
+
+            out.put_u64_le(self.dst_id.expect("to exist"));
+            out.put_u32(R::rng().next_u32());
+            out.put_u8(*MessageType::SessionCreated);
+            out.put_u8(2u8);
+            out.put_u8(2u8); // TODO: make configurable
+            out.put_u8(0u8);
+            out.put_u64_le(self.src_id.expect("to exist"));
+            out.put_u64(0u64);
+            out.put_slice(self.ephemeral_key.take().expect("to exist").as_ref());
+
+            out
+        };
+        let padding = {
+            let padding_len = R::rng().next_u32() as usize % MAX_PADDING + 1;
+            let mut padding = vec![0u8; padding_len];
+            R::rng().fill_bytes(&mut padding);
+
+            padding
+        };
+        let payload_size = 3 * 3 + 4 + 6 + padding.len() + POLY13055_MAC_LEN;
+
+        let payload = [
+            Block::DateTime {
+                timestamp: R::time_since_epoch().as_secs() as u32,
+            },
+            Block::Address {
+                address: self.address.expect("to exist"),
+            },
+            Block::Padding { padding },
+        ]
+        .into_iter()
+        .fold(BytesMut::with_capacity(payload_size), |mut out, block| {
+            out.put_slice(&block.serialize());
+            out
+        })
+        .to_vec();
+
+        SessionCreated { header, payload }
     }
 }
