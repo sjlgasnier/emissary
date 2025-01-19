@@ -23,9 +23,7 @@
 use crate::{
     crypto::{
         chachapoly::{ChaCha, ChaChaPoly},
-        hmac::Hmac,
-        sha256::Sha256,
-        EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
+        EphemeralPublicKey, StaticPublicKey,
     },
     error::Ssu2Error,
     i2np::{Message, MessageType as I2npMessageType},
@@ -34,7 +32,7 @@ use crate::{
     transport::ssu2::session::active::KeyContext,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -42,7 +40,6 @@ use nom::{
     Err, IResult,
 };
 use rand_core::RngCore;
-use zeroize::Zeroize;
 
 use core::{
     fmt,
@@ -82,23 +79,6 @@ const PKT_MIN_SIZE: usize = 24usize;
 
 /// Protocol version.
 const PROTOCOL_VERSION: u8 = 2u8;
-
-pub struct NoiseContext {
-    pub chaining_key: Bytes,
-    pub static_key: StaticPublicKey, // remote
-    pub state: Vec<u8>,
-    pub eph: EphemeralPrivateKey, // local
-    pub local_static_key: StaticPrivateKey,
-    pub cipher_key: Vec<u8>,
-    pub remote_eph: Option<EphemeralPublicKey>,
-}
-
-impl NoiseContext {
-    pub fn mix_hash(&mut self, input: impl AsRef<[u8]>) -> &mut Self {
-        self.state = Sha256::new().update(&self.state).update(input.as_ref()).finalize();
-        self
-    }
-}
 
 /// SSU2 block type.
 #[derive(Debug)]
@@ -1312,119 +1292,43 @@ impl TokenRequestBuilder {
     }
 }
 
-#[derive(Default)]
-pub struct SessionRequestBuilder<'a> {
-    dst_id: Option<u64>,
-    #[allow(unused)]
-    ephemeral_key: Option<EphemeralPublicKey>,
-    noise_ctx: Option<&'a mut NoiseContext>,
-    intro_key: Option<[u8; 32]>,
-    src_id: Option<u64>,
-    token: Option<u64>,
+/// Unserialized `SessionCreated` message.
+pub struct SessionRequest {
+    /// Serialized, unencrypted header.
+    header: BytesMut,
+
+    /// Serialized, unencrypted payload
+    payload: Vec<u8>,
 }
 
-impl<'a> SessionRequestBuilder<'a> {
-    /// Specify destination connection ID.
-    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
-        self.dst_id = Some(dst_id);
-        self
+impl SessionRequest {
+    /// Get reference to header.
+    pub fn header(&self) -> &[u8] {
+        &self.header[..32]
     }
 
-    /// Specify source connection ID.
-    pub fn with_src_id(mut self, src_id: u64) -> Self {
-        self.src_id = Some(src_id);
-        self
+    /// Get reference to payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
     }
 
-    /// Specify remote router's intro key.
-    pub fn with_intro_key(mut self, intro_key: [u8; 32]) -> Self {
-        self.intro_key = Some(intro_key);
-        self
-    }
-
-    /// Specify token.
-    pub fn with_token(mut self, token: u64) -> Self {
-        self.token = Some(token);
-        self
-    }
-
-    /// Specify noise context.
-    pub fn with_noise_ctx(mut self, noise_ctx: &'a mut NoiseContext) -> Self {
-        self.noise_ctx = Some(noise_ctx);
-        self
-    }
-
-    /// Build [`SessionRequestBuilder`] into a byte vector.
-    pub fn build<R: Runtime>(mut self) -> BytesMut {
-        let intro_key = self.intro_key.take().expect("to exist");
-        let noise_ctx = self.noise_ctx.take().expect("to exist");
-
-        let mut rng = R::rng();
-        let padding = {
-            let padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
-            let mut padding = vec![0u8; padding_len as usize];
-            rng.fill_bytes(&mut padding);
-
-            padding
-        };
-
-        let ephemeral_key = noise_ctx.eph.public().to_vec();
-        let mut header = {
-            let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + PUBLIC_KEY_LEN);
-            let pkt_num = rng.next_u32();
-
-            out.put_u64_le(self.dst_id.take().expect("to exist"));
-            out.put_u32(pkt_num);
-            out.put_u8(*MessageType::SessionRequest);
-            out.put_u8(2u8); // version
-            out.put_u8(2u8); // net id TODO: make configurable
-            out.put_u8(0u8); // flag
-            out.put_u64_le(self.src_id.take().expect("to exist"));
-            out.put_u64_le(self.token.take().expect("to exist"));
-            out.put_slice(ephemeral_key.as_ref());
-
-            out
-        };
-
-        // mixhash
-        noise_ctx.mix_hash(&header[..32]).mix_hash(&ephemeral_key);
-
-        // TODO: do diffie-hellman
-        let mut shared = noise_ctx.eph.diffie_hellman(&noise_ctx.static_key);
-        let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
-        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-        let mut cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
-
-        let mut payload = Vec::with_capacity(10 + padding.len() + POLY13055_MAC_LEN);
-        payload.extend_from_slice(
-            &Block::DateTime {
-                timestamp: R::time_since_epoch().as_secs() as u32,
-            }
-            .serialize(),
-        );
-        payload.extend_from_slice(&Block::Padding { padding }.serialize());
-
+    /// Encrypt payload.
+    pub fn encrypt_payload(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
         // must succeed since all the parameters are controlled by us
-        ChaChaPoly::with_nonce(&cipher_key, 0u64)
-            .encrypt_with_ad_new(&noise_ctx.state, &mut payload)
+        ChaChaPoly::with_nonce(&cipher_key, nonce)
+            .encrypt_with_ad_new(&state, &mut self.payload)
             .expect("to succeed");
+    }
 
-        shared.zeroize();
-        temp_key.zeroize();
-        cipher_key.zeroize();
-
-        // update noise state
-        noise_ctx.chaining_key = chaining_key.into();
-        // noise_ctx.cipher_key = cipher_key;
-        noise_ctx.mix_hash(&payload);
-
+    /// Encrypt header.
+    pub fn encrypt_header(&mut self, k_header_1: [u8; 32], k_header_2: [u8; 32]) {
         // encrypt first 16 bytes of the long header
         //
         // https://geti2p.net/spec/ssu2#header-encryption-kdf
-        payload[payload.len() - 2 * IV_SIZE..]
+        self.payload[self.payload.len() - 2 * IV_SIZE..]
             .chunks(IV_SIZE)
-            .zip(header.chunks_mut(8usize))
-            .zip([intro_key, intro_key])
+            .zip(self.header.chunks_mut(8usize))
+            .zip([k_header_1, k_header_2])
             .for_each(|((chunk, header_chunk), key)| {
                 ChaCha::with_iv(
                     key,
@@ -1439,27 +1343,35 @@ impl<'a> SessionRequestBuilder<'a> {
             });
 
         // encrypt last 16 bytes of the header and the public key
-        ChaCha::with_iv(intro_key, [0u8; IV_SIZE]).encrypt_ref(&mut header[16..64]);
+        ChaCha::with_iv(k_header_2, [0u8; IV_SIZE]).encrypt_ref(&mut self.header[16..64]);
+    }
 
-        let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + payload.len());
-        out.put_slice(&header);
-        out.put_slice(&payload);
+    /// Serialize [`SessionRequest`] into a byte vector.
+    pub fn build(self) -> BytesMut {
+        let mut out = BytesMut::with_capacity(self.header.len() + self.payload.len());
+        out.put_slice(&self.header);
+        out.put_slice(&self.payload);
 
         out
     }
 }
 
 #[derive(Default)]
-pub struct SessionConfirmedBuilder<'a> {
+pub struct SessionRequestBuilder {
+    /// Destination connection ID.
     dst_id: Option<u64>,
-    noise_ctx: Option<&'a mut NoiseContext>,
-    intro_key: Option<[u8; 32]>,
+
+    /// Local ephemeral public key.
+    ephemeral_key: Option<EphemeralPublicKey>,
+
+    /// Source connection ID.
     src_id: Option<u64>,
-    router_info: Option<Vec<u8>>,
-    k_header_2: Option<[u8; 32]>,
+
+    /// Token.
+    token: Option<u64>,
 }
 
-impl<'a> SessionConfirmedBuilder<'a> {
+impl SessionRequestBuilder {
     /// Specify destination connection ID.
     pub fn with_dst_id(mut self, dst_id: u64) -> Self {
         self.dst_id = Some(dst_id);
@@ -1472,92 +1384,110 @@ impl<'a> SessionConfirmedBuilder<'a> {
         self
     }
 
-    /// Specify remote router's intro key.
-    pub fn with_intro_key(mut self, intro_key: [u8; 32]) -> Self {
-        self.intro_key = Some(intro_key);
+    /// Specify token.
+    pub fn with_token(mut self, token: u64) -> Self {
+        self.token = Some(token);
         self
     }
 
-    /// Specify noise context.
-    pub fn with_noise_ctx(mut self, noise_ctx: &'a mut NoiseContext) -> Self {
-        self.noise_ctx = Some(noise_ctx);
+    /// Specify local ephemeral public key.
+    pub fn with_ephemeral_key(mut self, ephemeral_key: EphemeralPublicKey) -> Self {
+        self.ephemeral_key = Some(ephemeral_key);
         self
     }
 
-    /// Specify router info.
-    pub fn with_router_info(mut self, router_info: Vec<u8>) -> Self {
-        self.router_info = Some(router_info);
-        self
-    }
+    /// Build [`SessionRequestBuilder`] into [`SessionRequest`].
+    pub fn build<R: Runtime>(mut self) -> SessionRequest {
+        let mut rng = R::rng();
+        let padding = {
+            let padding_len = rng.next_u32() % MAX_PADDING as u32 + 1;
+            let mut padding = vec![0u8; padding_len as usize];
+            rng.fill_bytes(&mut padding);
 
-    /// Specify `k_header_2`.
-    pub fn with_k_header_2(mut self, k_header_2: [u8; 32]) -> Self {
-        self.k_header_2 = Some(k_header_2);
-        self
-    }
-
-    /// Build [`SessionConfirmedBuilder`] into a byte vector.
-    pub fn build<R: Runtime>(mut self) -> BytesMut {
-        let intro_key = self.intro_key.take().expect("to exist");
-        let noise_ctx = self.noise_ctx.take().expect("to exist");
-
-        let mut header = {
-            let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN);
+            padding
+        };
+        let header = {
+            let mut out = BytesMut::with_capacity(LONG_HEADER_LEN + PUBLIC_KEY_LEN);
 
             out.put_u64_le(self.dst_id.take().expect("to exist"));
-            out.put_u32(0u32);
-            out.put_u8(*MessageType::SessionConfirmed);
-            out.put_u8(1u8); // 1 fragment
-            out.put_u16(0u16); // flags
+            out.put_u32(rng.next_u32());
+            out.put_u8(*MessageType::SessionRequest);
+            out.put_u8(2u8); // version
+            out.put_u8(2u8); // net id TODO: make configurable
+            out.put_u8(0u8); // flag
+            out.put_u64_le(self.src_id.take().expect("to exist"));
+            out.put_u64_le(self.token.take().expect("to exist"));
+            out.put_slice(self.ephemeral_key.take().expect("to exist").as_ref());
 
             out
         };
-        noise_ctx.mix_hash(&header);
 
-        // must succeed since all the parameters are controlled by us
-        let mut public_key = noise_ctx.local_static_key.public().to_vec();
-        ChaChaPoly::with_nonce(&noise_ctx.cipher_key, 1u64)
-            .encrypt_with_ad_new(&noise_ctx.state, &mut public_key)
+        let mut payload = Vec::with_capacity(10 + padding.len() + POLY13055_MAC_LEN);
+        payload.extend_from_slice(
+            &Block::DateTime {
+                timestamp: R::time_since_epoch().as_secs() as u32,
+            }
+            .serialize(),
+        );
+        payload.extend_from_slice(&Block::Padding { padding }.serialize());
+
+        SessionRequest { header, payload }
+    }
+}
+
+/// Unserialized `SessionConfirmed` message.
+pub struct SessionConfirmed {
+    /// Serialized, unencrypted header.
+    header: BytesMut,
+
+    /// Serialized, unencrypted static key.
+    static_key: Vec<u8>,
+
+    /// Serialized, unecrypted payload.
+    payload: Vec<u8>,
+}
+
+impl SessionConfirmed {
+    /// Get reference to header.
+    pub fn header(&self) -> &[u8] {
+        &self.header[..16]
+    }
+
+    /// Get reference to public key.
+    pub fn public_key(&self) -> &[u8] {
+        &self.static_key
+    }
+
+    /// Get reference to payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Encrypt public key.
+    pub fn encrypt_public_key(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
+        // must succeed as the parameters are controlled by us
+        ChaChaPoly::with_nonce(&cipher_key, nonce)
+            .encrypt_with_ad_new(&state, &mut self.static_key)
             .expect("to succeed");
+    }
 
-        noise_ctx.mix_hash(&public_key);
-
-        let mut shared = noise_ctx
-            .local_static_key
-            .diffie_hellman(noise_ctx.remote_eph.as_ref().expect("to exist"));
-        let mut temp_key = Hmac::new(&noise_ctx.chaining_key).update(&shared).finalize();
-        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-        let mut cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
-
-        let router_info = self.router_info.take().expect("to exist");
-        let mut payload = {
-            let mut out = BytesMut::with_capacity(5 + router_info.len());
-            out.put_u8(BlockType::RouterInfo.as_u8());
-            out.put_u16((2 + router_info.len()) as u16);
-            out.put_u8(0u8);
-            out.put_u8(1u8);
-            out.put_slice(&router_info);
-
-            out.to_vec()
-        };
-
-        ChaChaPoly::with_nonce(&cipher_key, 0u64)
-            .encrypt_with_ad_new(&noise_ctx.state, &mut payload)
+    /// Encrypt payload.
+    pub fn encrypt_payload(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
+        // must succeed as the parameters are controlled by us
+        ChaChaPoly::with_nonce(&cipher_key, nonce)
+            .encrypt_with_ad_new(&state, &mut self.payload)
             .expect("to succeed");
-        noise_ctx.mix_hash(&payload);
-        noise_ctx.chaining_key = chaining_key.into();
+    }
 
-        shared.zeroize();
-        temp_key.zeroize();
-        cipher_key.zeroize();
-
+    /// Encrypt header.
+    pub fn encrypt_header(&mut self, k_header_1: [u8; 32], k_header_2: [u8; 32]) {
         // encrypt first 16 bytes of the long header
         //
         // https://geti2p.net/spec/ssu2#header-encryption-kdf
-        payload[payload.len() - 2 * IV_SIZE..]
+        self.payload[self.payload.len() - 2 * IV_SIZE..]
             .chunks(IV_SIZE)
-            .zip(header.chunks_mut(8usize))
-            .zip([intro_key, self.k_header_2.take().expect("to exist")])
+            .zip(self.header.chunks_mut(8usize))
+            .zip([k_header_1, k_header_2])
             .for_each(|((chunk, header_chunk), key)| {
                 ChaCha::with_iv(
                     key,
@@ -1570,13 +1500,93 @@ impl<'a> SessionConfirmedBuilder<'a> {
                     *header_byte ^= mask_byte;
                 });
             });
+    }
 
-        let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN + public_key.len() + payload.len());
-        out.put_slice(&header);
-        out.put_slice(&public_key);
-        out.put_slice(&payload);
+    /// Serialize [`SessionConfirmed`] into a byte vector.
+    pub fn build(self) -> BytesMut {
+        let mut out =
+            BytesMut::with_capacity(self.header.len() + self.static_key.len() + self.payload.len());
+        out.put_slice(&self.header);
+        out.put_slice(&self.static_key);
+        out.put_slice(&self.payload);
 
         out
+    }
+}
+
+/// `SessionConfirmed` builder.
+#[derive(Default)]
+pub struct SessionConfirmedBuilder {
+    /// Destination connection ID.
+    dst_id: Option<u64>,
+
+    /// Source connection ID.
+    src_id: Option<u64>,
+
+    /// Serialized local router info.
+    router_info: Option<Vec<u8>>,
+
+    /// Local static public key.
+    static_key: Option<StaticPublicKey>,
+}
+
+impl SessionConfirmedBuilder {
+    /// Specify destination connection ID.
+    pub fn with_dst_id(mut self, dst_id: u64) -> Self {
+        self.dst_id = Some(dst_id);
+        self
+    }
+
+    /// Specify source connection ID.
+    pub fn with_src_id(mut self, src_id: u64) -> Self {
+        self.src_id = Some(src_id);
+        self
+    }
+
+    /// Specify router info.
+    pub fn with_router_info(mut self, router_info: Vec<u8>) -> Self {
+        self.router_info = Some(router_info);
+        self
+    }
+
+    /// Specify local static public key.
+    pub fn with_static_key(mut self, static_key: StaticPublicKey) -> Self {
+        self.static_key = Some(static_key);
+        self
+    }
+
+    /// Build [`SessionConfirmedBuilder`] into a byte vector.
+    pub fn build<R: Runtime>(mut self) -> SessionConfirmed {
+        let header = {
+            let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN);
+
+            out.put_u64_le(self.dst_id.take().expect("to exist"));
+            out.put_u32(0u32);
+            out.put_u8(*MessageType::SessionConfirmed);
+            out.put_u8(1u8); // 1 fragment
+            out.put_u16(0u16); // flags
+
+            out
+        };
+        let static_key = self.static_key.expect("to exist").to_vec();
+        let payload = {
+            let router_info = self.router_info.take().expect("to exist");
+            let mut out = BytesMut::with_capacity(5 + router_info.len());
+
+            out.put_u8(BlockType::RouterInfo.as_u8());
+            out.put_u16((2 + router_info.len()) as u16);
+            out.put_u8(0u8);
+            out.put_u8(1u8);
+            out.put_slice(&router_info);
+
+            out.to_vec()
+        };
+
+        SessionConfirmed {
+            header,
+            static_key,
+            payload,
+        }
     }
 }
 
@@ -1993,10 +2003,10 @@ impl RetryBuilder {
 /// Unserialized `SessionCreated` message.
 pub struct SessionCreated {
     /// Serialized, unencrypted header.
-    pub header: BytesMut,
+    header: BytesMut,
 
     /// Serialized, unencrypted payload
-    pub payload: Vec<u8>,
+    payload: Vec<u8>,
 }
 
 impl SessionCreated {

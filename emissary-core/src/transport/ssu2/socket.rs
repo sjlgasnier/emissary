@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, sha256::Sha256, StaticPrivateKey},
+    crypto::{base64_decode, sha256::Sha256, StaticPrivateKey, StaticPublicKey},
     error::Ssu2Error,
     primitives::{RouterId, RouterInfo, Str, TransportKind},
     runtime::{JoinSet, Runtime, UdpSocket},
@@ -301,11 +301,11 @@ impl<R: Runtime> Ssu2Socket<R> {
             let static_key = address.options.get(&Str::from("s")).expect("to exist");
             let static_key = base64_decode(&static_key.as_bytes()).expect("to succeed");
 
-            TryInto::<[u8; 32]>::try_into(static_key).expect("to succeed")
+            StaticPublicKey::from_bytes(&static_key).expect("to succeed")
         };
         let address = address.socket_address.expect("to exist");
 
-        let state = Sha256::new().update(&self.outbound_state).update(static_key).finalize();
+        let state = Sha256::new().update(&self.outbound_state).update(&static_key).finalize();
         let src_id = R::rng().next_u64();
         let dst_id = R::rng().next_u64();
 
