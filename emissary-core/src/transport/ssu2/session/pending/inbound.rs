@@ -18,12 +18,10 @@
 
 use crate::{
     crypto::{
-        base64_decode,
-        chachapoly::{ChaCha, ChaChaPoly},
-        hmac::Hmac,
-        sha256::Sha256,
-        EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
+        base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, EphemeralPrivateKey,
+        StaticPrivateKey, StaticPublicKey,
     },
+    error::Ssu2Error,
     primitives::{Str, TransportKind},
     runtime::Runtime,
     transport::ssu2::{
@@ -68,17 +66,14 @@ pub struct InboundSsu2Context {
     /// Destination connection ID.
     pub dst_id: u64,
 
-    /// Source connection ID.
-    pub src_id: u64,
-
-    /// Packet number.
-    pub pkt_num: u32,
-
     /// Local intro key.
     pub intro_key: [u8; 32],
 
     /// `TokenRequest` packet.
     pub pkt: Vec<u8>,
+
+    /// Packet number.
+    pub pkt_num: u32,
 
     /// TX channel for sending packets to [`Ssu2Socket`].
     //
@@ -87,6 +82,9 @@ pub struct InboundSsu2Context {
 
     /// RX channel for receiving datagrams from `Ssu2Socket`.
     pub rx: Receiver<Packet>,
+
+    /// Source connection ID.
+    pub src_id: u64,
 
     /// AEAD state.
     pub state: Bytes,
@@ -167,47 +165,44 @@ impl<R: Runtime> InboundSsu2Session<R> {
     /// Create new [`PendingSsu2Session`].
     //
     // TODO: explain what happens here
-    pub fn new(context: InboundSsu2Context) -> Self {
+    pub fn new(context: InboundSsu2Context) -> Result<Self, Ssu2Error> {
         let InboundSsu2Context {
             address,
             chaining_key,
             dst_id,
-            pkt_tx,
-            pkt_num,
-            src_id,
             intro_key,
-            static_key,
             pkt,
+            pkt_num,
+            pkt_tx,
             rx,
+            src_id,
             state,
+            static_key,
         } = context;
 
         tracing::trace!(
             target: LOG_TARGET,
             ?dst_id,
             ?src_id,
-            ?address,
             ?pkt_num,
             "handle `TokenRequest`",
         );
 
         let mut payload = pkt[32..pkt.len()].to_vec();
-        if let Err(_error) = ChaChaPoly::with_nonce(&intro_key, pkt_num as u64)
-            .decrypt_with_ad(&pkt[..32], &mut payload)
-        {
-            tracing::error!("failed to decrypt = {pkt_num}");
-            panic!("");
-        }
+        ChaChaPoly::with_nonce(&intro_key, pkt_num as u64)
+            .decrypt_with_ad(&pkt[..32], &mut payload)?;
 
-        match Block::parse(&payload) {
-            Some(blocks) => blocks.into_iter().for_each(|block| {
-                tracing::trace!(target: LOG_TARGET, "block = {block:?}");
-            }),
-            None => tracing::error!(
+        Block::parse(&payload).ok_or_else(|| {
+            tracing::warn!(
                 target: LOG_TARGET,
-                "failed to parse blocks",
-            ),
-        }
+                ?dst_id,
+                ?src_id,
+                "failed to parse message blocks",
+            );
+            debug_assert!(false);
+
+            Ssu2Error::Malformed
+        })?;
 
         let token = R::rng().next_u64();
         let pkt = MessageBuilder::new(
@@ -238,7 +233,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
             );
         }
 
-        Self {
+        Ok(Self {
             address,
             aead: state,
             chaining_key,
@@ -250,19 +245,28 @@ impl<R: Runtime> InboundSsu2Session<R> {
             state: PendingSessionState::AwaitingSessionRequest { token },
             static_key,
             _runtime: Default::default(),
-        }
+        })
     }
 
     /// Handle `SessionRequest` message.
-    //
-    // TODO: more documentation
+    ///
+    /// Attempt to parse `pkt` into `SessionRequest` and if it succeeds, verify that the token it
+    /// contains is the once that was sent in `Retry`, send `SessionCreated` as a reply and
+    /// transition the inbound state to [`PendingSessionState::AwaitingSessionConfirmed`].
+    ///
+    /// <https://geti2p.net/spec/ssu2#kdf-for-session-request>
+    /// <https://geti2p.net/spec/ssu2#sessionrequest-type-0>
+    ///
+    /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
     fn on_session_request(
         &mut self,
         mut pkt: Vec<u8>,
         _token: u64,
-    ) -> Option<PendingSsu2SessionStatus> {
-        let (ephemeral_key, pkt_num, _recv_token) =
-            match HeaderReader::new(self.intro_key, &mut pkt).ok()?.parse(self.intro_key)? {
+    ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
+        let (ephemeral_key, pkt_num, _recv_token) = match HeaderReader::new(self.intro_key, &mut pkt)?
+                .parse(self.intro_key)
+                .ok_or(Ssu2Error::InvalidVersion)? // TODO: could be other error
+            {
                 HeaderKind::SessionRequest {
                     ephemeral_key,
                     net_id: _,
@@ -282,11 +286,11 @@ impl<R: Runtime> InboundSsu2Session<R> {
                         ?kind,
                         "invalid message, expected `SessionRequest`",
                     );
-                    return None;
+                    return Err(Ssu2Error::UnexpectedMessage);
                 }
             };
 
-        tracing::error!(
+        tracing::trace!(
             target: LOG_TARGET,
             dst_id = ?self.dst_id,
             src_id = ?self.src_id,
@@ -307,30 +311,26 @@ impl<R: Runtime> InboundSsu2Session<R> {
         shared.zeroize();
         temp_key.zeroize();
 
-        // TODO: derive sessioncreated header keyfrom `cipher_key` (??)
-        // HKDF(chainKey, ZEROLEN, "SessCreateHeader", 32)
         let temp_key = Hmac::new(&chaining_key).update([]).finalize();
         let k_header_2 = Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize();
-        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).unwrap();
+        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).expect("to succeed");
 
         // state for `SessionCreated`
         let new_state = Sha256::new().update(&state).update(&pkt[64..pkt.len()]).finalize();
 
         let mut payload = pkt[64..pkt.len()].to_vec();
-        ChaChaPoly::with_nonce(&cipher_key, 0u64)
-            .decrypt_with_ad(&state, &mut payload)
-            .unwrap();
+        ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut payload)?;
 
         cipher_key.zeroize();
 
-        match Block::parse(&payload) {
-            Some(blocks) => blocks.into_iter().for_each(|block| {
-                tracing::trace!(target: LOG_TARGET, "block = {block:?}");
-            }),
-            None => tracing::error!(
+        if Block::parse(&payload).is_none() {
+            tracing::warn!(
                 target: LOG_TARGET,
-                "failed to parse blocks",
-            ),
+                dst_id = ?self.dst_id,
+                src_id = ?self.src_id,
+            );
+            debug_assert!(false);
+            return Err(Ssu2Error::Malformed);
         }
 
         let sk = EphemeralPrivateKey::random(R::rng());
@@ -390,8 +390,8 @@ impl<R: Runtime> InboundSsu2Session<R> {
         // create new session
         let temp_key = Hmac::new(&chaining_key).update([]).finalize();
         let k_header_2 = Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize();
-        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).unwrap();
-        let k_session_created = TryInto::<[u8; 32]>::try_into(cipher_key).unwrap();
+        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).expect("to succeed");
+        let k_session_created = TryInto::<[u8; 32]>::try_into(cipher_key).expect("to succeed");
 
         self.state = PendingSessionState::AwaitingSessionConfirmed {
             chaining_key,
@@ -401,13 +401,22 @@ impl<R: Runtime> InboundSsu2Session<R> {
             state: aead_state.state,
         };
 
-        None
+        Ok(None)
     }
 
     /// Handle `SessionConfirmed` message.
-    //
-    // TODO: more documentation
-    // TODO: return `Result<Option<>, Ssu2Error>`
+    ///
+    /// Attempt to parse `pkt` into `SessionConfirmed` and if it succeeds, derive data phase keys
+    /// and send an ACK for the message. Return context for an active session and destroy this
+    /// future, allowing [`Ssu2Socket`] to create a new future for the active session.
+    ///
+    /// `SessionConfirmed` must contain a valid router info.
+    ///
+    /// <https://geti2p.net/spec/ssu2#kdf-for-session-confirmed-part-1-using-session-created-kdf>
+    /// <https://geti2p.net/spec/ssu2#sessionconfirmed-type-2>
+    /// <https://geti2p.net/spec/ssu2#kdf-for-data-phase>
+    ///
+    /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
     fn on_session_confirmed(
         &mut self,
         mut pkt: Vec<u8>,
@@ -416,8 +425,11 @@ impl<R: Runtime> InboundSsu2Session<R> {
         k_header_2: [u8; 32],
         k_session_created: [u8; 32],
         state: Vec<u8>,
-    ) -> Option<PendingSsu2SessionStatus> {
-        match HeaderReader::new(self.intro_key, &mut pkt).ok()?.parse(k_header_2)? {
+    ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
+        match HeaderReader::new(self.intro_key, &mut pkt)?
+            .parse(k_header_2)
+            .ok_or(Ssu2Error::InvalidVersion)? // TODO: could be other error
+        {
             HeaderKind::SessionConfirmed { pkt_num } =>
                 if pkt_num != 0 {
                     tracing::warn!(
@@ -427,7 +439,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                         ?pkt_num,
                         "`SessionConfirmed` contains non-zero packet number",
                     );
-                    return None;
+                    return Err(Ssu2Error::Malformed);
                 },
             kind => {
                 tracing::trace!(
@@ -437,11 +449,12 @@ impl<R: Runtime> InboundSsu2Session<R> {
                     ?kind,
                     "invalid message, expected `SessionRequest`",
                 );
-                return None;
+                return Err(Ssu2Error::UnexpectedMessage);
             }
         }
 
         tracing::trace!(
+            target: LOG_TARGET,
             dst_id = ?self.dst_id,
             src_id = ?self.src_id,
             "handle `SessionConfirmed`",
@@ -452,9 +465,8 @@ impl<R: Runtime> InboundSsu2Session<R> {
 
         let mut static_key = pkt[16..64].to_vec();
         ChaChaPoly::with_nonce(&k_session_created, 1u64)
-            .decrypt_with_ad(&state, &mut static_key)
-            .unwrap();
-        let static_key = StaticPublicKey::from_bytes(&static_key).unwrap();
+            .decrypt_with_ad(&state, &mut static_key)?;
+        let static_key = StaticPublicKey::from_bytes(&static_key).expect("to succeed");
         let mut shared = ephemeral_key.diffie_hellman(&static_key);
 
         let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
@@ -462,9 +474,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         let mut cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
 
         let mut payload = pkt[64..].to_vec();
-        ChaChaPoly::with_nonce(&cipher_key, 0u64)
-            .decrypt_with_ad(&new_state, &mut payload)
-            .unwrap();
+        ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&new_state, &mut payload)?;
 
         shared.zeroize();
         temp_key.zeroize();
@@ -476,7 +486,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                 "failed to parse message blocks of `SessionConfirmed`",
             );
             debug_assert!(false);
-            return None;
+            return Err(Ssu2Error::Malformed);
         };
 
         let Some(Block::RouterInfo { router_info }) =
@@ -487,8 +497,10 @@ impl<R: Runtime> InboundSsu2Session<R> {
                 "`SessionConfirmed` doesn't include router info block",
             );
             debug_assert!(false);
-            return None;
+            return Err(Ssu2Error::Malformed);
         };
+
+        // TODO: `RouterInfo::ssu2_intro_key()`
         let intro_key = router_info
             .addresses
             .get(&TransportKind::Ssu2)
@@ -507,7 +519,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         let k_data_ab = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
         let k_header_2_ab = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key)
                 .update(&k_data_ab)
@@ -515,13 +527,13 @@ impl<R: Runtime> InboundSsu2Session<R> {
                 .update([0x02])
                 .finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
 
         let temp_key = Hmac::new(&k_ba).update([]).finalize();
         let k_data_ba = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
         let k_header_2_ba = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key)
                 .update(&k_data_ba)
@@ -529,7 +541,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                 .update([0x02])
                 .finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
 
         let mut state = AeadState {
             cipher_key: k_data_ba.to_vec(),
@@ -556,21 +568,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         })
         .build::<R>();
 
-        let mut test = pkt.to_vec();
-        let mut mask = [0u8; 8];
-        let iv1 =
-            TryInto::<[u8; 12]>::try_into(pkt[pkt.len() - 24..pkt.len() - 12].to_vec()).unwrap();
-        ChaCha::with_iv(intro_key, iv1).decrypt_ref(&mut mask);
-        let _connection_id = u64::from_be(mask.into_iter().zip(&mut test).fold(
-            0u64,
-            |connection_id, (a, b)| {
-                *b ^= a;
-
-                (connection_id << 8) | (*b as u64)
-            },
-        ));
-
-        Some(PendingSsu2SessionStatus::NewInboundSession {
+        Ok(Some(PendingSsu2SessionStatus::NewInboundSession {
             context: Ssu2SessionContext {
                 address: self.address,
                 dst_id: self.src_id,
@@ -582,14 +580,14 @@ impl<R: Runtime> InboundSsu2Session<R> {
             },
             pkt,
             target: self.address,
-        })
+        }))
     }
 
     /// Handle received packet to a pending session.
     ///
     /// `pkt` contains the full header but the first part of the header has been decrypted by the
     /// `Ssu2Socket`, meaning only the second part of the header must be decrypted by us.
-    fn on_packet(&mut self, pkt: Vec<u8>) -> Option<PendingSsu2SessionStatus> {
+    fn on_packet(&mut self, pkt: Vec<u8>) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::AwaitingSessionRequest { token } =>
                 self.on_session_request(pkt, token),
@@ -607,7 +605,16 @@ impl<R: Runtime> InboundSsu2Session<R> {
                 k_session_created,
                 state,
             ),
-            PendingSessionState::Poisoned => unreachable!(),
+            PendingSessionState::Poisoned => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    dst_id = ?self.dst_id,
+                    src_id = ?self.src_id,
+                    "inbound session state is poisoned",
+                );
+                debug_assert!(false);
+                return Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}));
+            }
         }
     }
 }
@@ -627,8 +634,18 @@ impl<R: Runtime> Future for InboundSsu2Session<R> {
                 },
             };
 
-            if let Some(status) = self.on_packet(pkt) {
-                return Poll::Ready(status);
+            match self.on_packet(pkt) {
+                Ok(None) => {}
+                Ok(Some(status)) => return Poll::Ready(status),
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        dst_id = ?self.dst_id,
+                        src_id = ?self.src_id,
+                        ?error,
+                        "failed to handle packet",
+                    );
+                }
             }
         }
     }

@@ -438,6 +438,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     /// <https://geti2p.net/spec/ssu2#kdf-for-session-confirmed-part-1-using-session-created-kdf>
     /// <https://geti2p.net/spec/ssu2#kdf-for-session-confirmed-part-2>
     /// <https://geti2p.net/spec/ssu2#sessionconfirmed-type-2>
+    /// <https://geti2p.net/spec/ssu2#kdf-for-data-phase>
     ///
     /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
     fn on_data(

@@ -227,9 +227,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             }) => {
                 // TODO: validate net id
                 let (tx, rx) = channel(CHANNEL_SIZE);
-
-                self.sessions.insert(connection_id, tx);
-                self.pending_sessions.push(InboundSsu2Session::<R>::new(InboundSsu2Context {
+                let session = InboundSsu2Session::<R>::new(InboundSsu2Context {
                     address,
                     src_id,
                     pkt_num,
@@ -241,7 +239,10 @@ impl<R: Runtime> Ssu2Socket<R> {
                     rx,
                     state: self.inbound_state.clone(),
                     static_key: self.static_key.clone(),
-                }));
+                })?;
+
+                self.sessions.insert(connection_id, tx);
+                self.pending_sessions.push(session);
 
                 Ok(())
             }
