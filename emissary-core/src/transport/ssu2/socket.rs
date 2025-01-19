@@ -17,13 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, chachapoly::ChaCha, sha256::Sha256, StaticPrivateKey},
+    crypto::{base64_decode, sha256::Sha256, StaticPrivateKey},
+    error::Ssu2Error,
     primitives::{RouterId, RouterInfo, Str, TransportKind},
     runtime::{JoinSet, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
     transport::{
         ssu2::{
-            message::MessageType,
+            message::{HeaderKind, HeaderReader},
             session::{
                 active::{Ssu2Session, Ssu2SessionContext},
                 pending::{
@@ -204,56 +205,34 @@ impl<R: Runtime> Ssu2Socket<R> {
     /// Handle packet.
     //
     // TODO: needs as lot of refactoring
-    fn handle_packet(&mut self, nread: usize, address: SocketAddr) {
-        // TODO: ensure size
-        let iv1 = TryInto::<[u8; 12]>::try_into(&self.buffer[nread - 24..nread - 12])
-            .expect("to succeed");
-        let iv2 =
-            TryInto::<[u8; 12]>::try_into(&self.buffer[nread - 12..nread]).expect("to succeed");
-        ChaCha::with_iv(self.intro_key, iv1)
-            .decrypt([0u8; 8])
-            .into_iter()
-            .zip(&mut self.buffer[..8])
-            .for_each(|(a, b)| {
-                *b ^= a;
-            });
-        let connection_id = u64::from_le_bytes(
-            TryInto::<[u8; 8]>::try_into(&self.buffer[..8]).expect("to succeed"),
-        );
+    // TODO: explain what happens here
+    fn handle_packet(&mut self, nread: usize, address: SocketAddr) -> Result<(), Ssu2Error> {
+        let mut reader = HeaderReader::new(self.intro_key, &mut self.buffer[..nread])?;
+        let connection_id = reader.dst_id();
 
         if let Some(tx) = self.sessions.get_mut(&connection_id) {
-            if let Err(error) = tx.try_send(Packet {
-                pkt: self.buffer[..nread].to_vec(),
-                address,
-            }) {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    ?connection_id,
-                    ?error,
-                    "failed to send datagram to ssu2 session",
-                );
-            }
-            return;
+            return tx
+                .try_send(Packet {
+                    pkt: self.buffer[..nread].to_vec(),
+                    address,
+                })
+                .map_err(From::from);
         }
 
-        // TODO: create parser for packet?
-        // TODO: move header decryption and parsing there?
-
-        ChaCha::with_iv(self.intro_key, iv2)
-            .decrypt([0u8; 8])
-            .into_iter()
-            .zip(&mut self.buffer[8..])
-            .for_each(|(a, b)| {
-                *b ^= a;
-            });
-
-        match MessageType::try_from(self.buffer[12]) {
-            Ok(MessageType::TokenRequest) => {
+        match reader.parse(self.intro_key) {
+            Some(HeaderKind::TokenRequest {
+                net_id: _,
+                pkt_num,
+                src_id,
+            }) => {
+                // TODO: validate net id
                 let (tx, rx) = channel(CHANNEL_SIZE);
-                self.sessions.insert(connection_id, tx);
 
+                self.sessions.insert(connection_id, tx);
                 self.pending_sessions.push(InboundSsu2Session::<R>::new(InboundSsu2Context {
                     address,
+                    src_id,
+                    pkt_num,
                     chaining_key: self.chaining_key.clone(),
                     dst_id: connection_id,
                     intro_key: self.intro_key,
@@ -263,80 +242,49 @@ impl<R: Runtime> Ssu2Socket<R> {
                     state: self.inbound_state.clone(),
                     static_key: self.static_key.clone(),
                 }));
+
+                Ok(())
             }
-            Ok(message_type) => {
-                tracing::error!(
+            Some(kind) => {
+                tracing::warn!(
                     target: LOG_TARGET,
-                    ?message_type,
-                    "not supported",
+                    ?kind,
+                    "unable to handle message",
                 );
+                Ok(())
             }
-            Err(()) => match self.pending_outbound.get(&address) {
-                Some(intro_key) => {
-                    // undo header decryption done with incorrect key
-                    ChaCha::with_iv(self.intro_key, iv1)
-                        .decrypt([0u8; 8])
-                        .into_iter()
-                        .zip(&mut self.buffer[..8])
-                        .for_each(|(a, b)| {
-                            *b ^= a;
-                        });
-                    ChaCha::with_iv(self.intro_key, iv2)
-                        .decrypt([0u8; 8])
-                        .into_iter()
-                        .zip(&mut self.buffer[8..])
-                        .for_each(|(a, b)| {
-                            *b ^= a;
-                        });
-
-                    // re-decrypt
-                    ChaCha::with_iv(*intro_key, iv1)
-                        .decrypt([0u8; 8])
-                        .into_iter()
-                        .zip(&mut self.buffer[..8])
-                        .for_each(|(a, b)| {
-                            *b ^= a;
-                        });
-
-                    let connection_id = u64::from_le_bytes(
-                        TryInto::<[u8; 8]>::try_into(&self.buffer[..8]).expect("to succeed"),
-                    );
-
-                    if let Some(tx) = self.sessions.get_mut(&connection_id) {
-                        if let Err(error) = tx.try_send(Packet {
-                            pkt: self.buffer[..nread].to_vec(),
-                            address,
-                        }) {
-                            tracing::debug!(
+            None => match self.pending_outbound.get(&address) {
+                Some(intro_key) =>
+                    match self.sessions.get_mut(&reader.reset_key(*intro_key).dst_id()) {
+                        Some(tx) => tx
+                            .try_send(Packet {
+                                pkt: self.buffer[..nread].to_vec(),
+                                address,
+                            })
+                            .map_err(From::from),
+                        None => {
+                            tracing::warn!(
                                 target: LOG_TARGET,
-                                ?connection_id,
-                                ?error,
-                                "failed to send datagram to ssu2 session",
+                                ?address,
+                                "pending connection found but no associated session",
                             );
+                            debug_assert!(false);
+                            Ok(())
                         }
-                        return;
-                    } else {
-                        tracing::error!("not found after check");
-                    }
-                }
+                    },
                 None => {
-                    tracing::warn!(
+                    tracing::trace!(
                         target: LOG_TARGET,
                         message_type = ?self.buffer[12],
                         "unrecognized message type",
                     );
+                    Err(Ssu2Error::Malformed)
                 }
             },
         }
     }
 
     pub fn connect(&mut self, router_info: RouterInfo) {
-        tracing::debug!(
-            target: LOG_TARGET,
-            router_id = %router_info.identity.id(),
-            "establish outbound session",
-        );
-
         // must succeed since `TransportManager` has ensured `router_info` contains
         // a valid and reachable ssu2 router address
         //
@@ -359,6 +307,15 @@ impl<R: Runtime> Ssu2Socket<R> {
         let state = Sha256::new().update(&self.outbound_state).update(static_key).finalize();
         let src_id = R::rng().next_u64();
         let dst_id = R::rng().next_u64();
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            router_id = %router_info.identity.id(),
+            ?src_id,
+            ?dst_id,
+            ?address,
+            "establish outbound session",
+        );
 
         let (tx, rx) = channel(CHANNEL_SIZE);
         self.sessions.insert(src_id, tx);
@@ -385,35 +342,29 @@ impl<R: Runtime> Ssu2Socket<R> {
     }
 
     pub fn accept(&mut self, router_id: &RouterId) {
-        match self.unvalidated_sessions.remove(router_id) {
-            None => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    "non-existent unvalidated session accepted",
-                );
-                debug_assert!(false);
-            }
-            Some(context) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    "session accepted",
-                );
+        let Some(context) = self.unvalidated_sessions.remove(router_id) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                %router_id,
+                "non-existent unvalidated session accepted",
+            );
+            debug_assert!(false);
+            return;
+        };
 
-                self.active_sessions.push(
-                    Ssu2Session::<R>::new(
-                        context,
-                        self.pkt_tx.clone(),
-                        self.subsystem_handle.clone(),
-                    )
-                    .run(),
-                );
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            "session accepted",
+        );
 
-                if let Some(waker) = self.waker.take() {
-                    waker.wake_by_ref();
-                }
-            }
+        self.active_sessions.push(
+            Ssu2Session::<R>::new(context, self.pkt_tx.clone(), self.subsystem_handle.clone())
+                .run(),
+        );
+
+        if let Some(waker) = self.waker.take() {
+            waker.wake_by_ref();
         }
     }
 
@@ -456,7 +407,14 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some((nread, from))) => {
-                    this.handle_packet(nread, from);
+                    if let Err(error) = this.handle_packet(nread, from) {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?from,
+                            ?error,
+                            "failed to handle packet",
+                        );
+                    }
                 }
             }
         }

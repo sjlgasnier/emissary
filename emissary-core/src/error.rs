@@ -35,6 +35,12 @@ pub enum Ssu2Error {
 
     /// Encryption/decryption error.
     Chacha,
+
+    /// Channel error.
+    Channel(ChannelError),
+
+    /// Packet is too short.
+    NotEnoughBytes,
 }
 
 impl fmt::Display for Ssu2Error {
@@ -43,6 +49,8 @@ impl fmt::Display for Ssu2Error {
             Self::SessionTerminated => write!(f, "session forcibly terminated"),
             Self::Malformed => write!(f, "malformed packet"),
             Self::Chacha => write!(f, "encryption/decryption error"),
+            Self::Channel(error) => write!(f, "{error}"),
+            Self::NotEnoughBytes => write!(f, "packet is too short"),
         }
     }
 }
@@ -455,6 +463,17 @@ impl<T> From<thingbuf::mpsc::errors::TrySendError<T>> for ChannelError {
         match value {
             thingbuf::mpsc::errors::TrySendError::Full(_) => ChannelError::Full,
             thingbuf::mpsc::errors::TrySendError::Closed(_) => ChannelError::Closed,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<T> From<thingbuf::mpsc::errors::TrySendError<T>> for Ssu2Error {
+    fn from(value: thingbuf::mpsc::errors::TrySendError<T>) -> Self {
+        match value {
+            thingbuf::mpsc::errors::TrySendError::Full(_) => Ssu2Error::Channel(ChannelError::Full),
+            thingbuf::mpsc::errors::TrySendError::Closed(_) =>
+                Ssu2Error::Channel(ChannelError::Closed),
             _ => unreachable!(),
         }
     }

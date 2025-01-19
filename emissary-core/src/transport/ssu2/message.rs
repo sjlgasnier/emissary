@@ -27,6 +27,7 @@ use crate::{
         sha256::Sha256,
         EphemeralPrivateKey, EphemeralPublicKey, StaticPrivateKey, StaticPublicKey,
     },
+    error::Ssu2Error,
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
     runtime::Runtime,
@@ -47,7 +48,7 @@ use core::{
     fmt,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
-    ops::Deref,
+    ops::{Deref, Range},
 };
 
 /// Logging target for the file.
@@ -76,6 +77,12 @@ const SHORT_HEADER_LEN: usize = 16usize;
 
 /// Public key length.
 const PUBLIC_KEY_LEN: usize = 32usize;
+
+/// Minimum size for a packet.
+const PKT_MIN_SIZE: usize = 24usize;
+
+/// Protocol version.
+const PROTOCOL_VERSION: u8 = 2u8;
 
 pub struct NoiseContext {
     pub chaining_key: Bytes,
@@ -2135,5 +2142,287 @@ impl<'a> SessionConfirmedBuilder<'a> {
         out.put_slice(&payload);
 
         out
+    }
+}
+
+/// Header kind.
+pub enum HeaderKind {
+    /// Retry
+    Retry {
+        /// Network ID.
+        net_id: u8,
+
+        /// Packet number.
+        pkt_num: u32,
+
+        /// Token.
+        token: u64,
+    },
+
+    /// Session confirmed.
+    //
+    // TODO: router info fragmentation
+    SessionConfirmed {
+        /// Packet number.
+        pkt_num: u32,
+    },
+
+    /// Session created.
+    SessionCreated {
+        /// Extracted ephemeral public key.
+        ephemeral_key: EphemeralPublicKey,
+
+        /// Network ID.
+        net_id: u8,
+
+        /// Packet number.
+        pkt_num: u32,
+    },
+
+    /// Session request.
+    SessionRequest {
+        /// Extracted ephemeral public key.
+        ephemeral_key: EphemeralPublicKey,
+
+        /// Network ID.
+        net_id: u8,
+
+        /// Packet number.
+        pkt_num: u32,
+
+        /// Token
+        token: u64,
+    },
+
+    /// Token request.
+    TokenRequest {
+        /// Network ID.
+        net_id: u8,
+
+        /// Packet number.
+        pkt_num: u32,
+
+        /// Source connection ID.
+        src_id: u64,
+    },
+}
+
+impl fmt::Debug for HeaderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeaderKind::Retry {
+                net_id,
+                pkt_num,
+                token,
+            } => f
+                .debug_struct("HeaderKind::Retry")
+                .field("net_id", &net_id)
+                .field("pkt_num", &pkt_num)
+                .field("token", &token)
+                .finish(),
+            HeaderKind::SessionConfirmed { pkt_num } => f
+                .debug_struct("HeaderKind::SessionConfirmed")
+                .field("pkt_num", &pkt_num)
+                .finish(),
+            HeaderKind::SessionCreated {
+                net_id, pkt_num, ..
+            } => f
+                .debug_struct("HeaderKind::SessionCreated")
+                .field("net_id", &net_id)
+                .field("pkt_num", &pkt_num)
+                .finish_non_exhaustive(),
+            Self::SessionRequest {
+                net_id,
+                pkt_num,
+                token,
+                ..
+            } => f
+                .debug_struct("HeaderKind::TokenRequest")
+                .field("net_id", &net_id)
+                .field("pkt_num", &pkt_num)
+                .field("token", &token)
+                .finish_non_exhaustive(),
+            Self::TokenRequest {
+                net_id,
+                pkt_num,
+                src_id,
+            } => f
+                .debug_struct("HeaderKind::TokenRequest")
+                .field("net_id", &net_id)
+                .field("pkt_num", &pkt_num)
+                .field("src_id", &src_id)
+                .finish(),
+        }
+    }
+}
+
+/// Header reader.
+pub struct HeaderReader<'a> {
+    k_header_1: [u8; 32],
+    iv1: [u8; IV_SIZE],
+    iv2: [u8; IV_SIZE],
+    pkt: &'a mut [u8],
+}
+
+impl<'a> HeaderReader<'a> {
+    /// Create new [`HeaderReader`].
+    pub fn new(k_header_1: [u8; 32], pkt: &'a mut [u8]) -> Result<Self, Ssu2Error> {
+        if pkt.len() < PKT_MIN_SIZE {
+            return Err(Ssu2Error::NotEnoughBytes);
+        }
+
+        Ok(Self {
+            k_header_1,
+            iv1: TryInto::<[u8; IV_SIZE]>::try_into(&pkt[pkt.len() - 24..pkt.len() - 12])
+                .expect("to succeed"),
+            iv2: TryInto::<[u8; IV_SIZE]>::try_into(&pkt[pkt.len() - 12..pkt.len()])
+                .expect("to succeed"),
+            pkt,
+        })
+    }
+
+    /// Apply obfuscation mask generated from `key` and `iv` to the packet over `range`.
+    fn apply_mask(&mut self, key: [u8; 32], iv: [u8; 12], range: Range<usize>) {
+        ChaCha::with_iv(key, iv)
+            .decrypt([0u8; 8])
+            .into_iter()
+            .zip(&mut self.pkt[range])
+            .for_each(|(a, b)| {
+                *b ^= a;
+            });
+    }
+
+    /// Extract destination connection ID from the header.
+    pub fn dst_id(&mut self) -> u64 {
+        self.apply_mask(self.k_header_1, self.iv1, 0..8);
+
+        u64::from_le_bytes(TryInto::<[u8; 8]>::try_into(&self.pkt[..8]).expect("to succeed"))
+    }
+
+    // Reset key.
+    pub fn reset_key(&mut self, k_header_1: [u8; 32]) -> &mut Self {
+        self.apply_mask(self.k_header_1, self.iv1, 0..8);
+        self.apply_mask(self.k_header_1, self.iv2, 8..16);
+
+        self.k_header_1 = k_header_1;
+        self
+    }
+
+    /// Attempt to parse the second part of the header using `k_header_2`.
+    //
+    // TODO: explain in more detail
+    pub fn parse(&mut self, k_header_2: [u8; 32]) -> Option<HeaderKind> {
+        self.apply_mask(k_header_2, self.iv2, 8..16);
+
+        let header =
+            u64::from_le_bytes(TryInto::<[u8; 8]>::try_into(&self.pkt[8..16]).expect("to succeed"));
+
+        match MessageType::try_from(((header >> 32) & 0xff) as u8).ok()? {
+            MessageType::SessionRequest => {
+                if ((header >> 40) as u8) != PROTOCOL_VERSION {
+                    return None;
+                }
+
+                // TODO: ensure packet has enough bytes
+
+                ChaCha::with_iv(k_header_2, [0u8; 12]).decrypt_ref(&mut self.pkt[16..64]);
+
+                let net_id = ((header >> 48) & 0xff) as u8;
+                let pkt_num = u32::from_be(header as u32);
+
+                // these are expected to succeed as the packet has been confirmed to be long enough
+                let token = u64::from_le_bytes(
+                    TryInto::<[u8; 8]>::try_into(&self.pkt[24..32]).expect("to succeed"),
+                );
+                let ephemeral_key =
+                    EphemeralPublicKey::from_bytes(&self.pkt[32..64]).expect("to succeed");
+
+                Some(HeaderKind::SessionRequest {
+                    ephemeral_key,
+                    net_id,
+                    pkt_num,
+                    token,
+                })
+            }
+            MessageType::SessionCreated => {
+                if ((header >> 40) as u8) != PROTOCOL_VERSION {
+                    return None;
+                }
+
+                // TODO: ensure packet has enough bytes
+
+                ChaCha::with_iv(k_header_2, [0u8; 12]).decrypt_ref(&mut self.pkt[16..64]);
+
+                let net_id = ((header >> 48) & 0xff) as u8;
+                let pkt_num = u32::from_be(header as u32);
+
+                // expected to succeed as the packet has been confirmed to be long enough
+                let ephemeral_key =
+                    EphemeralPublicKey::from_bytes(&self.pkt[32..64]).expect("to succeed");
+
+                Some(HeaderKind::SessionCreated {
+                    ephemeral_key,
+                    net_id,
+                    pkt_num,
+                })
+            }
+            MessageType::SessionConfirmed => Some(HeaderKind::SessionConfirmed {
+                pkt_num: u32::from_be(header as u32),
+            }),
+            MessageType::Data => {
+                tracing::error!("Data");
+                None
+            }
+            MessageType::Retry => {
+                if ((header >> 40) as u8) != PROTOCOL_VERSION {
+                    return None;
+                }
+
+                // TODO: verify packet length
+
+                ChaCha::with_iv(k_header_2, [0u8; 12]).decrypt_ref(&mut self.pkt[16..32]);
+
+                let net_id = ((header >> 48) & 0xff) as u8;
+                let pkt_num = u32::from_be(header as u32);
+
+                // expected to succeed as the packet has been confirmed to be long enough
+                let token = u64::from_le_bytes(
+                    TryInto::<[u8; 8]>::try_into(&self.pkt[24..32]).expect("to succeed"),
+                );
+
+                Some(HeaderKind::Retry {
+                    net_id,
+                    pkt_num,
+                    token,
+                })
+            }
+            MessageType::TokenRequest => {
+                if ((header >> 40) as u8) != PROTOCOL_VERSION {
+                    return None;
+                }
+
+                ChaCha::with_iv(k_header_2, [0u8; 12]).decrypt_ref(&mut self.pkt[16..32]);
+
+                let net_id = ((header >> 48) & 0xff) as u8;
+                let pkt_num = u32::from_be(header as u32);
+                let src_id = u64::from_le_bytes(
+                    TryInto::<[u8; 8]>::try_into(&self.pkt[16..24]).expect("to succeed"),
+                );
+
+                Some(HeaderKind::TokenRequest {
+                    net_id,
+                    pkt_num,
+                    src_id,
+                })
+            }
+            message_type => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?message_type,
+                    "unsupported message type",
+                );
+                None
+            }
+        }
     }
 }

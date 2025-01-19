@@ -604,6 +604,7 @@ impl<R: Runtime> Future for Ssu2Session<R> {
                         );
                         return Poll::Ready(());
                     }
+                    Err(_) => {}
                 },
             }
         }

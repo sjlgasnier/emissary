@@ -49,7 +49,6 @@ pub enum PendingSsu2SessionStatus {
     },
 
     /// Pending session terminated due to fatal error, e.g., decryption error.
-    #[allow(unused)]
     SessionTermianted {},
 
     /// [`SSu2Socket`] has been closed.
