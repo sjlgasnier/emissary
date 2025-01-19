@@ -324,16 +324,16 @@ impl<R: Runtime> Ssu2Socket<R> {
         self.pending_sessions.push(OutboundSsu2Session::<R>::new(OutboundSsu2Context {
             address,
             chaining_key: self.chaining_key.clone(),
-            local_static_key: self.static_key.clone(),
-            router_id: router_info.identity.id(),
             dst_id,
             intro_key,
+            local_static_key: self.static_key.clone(),
             pkt_tx: self.pkt_tx.clone(),
+            router_id: router_info.identity.id(),
+            router_info: self.router_info.clone(),
             rx,
             src_id,
             state,
             static_key,
-            router_info: self.router_info.clone(),
         }));
 
         if let Some(waker) = self.waker.take() {

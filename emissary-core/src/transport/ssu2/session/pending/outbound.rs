@@ -20,6 +20,7 @@ use crate::{
     crypto::{
         chachapoly::ChaChaPoly, hmac::Hmac, EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
+    error::Ssu2Error,
     primitives::RouterId,
     runtime::Runtime,
     transport::ssu2::{
@@ -59,17 +60,23 @@ pub struct OutboundSsu2Context {
     /// Chaining key.
     pub chaining_key: Bytes,
 
-    /// ID of the remote router.
-    pub router_id: RouterId,
-
     /// Destination connection ID.
     pub dst_id: u64,
 
     /// Remote router's intro key.
     pub intro_key: [u8; 32],
 
+    /// Local static key.
+    pub local_static_key: StaticPrivateKey,
+
     /// TX channel for sending packets to [`Ssu2Socket`].
     pub pkt_tx: Sender<Packet>,
+
+    /// ID of the remote router.
+    pub router_id: RouterId,
+
+    /// Serialized local router info.
+    pub router_info: Vec<u8>,
 
     /// RX channel for receiving datagrams from `Ssu2Socket`.
     pub rx: Receiver<Packet>,
@@ -82,10 +89,6 @@ pub struct OutboundSsu2Context {
 
     /// Remote router's static key.
     pub static_key: [u8; 32],
-
-    /// Local static key.
-    pub local_static_key: StaticPrivateKey,
-    pub router_info: Vec<u8>,
 }
 
 /// State for a pending outbound SSU2 session.
@@ -98,16 +101,8 @@ enum PendingSessionState {
         /// Local static key.
         local_static_key: StaticPrivateKey,
 
-        /// TX channel for sending packets to [`Ssu2Socket`].
-        pkt_tx: Sender<Packet>,
-
-        /// Router ID.
-        router_id: RouterId,
-
+        /// Serialized local router info.
         router_info: Vec<u8>,
-
-        /// Source connection ID.
-        src_id: u64,
 
         /// AEAD state.
         state: Vec<u8>,
@@ -118,20 +113,17 @@ enum PendingSessionState {
 
     /// Awaiting `SessionCreated` message from remote router.
     AwaitingSessionCreated {
-        router_info: Vec<u8>,
+        /// Noise context.
         noise_ctx: NoiseContext,
-        intro_key: [u8; 32],
-        pkt_tx: Sender<Packet>,
-        src_id: u64,
-        router_id: RouterId,
+
+        /// Serialized local router info.
+        router_info: Vec<u8>,
     },
 
     /// Awaiting first ACK to be received.
     AwaitingFirstAck {
         /// Noise context.
         noise_ctx: NoiseContext,
-        router_id: RouterId,
-        intro_key: [u8; 32],
     },
 
     Poisoned,
@@ -148,8 +140,17 @@ pub struct OutboundSsu2Session<R: Runtime> {
     /// Intro key.
     intro_key: [u8; 32],
 
+    /// TX channel for sending packets to [`Ssu2Socket`].
+    pkt_tx: Sender<Packet>,
+
+    /// ID of the remote router.
+    router_id: RouterId,
+
     /// RX channel for receiving datagrams from `Ssu2Socket`.
     rx: Option<Receiver<Packet>>,
+
+    /// Source connection ID.
+    src_id: u64,
 
     /// Pending session state.
     state: PendingSessionState,
@@ -176,6 +177,14 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             router_info,
         } = context;
 
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            ?dst_id,
+            ?src_id,
+            "send `TokenRequest`",
+        );
+
         let pkt = TokenRequestBuilder::default()
             .with_dst_id(dst_id)
             .with_src_id(src_id)
@@ -197,13 +206,13 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             address,
             dst_id,
             intro_key,
+            pkt_tx,
+            router_id,
             rx: Some(rx),
+            src_id,
             state: PendingSessionState::AwaitingRetry {
                 chaining_key,
-                router_id,
                 local_static_key,
-                pkt_tx,
-                src_id,
                 state,
                 static_key,
                 router_info,
@@ -213,47 +222,60 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     }
 
     /// Handle `Retry`.
-    //
-    // TODO: documentation
+    ///
+    /// Attempt to parse the header into `Retry` and if it succeeds, send a `SessionRequest` to
+    /// remote using the token that was received in the `Retry` message. The state of the outbound
+    /// connection proceeds to `AwaitingSessionCreated` which is handled by
+    /// [`OutboundSsu2Session::on_session_created()`].
+    ///
+    /// <https://geti2p.net/spec/ssu2#kdf-for-retry>
+    /// <https://geti2p.net/spec/ssu2#retry-type-9>
     fn on_retry(
         &mut self,
         mut pkt: Vec<u8>,
         chaining_key: Bytes,
         local_static_key: StaticPrivateKey,
-        pkt_tx: Sender<Packet>,
-        router_id: RouterId,
         router_info: Vec<u8>,
-        src_id: u64,
         state: Vec<u8>,
         static_key: [u8; 32],
-    ) -> Option<PendingSsu2SessionStatus> {
-        let (pkt_num, token) =
-            match HeaderReader::new(self.intro_key, &mut pkt).ok()?.parse(self.intro_key)? {
-                HeaderKind::Retry {
-                    net_id: _,
-                    pkt_num,
-                    token,
-                } => {
-                    // TODO: verify net id
+    ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
+        let (pkt_num, token) = match HeaderReader::new(self.intro_key, &mut pkt)?
+            .parse(self.intro_key)
+            .ok_or(Ssu2Error::InvalidVersion)? // TODO: could be too short mesasge
+        {
+            HeaderKind::Retry {
+                net_id: _,
+                pkt_num,
+                token,
+            } => {
+                // TODO: verify net id
 
-                    (pkt_num, token)
-                }
-                kind => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        dst_id = ?self.dst_id,
-                        ?src_id,
-                        ?kind,
-                        "invalid message, expected `Retry`",
-                    );
-                    return None;
-                }
-            };
+                (pkt_num, token)
+            }
+            kind => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    router_id = %self.router_id,
+                    dst_id = ?self.dst_id,
+                    src_id = ?self.src_id,
+                    ?kind,
+                    "invalid message, expected `Retry`",
+                );
+                return Err(Ssu2Error::UnexpectedMessage);
+            }
+        };
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            router_id = %self.router_id,
+            dst_id = ?self.dst_id,
+            src_id = ?self.src_id,
+            "handle `Retry`",
+        );
 
         let mut payload = pkt[32..].to_vec();
         ChaChaPoly::with_nonce(&self.intro_key, pkt_num as u64)
-            .decrypt_with_ad(&pkt[..32], &mut payload)
-            .unwrap();
+            .decrypt_with_ad(&pkt[..32], &mut payload)?;
 
         let mut noise_ctx = NoiseContext {
             local_static_key,
@@ -267,7 +289,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
 
         let pkt = SessionRequestBuilder::default()
             .with_dst_id(self.dst_id)
-            .with_src_id(src_id)
+            .with_src_id(self.src_id)
             .with_intro_key(self.intro_key)
             .with_token(token)
             .with_noise_ctx(&mut noise_ctx)
@@ -275,14 +297,16 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .to_vec();
 
         // TODO: retransmissions
-        if let Err(error) = pkt_tx.try_send(Packet {
+        if let Err(error) = self.pkt_tx.try_send(Packet {
             pkt,
             address: self.address,
         }) {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?error,
-                address = ?self.address,
+                router_id = %self.router_id,
+                dst_id = ?self.dst_id,
+                src_id = ?self.src_id,
                 "failed to send `SessionRequest`",
             );
         }
@@ -290,56 +314,66 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         self.state = PendingSessionState::AwaitingSessionCreated {
             noise_ctx,
             router_info,
-            intro_key: self.intro_key,
-            router_id,
-            pkt_tx,
-            src_id,
         };
 
-        None
+        Ok(None)
     }
 
     /// Handle `SessionCreated`.
-    //
-    // TODO: documentation
+    ///
+    /// Attempt to parse the header into `SessionCrated` and if it succeeds, send a
+    /// `SessionConfirmed` to remote. The state of the outbound connection proceeds to
+    /// `AwaitingFirstAck` which is handled by [`OutboundSsu2Session::on_data()`]. Once an ACK for
+    /// the `SessionConfirmed` message has been received, data phase keys are derived and the
+    /// session is considered established
+    ///
+    /// <https://geti2p.net/spec/ssu2#kdf-for-session-created-and-session-confirmed-part-1>
+    /// <https://geti2p.net/spec/ssu2#sessioncreated-type-1>
+    ///
+    /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
     fn on_session_created(
         &mut self,
         mut pkt: Vec<u8>,
         router_info: Vec<u8>,
         mut noise_ctx: NoiseContext,
-        intro_key: [u8; 32],
-        pkt_tx: Sender<Packet>,
-        src_id: u64,
-        router_id: RouterId,
-    ) -> Option<PendingSsu2SessionStatus> {
+    ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         let temp_key = Hmac::new(&noise_ctx.chaining_key).update([]).finalize();
         let k_header_2 = Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize();
-        let k_header_2: [u8; 32] = TryInto::try_into(k_header_2).unwrap();
+        let k_header_2: [u8; 32] = TryInto::try_into(k_header_2).expect("to succeed");
 
-        let ephemeral_key =
-            match HeaderReader::new(self.intro_key, &mut pkt).ok()?.parse(k_header_2)? {
-                HeaderKind::SessionCreated {
-                    ephemeral_key,
-                    net_id: _,
-                    ..
-                } => {
-                    // TODO: verify net id
+        let ephemeral_key = match HeaderReader::new(self.intro_key, &mut pkt)?
+            .parse(k_header_2)
+            .ok_or(Ssu2Error::InvalidVersion)? // TODO: could be other error
+        {
+            HeaderKind::SessionCreated {
+                ephemeral_key,
+                net_id: _,
+                ..
+            } => {
+                // TODO: verify net id
 
-                    ephemeral_key
-                }
-                kind => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        dst_id = ?self.dst_id,
-                        ?src_id,
-                        ?kind,
-                        "invalid message, expected `Retry`",
-                    );
-                    return None;
-                }
-            };
+                ephemeral_key
+            }
+            kind => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    router_id = %self.router_id,
+                    dst_id = ?self.dst_id,
+                    src_id = ?self.src_id,
+                    ?kind,
+                    "invalid message, expected `Retry`",
+                );
+                return Err(Ssu2Error::UnexpectedMessage);
+            }
+        };
 
-        // TODO: validate header
+        tracing::trace!(
+            target: LOG_TARGET,
+            router_id = %self.router_id,
+            dst_id = ?self.dst_id,
+            src_id = ?self.src_id,
+            "handle `SessionCreated`",
+        );
 
         noise_ctx.mix_hash(&pkt[..32]).mix_hash(&pkt[32..64]);
 
@@ -355,9 +389,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         noise_ctx.chaining_key = chaining_key.clone().into();
 
         let mut payload = pkt[64..].to_vec();
-        ChaChaPoly::with_nonce(&cipher_key, 0u64)
-            .decrypt_with_ad(&state, &mut payload)
-            .expect("to succeed");
+        ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut payload)?;
 
         shared.zeroize();
         temp_key.zeroize();
@@ -367,11 +399,11 @@ impl<R: Runtime> OutboundSsu2Session<R> {
 
         let temp_key = Hmac::new(&chaining_key).update([]).finalize();
         let k_header_2 = Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize();
-        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).unwrap();
+        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).expect("to succeed");
 
         let pkt = SessionConfirmedBuilder::default()
             .with_dst_id(self.dst_id)
-            .with_src_id(src_id)
+            .with_src_id(self.src_id)
             .with_intro_key(self.intro_key)
             .with_noise_ctx(&mut noise_ctx)
             .with_k_header_2(k_header_2)
@@ -380,39 +412,49 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .to_vec();
 
         // TODO: retransmissions
-        if let Err(error) = pkt_tx.try_send(Packet {
+        if let Err(error) = self.pkt_tx.try_send(Packet {
             pkt,
             address: self.address,
         }) {
             tracing::warn!(
                 target: LOG_TARGET,
+                router_id = %self.router_id,
+                dst_id = ?self.dst_id,
+                src_id = ?self.src_id,
                 ?error,
-                address = ?self.address,
                 "failed to send `SessionConfirmed`",
             );
         }
 
-        self.state = PendingSessionState::AwaitingFirstAck {
-            noise_ctx,
-            router_id,
-            intro_key,
-        };
-
-        None
+        self.state = PendingSessionState::AwaitingFirstAck { noise_ctx };
+        Ok(None)
     }
 
-    /// Handle `Data`.
-    //
-    // TODO: documentation
+    /// Handle `Data`, in other words an ACK for the `SessionConfirmed` message.
+    ///
+    /// Verify that a valid message was received, derive data phase keys and return session context
+    /// for [`Ssu2Socket`] which starts an active session.
+    ///
+    /// <https://geti2p.net/spec/ssu2#kdf-for-session-confirmed-part-1-using-session-created-kdf>
+    /// <https://geti2p.net/spec/ssu2#kdf-for-session-confirmed-part-2>
+    /// <https://geti2p.net/spec/ssu2#sessionconfirmed-type-2>
+    ///
+    /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
     fn on_data(
         &mut self,
         _pkt: Vec<u8>,
         noise_ctx: NoiseContext,
-        router_id: RouterId,
-        intro_key: [u8; 32],
-    ) -> Option<PendingSsu2SessionStatus> {
+    ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         // TODO: implement data packet parse
         // TODO: verify ack was received
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            router_id = %self.router_id,
+            dst_id = ?self.dst_id,
+            src_id = ?self.src_id,
+            "handle `Data` (first ack)",
+        );
 
         let temp_key = Hmac::new(&noise_ctx.chaining_key).update([]).finalize();
         let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
@@ -422,7 +464,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         let k_data_ab = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
         let k_header_2_ab = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key)
                 .update(&k_data_ab)
@@ -430,13 +472,13 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 .update([0x02])
                 .finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
 
         let temp_key = Hmac::new(&k_ba).update([]).finalize();
         let k_data_ba = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
         let k_header_2_ba = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key)
                 .update(&k_data_ba)
@@ -444,19 +486,19 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 .update([0x02])
                 .finalize(),
         )
-        .unwrap();
+        .expect("to succeed");
 
-        Some(PendingSsu2SessionStatus::NewOutboundSession {
+        Ok(Some(PendingSsu2SessionStatus::NewOutboundSession {
             context: Ssu2SessionContext {
                 address: self.address,
                 dst_id: self.dst_id,
-                intro_key,
+                intro_key: self.intro_key,
                 recv_key_ctx: KeyContext::new(k_data_ba, k_header_2_ba),
                 send_key_ctx: KeyContext::new(k_data_ab, k_header_2_ab),
-                router_id,
+                router_id: self.router_id.clone(),
                 pkt_rx: self.rx.take().expect("to exist"),
             },
-        })
+        }))
     }
 
     /// Handle `pkt`.
@@ -464,61 +506,41 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     /// If the packet is the next in expected sequnce, the outbound session advances to the next
     /// state and if an ACK for `SessionConfirmed` has been received,
     /// [`PendingSsu2SessionStatus::NewOutboundSession`] is returned to the caller, shutting down
-    /// the future.
+    /// this future and allowing [`Ssu2Socket`] to start a new future for the active session.
     ///
     /// If a fatal error occurs during handling of the packet,
     /// [`PendingSsu2SessionStatus::SessionTerminated`] is returned.
-    fn on_packet(&mut self, pkt: Vec<u8>) -> Option<PendingSsu2SessionStatus> {
+    fn on_packet(&mut self, pkt: Vec<u8>) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::AwaitingRetry {
                 chaining_key,
-                pkt_tx,
-                src_id,
                 state,
                 static_key,
                 router_info,
-                router_id,
                 local_static_key,
             } => self.on_retry(
                 pkt,
                 chaining_key,
                 local_static_key,
-                pkt_tx,
-                router_id,
                 router_info,
-                src_id,
                 state,
                 static_key,
             ),
             PendingSessionState::AwaitingSessionCreated {
                 noise_ctx,
-                pkt_tx,
-                src_id,
                 router_info,
-                router_id,
-                intro_key,
-            } => self.on_session_created(
-                pkt,
-                router_info,
-                noise_ctx,
-                intro_key,
-                pkt_tx,
-                src_id,
-                router_id,
-            ),
-            PendingSessionState::AwaitingFirstAck {
-                noise_ctx,
-                intro_key,
-                router_id,
-            } => self.on_data(pkt, noise_ctx, router_id, intro_key),
+            } => self.on_session_created(pkt, router_info, noise_ctx),
+            PendingSessionState::AwaitingFirstAck { noise_ctx } => self.on_data(pkt, noise_ctx),
             PendingSessionState::Poisoned => {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    router_id = %self.router_id,
                     dst_id = ?self.dst_id,
+                    src_id = ?self.src_id,
                     "outbound session state is poisoned",
                 );
                 debug_assert!(false);
-                return Some(PendingSsu2SessionStatus::SessionTermianted {});
+                return Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}));
             }
         }
     }
@@ -539,8 +561,17 @@ impl<R: Runtime> Future for OutboundSsu2Session<R> {
                 },
             };
 
-            if let Some(status) = self.on_packet(pkt) {
-                return Poll::Ready(status);
+            match self.on_packet(pkt) {
+                Ok(None) => {}
+                Ok(Some(status)) => return Poll::Ready(status),
+                Err(error) => tracing::debug!(
+                    target: LOG_TARGET,
+                    router_id = %self.router_id,
+                    dst_id = ?self.dst_id,
+                    src_id = ?self.src_id,
+                    ?error,
+                    "failed to handle packet",
+                ),
             }
         }
     }

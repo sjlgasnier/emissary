@@ -27,30 +27,38 @@ use core::fmt;
 /// SSU2 error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ssu2Error {
-    /// Session terminated.
-    SessionTerminated,
-
-    /// Malformed packet.
-    Malformed,
-
     /// Encryption/decryption error.
     Chacha,
 
     /// Channel error.
     Channel(ChannelError),
 
+    /// Invalid protocol version.
+    InvalidVersion,
+
+    /// Malformed packet.
+    Malformed,
+
     /// Packet is too short.
     NotEnoughBytes,
+
+    /// Session terminated.
+    SessionTerminated,
+
+    /// Unexpected message.
+    UnexpectedMessage,
 }
 
 impl fmt::Display for Ssu2Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SessionTerminated => write!(f, "session forcibly terminated"),
-            Self::Malformed => write!(f, "malformed packet"),
             Self::Chacha => write!(f, "encryption/decryption error"),
             Self::Channel(error) => write!(f, "{error}"),
+            Self::InvalidVersion => write!(f, "invalid protocol version"),
+            Self::Malformed => write!(f, "malformed packet"),
             Self::NotEnoughBytes => write!(f, "packet is too short"),
+            Self::SessionTerminated => write!(f, "session forcibly terminated"),
+            Self::UnexpectedMessage => write!(f, "unexpected message"),
         }
     }
 }
