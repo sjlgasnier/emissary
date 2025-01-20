@@ -34,13 +34,22 @@ impl Hmac {
     }
 
     /// Update state.
-    pub fn update<T: AsRef<[u8]>>(mut self, bytes: T) -> Self {
+    pub fn update(mut self, bytes: impl AsRef<[u8]>) -> Self {
         self.hmac.update(bytes.as_ref());
         self
     }
 
     /// Finalize and return MAC.
+    //
+    // TODO: remove
     pub fn finalize(self) -> Vec<u8> {
         self.hmac.finalize().into_bytes().to_vec()
+    }
+
+    /// Finalize and return MAC.
+    //
+    // TODO: rename
+    pub fn finalize_new(self) -> [u8; 32] {
+        self.hmac.finalize().into_bytes().into()
     }
 }

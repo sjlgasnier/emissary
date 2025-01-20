@@ -1458,11 +1458,6 @@ impl SessionConfirmed {
         &self.static_key
     }
 
-    /// Get reference to payload.
-    pub fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
     /// Encrypt public key.
     pub fn encrypt_public_key(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
         // must succeed as the parameters are controlled by us

@@ -30,6 +30,7 @@ use core::convert::TryInto;
 pub mod aes;
 pub mod chachapoly;
 pub mod hmac;
+pub mod noise;
 pub mod sha256;
 pub mod siphash;
 
@@ -70,6 +71,12 @@ pub fn base32_encode(data: impl AsRef<[u8]>) -> String {
 #[allow(unused)]
 pub fn base32_decode(data: impl AsRef<[u8]>) -> Option<Vec<u8>> {
     I2P_BASE32.decode(data.as_ref()).ok()
+}
+
+/// Trait describing the expected API from secret keys.
+pub trait SecretKey {
+    /// Perform Diffie-Hellman key exchange between `self` and `public_key`.
+    fn diffie_hellman<T: AsRef<x25519_dalek::PublicKey>>(&self, public_key: &T) -> [u8; 32];
 }
 
 /// Static public key.
@@ -168,6 +175,14 @@ impl AsRef<[u8]> for StaticPrivateKey {
     }
 }
 
+impl SecretKey for StaticPrivateKey {
+    fn diffie_hellman<T: AsRef<x25519_dalek::PublicKey>>(&self, public_key: &T) -> [u8; 32] {
+        match self {
+            Self::X25519(key) => key.diffie_hellman(public_key.as_ref()).to_bytes(),
+        }
+    }
+}
+
 /// Ephemeral private key.
 pub enum EphemeralPrivateKey {
     /// X25519.
@@ -198,6 +213,14 @@ impl EphemeralPrivateKey {
     pub fn zeroize(self) {
         match self {
             Self::X25519(mut key) => key.zeroize(),
+        }
+    }
+}
+
+impl SecretKey for EphemeralPrivateKey {
+    fn diffie_hellman<T: AsRef<x25519_dalek::PublicKey>>(&self, public_key: &T) -> [u8; 32] {
+        match self {
+            Self::X25519(key) => key.diffie_hellman(public_key.as_ref()).to_bytes(),
         }
     }
 }
@@ -237,6 +260,14 @@ impl AsRef<x25519_dalek::PublicKey> for EphemeralPublicKey {
     fn as_ref(&self) -> &x25519_dalek::PublicKey {
         match self {
             Self::X25519(key) => key,
+        }
+    }
+}
+
+impl Zeroize for EphemeralPublicKey {
+    fn zeroize(&mut self) {
+        match self {
+            Self::X25519(key) => key.zeroize(),
         }
     }
 }
