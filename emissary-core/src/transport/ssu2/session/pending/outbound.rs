@@ -18,8 +18,8 @@
 
 use crate::{
     crypto::{
-        chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, EphemeralPrivateKey, StaticPrivateKey,
-        StaticPublicKey,
+        chachapoly::ChaChaPoly, hmac::Hmac, noise::NoiseContext, EphemeralPrivateKey,
+        StaticPrivateKey, StaticPublicKey,
     },
     error::Ssu2Error,
     primitives::RouterId,
@@ -96,17 +96,11 @@ pub struct OutboundSsu2Context {
 enum PendingSessionState {
     /// Awaiting `Retry` from remote router.
     AwaitingRetry {
-        /// Chaining key.
-        chaining_key: Bytes,
-
         /// Local static key.
         local_static_key: StaticPrivateKey,
 
         /// Serialized local router info.
         router_info: Vec<u8>,
-
-        /// AEAD state.
-        state: Vec<u8>,
 
         /// Remote router's static key.
         static_key: StaticPublicKey,
@@ -114,9 +108,6 @@ enum PendingSessionState {
 
     /// Awaiting `SessionCreated` message from remote router.
     AwaitingSessionCreated {
-        /// Chaining key.
-        chaining_key: Vec<u8>,
-
         /// Local ephemeral key.
         ephemeral_key: EphemeralPrivateKey,
 
@@ -125,17 +116,12 @@ enum PendingSessionState {
 
         /// Serialized local router info.
         router_info: Vec<u8>,
-
-        /// AEAD state.
-        state: Vec<u8>,
     },
 
     /// Awaiting first ACK to be received.
-    AwaitingFirstAck {
-        /// Chaining key.
-        chaining_key: Vec<u8>,
-    },
+    AwaitingFirstAck,
 
+    /// State has been poisoned.
     Poisoned,
 }
 
@@ -149,6 +135,9 @@ pub struct OutboundSsu2Session<R: Runtime> {
 
     /// Intro key.
     intro_key: [u8; 32],
+
+    /// Noise context.
+    noise_ctx: NoiseContext,
 
     /// TX channel for sending packets to [`Ssu2Socket`].
     pkt_tx: Sender<Packet>,
@@ -216,16 +205,18 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             address,
             dst_id,
             intro_key,
+            noise_ctx: NoiseContext::new(
+                TryInto::<[u8; 32]>::try_into(chaining_key.to_vec()).expect("to succeed"),
+                TryInto::<[u8; 32]>::try_into(state.to_vec()).expect("to succeed"),
+            ),
             pkt_tx,
             router_id,
             rx: Some(rx),
             src_id,
             state: PendingSessionState::AwaitingRetry {
-                chaining_key,
                 local_static_key,
-                state,
-                static_key,
                 router_info,
+                static_key,
             },
             _runtime: Default::default(),
         }
@@ -243,10 +234,8 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     fn on_retry(
         &mut self,
         mut pkt: Vec<u8>,
-        chaining_key: Bytes,
         local_static_key: StaticPrivateKey,
         router_info: Vec<u8>,
-        state: Vec<u8>,
         static_key: StaticPublicKey,
     ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         let (pkt_num, token) = match HeaderReader::new(self.intro_key, &mut pkt)?
@@ -287,11 +276,9 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         ChaChaPoly::with_nonce(&self.intro_key, pkt_num as u64)
             .decrypt_with_ad(&pkt[..32], &mut payload)?;
 
+        // MixKey(DH())
         let ephemeral_key = EphemeralPrivateKey::random(R::rng());
-        let shared = ephemeral_key.diffie_hellman(&static_key);
-        let temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-        let cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        let cipher_key = self.noise_ctx.mix_key(&ephemeral_key, &static_key);
 
         let mut message = SessionRequestBuilder::default()
             .with_dst_id(self.dst_id)
@@ -300,21 +287,18 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .with_token(token)
             .build::<R>();
 
-        let state = Sha256::new().update(&state).update(message.header()).finalize();
-        let state = Sha256::new()
-            .update(&state)
-            .update::<&[u8]>(&ephemeral_key.public().as_ref())
-            .finalize();
+        // MixHash(header), MixHash(aepk)
+        self.noise_ctx.mix_hash(message.header()).mix_hash(&ephemeral_key.public());
 
-        message.encrypt_payload(&cipher_key, 0u64, &state);
+        message.encrypt_payload(&cipher_key, 0u64, self.noise_ctx.state());
         message.encrypt_header(self.intro_key, self.intro_key);
 
-        let state = Sha256::new().update(&state).update(&message.payload()).finalize();
-        let pkt = message.build().to_vec();
+        // MixHash(ciphertext)
+        self.noise_ctx.mix_hash(message.payload());
 
         // TODO: retransmissions
         if let Err(error) = self.pkt_tx.try_send(Packet {
-            pkt,
+            pkt: message.build().to_vec(),
             address: self.address,
         }) {
             tracing::warn!(
@@ -328,11 +312,9 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         }
 
         self.state = PendingSessionState::AwaitingSessionCreated {
-            chaining_key,
             ephemeral_key,
             local_static_key,
             router_info,
-            state,
         };
 
         Ok(None)
@@ -348,20 +330,16 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     ///
     /// <https://geti2p.net/spec/ssu2#kdf-for-session-created-and-session-confirmed-part-1>
     /// <https://geti2p.net/spec/ssu2#sessioncreated-type-1>
-    ///
-    /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
     fn on_session_created(
         &mut self,
         mut pkt: Vec<u8>,
-        chaining_key: Vec<u8>,
         ephemeral_key: EphemeralPrivateKey,
         local_static_key: StaticPrivateKey,
         router_info: Vec<u8>,
-        state: Vec<u8>,
     ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
-        let temp_key = Hmac::new(&chaining_key).update([]).finalize();
-        let k_header_2 = Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize();
-        let k_header_2: [u8; 32] = TryInto::try_into(k_header_2).expect("to succeed");
+        let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
+        let k_header_2 =
+            Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize_new();
 
         let remote_ephemeral_key = match HeaderReader::new(self.intro_key, &mut pkt)?
             .parse(k_header_2)
@@ -397,29 +375,26 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             "handle `SessionCreated`",
         );
 
-        let state = Sha256::new().update(&state).update(&pkt[..32]).finalize();
-        let state = Sha256::new().update(&state).update(&pkt[32..64]).finalize();
+        // MixHash(header), MixHash(bepk)
+        self.noise_ctx.mix_hash(&pkt[..32]).mix_hash(&pkt[32..64]);
 
-        let mut shared = ephemeral_key.diffie_hellman(&remote_ephemeral_key);
-        let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-        let cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        // MixKey(DH())
+        let cipher_key = self.noise_ctx.mix_key(&ephemeral_key, &remote_ephemeral_key);
 
-        let prev_state = state.clone();
-        let state = Sha256::new().update(&state).update(&pkt[64..]).finalize();
-
+        // decrypt payload
         let mut payload = pkt[64..].to_vec();
-        ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&prev_state, &mut payload)?;
+        ChaChaPoly::with_nonce(&cipher_key, 0u64)
+            .decrypt_with_ad(&self.noise_ctx.state(), &mut payload)?;
 
-        shared.zeroize();
-        temp_key.zeroize();
+        // MixHash(ciphertext)
+        self.noise_ctx.mix_hash(&pkt[64..]);
 
         // TODO: validate datetime
         // TODO: get our address
 
-        let temp_key = Hmac::new(&chaining_key).update([]).finalize();
-        let k_header_2 = Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize();
-        let k_header_2 = TryInto::<[u8; 32]>::try_into(k_header_2).expect("to succeed");
+        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
+        let k_header_2 =
+            Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize_new();
 
         let mut message = SessionConfirmedBuilder::default()
             .with_dst_id(self.dst_id)
@@ -428,18 +403,19 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .with_router_info(router_info)
             .build::<R>();
 
-        let state = Sha256::new().update(&state).update(&message.header()).finalize();
+        // MixHash(header) & encrypt public key
+        self.noise_ctx.mix_hash(message.header());
+        message.encrypt_public_key(&cipher_key, 1u64, self.noise_ctx.state());
 
-        message.encrypt_public_key(&cipher_key, 1u64, &state);
-        let state = Sha256::new().update(&state).update(&message.public_key()).finalize();
+        // MixHash(apk)
+        self.noise_ctx.mix_hash(&message.public_key());
 
-        let shared = local_static_key.diffie_hellman(&remote_ephemeral_key);
-        let temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-        let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-        let cipher_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        // MixKey(DH())
+        let mut cipher_key = self.noise_ctx.mix_key(&local_static_key, &remote_ephemeral_key);
 
-        message.encrypt_payload(&cipher_key, 0u64, &state);
+        message.encrypt_payload(&cipher_key, 0u64, self.noise_ctx.state());
         message.encrypt_header(self.intro_key, k_header_2);
+        cipher_key.zeroize();
 
         // TODO: retransmissions
         if let Err(error) = self.pkt_tx.try_send(Packet {
@@ -456,7 +432,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             );
         }
 
-        self.state = PendingSessionState::AwaitingFirstAck { chaining_key };
+        self.state = PendingSessionState::AwaitingFirstAck;
         Ok(None)
     }
 
@@ -469,13 +445,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     /// <https://geti2p.net/spec/ssu2#kdf-for-session-confirmed-part-2>
     /// <https://geti2p.net/spec/ssu2#sessionconfirmed-type-2>
     /// <https://geti2p.net/spec/ssu2#kdf-for-data-phase>
-    ///
-    /// Conversion to `[u8; N]` in this function use `expect()` as they are guaranteed to succeed.
-    fn on_data(
-        &mut self,
-        _pkt: Vec<u8>,
-        chaining_key: Vec<u8>,
-    ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
+    fn on_data(&mut self, _pkt: Vec<u8>) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         // TODO: implement data packet parse
         // TODO: verify ack was received
 
@@ -487,15 +457,13 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             "handle `Data` (first ack)",
         );
 
-        let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
         let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
         let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();
 
         let temp_key = Hmac::new(&k_ab).update([]).finalize();
-        let k_data_ab = TryInto::<[u8; 32]>::try_into(
-            Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
-        )
-        .expect("to succeed");
+        let k_data_ab =
+            Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize_new();
         let k_header_2_ab = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key)
                 .update(&k_data_ab)
@@ -506,18 +474,13 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         .expect("to succeed");
 
         let temp_key = Hmac::new(&k_ba).update([]).finalize();
-        let k_data_ba = TryInto::<[u8; 32]>::try_into(
-            Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize(),
-        )
-        .expect("to succeed");
-        let k_header_2_ba = TryInto::<[u8; 32]>::try_into(
-            Hmac::new(&temp_key)
-                .update(&k_data_ba)
-                .update(b"HKDFSSU2DataKeys")
-                .update([0x02])
-                .finalize(),
-        )
-        .expect("to succeed");
+        let k_data_ba =
+            Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize_new();
+        let k_header_2_ba = Hmac::new(&temp_key)
+            .update(&k_data_ba)
+            .update(b"HKDFSSU2DataKeys")
+            .update([0x02])
+            .finalize_new();
 
         Ok(Some(PendingSsu2SessionStatus::NewOutboundSession {
             context: Ssu2SessionContext {
@@ -544,35 +507,16 @@ impl<R: Runtime> OutboundSsu2Session<R> {
     fn on_packet(&mut self, pkt: Vec<u8>) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
             PendingSessionState::AwaitingRetry {
-                chaining_key,
-                state,
-                static_key,
-                router_info,
-                local_static_key,
-            } => self.on_retry(
-                pkt,
-                chaining_key,
                 local_static_key,
                 router_info,
-                state,
                 static_key,
-            ),
+            } => self.on_retry(pkt, local_static_key, router_info, static_key),
             PendingSessionState::AwaitingSessionCreated {
-                chaining_key,
                 ephemeral_key,
                 local_static_key,
                 router_info,
-                state,
-            } => self.on_session_created(
-                pkt,
-                chaining_key,
-                ephemeral_key,
-                local_static_key,
-                router_info,
-                state,
-            ),
-            PendingSessionState::AwaitingFirstAck { chaining_key } =>
-                self.on_data(pkt, chaining_key),
+            } => self.on_session_created(pkt, ephemeral_key, local_static_key, router_info),
+            PendingSessionState::AwaitingFirstAck => self.on_data(pkt),
             PendingSessionState::Poisoned => {
                 tracing::warn!(
                     target: LOG_TARGET,
