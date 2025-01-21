@@ -33,7 +33,11 @@ use futures::{future::BoxFuture, FutureExt};
 use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 use core::{
     future::Future,
     marker::PhantomData,

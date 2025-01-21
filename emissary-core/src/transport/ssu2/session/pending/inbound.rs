@@ -42,6 +42,7 @@ use rand_core::RngCore;
 use thingbuf::mpsc::{Receiver, Sender};
 use zeroize::Zeroize;
 
+use alloc::vec::Vec;
 use core::{
     future::Future,
     marker::PhantomData,

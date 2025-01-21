@@ -29,6 +29,7 @@ use crate::{
 
 use futures::{Stream, StreamExt};
 
+use alloc::{format, vec::Vec};
 use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,

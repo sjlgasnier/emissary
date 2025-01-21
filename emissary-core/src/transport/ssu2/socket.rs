@@ -45,7 +45,7 @@ use hashbrown::HashMap;
 use rand_core::RngCore;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use core::{
     mem,
     net::SocketAddr,

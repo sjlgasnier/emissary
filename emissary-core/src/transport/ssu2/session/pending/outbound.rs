@@ -41,6 +41,7 @@ use bytes::Bytes;
 use thingbuf::mpsc::{Receiver, Sender};
 use zeroize::Zeroize;
 
+use alloc::vec::Vec;
 use core::{
     future::Future,
     marker::PhantomData,

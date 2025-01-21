@@ -36,7 +36,7 @@ use bytes::Bytes;
 use futures::{FutureExt, Stream};
 use rand_core::RngCore;
 
-use alloc::vec::Vec;
+use alloc::{string::ToString, vec::Vec};
 use core::{
     net::SocketAddr,
     pin::Pin,

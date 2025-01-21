@@ -41,6 +41,7 @@ use nom::{
 };
 use rand_core::RngCore;
 
+use alloc::{vec, vec::Vec};
 use core::{
     fmt,
     net::{IpAddr, SocketAddr},
