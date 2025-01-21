@@ -18,7 +18,7 @@
 
 use crate::{
     runtime::{Runtime, TcpListener},
-    transports::ntcp2::LOG_TARGET,
+    transport::ntcp2::LOG_TARGET,
     util::is_global,
 };
 

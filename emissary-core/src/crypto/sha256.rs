@@ -41,8 +41,15 @@ impl Sha256 {
     }
 
     /// Finalize and return digest.
+    //
+    // TODO: remove
     pub fn finalize(self) -> Vec<u8> {
         self.hasher.finalize().to_vec()
+    }
+
+    // TODO: rename
+    pub fn finalize_new(self) -> [u8; 32] {
+        self.hasher.finalize().into()
     }
 }
 

@@ -16,40 +16,41 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use hmac::Mac;
-use sha2::Sha256;
+use crate::transport::ssu2::session::active::Ssu2SessionContext;
 
-use alloc::vec::Vec;
+use bytes::BytesMut;
 
-pub struct Hmac {
-    hmac: hmac::Hmac<Sha256>,
-}
+use core::net::SocketAddr;
 
-impl Hmac {
-    /// Create new [`Hmac`].
-    pub fn new(key: &[u8]) -> Self {
-        Self {
-            hmac: hmac::Hmac::new_from_slice(key).expect("valid key size"),
-        }
-    }
+pub mod inbound;
+pub mod outbound;
 
-    /// Update state.
-    pub fn update(mut self, bytes: impl AsRef<[u8]>) -> Self {
-        self.hmac.update(bytes.as_ref());
-        self
-    }
+/// Status returned by [`PendingSession`] to [`Ssu2Socket`].
+pub enum PendingSsu2SessionStatus {
+    /// New session has been opened.
+    ///
+    /// Session info is forwaded to [`Ssu2Socket`] and to [`TransportManager`] for validation and
+    /// if the session is accepted, a new future is started for the session.
+    NewInboundSession {
+        /// Context for the active session.
+        context: Ssu2SessionContext,
 
-    /// Finalize and return MAC.
-    //
-    // TODO: remove
-    pub fn finalize(self) -> Vec<u8> {
-        self.hmac.finalize().into_bytes().to_vec()
-    }
+        /// ACK for `SessionConfirmed`.
+        pkt: BytesMut,
 
-    /// Finalize and return MAC.
-    //
-    // TODO: rename
-    pub fn finalize_new(self) -> [u8; 32] {
-        self.hmac.finalize().into_bytes().into()
-    }
+        /// Socket address of the remote router.
+        target: SocketAddr,
+    },
+
+    /// New outbound session.
+    NewOutboundSession {
+        /// Context for the active session.
+        context: Ssu2SessionContext,
+    },
+
+    /// Pending session terminated due to fatal error, e.g., decryption error.
+    SessionTermianted {},
+
+    /// [`SSu2Socket`] has been closed.
+    SocketClosed,
 }

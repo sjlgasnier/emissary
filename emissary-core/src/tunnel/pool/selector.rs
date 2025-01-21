@@ -154,20 +154,28 @@ impl<R: Runtime> ExploratorySelector<R> {
                     // address must exist since the `router_info.is_reachable()` check
                     // above has ensured the router has at least one published address
                     //
-                    // TODO: add support for SSU
-                    let address = reader
-                        .router_info(&router_id)
-                        .addresses
-                        .get(&TransportKind::Ntcp2)
-                        .expect("to exist")
-                        .socket_address
-                        .expect("to exist");
+                    let addresses = [
+                        reader
+                            .router_info(&router_id)
+                            .addresses
+                            .get(&TransportKind::Ntcp2)
+                            .and_then(|address| address.socket_address),
+                        reader
+                            .router_info(&router_id)
+                            .addresses
+                            .get(&TransportKind::Ssu2)
+                            .and_then(|address| address.socket_address),
+                    ];
 
-                    // TODO: add support for ipv6
-                    match address {
-                        SocketAddr::V4(address) => Some((router_id, *address.ip())),
-                        SocketAddr::V6(_) => None,
-                    }
+                    let addresses = addresses
+                        .into_iter()
+                        .filter_map(|address| match address? {
+                            SocketAddr::V4(address) => Some(*address.ip()),
+                            SocketAddr::V6(_) => None,
+                        })
+                        .collect::<HashSet<_>>();
+
+                    (!addresses.is_empty()).then_some((router_id, addresses))
                 })
                 .collect::<Vec<_>>()
         };
@@ -175,9 +183,11 @@ impl<R: Runtime> ExploratorySelector<R> {
         // group addresses by /16 subnet
         addresses.into_iter().fold(
             HashMap::<(u8, u8), Vec<RouterId>>::new(),
-            |mut grouped, (router_id, address)| {
-                let octets = address.octets();
-                grouped.entry((octets[0], octets[1])).or_default().push(router_id);
+            |mut grouped, (router_id, addresses)| {
+                for address in addresses {
+                    let octets = address.octets();
+                    grouped.entry((octets[0], octets[1])).or_default().push(router_id.clone());
+                }
 
                 grouped
             },
@@ -689,7 +699,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -706,7 +716,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -867,7 +877,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -885,7 +895,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -920,7 +930,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -938,7 +948,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1043,7 +1053,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1061,7 +1071,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1099,7 +1109,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1117,7 +1127,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1156,7 +1166,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1174,7 +1184,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1237,7 +1247,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,
@@ -1255,7 +1265,7 @@ mod tests {
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
-                    RouterAddress::new_published(
+                    RouterAddress::new_published_ntcp2(
                         [1u8; 32],
                         [1u8; 16],
                         8888,

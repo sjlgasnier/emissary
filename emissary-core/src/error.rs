@@ -24,6 +24,45 @@ use crate::{
 use alloc::string::String;
 use core::fmt;
 
+/// SSU2 error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ssu2Error {
+    /// Encryption/decryption error.
+    Chacha,
+
+    /// Channel error.
+    Channel(ChannelError),
+
+    /// Invalid protocol version.
+    InvalidVersion,
+
+    /// Malformed packet.
+    Malformed,
+
+    /// Packet is too short.
+    NotEnoughBytes,
+
+    /// Session terminated.
+    SessionTerminated,
+
+    /// Unexpected message.
+    UnexpectedMessage,
+}
+
+impl fmt::Display for Ssu2Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Chacha => write!(f, "encryption/decryption error"),
+            Self::Channel(error) => write!(f, "{error}"),
+            Self::InvalidVersion => write!(f, "invalid protocol version"),
+            Self::Malformed => write!(f, "malformed packet"),
+            Self::NotEnoughBytes => write!(f, "packet is too short"),
+            Self::SessionTerminated => write!(f, "session forcibly terminated"),
+            Self::UnexpectedMessage => write!(f, "unexpected message"),
+        }
+    }
+}
+
 /// Connection error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SessionError {
@@ -361,6 +400,7 @@ pub enum Error {
     Expired,
     Routing(RoutingError),
     Duplicate,
+    Ssu2(Ssu2Error),
 }
 
 impl fmt::Display for Error {
@@ -387,8 +427,9 @@ impl fmt::Display for Error {
             Self::Session(error) => write!(f, "session error: {error}"),
             Self::NetworkMismatch => write!(f, "network mismatch"),
             Self::Expired => write!(f, "message has expired"),
-            Self::Routing(error) => write!(f, "{error}"),
+            Self::Routing(error) => write!(f, "routing: {error}"),
             Self::Duplicate => write!(f, "duplicate message"),
+            Self::Ssu2(error) => write!(f, "ssu2: {error}"),
         }
     }
 }
@@ -405,9 +446,17 @@ impl From<chacha20poly1305::Error> for Error {
     }
 }
 
+// TODO: not good, fix chacha error
 impl From<Error> for SessionError {
     fn from(_: Error) -> Self {
         SessionError::Chacha
+    }
+}
+
+// TODO: not good, fix chacha error
+impl From<Error> for Ssu2Error {
+    fn from(_: Error) -> Self {
+        Ssu2Error::Chacha
     }
 }
 
@@ -422,6 +471,17 @@ impl<T> From<thingbuf::mpsc::errors::TrySendError<T>> for ChannelError {
         match value {
             thingbuf::mpsc::errors::TrySendError::Full(_) => ChannelError::Full,
             thingbuf::mpsc::errors::TrySendError::Closed(_) => ChannelError::Closed,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<T> From<thingbuf::mpsc::errors::TrySendError<T>> for Ssu2Error {
+    fn from(value: thingbuf::mpsc::errors::TrySendError<T>) -> Self {
+        match value {
+            thingbuf::mpsc::errors::TrySendError::Full(_) => Ssu2Error::Channel(ChannelError::Full),
+            thingbuf::mpsc::errors::TrySendError::Closed(_) =>
+                Ssu2Error::Channel(ChannelError::Closed),
             _ => unreachable!(),
         }
     }

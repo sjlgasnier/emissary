@@ -668,7 +668,7 @@ impl<R: Runtime> Destination<R> {
                 .build();
 
             let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-            let ephemeral_public = ephemeral_secret.public_key();
+            let ephemeral_public = ephemeral_secret.public();
             let (garlic_key, garlic_tag) =
                 noise.derive_outbound_garlic_key(floodfills[0].1.clone(), ephemeral_secret);
 
@@ -728,7 +728,7 @@ impl<R: Runtime> Destination<R> {
                 .build();
 
             let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-            let ephemeral_public = ephemeral_secret.public_key();
+            let ephemeral_public = ephemeral_secret.public();
             let (garlic_key, garlic_tag) =
                 noise.derive_outbound_garlic_key(floodfills[1].1.clone(), ephemeral_secret);
 

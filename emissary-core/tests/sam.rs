@@ -46,7 +46,7 @@ async fn make_router(
             disable_metrics: true,
             ..Default::default()
         },
-        ntcp2_config: Some(Ntcp2Config {
+        ntcp2: Some(Ntcp2Config {
             port: 0u16,
             iv: {
                 let mut iv = [0u8; 16];

@@ -28,7 +28,7 @@ use crate::{
         siphash::SipHash, EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     runtime::Runtime,
-    transports::ntcp2::{
+    transport::ntcp2::{
         message::MessageBlock,
         options::{InitiatorOptions, ResponderOptions},
         session::KeyContext,
@@ -152,7 +152,7 @@ impl Initiator {
         // generate ephemeral key pair and apply MixHash(epub)
         let state = Sha256::new().update(state).update(remote_static_key.to_vec()).finalize();
         let sk = EphemeralPrivateKey::random(R::rng());
-        let pk = sk.public_key();
+        let pk = sk.public();
         let state = Sha256::new().update(&state).update(&pk).finalize();
 
         // perform dh and return chaining & local key

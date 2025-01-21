@@ -242,7 +242,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         hop.key_context.reply_key(),
                         (hop_idx + record_idx + 1) as u64,
                     )
-                    .decrypt(record);
+                    .decrypt_ref(record);
                 },
             )
         });
@@ -276,7 +276,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         .build();
 
                     let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-                    let ephemeral_public = ephemeral_secret.public_key();
+                    let ephemeral_public = ephemeral_secret.public();
                     let (key, tag) =
                         noise.derive_outbound_garlic_key(first_hop_static_key, ephemeral_secret);
 
@@ -449,7 +449,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                         .filter(|(index, _)| index != &hop_idx)
                         .for_each(|(index, record)| {
                             ChaCha::with_nonce(hop.key_context.reply_key(), index as u64)
-                                .encrypt(record);
+                                .encrypt_ref(record);
                         });
 
                     Ok(builder.with_hop(hop))

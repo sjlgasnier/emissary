@@ -91,8 +91,8 @@ pub struct RouterAddress {
 }
 
 impl RouterAddress {
-    /// Create new unpublished [`RouterAddress`].
-    pub fn new_unpublished(key: [u8; 32], port: u16) -> Self {
+    /// Create new unpublished NTCP2 [`RouterAddress`].
+    pub fn new_unpublished_ntcp2(key: [u8; 32], port: u16) -> Self {
         let static_key = StaticPrivateKey::from(key).public();
         let key = base64_encode(&static_key);
 
@@ -101,7 +101,7 @@ impl RouterAddress {
         options.insert(Str::from_str("s").unwrap(), Str::from_str(&key).unwrap());
 
         Self {
-            cost: 10,
+            cost: 14,
             expires: Date::new(0),
             transport: TransportKind::Ntcp2,
             socket_address: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)),
@@ -109,8 +109,8 @@ impl RouterAddress {
         }
     }
 
-    /// Create new unpublished [`RouterAddress`].
-    pub fn new_published(key: [u8; 32], iv: [u8; 16], port: u16, host: Ipv4Addr) -> Self {
+    /// Create new unpublished NTCP2 [`RouterAddress`].
+    pub fn new_published_ntcp2(key: [u8; 32], iv: [u8; 16], port: u16, host: Ipv4Addr) -> Self {
         let static_key = StaticPrivateKey::from(key).public();
 
         let mut options = HashMap::<Str, Str>::new();
@@ -124,6 +124,69 @@ impl RouterAddress {
             cost: 10,
             expires: Date::new(0),
             transport: TransportKind::Ntcp2,
+            options,
+            socket_address: Some(SocketAddr::new(IpAddr::V4(host), port)),
+        }
+    }
+
+    /// Create new unpublished SSU2 [`RouterAddress`].
+    pub fn new_unpublished_ssu2(static_key: [u8; 32], intro_key: [u8; 32], port: u16) -> Self {
+        let static_key = {
+            let static_key = StaticPrivateKey::from(static_key).public();
+            base64_encode(&static_key)
+        };
+        let intro_key = base64_encode(intro_key);
+
+        let mut options = HashMap::<Str, Str>::new();
+        options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
+        options.insert(
+            Str::from_str("s").unwrap(),
+            Str::from_str(&static_key).unwrap(),
+        );
+        options.insert(
+            Str::from_str("i").unwrap(),
+            Str::from_str(&intro_key).unwrap(),
+        );
+
+        Self {
+            cost: 14,
+            expires: Date::new(0),
+            transport: TransportKind::Ssu2,
+            socket_address: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)),
+            options,
+        }
+    }
+
+    /// Create new unpublished SSU2 [`RouterAddress`].
+    pub fn new_published_ssu2(
+        static_key: [u8; 32],
+        intro_key: [u8; 32],
+        port: u16,
+        host: Ipv4Addr,
+    ) -> Self {
+        let static_key = {
+            let static_key = StaticPrivateKey::from(static_key).public();
+            base64_encode(&static_key)
+        };
+        let intro_key = base64_encode(intro_key);
+
+        let mut options = HashMap::<Str, Str>::new();
+        options.insert(Str::from("v"), Str::from("2"));
+        options.insert(
+            Str::from_str("s").unwrap(),
+            Str::from_str(&static_key).unwrap(),
+        );
+        options.insert(
+            Str::from_str("i").unwrap(),
+            Str::from_str(&intro_key).unwrap(),
+        );
+        options.insert(Str::from("host"), Str::from(host.to_string()));
+        options.insert(Str::from("port"), Str::from(port.to_string()));
+
+        Self {
+            cost: 10,
+            expires: Date::new(0),
+            transport: TransportKind::Ssu2,
             options,
             socket_address: Some(SocketAddr::new(IpAddr::V4(host), port)),
         }
@@ -202,12 +265,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serialize_deserialize_unpublished() {
-        let serialized = RouterAddress::new_unpublished([1u8; 32], 8888).serialize();
+    fn serialize_deserialize_unpublished_ntcp2() {
+        let serialized = RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888).serialize();
         let static_key = StaticPrivateKey::from([1u8; 32]).public();
 
         let address = RouterAddress::parse(&serialized).unwrap();
-        assert_eq!(address.cost, 10);
+        assert_eq!(address.cost, 14);
         assert_eq!(
             address.options.get(&Str::from("s")),
             Some(&Str::from(base64_encode(&static_key)))
@@ -219,10 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn serialize_deserialize_published() {
-        let serialized =
-            RouterAddress::new_published([1u8; 32], [0xaa; 16], 8888, "127.0.0.1".parse().unwrap())
-                .serialize();
+    fn serialize_deserialize_published_ntcp2() {
+        let serialized = RouterAddress::new_published_ntcp2(
+            [1u8; 32],
+            [0xaa; 16],
+            8888,
+            "127.0.0.1".parse().unwrap(),
+        )
+        .serialize();
         let static_key = StaticPrivateKey::from([1u8; 32]).public();
 
         let address = RouterAddress::parse(&serialized).unwrap();
@@ -234,6 +301,61 @@ mod tests {
         assert_eq!(
             address.options.get(&Str::from("s")),
             Some(&Str::from(base64_encode(&static_key)))
+        );
+        assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
+        assert_eq!(
+            address.options.get(&Str::from("host")),
+            Some(&Str::from("127.0.0.1"))
+        );
+        assert_eq!(
+            address.options.get(&Str::from("port")),
+            Some(&Str::from("8888"))
+        );
+    }
+
+    #[test]
+    fn serialize_deserialize_unpublished_ssu2() {
+        let serialized =
+            RouterAddress::new_unpublished_ssu2([1u8; 32], [2u8; 32], 8888).serialize();
+        let static_key = StaticPrivateKey::from([1u8; 32]).public();
+        let intro_key = [2u8; 32];
+
+        let address = RouterAddress::parse(&serialized).unwrap();
+        assert_eq!(address.cost, 14);
+        assert_eq!(
+            address.options.get(&Str::from("s")),
+            Some(&Str::from(base64_encode(&static_key)))
+        );
+        assert_eq!(
+            address.options.get(&Str::from("i")),
+            Some(&Str::from(base64_encode(&intro_key)))
+        );
+        assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
+        assert!(address.options.get(&Str::from("host")).is_none());
+        assert!(address.options.get(&Str::from("port")).is_none());
+    }
+
+    #[test]
+    fn serialize_deserialize_published_ssu2() {
+        let serialized = RouterAddress::new_published_ssu2(
+            [1u8; 32],
+            [2u8; 32],
+            8888,
+            "127.0.0.1".parse().unwrap(),
+        )
+        .serialize();
+        let static_key = StaticPrivateKey::from([1u8; 32]).public();
+        let intro_key = [2u8; 32];
+
+        let address = RouterAddress::parse(&serialized).unwrap();
+        assert_eq!(address.cost, 10);
+        assert_eq!(
+            address.options.get(&Str::from("s")),
+            Some(&Str::from(base64_encode(&static_key)))
+        );
+        assert_eq!(
+            address.options.get(&Str::from("i")),
+            Some(&Str::from(base64_encode(&intro_key)))
         );
         assert_eq!(address.options.get(&Str::from("v")), Some(&Str::from("2")));
         assert_eq!(

@@ -29,7 +29,7 @@ use crate::{
     },
     primitives::RouterInfo,
     runtime::Runtime,
-    transports::ntcp2::{
+    transport::ntcp2::{
         message::MessageBlock,
         options::{InitiatorOptions, ResponderOptions},
         session::KeyContext,
@@ -262,7 +262,7 @@ impl Responder {
 
         // generate ephemeral key pair and apply MixHash(epub)
         let sk = EphemeralPrivateKey::random(R::rng());
-        let pk = sk.public_key();
+        let pk = sk.public();
         let state = Sha256::new().update(&state).update(&pk).finalize();
 
         // perform dh between initator's and responder's ephemeral keys

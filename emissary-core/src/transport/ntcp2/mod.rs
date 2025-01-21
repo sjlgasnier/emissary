@@ -24,7 +24,7 @@ use crate::{
     profile::ProfileStorage,
     runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener},
     subsystem::SubsystemHandle,
-    transports::{
+    transport::{
         metrics::*,
         ntcp2::{
             listener::Ntcp2Listener,
@@ -170,16 +170,20 @@ impl<R: Runtime> Ntcp2Transport<R> {
         })?;
 
         let address = match (config.publish, config.host) {
-            (true, Some(host)) =>
-                RouterAddress::new_published(config.key, config.iv, socket_address.port(), host),
+            (true, Some(host)) => RouterAddress::new_published_ntcp2(
+                config.key,
+                config.iv,
+                socket_address.port(),
+                host,
+            ),
             (true, None) => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     "ntcp2 requested to be published but no host provided",
                 );
-                RouterAddress::new_unpublished(config.key, socket_address.port())
+                RouterAddress::new_unpublished_ntcp2(config.key, socket_address.port())
             }
-            (_, _) => RouterAddress::new_unpublished(config.key, socket_address.port()),
+            (_, _) => RouterAddress::new_unpublished_ntcp2(config.key, socket_address.port()),
         };
 
         Ok((
@@ -268,8 +272,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(router)) =>
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router })),
+            Poll::Ready(Some(router_id)) =>
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })),
         }
 
         match self.listener.poll_next_unpin(cx) {
@@ -303,13 +307,11 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     //
                     // `TransportManager` will either accept or reject the session
                     let router_info = session.router();
-                    let router = router_info.identity.id();
+                    let router_id = router_info.identity.id();
 
-                    self.pending_connections.insert(router, session);
+                    self.pending_connections.insert(router_id.clone(), session);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
-                        router_info,
-                    }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
                 Some(Err(error)) => {
                     tracing::debug!(
@@ -378,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn dont_publish_ntcp_host_specified() {
         let config = Some(Ntcp2Config {
-            port: 8888,
+            port: 0u16,
             host: Some("8.8.8.8".parse().unwrap()),
             publish: false,
             key: [0xaa; 32],
@@ -396,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn publish_ntcp_but_no_host() {
         let config = Some(Ntcp2Config {
-            port: 8888,
+            port: 0u16,
             host: None,
             publish: true,
             key: [0xaa; 32],

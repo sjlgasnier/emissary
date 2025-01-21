@@ -109,7 +109,7 @@ pub enum MessageType {
 
 impl MessageType {
     /// Serialize [`MessageType`].
-    fn as_u8(&self) -> u8 {
+    pub fn as_u8(&self) -> u8 {
         match self {
             Self::DatabaseStore => 1,
             Self::DatabaseLookup => 2,
@@ -493,6 +493,16 @@ impl Message {
             .with_message_id(self.message_id)
             .with_payload(&self.payload)
             .build()
+    }
+
+    /// Get serialized length of [`Message`] with short header
+    pub fn serialized_len_short(&self) -> usize {
+        self.payload.len() + I2NP_SHORT_HEADER_LEN + 2 // length field
+    }
+
+    /// Get serialized length of [`Message`] with long header
+    pub fn serialized_len_long(&self) -> usize {
+        self.payload.len() + I2NP_STANDARD_HEADER_LEN
     }
 
     /// Returns `true` if [`Message`] is expired.

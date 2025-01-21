@@ -358,7 +358,7 @@ impl ShortInboundSession {
                             .unwrap();
                         record[202..218].copy_from_slice(&tag);
                     } else {
-                        ChaCha::with_nonce(tunnel_keys.reply_key(), idx as u64).encrypt(record);
+                        ChaCha::with_nonce(tunnel_keys.reply_key(), idx as u64).encrypt_ref(record);
                     }
                 });
                 self.state = ShortInboundSessionState::BuildRecordsEncrypted { tunnel_keys };
@@ -687,7 +687,7 @@ impl NoiseContext {
         hop_role: HopRole,
     ) -> OutboundSession {
         let local_ephemeral = EphemeralPrivateKey::random(R::rng());
-        let local_ephemeral_public = local_ephemeral.public_key().to_vec();
+        let local_ephemeral_public = local_ephemeral.public().to_vec();
         let state = {
             let state = Sha256::new()
                 .update(&self.outbound_state)
@@ -781,7 +781,7 @@ impl NoiseContext {
         remote_public: StaticPublicKey,
         ephemeral_secret: EphemeralPrivateKey,
     ) -> (Vec<u8>, Vec<u8>) {
-        let ephemeral_public = ephemeral_secret.public_key();
+        let ephemeral_public = ephemeral_secret.public();
         let state = Sha256::new()
             .update(
                 Sha256::new()
@@ -824,7 +824,7 @@ mod tests {
 
         // derive outbound garlic context
         let ephemeral_secret = EphemeralPrivateKey::random(rand::thread_rng());
-        let ephemeral_public = ephemeral_secret.public_key();
+        let ephemeral_public = ephemeral_secret.public();
         let (local_key, local_state) =
             local_noise.derive_outbound_garlic_key(remote_key.public(), ephemeral_secret);
 

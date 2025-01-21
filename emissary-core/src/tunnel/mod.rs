@@ -26,7 +26,7 @@ use crate::{
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     shutdown::ShutdownHandle,
     subsystem::SubsystemEvent,
-    transports::TransportService,
+    transport::TransportService,
     tunnel::{
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
@@ -497,7 +497,16 @@ impl<R: Runtime> TunnelManager<R> {
             MessageType::Garlic => self.on_garlic(message),
             MessageType::TunnelBuildReply
             | MessageType::Data
-            | MessageType::VariableTunnelBuildReply => unimplemented!(),
+            | MessageType::VariableTunnelBuildReply => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    message_type = ?message.message_type,
+                    "unsupported message type",
+                );
+                debug_assert!(false);
+
+                Ok(())
+            }
             MessageType::DeliveryStatus
             | MessageType::DatabaseStore
             | MessageType::DatabaseLookup

@@ -31,7 +31,9 @@ extern crate alloc;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub use config::{Config, ExploratoryConfig, I2cpConfig, MetricsConfig, Ntcp2Config, SamConfig};
+pub use config::{
+    Config, ExploratoryConfig, I2cpConfig, MetricsConfig, Ntcp2Config, SamConfig, Ssu2Config,
+};
 pub use error::Error;
 pub use profile::Profile;
 
@@ -46,7 +48,7 @@ mod profile;
 mod sam;
 mod shutdown;
 mod subsystem;
-mod transports;
+mod transport;
 mod tunnel;
 mod util;
 

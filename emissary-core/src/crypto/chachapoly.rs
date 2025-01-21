@@ -180,7 +180,7 @@ pub struct ChaCha {
 }
 
 impl ChaCha {
-    /// Create new [`ChachaPoly`] instance with a custom `nonce`.
+    /// Create new [`ChaCha`] instance with a custom `nonce`.
     pub fn with_nonce(key: &[u8], nonce: u64) -> Self {
         let key: [u8; 32] = key.try_into().expect("valid chacha key");
         let key = GenericArray::from(key);
@@ -198,14 +198,36 @@ impl ChaCha {
         }
     }
 
+    /// Create new [`ChaCha`] instance with a custom IV.
+    pub fn with_iv(key: [u8; 32], iv: [u8; 12]) -> Self {
+        let key = GenericArray::from(key);
+        let iv = GenericArray::from(iv);
+
+        Self {
+            cipher: {
+                use chacha20::cipher::KeyIvInit;
+
+                let mut cipher = ChaCha20::new(&key, &iv);
+                cipher.seek(64);
+                cipher
+            },
+        }
+    }
+
     /// Encrypt `plaintext` in place.
-    pub fn encrypt(&mut self, plaintext: &mut [u8]) {
+    pub fn encrypt_ref(&mut self, plaintext: &mut [u8]) {
         self.cipher.apply_keystream(plaintext);
     }
 
     /// Dencrypt `ciphertext` in place.
-    pub fn decrypt(&mut self, ciphertext: &mut [u8]) {
+    pub fn decrypt_ref(&mut self, ciphertext: &mut [u8]) {
         self.cipher.apply_keystream(ciphertext)
+    }
+
+    /// Decrypt constant-size `ciphertext` and return it after encryption.
+    pub fn decrypt<const SIZE: usize>(&mut self, mut ciphertext: [u8; SIZE]) -> [u8; SIZE] {
+        self.cipher.apply_keystream(&mut ciphertext);
+        ciphertext
     }
 }
 
@@ -246,7 +268,7 @@ mod tests {
 
         let ciphertext = ChaChaPoly::with_nonce(&key, 1337).encrypt(&plaintext).unwrap();
 
-        ChaCha::with_nonce(&key, 1337u64).encrypt(&mut plaintext);
+        ChaCha::with_nonce(&key, 1337u64).encrypt_ref(&mut plaintext);
 
         assert_eq!(ciphertext[..ciphertext.len() - 16], plaintext);
     }

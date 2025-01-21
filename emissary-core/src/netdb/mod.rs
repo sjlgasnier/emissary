@@ -37,7 +37,7 @@ use crate::{
     profile::{Bucket, ProfileStorage},
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
-    transports::TransportService,
+    transport::TransportService,
     tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
@@ -1648,25 +1648,25 @@ impl<R: Runtime> Future for NetDb<R> {
             match self.query_timers.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(key)) => match self.active.remove(&key) {
-                    Some(kind) => match kind {
-                        QueryKind::Leaseset { tx } => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                key = %base32_encode(&key),
-                                "leaseset query timed out",
-                            );
+                Poll::Ready(Some(key)) =>
+                    if let Some(kind) = self.active.remove(&key) {
+                        match kind {
+                            QueryKind::Leaseset { tx } => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    key = %base32_encode(&key),
+                                    "leaseset query timed out",
+                                );
 
-                            let _ = tx.send(Err(QueryError::Timeout));
+                                let _ = tx.send(Err(QueryError::Timeout));
+                            }
+                            kind => tracing::debug!(
+                                target: LOG_TARGET,
+                                ?kind,
+                                "query timed out",
+                            ),
                         }
-                        kind => tracing::debug!(
-                            target: LOG_TARGET,
-                            ?kind,
-                            "query timed out",
-                        ),
                     },
-                    None => {}
-                },
             }
         }
 
@@ -1716,7 +1716,7 @@ mod tests {
         },
         runtime::mock::MockRuntime,
         subsystem::{InnerSubsystemEvent, SubsystemCommand},
-        transports::ProtocolCommand,
+        transport::ProtocolCommand,
         tunnel::TunnelMessage,
     };
     use thingbuf::mpsc::channel;
@@ -2290,7 +2290,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2382,7 +2382,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -2648,7 +2648,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -3118,7 +3118,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -3151,7 +3151,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
@@ -3340,7 +3340,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("99")),
@@ -3497,7 +3497,7 @@ mod tests {
                             ),
                             addresses: HashMap::from_iter([(
                                 TransportKind::Ntcp2,
-                                RouterAddress::new_unpublished([1u8; 32], 8888),
+                                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
                             )]),
                             options: HashMap::from_iter([
                                 (Str::from("netId"), Str::from("2")),
