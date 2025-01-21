@@ -1648,25 +1648,25 @@ impl<R: Runtime> Future for NetDb<R> {
             match self.query_timers.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(key)) => match self.active.remove(&key) {
-                    Some(kind) => match kind {
-                        QueryKind::Leaseset { tx } => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                key = %base32_encode(&key),
-                                "leaseset query timed out",
-                            );
+                Poll::Ready(Some(key)) =>
+                    if let Some(kind) = self.active.remove(&key) {
+                        match kind {
+                            QueryKind::Leaseset { tx } => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    key = %base32_encode(&key),
+                                    "leaseset query timed out",
+                                );
 
-                            let _ = tx.send(Err(QueryError::Timeout));
+                                let _ = tx.send(Err(QueryError::Timeout));
+                            }
+                            kind => tracing::debug!(
+                                target: LOG_TARGET,
+                                ?kind,
+                                "query timed out",
+                            ),
                         }
-                        kind => tracing::debug!(
-                            target: LOG_TARGET,
-                            ?kind,
-                            "query timed out",
-                        ),
                     },
-                    None => {}
-                },
             }
         }
 

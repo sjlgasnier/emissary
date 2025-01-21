@@ -193,7 +193,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             pkt_tx,
             sessions: HashMap::new(),
             socket,
-            static_key: StaticPrivateKey::from(static_key),
+            static_key,
             subsystem_handle,
             unvalidated_sessions: HashMap::new(),
             waker: None,
@@ -293,13 +293,13 @@ impl<R: Runtime> Ssu2Socket<R> {
         let address = router_info.addresses.get(&TransportKind::Ssu2).expect("to exist");
         let intro_key = {
             let intro_key = address.options.get(&Str::from("i")).expect("to exist");
-            let intro_key = base64_decode(&intro_key.as_bytes()).expect("to succeed");
+            let intro_key = base64_decode(intro_key.as_bytes()).expect("to succeed");
 
             TryInto::<[u8; 32]>::try_into(intro_key).expect("to succeed")
         };
         let static_key = {
             let static_key = address.options.get(&Str::from("s")).expect("to exist");
-            let static_key = base64_decode(&static_key.as_bytes()).expect("to succeed");
+            let static_key = base64_decode(static_key.as_bytes()).expect("to succeed");
 
             StaticPublicKey::from_bytes(&static_key).expect("to succeed")
         };
@@ -398,7 +398,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
         let this = &mut *self;
 
         loop {
-            match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.buffer.as_mut()) {
+            match Pin::new(&mut this.socket).poll_recv_from(cx, this.buffer.as_mut()) {
                 Poll::Pending => break,
                 Poll::Ready(None) => {
                     tracing::warn!(
@@ -420,14 +420,12 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             }
         }
 
-        loop {
-            match this.active_sessions.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some((router_id, _dst_id))) => {
-                    // TODO: remove channel
-                    return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id }));
-                }
+        match this.active_sessions.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some((router_id, _dst_id))) => {
+                // TODO: remove channel
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id }));
             }
         }
 

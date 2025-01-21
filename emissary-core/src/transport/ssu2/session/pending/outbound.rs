@@ -289,7 +289,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .build::<R>();
 
         // MixHash(header), MixHash(aepk)
-        self.noise_ctx.mix_hash(message.header()).mix_hash(&ephemeral_key.public());
+        self.noise_ctx.mix_hash(message.header()).mix_hash(ephemeral_key.public());
 
         message.encrypt_payload(&cipher_key, 0u64, self.noise_ctx.state());
         message.encrypt_header(self.intro_key, self.intro_key);
@@ -385,7 +385,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         // decrypt payload
         let mut payload = pkt[64..].to_vec();
         ChaChaPoly::with_nonce(&cipher_key, 0u64)
-            .decrypt_with_ad(&self.noise_ctx.state(), &mut payload)?;
+            .decrypt_with_ad(self.noise_ctx.state(), &mut payload)?;
 
         // MixHash(ciphertext)
         self.noise_ctx.mix_hash(&pkt[64..]);
@@ -393,7 +393,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         // TODO: validate datetime
         // TODO: get our address
 
-        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
+        let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_header_2 =
             Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize_new();
 
@@ -402,14 +402,14 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .with_src_id(self.src_id)
             .with_static_key(local_static_key.public())
             .with_router_info(router_info)
-            .build::<R>();
+            .build();
 
         // MixHash(header) & encrypt public key
         self.noise_ctx.mix_hash(message.header());
         message.encrypt_public_key(&cipher_key, 1u64, self.noise_ctx.state());
 
         // MixHash(apk)
-        self.noise_ctx.mix_hash(&message.public_key());
+        self.noise_ctx.mix_hash(message.public_key());
 
         // MixKey(DH())
         let mut cipher_key = self.noise_ctx.mix_key(&local_static_key, &remote_ephemeral_key);
@@ -458,7 +458,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             "handle `Data` (first ack)",
         );
 
-        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
+        let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
         let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();
 
@@ -467,7 +467,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize_new();
         let k_header_2_ab = TryInto::<[u8; 32]>::try_into(
             Hmac::new(&temp_key)
-                .update(&k_data_ab)
+                .update(k_data_ab)
                 .update(b"HKDFSSU2DataKeys")
                 .update([0x02])
                 .finalize(),
@@ -478,7 +478,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         let k_data_ba =
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize_new();
         let k_header_2_ba = Hmac::new(&temp_key)
-            .update(&k_data_ba)
+            .update(k_data_ba)
             .update(b"HKDFSSU2DataKeys")
             .update([0x02])
             .finalize_new();
@@ -527,7 +527,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                     "outbound session state is poisoned",
                 );
                 debug_assert!(false);
-                return Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}));
+                Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}))
             }
         }
     }

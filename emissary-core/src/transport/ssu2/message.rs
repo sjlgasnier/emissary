@@ -502,7 +502,7 @@ impl Block {
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         }
 
-        let router_info = RouterInfo::parse(&router_info).ok_or_else(|| {
+        let router_info = RouterInfo::parse(router_info).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
                 "malformed router info",
@@ -1316,8 +1316,8 @@ impl SessionRequest {
     /// Encrypt payload.
     pub fn encrypt_payload(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
         // must succeed since all the parameters are controlled by us
-        ChaChaPoly::with_nonce(&cipher_key, nonce)
-            .encrypt_with_ad_new(&state, &mut self.payload)
+        ChaChaPoly::with_nonce(cipher_key, nonce)
+            .encrypt_with_ad_new(state, &mut self.payload)
             .expect("to succeed");
     }
 
@@ -1462,16 +1462,16 @@ impl SessionConfirmed {
     /// Encrypt public key.
     pub fn encrypt_public_key(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
         // must succeed as the parameters are controlled by us
-        ChaChaPoly::with_nonce(&cipher_key, nonce)
-            .encrypt_with_ad_new(&state, &mut self.static_key)
+        ChaChaPoly::with_nonce(cipher_key, nonce)
+            .encrypt_with_ad_new(state, &mut self.static_key)
             .expect("to succeed");
     }
 
     /// Encrypt payload.
     pub fn encrypt_payload(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
         // must succeed as the parameters are controlled by us
-        ChaChaPoly::with_nonce(&cipher_key, nonce)
-            .encrypt_with_ad_new(&state, &mut self.payload)
+        ChaChaPoly::with_nonce(cipher_key, nonce)
+            .encrypt_with_ad_new(state, &mut self.payload)
             .expect("to succeed");
     }
 
@@ -1552,7 +1552,7 @@ impl SessionConfirmedBuilder {
     }
 
     /// Build [`SessionConfirmedBuilder`] into a byte vector.
-    pub fn build<R: Runtime>(mut self) -> SessionConfirmed {
+    pub fn build(mut self) -> SessionConfirmed {
         let header = {
             let mut out = BytesMut::with_capacity(SHORT_HEADER_LEN);
 
@@ -2044,8 +2044,8 @@ impl SessionCreated {
     /// Encrypt payload.
     pub fn encrypt_payload(&mut self, cipher_key: &[u8], nonce: u64, state: &[u8]) {
         // expected to succeed as the parameters are controlled by us
-        ChaChaPoly::with_nonce(&cipher_key, nonce)
-            .encrypt_with_ad_new(&state, &mut self.payload)
+        ChaChaPoly::with_nonce(cipher_key, nonce)
+            .encrypt_with_ad_new(state, &mut self.payload)
             .expect("to succeed");
     }
 

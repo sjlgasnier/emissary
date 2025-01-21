@@ -58,7 +58,7 @@ impl NoiseContext {
 
     /// Performn `MixHash()` for `input`
     pub fn mix_hash(&mut self, input: impl AsRef<[u8]>) -> &mut Self {
-        self.state = Sha256::new().update(&self.state).update(input).finalize_new();
+        self.state = Sha256::new().update(self.state).update(input).finalize_new();
         self
     }
 
@@ -69,9 +69,9 @@ impl NoiseContext {
         public_key: &P,
     ) -> [u8; 32] {
         let mut shared = secret_key.diffie_hellman(public_key);
-        let mut temp_key = Hmac::new(&self.chaining_key).update(&shared).finalize_new();
+        let mut temp_key = Hmac::new(&self.chaining_key).update(shared).finalize_new();
         self.chaining_key = Hmac::new(&temp_key).update([0x01]).finalize_new();
-        let key = Hmac::new(&temp_key).update(&self.chaining_key).update([0x02]).finalize_new();
+        let key = Hmac::new(&temp_key).update(self.chaining_key).update([0x02]).finalize_new();
 
         shared.zeroize();
         temp_key.zeroize();

@@ -135,7 +135,7 @@ impl RouterAddress {
             let static_key = StaticPrivateKey::from(static_key).public();
             base64_encode(&static_key)
         };
-        let intro_key = base64_encode(&intro_key);
+        let intro_key = base64_encode(intro_key);
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from_str("v").unwrap(), Str::from_str("2").unwrap());
@@ -168,7 +168,7 @@ impl RouterAddress {
             let static_key = StaticPrivateKey::from(static_key).public();
             base64_encode(&static_key)
         };
-        let intro_key = base64_encode(&intro_key);
+        let intro_key = base64_encode(intro_key);
 
         let mut options = HashMap::<Str, Str>::new();
         options.insert(Str::from("v"), Str::from("2"));
@@ -318,7 +318,7 @@ mod tests {
         let serialized =
             RouterAddress::new_unpublished_ssu2([1u8; 32], [2u8; 32], 8888).serialize();
         let static_key = StaticPrivateKey::from([1u8; 32]).public();
-        let intro_key = StaticPrivateKey::from([2u8; 32]).public();
+        let intro_key = [2u8; 32];
 
         let address = RouterAddress::parse(&serialized).unwrap();
         assert_eq!(address.cost, 14);
@@ -345,7 +345,7 @@ mod tests {
         )
         .serialize();
         let static_key = StaticPrivateKey::from([1u8; 32]).public();
-        let intro_key = StaticPrivateKey::from([2u8; 32]).public();
+        let intro_key = [2u8; 32];
 
         let address = RouterAddress::parse(&serialized).unwrap();
         assert_eq!(address.cost, 10);

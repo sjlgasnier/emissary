@@ -159,14 +159,12 @@ impl<R: Runtime> ExploratorySelector<R> {
                             .router_info(&router_id)
                             .addresses
                             .get(&TransportKind::Ntcp2)
-                            .map(|address| address.socket_address)
-                            .flatten(),
+                            .and_then(|address| address.socket_address),
                         reader
                             .router_info(&router_id)
                             .addresses
                             .get(&TransportKind::Ssu2)
-                            .map(|address| address.socket_address)
-                            .flatten(),
+                            .and_then(|address| address.socket_address),
                     ];
 
                     let addresses = addresses
@@ -177,11 +175,7 @@ impl<R: Runtime> ExploratorySelector<R> {
                         })
                         .collect::<HashSet<_>>();
 
-                    if addresses.is_empty() {
-                        return None;
-                    } else {
-                        return Some((router_id, addresses));
-                    }
+                    (!addresses.is_empty()).then_some((router_id, addresses))
                 })
                 .collect::<Vec<_>>()
         };

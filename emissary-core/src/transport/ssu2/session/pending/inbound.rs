@@ -290,7 +290,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         // MixKey(DH())
         let mut cipher_key = self.noise_ctx.mix_key(&self.static_key, &ephemeral_key);
 
-        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
+        let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_header_2 =
             Hmac::new(&temp_key).update(b"SessCreateHeader").update([0x01]).finalize_new();
 
@@ -352,7 +352,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         }
 
         // create new session
-        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
+        let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_header_2 =
             Hmac::new(&temp_key).update(b"SessionConfirmed").update([0x01]).finalize_new();
 
@@ -470,7 +470,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         let intro_key = base64_decode(intro_key.as_bytes()).unwrap();
         let intro_key = TryInto::<[u8; 32]>::try_into(intro_key).unwrap();
 
-        let temp_key = Hmac::new(&self.noise_ctx.chaining_key()).update([]).finalize();
+        let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
         let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();
 
@@ -478,7 +478,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         let k_data_ab =
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize_new();
         let k_header_2_ab = Hmac::new(&temp_key)
-            .update(&k_data_ab)
+            .update(k_data_ab)
             .update(b"HKDFSSU2DataKeys")
             .update([0x02])
             .finalize_new();
@@ -487,7 +487,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
         let k_data_ba =
             Hmac::new(&temp_key).update(b"HKDFSSU2DataKeys").update([0x01]).finalize_new();
         let k_header_2_ba = Hmac::new(&temp_key)
-            .update(&k_data_ba)
+            .update(k_data_ba)
             .update(b"HKDFSSU2DataKeys")
             .update([0x02])
             .finalize_new();
@@ -541,7 +541,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                     "inbound session state is poisoned",
                 );
                 debug_assert!(false);
-                return Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}));
+                Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}))
             }
         }
     }

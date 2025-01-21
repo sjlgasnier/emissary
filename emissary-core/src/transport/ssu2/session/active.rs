@@ -369,7 +369,7 @@ impl<R: Runtime> Ssu2Session<R> {
         ChaChaPoly::with_nonce(&self.recv_key_ctx.k_data, pkt_num as u64)
             .decrypt_with_ad(&pkt[..16], &mut payload)?;
 
-        let blocks = Block::parse(&payload).ok_or_else(|| Ssu2Error::Malformed)?;
+        let blocks = Block::parse(&payload).ok_or(Ssu2Error::Malformed)?;
 
         // TODO: shut down the sesssion
         // TODO: iterate only once?
