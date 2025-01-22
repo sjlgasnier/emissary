@@ -409,6 +409,7 @@ impl LeaseSet2 {
     pub fn random() -> (LeaseSet2, SigningPrivateKey) {
         use crate::{crypto::StaticPrivateKey, runtime::mock::MockRuntime};
         use rand::{Rng, RngCore};
+        use std::time::SystemTime;
 
         let mut rng = rand::thread_rng();
 
@@ -437,19 +438,23 @@ impl LeaseSet2 {
             .map(|_| Lease {
                 router_id: RouterId::random(),
                 tunnel_id: TunnelId::from(rng.next_u32()),
-                expires: Duration::from_secs(rng.next_u32() as u64),
+                expires: Duration::from_secs(
+                    (SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
+                        + Duration::from_secs(9 * 60))
+                    .as_secs(),
+                ),
             })
             .collect::<Vec<_>>();
 
-        let published = rng.next_u32();
-        let expires = rng.next_u32() / 10;
+        let published = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
+            - Duration::from_secs(60);
 
         (
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published,
-                    expires: published.saturating_sub(expires),
+                    published: published.as_secs() as u32,
+                    expires: (published + Duration::from_secs(8 * 60)).as_secs() as u32,
                 },
                 public_keys: vec![public_key],
                 leases,

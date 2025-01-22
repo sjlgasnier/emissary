@@ -241,12 +241,21 @@ impl<R: Runtime> Destination<R> {
     /// [`DestinationEvent::LeaseSetFound`], indicating that a lease set is foun and the remote
     /// destination is reachable.
     pub fn query_lease_set(&mut self, destination_id: &DestinationId) -> LeaseSetStatus {
-        if self.remote_destinations.contains_key(destination_id) {
-            return LeaseSetStatus::Found;
-        }
-
         if self.pending_queries.contains(destination_id) {
             return LeaseSetStatus::Pending;
+        }
+
+        if let Some(lease_set) = self.remote_destinations.get(destination_id) {
+            if !lease_set.is_expired::<R>() {
+                return LeaseSetStatus::Found;
+            }
+
+            tracing::debug!(
+                target: LOG_TARGET,
+                %destination_id,
+                "lease set found but it's expired",
+            );
+            self.remote_destinations.remove(destination_id);
         }
 
         tracing::trace!(
@@ -1028,6 +1037,37 @@ mod tests {
 
         // query lease set and verify it exists
         assert_eq!(destination.query_lease_set(&remote), LeaseSetStatus::Found);
+    }
+
+    #[tokio::test]
+    async fn query_lease_set_expired() {
+        let (netdb_handle, _rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let mut destination = Destination::<MockRuntime>::new(
+            DestinationId::random(),
+            StaticPrivateKey::random(MockRuntime::rng()),
+            Bytes::new(),
+            netdb_handle,
+            tp_handle,
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+
+        // insert lease set which expired 10 seconds ago
+        let remote = DestinationId::random();
+        let (mut lease_set, _) = LeaseSet2::random();
+        lease_set.header.expires =
+            (MockRuntime::time_since_epoch() - Duration::from_secs(10)).as_secs() as u32;
+        destination.remote_destinations.insert(remote.clone(), lease_set);
+
+        assert_eq!(
+            destination.query_lease_set(&remote),
+            LeaseSetStatus::NotFound
+        );
+
+        assert!(destination.pending_queries.contains(&remote));
+        assert_eq!(destination.query_futures.len(), 1);
     }
 
     #[tokio::test]
