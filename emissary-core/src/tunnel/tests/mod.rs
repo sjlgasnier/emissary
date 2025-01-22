@@ -226,6 +226,7 @@ pub fn build_outbound_tunnel(
         PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
             TunnelBuildParameters {
                 hops: hops.clone(),
+                name: Str::from("tunnel-pool"),
                 noise: local_noise,
                 message_id,
                 tunnel_info: TunnelInfo::Outbound {
@@ -286,6 +287,7 @@ pub fn build_inbound_tunnel(
     let (pending_tunnel, next_router, message) =
         PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
             hops: hops.clone(),
+            name: Str::from("tunnel-pool"),
             noise: local_noise,
             message_id,
             tunnel_info: TunnelInfo::Inbound {

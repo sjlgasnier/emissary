@@ -640,7 +640,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{StaticPrivateKey, StaticPublicKey},
-        primitives::MessageId,
+        primitives::{MessageId, Str},
         runtime::mock::MockRuntime,
         shutdown::ShutdownContext,
         tunnel::{
@@ -700,6 +700,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -767,6 +768,7 @@ mod tests {
         let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
+                name: Str::from("tunnel-pool"),
                 noise: local_noise,
                 message_id,
                 tunnel_info: TunnelInfo::Inbound {
@@ -831,6 +833,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise.clone(),
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -914,6 +917,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -1000,6 +1004,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -1063,6 +1068,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise.clone(),
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {

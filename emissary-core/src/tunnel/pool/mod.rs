@@ -372,14 +372,15 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     match PendingTunnel::<OutboundTunnel<R>>::create_tunnel::<R>(
                         TunnelBuildParameters {
                             hops,
+                            name: self.config.name.clone(),
+                            noise: self.noise.clone(),
+                            message_id,
                             tunnel_info: TunnelInfo::Outbound {
                                 gateway,
                                 tunnel_id,
                                 router_id: self.noise.local_router_hash().clone(),
                             },
                             receiver: ReceiverKind::Outbound,
-                            message_id,
-                            noise: self.noise.clone(),
                         },
                     ) {
                         Ok((tunnel, router_id, message)) => {
@@ -451,14 +452,15 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     match PendingTunnel::<OutboundTunnel<R>>::create_tunnel::<R>(
                         TunnelBuildParameters {
                             hops,
+                            name: self.config.name.clone(),
+                            noise: self.noise.clone(),
+                            message_id,
                             tunnel_info: TunnelInfo::Outbound {
                                 gateway,
                                 router_id: Bytes::from(Into::<Vec<u8>>::into(router_id)),
                                 tunnel_id,
                             },
                             receiver: ReceiverKind::Outbound,
-                            message_id,
-                            noise: self.noise.clone(),
                         },
                     ) {
                         Ok((tunnel, router_id, message)) => {
@@ -546,6 +548,9 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
             match PendingTunnel::<InboundTunnel>::create_tunnel::<R>(TunnelBuildParameters {
                 hops,
+                name: self.config.name.clone(),
+                noise: self.noise.clone(),
+                message_id,
                 tunnel_info: TunnelInfo::Inbound {
                     tunnel_id,
                     router_id: self.noise.local_router_hash().clone(),
@@ -554,8 +559,6 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     message_rx: tunnel_rx,
                     handle: self.context.context_handle(),
                 },
-                message_id,
-                noise: self.noise.clone(),
             }) {
                 Ok((tunnel, router, message)) => {
                     // add pending tunnel into outbound tunnel build listener and send

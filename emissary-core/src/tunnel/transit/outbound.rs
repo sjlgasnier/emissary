@@ -366,6 +366,7 @@ mod tests {
     use crate::{
         crypto::{EphemeralPublicKey, StaticPrivateKey},
         i2np::HopRole,
+        primitives::Str,
         runtime::mock::MockRuntime,
         tunnel::{
             hop::{
@@ -402,6 +403,7 @@ mod tests {
                         Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
                         obep_key.public(),
                     )],
+                    name: Str::from("tunnel-pool"),
                     noise: NoiseContext::new(
                         obgw_key,
                         Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
@@ -516,6 +518,7 @@ mod tests {
                         Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
                         obep_key.public(),
                     )],
+                    name: Str::from("tunnel-pool"),
                     noise: NoiseContext::new(
                         obgw_key,
                         Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
@@ -626,6 +629,7 @@ mod tests {
                         Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
                         obep_key.public(),
                     )],
+                    name: Str::from("tunnel-pool"),
                     noise: NoiseContext::new(
                         obgw_key,
                         Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),

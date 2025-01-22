@@ -28,7 +28,7 @@ use crate::{
         tunnel::build::short,
         Message, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
-    primitives::{RouterId, TunnelId},
+    primitives::{RouterId, Str, TunnelId},
     runtime::Runtime,
     tunnel::hop::{
         outbound::OutboundTunnel, ReceiverKind, Tunnel, TunnelBuildParameters, TunnelBuilder,
@@ -65,6 +65,9 @@ pub struct PendingTunnel<T: Tunnel> {
     /// Pending tunnel hops.
     hops: VecDeque<TunnelHop>,
 
+    /// Name of the tunnel pool.
+    name: Str,
+
     /// Number of build records (real and fake).
     num_records: usize,
 
@@ -98,10 +101,11 @@ impl<T: Tunnel> PendingTunnel<T> {
     ) -> Result<(Self, RouterId, Message), TunnelError> {
         let TunnelBuildParameters {
             hops,
-            noise,
             message_id,
-            tunnel_info,
+            name,
+            noise,
             receiver,
+            tunnel_info,
         } = parameters;
 
         if hops.len() > MAX_BUILD_RECORDS {
@@ -250,6 +254,7 @@ impl<T: Tunnel> PendingTunnel<T> {
         Ok((
             Self {
                 hops: tunnel_hops,
+                name,
                 num_records,
                 receiver,
                 _tunnel: Default::default(),
@@ -399,7 +404,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             .enumerate()
             .rev()
             .try_fold(
-                TunnelBuilder::new(self.tunnel_id, self.receiver),
+                TunnelBuilder::new(self.name, self.tunnel_id, self.receiver),
                 |builder, (hop_idx, hop)| {
                     let mut record = payload
                         [1 + (hop_idx * SHORT_RECORD_LEN)..1 + ((1 + hop_idx) * SHORT_RECORD_LEN)]
@@ -508,6 +513,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -598,6 +604,7 @@ mod test {
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
+                name: Str::from("tunnel-pool"),
                 noise: local_noise,
                 message_id,
                 tunnel_info: TunnelInfo::Inbound {
@@ -649,6 +656,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -740,6 +748,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -780,6 +789,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -828,6 +838,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
