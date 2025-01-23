@@ -286,7 +286,10 @@ enum QueryKind {
     /// Leaseset query.
     Leaseset {
         /// Oneshot sender for sending the result to caller.
-        tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
+        tx: Option<oneshot::Sender<Result<LeaseSet2, QueryError>>>,
+
+        /// Number of floodfills we still expect to receive a reply from.
+        num_floodfills: usize,
     },
 
     /// Router exploration.
@@ -1180,7 +1183,7 @@ impl<R: Runtime> NetDb<R> {
                             router_id = %router_info.identity.id(),
                             "ignoring router info database store",
                         ),
-                        DatabaseStorePayload::LeaseSet2 { lease_set } => tracing::warn!(
+                        DatabaseStorePayload::LeaseSet2 { lease_set } => tracing::trace!(
                             target: LOG_TARGET,
                             destination_id = %lease_set.header.destination.id(),
                             "ignoring lease set database store",
@@ -1189,7 +1192,7 @@ impl<R: Runtime> NetDb<R> {
                     Some(kind) => match (payload, kind) {
                         (
                             DatabaseStorePayload::LeaseSet2 { lease_set },
-                            QueryKind::Leaseset { tx },
+                            QueryKind::Leaseset { tx, .. },
                         ) => {
                             tracing::trace!(
                                 target: LOG_TARGET,
@@ -1197,7 +1200,9 @@ impl<R: Runtime> NetDb<R> {
                                 "lease set query reply received",
                             );
 
-                            let _ = tx.send(Ok(lease_set));
+                            if let Some(tx) = tx {
+                                let _ = tx.send(Ok(lease_set));
+                            }
                         }
                         (DatabaseStorePayload::RouterInfo { router_info }, QueryKind::Router) => {
                             let router_id = router_info.identity.id();
@@ -1293,15 +1298,42 @@ impl<R: Runtime> NetDb<R> {
                             "router exploration succeeded, send database lookups",
                         );
                     }
-                    Some(QueryKind::Leaseset { tx }) => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            %router_id,
-                            key = ?base32_encode(key),
-                            "lease set lookup failed",
-                        );
+                    Some(QueryKind::Leaseset { tx, num_floodfills }) => {
+                        match (tx, num_floodfills > 1) {
+                            // there's at least one more floodfill left and the lease set hasn't
+                            // been found yet (tx is `Some`), decrease floodfill count by one and
+                            // insert the query back into active queries
+                            (Some(tx), true) => {
+                                tracing::trace!(
+                                    target: LOG_TARGET,
+                                    %router_id,
+                                    key = ?base32_encode(key.clone()),
+                                    num_floodfills_left = ?(num_floodfills - 1),
+                                    "lease set lookup failed",
+                                );
 
-                        let _ = tx.send(Err(QueryError::ValueNotFound));
+                                self.active.insert(
+                                    key,
+                                    QueryKind::Leaseset {
+                                        tx: Some(tx),
+                                        num_floodfills: num_floodfills - 1,
+                                    },
+                                );
+                            }
+                            // this was the last floodfill to hear reply from and all queries
+                            // failed, inform the destination that the lease set lookup failed
+                            (Some(tx), false) => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    %router_id,
+                                    key = ?base32_encode(key),
+                                    "lease set lookup failed",
+                                );
+
+                                let _ = tx.send(Err(QueryError::ValueNotFound));
+                            }
+                            (None, _) => {}
+                        }
                     }
                     Some(QueryKind::Router) => tracing::debug!(
                         target: LOG_TARGET,
@@ -1364,66 +1396,21 @@ impl<R: Runtime> NetDb<R> {
         Ok(())
     }
 
-    /// Query `LeaseSet2` under `key` from `NetDb` and return result to caller via `tx`
+    /// Query `LeaseSet2` under `key` from `NetDb` and return result to caller via `tx`.
+    ///
+    /// Starts at most 3 queries in parallel and the first one that succeeds is sent to the
+    /// destination. The query is considered failed if `DatabaseSearchReply` is received from all
+    /// three floodfill routers or if the query timer expires.
     fn on_query_lease_set(
         &mut self,
         key: Bytes,
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
     ) {
-        let floodfills = self.floodfill_dht.closest(&key, 5usize).collect::<Vec<_>>();
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let num_floodfills = floodfills.len();
 
-        tracing::debug!(
-            target: LOG_TARGET,
-            key = ?base32_encode(&key),
-            num_floodfills = ?floodfills.len(),
-            "query lease set",
-        );
-
-        let Some(Lease {
-            router_id,
-            tunnel_id,
-            ..
-        }) = self.inbound_tunnels.next_tunnel()
-        else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                key = ?base32_encode(&key),
-                "cannot send lease set query, no inbound tunnel available",
-            );
-            debug_assert!(false);
-
-            let _ = tx.send(Err(QueryError::NoTunnel));
-            return;
-        };
-
-        let Some(outbound_tunnel) = self.outbound_tunnels.next_tunnel() else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                key = ?base32_encode(&key),
-                "cannot send lease set query, no outbound tunnel available",
-            );
-            debug_assert!(false);
-
-            let _ = tx.send(Err(QueryError::NoTunnel));
-            return;
-        };
-
-        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
-            .with_reply_type(ReplyType::Tunnel {
-                tunnel_id,
-                router_id,
-            })
-            .build();
-
-        let message_id = R::rng().next_u32();
-        let message = MessageBuilder::standard()
-            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-            .with_message_type(MessageType::DatabaseLookup)
-            .with_message_id(message_id)
-            .with_payload(&message)
-            .build();
-
-        if floodfills.is_empty() {
+        // should not happen but bail out early if there no floodfills
+        if num_floodfills == 0 {
             tracing::warn!(
                 target: LOG_TARGET,
                 "cannot query leaseset, no floodfills",
@@ -1433,30 +1420,84 @@ impl<R: Runtime> NetDb<R> {
             return;
         }
 
-        match self.exploratory_pool_handle.sender().try_send_to_router(
-            outbound_tunnel,
-            floodfills[0].clone(),
-            message,
-        ) {
-            Err(error) => {
+        tracing::debug!(
+            target: LOG_TARGET,
+            key = ?base32_encode(&key),
+            ?floodfills,
+            "query lease set",
+        );
+
+        for floodfill in floodfills {
+            let Some(Lease {
+                router_id,
+                tunnel_id,
+                ..
+            }) = self.inbound_tunnels.next_tunnel()
+            else {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    "cannot send lease set query, no inbound tunnel available",
+                );
+                debug_assert!(false);
+
+                let _ = tx.send(Err(QueryError::NoTunnel));
+                return;
+            };
+
+            let Some(outbound_tunnel) = self.outbound_tunnels.next_tunnel() else {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    "cannot send lease set query, no outbound tunnel available",
+                );
+                debug_assert!(false);
+
+                let _ = tx.send(Err(QueryError::NoTunnel));
+                return;
+            };
+
+            let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
+                .with_reply_type(ReplyType::Tunnel {
+                    tunnel_id,
+                    router_id,
+                })
+                .build();
+
+            let message_id = R::rng().next_u32();
+            let message = MessageBuilder::standard()
+                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+                .with_message_type(MessageType::DatabaseLookup)
+                .with_message_id(message_id)
+                .with_payload(&message)
+                .build();
+
+            if let Err(error) = self.exploratory_pool_handle.sender().try_send_to_router(
+                outbound_tunnel,
+                floodfill.clone(),
+                message,
+            ) {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %floodfill,
                     ?error,
                     "failed to send query",
                 );
-
-                // TODO: correct error, retry later
-                let _ = tx.send(Err(QueryError::Timeout));
-            }
-            Ok(()) => {
-                // store leaseset query into active queries and start timer for the query
-                self.active.insert(key.clone(), QueryKind::Leaseset { tx });
-                self.query_timers.push(async move {
-                    R::delay(QUERY_TIMEOUT).await;
-                    key
-                });
             }
         }
+
+        // store leaseset query into active queries and start timer for the query
+        self.active.insert(
+            key.clone(),
+            QueryKind::Leaseset {
+                tx: Some(tx),
+                num_floodfills,
+            },
+        );
+        self.query_timers.push(async move {
+            R::delay(QUERY_TIMEOUT).await;
+            key
+        });
     }
 
     /// Get `RouterId`'s of the floodfills closest to `key`.
@@ -1651,14 +1692,16 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Ready(Some(key)) =>
                     if let Some(kind) = self.active.remove(&key) {
                         match kind {
-                            QueryKind::Leaseset { tx } => {
+                            QueryKind::Leaseset { tx, .. } => {
                                 tracing::debug!(
                                     target: LOG_TARGET,
                                     key = %base32_encode(&key),
                                     "leaseset query timed out",
                                 );
 
-                                let _ = tx.send(Err(QueryError::Timeout));
+                                if let Some(tx) = tx {
+                                    let _ = tx.send(Err(QueryError::Timeout));
+                                }
                             }
                             kind => tracing::debug!(
                                 target: LOG_TARGET,
@@ -1707,6 +1750,8 @@ impl<R: Runtime> Future for NetDb<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
@@ -3563,5 +3608,551 @@ mod tests {
             }
             _ => panic!("invalid state"),
         }
+    }
+
+    #[tokio::test]
+    async fn netdb_parallel_lease_set_query_first_response_succeeds() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let _floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let key = Bytes::from(lease_set.header.destination.id().to_vec());
+        let (res_tx, mut res_rx) = oneshot::channel();
+
+        // destination asks netdb to query a lease set
+        //
+        // netdb sends the query to three floodfills
+        netdb.on_query_lease_set(key.clone(), res_tx);
+        assert_eq!(netdb.active.len(), 1);
+        assert!((0..3).all(|_| match tm_rx.try_recv().unwrap() {
+            TunnelMessage::RouterDelivery { .. } => true,
+            _ => false,
+        }));
+
+        // create database store message and give it netdb
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseStore,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseStoreBuilder::new(
+                    key.clone(),
+                    DatabaseStoreKind::LeaseSet2 {
+                        lease_set: Bytes::from(lease_set.serialize(&signing_key)),
+                    },
+                )
+                .build()
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(netdb.active.is_empty());
+        assert!(res_rx.try_recv().unwrap().unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn netdb_parallel_lease_set_query_second_response_succeeds() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<VecDeque<_>>();
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let key = Bytes::from(lease_set.header.destination.id().to_vec());
+        let (res_tx, mut res_rx) = oneshot::channel();
+
+        // destination asks netdb to query a lease set
+        //
+        // netdb sends the query to three floodfills
+        netdb.on_query_lease_set(key.clone(), res_tx);
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 3);
+            }
+            _ => panic!("invalid state"),
+        }
+        assert!((0..3).all(|_| match tm_rx.try_recv().unwrap() {
+            TunnelMessage::RouterDelivery { .. } => true,
+            _ => false,
+        }));
+
+        // create database search reply indicating the lease set was not found
+        let closest = (0..3).map(|_| RouterId::random()).collect::<HashSet<_>>();
+
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseSearchReply,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseSearchReply {
+                    from: floodfills.pop_front().unwrap().to_vec(),
+                    key: key.clone(),
+                    routers: closest.clone().into_iter().collect::<Vec<_>>(),
+                }
+                .serialize()
+                .to_vec(),
+            })
+            .unwrap();
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 2);
+            }
+            _ => panic!("invalid state"),
+        }
+
+        // ensure there are 4 queries, one for the leaset and three for the closest floodfills
+        assert_eq!(netdb.active.len(), 4);
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+
+        // create database store message and give it netdb
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseStore,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseStoreBuilder::new(
+                    key.clone(),
+                    DatabaseStoreKind::LeaseSet2 {
+                        lease_set: Bytes::from(lease_set.serialize(&signing_key)),
+                    },
+                )
+                .build()
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(res_rx.try_recv().unwrap().unwrap().is_ok());
+        assert!(netdb.active.get(&key).is_none());
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+    }
+
+    #[tokio::test]
+    async fn netdb_parallel_lease_set_query_third_response_succeeds() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<VecDeque<_>>();
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let key = Bytes::from(lease_set.header.destination.id().to_vec());
+        let (res_tx, mut res_rx) = oneshot::channel();
+
+        // destination asks netdb to query a lease set
+        //
+        // netdb sends the query to three floodfills
+        netdb.on_query_lease_set(key.clone(), res_tx);
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 3);
+            }
+            _ => panic!("invalid state"),
+        }
+        assert!((0..3).all(|_| match tm_rx.try_recv().unwrap() {
+            TunnelMessage::RouterDelivery { .. } => true,
+            _ => false,
+        }));
+
+        // create database search reply indicating the lease set was not found
+        let mut closest = (0..3).map(|_| RouterId::random()).collect::<HashSet<_>>();
+
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseSearchReply,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseSearchReply {
+                    from: floodfills.pop_front().unwrap().to_vec(),
+                    key: key.clone(),
+                    routers: closest.clone().into_iter().collect::<Vec<_>>(),
+                }
+                .serialize()
+                .to_vec(),
+            })
+            .unwrap();
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 2);
+            }
+            _ => panic!("invalid state"),
+        }
+
+        // ensure there are 4 queries, one for the leaset and three for the closest floodfills
+        assert_eq!(netdb.active.len(), 4);
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+
+        // create second database search reply indicating the lease set was not found
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseSearchReply,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseSearchReply {
+                    from: floodfills.pop_front().unwrap().to_vec(),
+                    key: key.clone(),
+                    routers: (0..3)
+                        .map(|_| {
+                            let router_id = RouterId::random();
+                            closest.insert(router_id.clone());
+
+                            router_id
+                        })
+                        .collect::<Vec<_>>(),
+                }
+                .serialize()
+                .to_vec(),
+            })
+            .unwrap();
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 1);
+            }
+            _ => panic!("invalid state"),
+        }
+
+        // ensure there are 4 queries, one for the leaset and three for the closest floodfills
+        assert_eq!(netdb.active.len(), 7);
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+
+        // create database store message and give it netdb
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseStore,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseStoreBuilder::new(
+                    key.clone(),
+                    DatabaseStoreKind::LeaseSet2 {
+                        lease_set: Bytes::from(lease_set.serialize(&signing_key)),
+                    },
+                )
+                .build()
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(res_rx.try_recv().unwrap().unwrap().is_ok());
+        assert!(netdb.active.get(&key).is_none());
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+    }
+
+    #[tokio::test]
+    async fn netdb_parallel_lease_set_query_all_queries_fail() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let mut floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<VecDeque<_>>();
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        let (lease_set, _signing_key) = LeaseSet2::random();
+        let key = Bytes::from(lease_set.header.destination.id().to_vec());
+        let (res_tx, mut res_rx) = oneshot::channel();
+
+        // destination asks netdb to query a lease set
+        //
+        // netdb sends the query to three floodfills
+        netdb.on_query_lease_set(key.clone(), res_tx);
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 3);
+            }
+            _ => panic!("invalid state"),
+        }
+        assert!((0..3).all(|_| match tm_rx.try_recv().unwrap() {
+            TunnelMessage::RouterDelivery { .. } => true,
+            _ => false,
+        }));
+
+        // create database search reply indicating the lease set was not found
+        let mut closest = (0..3).map(|_| RouterId::random()).collect::<HashSet<_>>();
+
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseSearchReply,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseSearchReply {
+                    from: floodfills.pop_front().unwrap().to_vec(),
+                    key: key.clone(),
+                    routers: closest.clone().into_iter().collect::<Vec<_>>(),
+                }
+                .serialize()
+                .to_vec(),
+            })
+            .unwrap();
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 2);
+            }
+            _ => panic!("invalid state"),
+        }
+
+        // ensure there are 4 queries, one for the leaset and three for the closest floodfills
+        assert_eq!(netdb.active.len(), 4);
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+
+        // create second database search reply indicating the lease set was not found
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseSearchReply,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseSearchReply {
+                    from: floodfills.pop_front().unwrap().to_vec(),
+                    key: key.clone(),
+                    routers: (0..3)
+                        .map(|_| {
+                            let router_id = RouterId::random();
+                            closest.insert(router_id.clone());
+
+                            router_id
+                        })
+                        .collect::<Vec<_>>(),
+                }
+                .serialize()
+                .to_vec(),
+            })
+            .unwrap();
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 1);
+            }
+            _ => panic!("invalid state"),
+        }
+
+        // ensure there are 4 queries, one for the leaset and three for the closest floodfills
+        assert_eq!(netdb.active.len(), 7);
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+
+        netdb
+            .on_message(Message {
+                message_type: MessageType::DatabaseSearchReply,
+                message_id: MockRuntime::rng().next_u32(),
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: DatabaseSearchReply {
+                    from: floodfills.pop_front().unwrap().to_vec(),
+                    key: key.clone(),
+                    routers: (0..3)
+                        .map(|_| {
+                            let router_id = RouterId::random();
+                            closest.insert(router_id.clone());
+
+                            router_id
+                        })
+                        .collect::<Vec<_>>(),
+                }
+                .serialize()
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(res_rx.try_recv().unwrap().unwrap().is_err());
+        assert!(netdb.active.get(&key).is_none());
+        assert_eq!(netdb.active.len(), 9);
+        assert!(
+            netdb.active.iter().filter(|(k, _)| k != &&key).all(|(k, kind)| std::matches!(
+                kind,
+                QueryKind::Router
+            ) && closest
+                .contains(&RouterId::from(k.as_ref())))
+        );
+    }
+
+    #[tokio::test]
+    async fn netdb_parallel_lease_set_query_timeout() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let _floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<VecDeque<_>>();
+
+        let (_msg_tx, msg_rx) = channel(64);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterId::random(),
+            true,
+            service,
+            storage,
+            MockRuntime::register_metrics(vec![], None),
+            tp_handle,
+            2u8,
+            msg_rx,
+            Bytes::from(vec![1, 2, 3, 4]),
+        );
+
+        netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        let (lease_set, _signing_key) = LeaseSet2::random();
+        let key = Bytes::from(lease_set.header.destination.id().to_vec());
+        let (res_tx, res_rx) = oneshot::channel();
+
+        // destination asks netdb to query a lease set
+        //
+        // netdb sends the query to three floodfills
+        netdb.on_query_lease_set(key.clone(), res_tx);
+        match netdb.active.get(&key) {
+            Some(QueryKind::Leaseset { num_floodfills, .. }) => {
+                assert_eq!(*num_floodfills, 3);
+            }
+            _ => panic!("invalid state"),
+        }
+        assert!((0..3).all(|_| match tm_rx.try_recv().unwrap() {
+            TunnelMessage::RouterDelivery { .. } => true,
+            _ => false,
+        }));
+
+        // spawn netdb in the background and allow the query to time out
+        tokio::spawn(netdb);
+        assert!(res_rx.await.unwrap().is_err());
     }
 }
