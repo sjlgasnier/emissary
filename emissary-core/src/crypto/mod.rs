@@ -21,6 +21,7 @@ use crate::error::Error;
 use data_encoding::{Encoding, Specification};
 use ed25519_dalek::Signer;
 use lazy_static::lazy_static;
+use p256::ecdsa::signature::Verifier as _;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
@@ -327,6 +328,13 @@ impl AsRef<[u8]> for SigningPrivateKey {
 pub enum SigningPublicKey {
     /// EdDSA.
     Ed25519(ed25519_dalek::VerifyingKey),
+
+    /// ECDSA-SHA256-P256
+    //
+    // Taken from `ire` which is licensed under MIT
+    //
+    // Credits to str4d
+    P256(p256::EncodedPoint, p256::ecdsa::VerifyingKey),
 }
 
 impl SigningPublicKey {
@@ -339,6 +347,16 @@ impl SigningPublicKey {
         ))
     }
 
+    /// Attempt to construct `SigningPublicKey::P256` from `key`.
+    pub fn p256(data: &[u8]) -> Option<Self> {
+        let encoded = p256::EncodedPoint::from_untagged_bytes(data.into());
+
+        Some(Self::P256(
+            encoded,
+            p256::ecdsa::VerifyingKey::from_encoded_point(&encoded).ok()?,
+        ))
+    }
+
     /// Verify `signature` of `message`.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> crate::Result<()> {
         match self {
@@ -348,6 +366,20 @@ impl SigningPublicKey {
 
                 key.verify_strict(message, &signature).map_err(From::from)
             }
+            Self::P256(_, vk) => {
+                let signature =
+                    p256::ecdsa::Signature::try_from(signature).map_err(|_| Error::InvalidData)?;
+
+                vk.verify(message, &signature).map_err(|_| Error::InvalidData)
+            }
+        }
+    }
+
+    /// Get signature length.
+    pub fn signature_len(&self) -> usize {
+        match self {
+            Self::Ed25519(_) => 64usize,
+            Self::P256(_, _) => 64usize,
         }
     }
 }
@@ -356,6 +388,7 @@ impl AsRef<[u8]> for SigningPublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
             Self::Ed25519(key) => key.as_bytes(),
+            Self::P256(pk, _) => &pk.as_bytes()[1..],
         }
     }
 }
