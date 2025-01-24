@@ -375,8 +375,10 @@ impl<R: Runtime> SamSession<R> {
             PendingSessionState::AwaitingSession { stream_id },
         );
 
-        let Some(message) =
-            I2cpPayloadBuilder::<R>::new(&packet).with_protocol(Protocol::Streaming).build()
+        let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
+            .with_protocol(Protocol::Streaming)
+            .with_destination_port(80)
+            .build()
         else {
             tracing::error!(
                 target: LOG_TARGET,
@@ -654,6 +656,7 @@ impl<R: Runtime> SamSession<R> {
 
                     if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
                         .with_protocol(self.session_kind.into())
+                        .with_destination_port(80)
                         .build()
                     {
                         if let Err(error) = self.destination.send_message(&destination_id, message)
@@ -824,6 +827,7 @@ impl<R: Runtime> Future for SamSession<R> {
                 })) => {
                     let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
                         .with_protocol(Protocol::Streaming)
+                        .with_destination_port(80)
                         .build()
                     else {
                         tracing::warn!(

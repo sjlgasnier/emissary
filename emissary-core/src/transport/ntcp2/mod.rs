@@ -82,7 +82,9 @@ pub struct Ntcp2Transport<R: Runtime> {
     pending_connections: HashMap<RouterId, Ntcp2Session<R>>,
 
     /// Pending connections.
-    pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
+    ///
+    /// `RouterId` is `None` for inbound sessions.
+    pending_handshakes: R::JoinSet<Result<Ntcp2Session<R>, (Option<RouterId>, Error)>>,
 
     /// Session manager.
     session_manager: SessionManager<R>,
@@ -313,14 +315,22 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
-                Some(Err(error)) => {
-                    tracing::debug!(
+                Some(Err((router_id, error))) => match router_id {
+                    Some(router_id) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?error,
+                            "failed to connect to router",
+                        );
+                        return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
+                    }
+                    None => tracing::trace!(
                         target: LOG_TARGET,
                         ?error,
-                        "failed to connect to router",
-                    );
-                    return Poll::Ready(Some(TransportEvent::ConnectionFailure {}));
-                }
+                        "failed to accept inbound connection",
+                    ),
+                },
                 None => return Poll::Ready(None),
             }
         }

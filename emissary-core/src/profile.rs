@@ -353,6 +353,26 @@ impl<R: Runtime> ProfileStorage<R> {
         profile.num_test_failures += 1;
         profile.last_activity = R::time_since_epoch();
     }
+
+    /// Record dial success for `router_id`.
+    pub fn dial_succeeded(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_dial_failures += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
+
+    /// Record dial failure for `router_id`.
+    pub fn dial_failed(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        // profile must exist since it's controlled by us
+        profile.num_dial_failures += 1;
+        profile.last_activity = R::time_since_epoch();
+    }
 }
 
 #[cfg(test)]

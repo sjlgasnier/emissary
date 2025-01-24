@@ -68,7 +68,10 @@ pub enum TransportEvent {
     ///
     /// The connection is considered failed if we failed to reach the router
     /// or if there was an error during handshaking.
-    ConnectionFailure {},
+    ConnectionFailure {
+        /// ID of the remote router.
+        router_id: RouterId,
+    },
 }
 
 // TODO: `poll_progress()` - only poll pending streams
@@ -414,9 +417,10 @@ impl<R: Runtime> Future for TransportManager<R> {
                             self.transports[index].reject(&router_id);
                         }
                     }
+                    self.profile_storage.dial_succeeded(&router_id);
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         target: LOG_TARGET,
                         %router_id,
                         "connection closed",
@@ -425,8 +429,9 @@ impl<R: Runtime> Future for TransportManager<R> {
                     self.routers.remove(&router_id);
                     self.metrics_handle.gauge(NUM_CONNECTIONS).decrement(1);
                 }
-                Poll::Ready(Some(TransportEvent::ConnectionFailure {})) => {
+                Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id })) => {
                     self.metrics_handle.counter(NUM_DIAL_FAILURES).increment(1);
+                    self.profile_storage.dial_failed(&router_id);
                 }
             }
 

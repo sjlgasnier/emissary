@@ -373,14 +373,7 @@ impl<R: Runtime> TunnelManager<R> {
             %router_id,
             "failed to open connection to router",
         );
-
-        if self.routers.remove(router_id).is_none() {
-            tracing::debug!(
-                target: LOG_TARGET,
-                %router_id,
-                "connection failure for unknown router",
-            );
-        }
+        self.routers.remove(router_id);
     }
 
     /// Handle garlic message.
