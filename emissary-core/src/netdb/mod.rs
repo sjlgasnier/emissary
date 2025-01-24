@@ -643,20 +643,31 @@ impl<R: Runtime> NetDb<R> {
             return;
         }
 
-        // parse the router info set from the database store, store it in the set of router infos we
-        // keep track of and flood it to three floodfills closest to `key`
-        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
-        self.router_infos.insert(
-            key.clone(),
-            (
-                raw_router_info.clone(),
-                Duration::from_millis(*router_info.published.date()),
-            ),
-        );
+        // add router to profile storage and floodfill dht (if they're a floodfill)
+        // and check if we are a floodfill
+        //
+        // if we are not, exit early as non-floodfill don't flood router infos
+        //
+        // if we are a floodfill and flooding was requested, send the received
+        // router info to three closest floodfills
+        let published = *router_info.published.date();
+
         if router_info.is_floodfill() {
             self.floodfill_dht.add_router(router_id.clone());
         }
         self.profile_storage.add_router(router_info);
+
+        if !self.floodfill {
+            return;
+        }
+
+        // parse the router info set from the database store and store it
+        // in the set of router infos we keep track of
+        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
+        self.router_infos.insert(
+            key.clone(),
+            (raw_router_info.clone(), Duration::from_millis(published)),
+        );
         self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
 
         match reply {
@@ -1172,17 +1183,12 @@ impl<R: Runtime> NetDb<R> {
 
                 match self.active.remove(&key) {
                     None => match payload {
-                        DatabaseStorePayload::RouterInfo { router_info } if self.floodfill => {
+                        DatabaseStorePayload::RouterInfo { router_info } => {
                             self.on_router_info_store(key, reply, &message.payload, router_info);
                         }
                         DatabaseStorePayload::LeaseSet2 { lease_set } if self.floodfill => {
                             self.on_lease_set_store(key, reply, &message.payload, lease_set);
                         }
-                        DatabaseStorePayload::RouterInfo { router_info } => tracing::trace!(
-                            target: LOG_TARGET,
-                            router_id = %router_info.identity.id(),
-                            "ignoring router info database store",
-                        ),
                         DatabaseStorePayload::LeaseSet2 { lease_set } => tracing::trace!(
                             target: LOG_TARGET,
                             destination_id = %lease_set.header.destination.id(),
