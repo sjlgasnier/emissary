@@ -313,9 +313,10 @@ impl<R: Runtime> ProfileStorage<R> {
     #[allow(unused)]
     pub fn tunnel_build_accepted(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_accepted += 1;
         profile.last_activity = R::time_since_epoch();
     }
@@ -324,9 +325,10 @@ impl<R: Runtime> ProfileStorage<R> {
     #[allow(unused)]
     pub fn tunnel_build_rejected(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_rejected += 1;
         profile.last_activity = R::time_since_epoch();
     }
@@ -335,9 +337,10 @@ impl<R: Runtime> ProfileStorage<R> {
     #[allow(unused)]
     pub fn tunnel_build_not_answered(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_unaswered += 1;
         profile.last_activity = R::time_since_epoch();
     }
@@ -346,9 +349,10 @@ impl<R: Runtime> ProfileStorage<R> {
     #[allow(unused)]
     pub fn tunnel_test_succeeded(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_test_successes += 1;
         profile.last_activity = R::time_since_epoch();
     }
@@ -357,31 +361,54 @@ impl<R: Runtime> ProfileStorage<R> {
     #[allow(unused)]
     pub fn tunnel_test_failed(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_test_failures += 1;
         profile.last_activity = R::time_since_epoch();
     }
 
     /// Record dial success for `router_id`.
+    ///
+    /// Profile might not exist if this is an inbound connection.
     pub fn dial_succeeded(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
-        // profile must exist since it's controlled by us
-        profile.num_dial_failures += 1;
-        profile.last_activity = R::time_since_epoch();
+        match inner.get_mut(router_id) {
+            Some(profile) => {
+                profile.num_connection += 1;
+                profile.last_activity = R::time_since_epoch();
+            }
+            None => {
+                let mut profile = Profile::new();
+                profile.num_connection += 1;
+                profile.last_activity = R::time_since_epoch();
+
+                inner.insert(router_id.clone(), profile);
+            }
+        }
     }
 
     /// Record dial failure for `router_id`.
+    ///
+    /// Profile might not exist if this is an inbound connection.
     pub fn dial_failed(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
-        // profile must exist since it's controlled by us
-        profile.num_dial_failures += 1;
-        profile.last_activity = R::time_since_epoch();
+        match inner.get_mut(router_id) {
+            Some(profile) => {
+                profile.num_dial_failures += 1;
+                profile.last_activity = R::time_since_epoch();
+            }
+            None => {
+                let mut profile = Profile::new();
+                profile.num_dial_failures += 1;
+                profile.last_activity = R::time_since_epoch();
+
+                inner.insert(router_id.clone(), profile);
+            }
+        }
     }
 }
 
@@ -534,5 +561,22 @@ mod tests {
 
         assert!(profiles.routers.read().is_empty());
         assert!(profiles.profiles.read().is_empty());
+    }
+
+    #[test]
+    fn create_profile_if_it_doesnt_exist() {
+        let profiles = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+        let router_id = RouterId::random();
+
+        assert!(profiles.routers.read().is_empty());
+        assert!(profiles.profiles.read().is_empty());
+
+        profiles.dial_succeeded(&router_id);
+
+        let reader = profiles.reader();
+        assert_eq!(
+            reader._profiles.get(&router_id).unwrap().num_connection,
+            1usize
+        );
     }
 }
