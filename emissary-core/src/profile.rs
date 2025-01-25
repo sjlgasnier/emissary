@@ -194,13 +194,23 @@ impl<R: Runtime> ProfileStorage<R> {
     pub fn add_router(&self, router_info: RouterInfo) {
         let router_id = router_info.identity.id();
 
-        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
-            tracing::warn!(
+        if !router_info.is_reachable_ntcp2() {
+            tracing::debug!(
                 target: LOG_TARGET,
+                %router_id,
                 caps = %router_info.capabilities,
-                "tried to add unreachable/unusable router",
+                "cannot add router, ntcp2 address is not reachable",
             );
             return;
+        }
+
+        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
+            tracing::trace!(
+                target: LOG_TARGET,
+                %router_id,
+                caps = %router_info.capabilities,
+                "adding potentially unreachable/unusable router",
+            );
         }
 
         {
