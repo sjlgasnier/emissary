@@ -93,6 +93,11 @@ const TUNNEL_TEST_EXPIRATION: Duration = Duration::from_secs(8);
 /// Tunnel channel size.
 const TUNNEL_CHANNEL_SIZE: usize = 64usize;
 
+/// Tunnel test interval.
+///
+/// How often tunnels of the pool are tested.
+const TUNNEL_TEST_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Tunnel pool configuration.
 #[derive(Debug, Clone)]
 pub struct TunnelPoolConfig {
@@ -185,6 +190,9 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     /// Inbound tunnels.
     inbound_tunnels: HashMap<TunnelId, RouterId>,
 
+    /// Last time a tunnel test was performed.
+    last_tunnel_test: R::Instant,
+
     /// Tunnel maintenance timer.
     maintenance_timer: BoxFuture<'static, ()>,
 
@@ -254,6 +262,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 expiring_outbound: HashSet::new(),
                 inbound: R::join_set(),
                 inbound_tunnels: HashMap::new(),
+                last_tunnel_test: R::now(),
                 maintenance_timer: Box::pin(R::delay(Duration::from_secs(0))),
                 metrics,
                 noise,
@@ -643,6 +652,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
         // for each message, start a timer which expires after 8 seconds and if the response is
         // received into the selected inbound tunnel within the time limit, the tunnel is considered
         // operational
+        //
+        // perform test only if enough time has elapsed since the last time
+        if self.last_tunnel_test.elapsed() < TUNNEL_TEST_INTERVAL {
+            return;
+        }
+        self.last_tunnel_test = R::now();
+
         self.outbound
             .keys()
             .filter(|tunnel_id| !self.expiring_outbound.contains(*tunnel_id))
@@ -769,6 +785,13 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // counter for keeping track of how many tunnel builds failed
+        //
+        // it's used to check if `TunnelPool::maintain_pool()` should be called before its timer
+        // expires so the pool doesn't unnecessarily wait for a timeout when it could be building a
+        // tunnel instead
+        let mut num_failed_builds = 0;
+
         // poll pending outbound tunnels
         while let Poll::Ready(Some((tunnel_id, event))) = self.pending_outbound.poll_next_unpin(cx)
         {
@@ -780,6 +803,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         ?error,
                         "failed to build outbound tunnel",
                     );
+                    num_failed_builds += 1;
 
                     self.metrics.counter(NUM_BUILD_FAILURES).increment(1);
                     self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
@@ -824,6 +848,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         ?error,
                         "failed to build inbound tunnel",
                     );
+                    num_failed_builds += 1;
 
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.metrics.counter(NUM_BUILD_FAILURES).increment(1);
@@ -1132,15 +1157,19 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
             }
         }
 
-        futures::ready!(self.maintenance_timer.poll_unpin(cx));
+        match self.maintenance_timer.poll_unpin(cx) {
+            Poll::Ready(()) => {
+                // create new timer and register it into the executor
+                {
+                    self.maintenance_timer = Box::pin(R::delay(TUNNEL_MAINTENANCE_INTERVAL));
+                    let _ = self.maintenance_timer.poll_unpin(cx);
+                }
 
-        // create new timer and register it into the executor
-        {
-            self.maintenance_timer = Box::pin(R::delay(TUNNEL_MAINTENANCE_INTERVAL));
-            let _ = self.maintenance_timer.poll_unpin(cx);
+                self.maintain_pool();
+            }
+            Poll::Pending if num_failed_builds > 0 => self.maintain_pool(),
+            _ => {}
         }
-
-        self.maintain_pool();
 
         Poll::Pending
     }
@@ -1787,8 +1816,6 @@ mod tests {
 
     #[tokio::test]
     async fn build_outbound_client_tunnel() {
-        crate::util::init_logger();
-
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
             .map(|i| {
@@ -2350,7 +2377,7 @@ mod tests {
         assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));
         assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
 
-        assert!(tokio::time::timeout(Duration::from_secs(8), &mut tunnel_pool).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(20), &mut tunnel_pool).await.is_err());
         let Ok(RoutingKind::External {
             router_id: router,
             message,
@@ -2570,7 +2597,7 @@ mod tests {
         assert_eq!(MockRuntime::get_gauge_value(NUM_OUTBOUND_TUNNELS), Some(1));
         assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
 
-        assert!(tokio::time::timeout(Duration::from_secs(8), &mut tunnel_pool).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(20), &mut tunnel_pool).await.is_err());
         let Ok(RoutingKind::External {
             router_id: router,
             message,
