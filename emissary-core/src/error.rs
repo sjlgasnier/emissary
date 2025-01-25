@@ -19,6 +19,7 @@
 use crate::{
     i2np::Message,
     primitives::{MessageId, TunnelId},
+    transport::TerminationReason,
 };
 
 use alloc::string::String;
@@ -43,7 +44,7 @@ pub enum Ssu2Error {
     NotEnoughBytes,
 
     /// Session terminated.
-    SessionTerminated,
+    SessionTerminated(TerminationReason),
 
     /// Unexpected message.
     UnexpectedMessage,
@@ -57,7 +58,7 @@ impl fmt::Display for Ssu2Error {
             Self::InvalidVersion => write!(f, "invalid protocol version"),
             Self::Malformed => write!(f, "malformed packet"),
             Self::NotEnoughBytes => write!(f, "packet is too short"),
-            Self::SessionTerminated => write!(f, "session forcibly terminated"),
+            Self::SessionTerminated(reason) => write!(f, "session forcibly terminated: {reason:?}"),
             Self::UnexpectedMessage => write!(f, "unexpected message"),
         }
     }

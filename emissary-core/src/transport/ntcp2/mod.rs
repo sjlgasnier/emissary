@@ -30,7 +30,7 @@ use crate::{
             listener::Ntcp2Listener,
             session::{Ntcp2Session, SessionManager},
         },
-        Transport, TransportEvent,
+        TerminationReason, Transport, TransportEvent,
     },
 };
 
@@ -73,7 +73,7 @@ pub struct Ntcp2Transport<R: Runtime> {
     metrics: R::MetricsHandle,
 
     /// Open connections.
-    open_connections: R::JoinSet<RouterId>,
+    open_connections: R::JoinSet<(RouterId, TerminationReason)>,
 
     /// Pending connections.
     ///
@@ -274,8 +274,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(router_id)) =>
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })),
+            Poll::Ready(Some((router_id, reason))) =>
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason })),
         }
 
         match self.listener.poll_next_unpin(cx) {

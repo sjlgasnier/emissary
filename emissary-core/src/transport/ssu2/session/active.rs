@@ -23,9 +23,12 @@ use crate::{
     primitives::{MessageId, RouterId},
     runtime::Runtime,
     subsystem::{SubsystemCommand, SubsystemHandle},
-    transport::ssu2::{
-        message::{Block, DataMessageBuilder},
-        Packet,
+    transport::{
+        ssu2::{
+            message::{Block, DataMessageBuilder},
+            Packet,
+        },
+        TerminationReason,
     },
 };
 
@@ -382,7 +385,9 @@ impl<R: Runtime> Ssu2Session<R> {
                 ?reason,
                 "session terminated by remote router",
             );
-            return Err(Ssu2Error::SessionTerminated);
+            return Err(Ssu2Error::SessionTerminated(TerminationReason::ssu2(
+                *reason,
+            )));
         }
 
         let messages = blocks
@@ -560,7 +565,7 @@ impl<R: Runtime> Ssu2Session<R> {
     }
 
     /// Run the event loop of an active SSU2 session.
-    pub async fn run(mut self) -> (RouterId, u64) {
+    pub async fn run(mut self) -> (RouterId, u64, TerminationReason) {
         self.subsystem_handle
             .report_connection_established(self.router_id.clone(), self.cmd_tx.clone())
             .await;
@@ -569,27 +574,21 @@ impl<R: Runtime> Ssu2Session<R> {
         // the peer has disconnected or an error was encoutered
         //
         // inform other subsystems of the disconnection
-        (&mut self).await;
-
-        tracing::debug!(
-            target: LOG_TARGET,
-            router_id = %self.router_id,
-            "connnection closed",
-        );
+        let reason = (&mut self).await;
 
         self.subsystem_handle.report_connection_closed(self.router_id.clone()).await;
-        (self.router_id, self.dst_id)
+        (self.router_id, self.dst_id, reason)
     }
 }
 
 impl<R: Runtime> Future for Ssu2Session<R> {
-    type Output = ();
+    type Output = TerminationReason;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             match self.pkt_rx.poll_recv(cx) {
                 Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(None) => return Poll::Ready(TerminationReason::Unspecified),
                 Poll::Ready(Some(pkt)) => match self.on_packet(pkt) {
                     Ok(()) => {}
                     Err(Ssu2Error::Malformed) => {
@@ -599,14 +598,14 @@ impl<R: Runtime> Future for Ssu2Session<R> {
                         );
                         debug_assert!(false);
                     }
-                    Err(Ssu2Error::SessionTerminated) => return Poll::Ready(()),
+                    Err(Ssu2Error::SessionTerminated(reason)) => return Poll::Ready(reason),
                     Err(Ssu2Error::Chacha) => {
                         tracing::warn!(
                             target: LOG_TARGET,
                             router_id = %self.router_id,
                             "encryption/decryption failure, shutting down session",
                         );
-                        return Poll::Ready(());
+                        return Poll::Ready(TerminationReason::AeadFailure);
                     }
                     Err(_) => {}
                 },
@@ -616,7 +615,7 @@ impl<R: Runtime> Future for Ssu2Session<R> {
         loop {
             match self.cmd_rx.poll_recv(cx) {
                 Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(None) => return Poll::Ready(TerminationReason::Unspecified),
                 Poll::Ready(Some(SubsystemCommand::SendMessage { message })) =>
                     self.on_send_message(message),
                 Poll::Ready(Some(SubsystemCommand::Dummy)) => {}
