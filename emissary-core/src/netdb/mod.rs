@@ -1824,8 +1824,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
-                            published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            offline_signature: None,
+                            published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -1918,8 +1919,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
-                            published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            offline_signature: None,
+                            published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -2002,10 +2004,11 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
+                            expires: (Duration::from_secs(60)).as_secs() as u32,
+                            offline_signature: None,
                             published: (MockRuntime::time_since_epoch()
                                 - Duration::from_secs(5 * 60))
                             .as_secs() as u32,
-                            expires: (Duration::from_secs(60)).as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -2088,8 +2091,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                             expires: Duration::from_secs(10).as_secs() as u32,
+                            offline_signature: None,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -2122,8 +2126,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                             expires: Duration::from_secs(5).as_secs() as u32,
+                            offline_signature: None,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -2156,9 +2161,10 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
+                            expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            offline_signature: None,
                             published: (MockRuntime::time_since_epoch() - Duration::from_secs(60))
                                 .as_secs() as u32,
-                            expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -2514,8 +2520,9 @@ mod tests {
                 LeaseSet2 {
                     header: LeaseSet2Header {
                         destination,
-                        published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                        offline_signature: None,
+                        published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                     },
                     public_keys: vec![sk.public()],
                     leases: vec![lease1.clone(), lease2.clone()],
@@ -2948,8 +2955,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                             expires: Duration::from_secs(5).as_secs() as u32,
+                            offline_signature: None,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -2982,9 +2990,10 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
+                            expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            offline_signature: None,
                             published: (MockRuntime::time_since_epoch() - Duration::from_secs(60))
                                 .as_secs() as u32,
-                            expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],
@@ -3475,8 +3484,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination,
-                            published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            offline_signature: None,
+                            published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         },
                         public_keys: vec![sk.public()],
                         leases: vec![lease1.clone(), lease2.clone()],

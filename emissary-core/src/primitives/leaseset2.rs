@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPublicKey},
+    crypto::{SigningPrivateKey, SigningPublicKey, StaticPublicKey},
     primitives::{Destination, Mapping, RouterId, TunnelId, LOG_TARGET},
     runtime::Runtime,
 };
@@ -33,6 +33,16 @@ use nom::{
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{iter, time::Duration};
 
+/// Signature kind for `EdDSA_SHA512_Ed25519`.
+///
+/// https://geti2p.net/spec/common-structures#key-certificates
+const SIGNATURE_KIND_EDDSA_SHA512_ED25519: u16 = 0x0007;
+
+/// Signature kind for `ECDSA_SHA256_P256`.
+///
+/// https://geti2p.net/spec/common-structures#key-certificates
+const SIGNATURE_KIND_ECDSA_SHA256_P256: u16 = 0x0001;
+
 /// Header for [`LeaseSet2`].
 ///
 /// https://geti2p.net/spec/common-structures#leaseset2header
@@ -41,11 +51,14 @@ pub struct LeaseSet2Header {
     /// Destination for [`LeaseSet2`].
     pub destination: Destination,
 
-    /// When [`LeaseSet2`] was published.
-    pub published: u32,
-
     /// When [`LeaseSet2`] expires.
     pub expires: u32,
+
+    /// Offline key, if specified.
+    pub offline_signature: Option<SigningPublicKey>,
+
+    /// When [`LeaseSet2`] was published.
+    pub published: u32,
 }
 
 impl LeaseSet2Header {
@@ -58,21 +71,92 @@ impl LeaseSet2Header {
         let (rest, expires) = be_u16(rest)?;
         let (rest, flags) = be_u16(rest)?;
 
-        if flags & 1 == 1 {
-            tracing::warn!(
-                target: LOG_TARGET,
-                ?input,
-                "offline signatures not supported",
-            );
-            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+        // no offline signature
+        if flags & 1 == 0 {
+            return Ok((
+                rest,
+                Self {
+                    destination,
+                    expires: published.saturating_add(expires as u32),
+                    offline_signature: None,
+                    published,
+                },
+            ));
+        }
+
+        // save start of the signed segment so the offline signature can be verified
+        let signed_segment = rest;
+
+        let (rest, _expires) = be_u32(rest)?;
+        let (rest, signature_kind) = be_u16(rest)?;
+
+        // extract verifying key from the offline signature
+        //
+        // this key is used to verify the lease set's signature
+        let (rest, verifying_key, verifying_key_len) = match signature_kind {
+            SIGNATURE_KIND_EDDSA_SHA512_ED25519 => {
+                let (rest, key) = take(32usize)(rest)?;
+
+                // must succeed since `key` has sufficient length
+                let verifying_key = SigningPublicKey::from_bytes(
+                    &TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
+                )
+                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+                (rest, verifying_key, 32usize)
+            }
+            SIGNATURE_KIND_ECDSA_SHA256_P256 => {
+                let (rest, key) = take(64usize)(rest)?;
+                let verifying_key = SigningPublicKey::p256(key)
+                    .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+                (rest, verifying_key, 64usize)
+            }
+            _ => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?signature_kind,
+                    "unsupported offline signature kind",
+                );
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
+        };
+
+        // extract offline signature and verify it with the destination's verifying key
+        //
+        // the signed portion covers expiration + signature kind + verifying key
+        let (rest, signature) = take(verifying_key.signature_len())(rest)?;
+
+        match destination.verifying_key() {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "no verifying key specified, cannot verify offline signature",
+                );
+                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+            }
+            Some(key) => {
+                key.verify(&signed_segment[..(6 + verifying_key_len)], signature).map_err(
+                    |error| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "invalid offline signature",
+                        );
+
+                        Err::Error(make_error(input, ErrorKind::Fail))
+                    },
+                )?;
+            }
         }
 
         Ok((
             rest,
             Self {
                 destination,
-                published,
                 expires: published.saturating_add(expires as u32),
+                offline_signature: Some(verifying_key),
+                published,
             },
         ))
     }
@@ -323,15 +407,30 @@ impl LeaseSet2 {
                 bytes.put_u8(3u8);
                 bytes.put_slice(&input[..input.len() - rest.len() - verifying_key.signature_len()]);
 
-                verifying_key.verify(&bytes, signature).map_err(|error| {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        ?error,
-                        "invalid signature for leaseset2",
-                    );
+                match &header.offline_signature {
+                    None => {
+                        verifying_key.verify(&bytes, signature).map_err(|error| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "invalid signature for lease set",
+                            );
 
-                    Err::Error(make_error(input, ErrorKind::Fail))
-                })?;
+                            Err::Error(make_error(input, ErrorKind::Fail))
+                        })?;
+                    }
+                    Some(verifying_key) => {
+                        verifying_key.verify(&bytes, &signature).map_err(|error| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "invalid signature for lease set with offline key",
+                            );
+
+                            Err::Error(make_error(input, ErrorKind::Fail))
+                        })?;
+                    }
+                }
 
                 rest
             }
@@ -459,8 +558,9 @@ impl LeaseSet2 {
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: published.as_secs() as u32,
                     expires: (published + Duration::from_secs(8 * 60)).as_secs() as u32,
+                    offline_signature: None,
+                    published: published.as_secs() as u32,
                 },
                 public_keys: vec![public_key],
                 leases,
@@ -525,8 +625,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases: vec![lease1.clone(), lease2.clone()],
@@ -554,8 +655,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases: vec![],
@@ -609,8 +711,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![],
             leases: vec![lease1.clone(), lease2.clone()],
@@ -645,8 +748,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases,
@@ -741,8 +845,9 @@ mod tests {
             let lease_set = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
                     expires: Duration::from_secs(60).as_secs() as u32,
+                    offline_signature: None,
+                    published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
                 },
                 public_keys: vec![sk.public()],
                 leases: vec![lease1.clone(), lease2.clone()],
@@ -780,8 +885,9 @@ mod tests {
             let lease_set = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: (now - Duration::from_secs(60)).as_secs() as u32,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    offline_signature: None,
+                    published: (now - Duration::from_secs(60)).as_secs() as u32,
                 },
                 public_keys: vec![sk.public()],
                 leases: vec![lease1.clone(), lease2.clone()],
@@ -817,8 +923,9 @@ mod tests {
             let serialized = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: (now).as_secs() as u32,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    offline_signature: None,
+                    published: (now).as_secs() as u32,
                 },
                 public_keys: vec![sk.public()],
                 leases: vec![lease1.clone(), lease2.clone()],
@@ -879,8 +986,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases: vec![lease1.clone(), lease2.clone()],
@@ -940,6 +1048,53 @@ mod tests {
             255, 202, 236, 90, 136, 92, 24, 125, 134, 249, 84, 61, 73, 83, 20, 232, 53, 229, 62,
             143, 21, 204, 24, 200, 226, 232, 226, 13, 119, 50, 165, 163, 243, 173, 233, 198, 85,
             52, 251, 199, 89, 220, 21, 209, 37, 158, 59, 195, 58, 40, 19, 70,
+        ];
+
+        let _ = LeaseSet2::parse(&input).unwrap();
+    }
+
+    #[test]
+    fn offline_signature() {
+        crate::util::init_logger();
+
+        let input = vec![
+            24, 166, 169, 39, 201, 40, 81, 192, 99, 254, 57, 144, 204, 123, 19, 99, 16, 224, 218,
+            218, 95, 90, 61, 49, 141, 4, 243, 119, 192, 97, 124, 47, 92, 220, 228, 185, 127, 3,
+            193, 53, 168, 224, 23, 231, 142, 15, 167, 130, 140, 84, 234, 78, 90, 43, 150, 30, 199,
+            157, 223, 36, 94, 61, 106, 110, 85, 6, 93, 63, 173, 14, 132, 125, 253, 133, 124, 118,
+            101, 229, 231, 87, 9, 159, 211, 21, 77, 26, 196, 169, 21, 146, 37, 85, 219, 81, 76,
+            253, 183, 147, 232, 233, 118, 182, 227, 181, 107, 210, 194, 103, 219, 180, 120, 42,
+            130, 143, 241, 5, 99, 212, 107, 135, 233, 208, 119, 111, 172, 19, 61, 179, 154, 152,
+            45, 221, 144, 237, 124, 190, 68, 36, 125, 149, 148, 117, 19, 3, 94, 77, 29, 240, 7, 99,
+            7, 65, 52, 243, 174, 39, 57, 63, 201, 244, 90, 103, 119, 106, 80, 19, 155, 168, 21, 62,
+            143, 208, 58, 173, 65, 29, 163, 176, 91, 223, 244, 193, 58, 213, 170, 139, 188, 163,
+            207, 90, 153, 32, 118, 126, 51, 233, 153, 38, 248, 210, 78, 112, 60, 246, 54, 255, 18,
+            139, 184, 101, 139, 222, 4, 245, 40, 33, 49, 132, 108, 118, 53, 62, 146, 115, 155, 42,
+            252, 98, 106, 9, 252, 224, 82, 48, 112, 234, 94, 167, 27, 134, 254, 65, 87, 116, 62,
+            77, 126, 193, 244, 191, 165, 43, 139, 123, 172, 19, 117, 214, 15, 179, 240, 232, 255,
+            42, 85, 129, 119, 246, 53, 8, 171, 131, 162, 52, 204, 15, 156, 214, 51, 203, 99, 120,
+            152, 51, 16, 118, 199, 71, 59, 114, 212, 86, 31, 195, 18, 154, 78, 203, 208, 0, 152,
+            74, 7, 14, 56, 201, 198, 221, 129, 20, 22, 198, 197, 247, 105, 100, 42, 68, 54, 76, 47,
+            153, 151, 152, 83, 35, 66, 11, 48, 18, 169, 51, 142, 148, 220, 221, 166, 119, 188, 114,
+            231, 172, 159, 115, 67, 92, 138, 77, 158, 161, 4, 232, 231, 185, 66, 110, 88, 56, 156,
+            164, 173, 127, 213, 199, 247, 5, 21, 61, 208, 204, 49, 164, 34, 56, 241, 148, 80, 108,
+            141, 66, 114, 98, 65, 99, 5, 0, 4, 0, 7, 0, 0, 103, 145, 24, 146, 2, 87, 0, 1, 103,
+            211, 114, 177, 0, 7, 114, 245, 169, 33, 134, 26, 252, 238, 198, 139, 178, 162, 137,
+            244, 248, 219, 134, 158, 177, 169, 36, 111, 194, 146, 62, 64, 132, 131, 205, 60, 141,
+            119, 75, 98, 229, 232, 91, 194, 2, 167, 112, 200, 140, 187, 82, 159, 142, 104, 231, 51,
+            65, 186, 199, 13, 110, 250, 125, 184, 96, 36, 20, 106, 127, 70, 84, 46, 253, 209, 8,
+            190, 88, 186, 122, 152, 13, 39, 3, 238, 211, 221, 88, 159, 203, 116, 189, 186, 222,
+            120, 237, 193, 252, 251, 122, 55, 198, 6, 0, 0, 1, 0, 4, 0, 32, 250, 45, 143, 169, 233,
+            103, 250, 255, 190, 251, 51, 16, 101, 224, 182, 135, 254, 87, 23, 3, 174, 163, 208,
+            233, 164, 53, 89, 73, 254, 223, 166, 2, 2, 110, 27, 112, 170, 104, 203, 23, 254, 172,
+            25, 167, 58, 65, 76, 245, 160, 32, 118, 167, 7, 175, 202, 173, 248, 57, 191, 38, 151,
+            242, 201, 155, 138, 104, 137, 89, 100, 103, 145, 26, 233, 6, 136, 237, 205, 181, 252,
+            77, 120, 184, 187, 162, 8, 12, 158, 188, 212, 200, 65, 245, 132, 161, 220, 83, 103, 54,
+            20, 176, 15, 20, 159, 87, 227, 242, 4, 131, 233, 103, 145, 25, 157, 173, 224, 11, 74,
+            17, 85, 226, 29, 103, 124, 15, 113, 242, 58, 254, 240, 45, 40, 139, 193, 121, 211, 190,
+            82, 37, 199, 31, 103, 111, 110, 151, 44, 204, 145, 204, 134, 61, 81, 45, 239, 98, 43,
+            255, 143, 72, 186, 230, 83, 179, 172, 49, 63, 148, 215, 219, 175, 57, 175, 212, 122,
+            41, 207, 20, 11,
         ];
 
         let _ = LeaseSet2::parse(&input).unwrap();

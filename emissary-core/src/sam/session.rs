@@ -275,8 +275,9 @@ impl<R: Runtime> SamSession<R> {
                 LeaseSet2 {
                     header: LeaseSet2Header {
                         destination: destination.clone(),
-                        published: R::time_since_epoch().as_secs() as u32,
                         expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                        offline_signature: None,
+                        published: R::time_since_epoch().as_secs() as u32,
                     },
                     public_keys: vec![public_key],
                     leases: inbound.values().cloned().collect(),
@@ -912,8 +913,9 @@ impl<R: Runtime> Future for SamSession<R> {
                         LeaseSet2 {
                             header: LeaseSet2Header {
                                 destination: self.dest.clone(),
-                                published: R::time_since_epoch().as_secs() as u32,
                                 expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                                offline_signature: None,
+                                published: R::time_since_epoch().as_secs() as u32,
                             },
                             public_keys: vec![self.encryption_key.public()],
                             leases,

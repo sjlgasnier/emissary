@@ -1359,8 +1359,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination: dest.clone(),
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                             expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                            offline_signature: None,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
                         public_keys: vec![encryption_key.public()],
                         leases,
@@ -1538,8 +1539,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination: dest.clone(),
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                             expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                            offline_signature: None,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
                         public_keys: vec![encryption_key.public()],
                         leases,
@@ -1717,8 +1719,9 @@ mod tests {
                     LeaseSet2 {
                         header: LeaseSet2Header {
                             destination: dest.clone(),
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                             expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                            offline_signature: None,
+                            published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
                         public_keys: vec![encryption_key.public()],
                         leases,

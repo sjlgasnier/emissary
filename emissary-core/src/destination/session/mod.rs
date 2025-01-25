@@ -2050,9 +2050,10 @@ mod tests {
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination: outbound_destination.clone(),
-                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                     expires: (MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60))
                         .as_secs() as u32,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                 },
                 public_keys: vec![outbound_private_key.public()],
                 leases: vec![Lease {
@@ -2279,9 +2280,10 @@ mod tests {
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination: outbound_destination.clone(),
-                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                     expires: (MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60))
                         .as_secs() as u32,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                 },
                 public_keys: vec![outbound_private_key.public()],
                 leases: vec![Lease {
