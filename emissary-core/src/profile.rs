@@ -56,6 +56,9 @@ pub struct Profile {
     /// Number of accepted tunnels.
     pub num_accepted: usize,
 
+    /// Number of times the router has been selecte for a tunnel.
+    pub num_selected: usize,
+
     /// Number of successful connections.
     pub num_connection: usize,
 
@@ -84,6 +87,7 @@ impl Profile {
             num_connection: 0usize,
             num_dial_failures: 0usize,
             num_rejected: 0usize,
+            num_selected: 0usize,
             num_test_failures: 0usize,
             num_test_successes: 0usize,
             num_unaswered: 0usize,
@@ -309,9 +313,31 @@ impl<R: Runtime> ProfileStorage<R> {
             .map_or(false, |router_info| router_info.is_floodfill())
     }
 
+    /// Record that `router_id` was selected for a tunnel.
+    pub fn selected_for_tunnel(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        profile.num_selected += 1;
+    }
+
+    /// Record that `router_id`'s participation for a tunnel could not be determined.
+    ///
+    /// This happens when a build record fails to decrypt, causing the entire build response to be
+    /// unparseable and hops following the malformed hop cannot be decrypted and parsed.
+    pub fn unselected_for_tunnel(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        profile.num_selected = profile.num_selected.saturating_sub(1);
+    }
+
     /// Record that `router_id` accepted a tunnel build request.
-    #[allow(unused)]
-    pub fn tunnel_build_accepted(&self, router_id: &RouterId) {
+    pub fn tunnel_accepted(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
 
         // profile must exist since it's controlled by us
@@ -322,8 +348,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record that `router_id` rejected a tunnel build request.
-    #[allow(unused)]
-    pub fn tunnel_build_rejected(&self, router_id: &RouterId) {
+    pub fn tunnel_rejected(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
 
         // profile must exist since it's controlled by us
@@ -334,8 +359,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record that `router_id` failed to answer a tunnel build request.
-    #[allow(unused)]
-    pub fn tunnel_build_not_answered(&self, router_id: &RouterId) {
+    pub fn tunnel_not_answered(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
 
         // profile must exist since it's controlled by us
@@ -346,7 +370,6 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record test success for a tunnel that `router_id` was a participant of.
-    #[allow(unused)]
     pub fn tunnel_test_succeeded(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
 
@@ -358,7 +381,6 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Record test failure for a tunnel that `router_id` was a participant of.
-    #[allow(unused)]
     pub fn tunnel_test_failed(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
 
@@ -502,6 +524,7 @@ mod tests {
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
                         num_rejected: i + 1,
+                        num_selected: i + 1,
                         num_test_failures: i + 1,
                         num_test_successes: i + 1,
                         num_unaswered: i + 1,
@@ -549,6 +572,7 @@ mod tests {
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
                         num_rejected: i + 1,
+                        num_selected: i + 1,
                         num_test_failures: i + 1,
                         num_test_successes: i + 1,
                         num_unaswered: i + 1,

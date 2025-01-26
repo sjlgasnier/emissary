@@ -20,6 +20,7 @@ use crate::{
     error::ChannelError,
     i2np::Message,
     primitives::{MessageId, TunnelId},
+    profile::ProfileStorage,
     runtime::{JoinSet, Runtime},
     tunnel::{
         hop::{pending::PendingTunnel, Tunnel},
@@ -67,15 +68,19 @@ pub struct TunnelBuildListener<R: Runtime, T: Tunnel + 'static> {
     /// Pending tunnels.
     pending: R::JoinSet<(TunnelId, crate::Result<T>)>,
 
+    /// Profile storage.
+    profile: ProfileStorage<R>,
+
     /// Routing table.
     routing_table: RoutingTable,
 }
 
 impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
     /// Create new [`TunnelBuildListener`].
-    pub fn new(routing_table: RoutingTable) -> Self {
+    pub fn new(routing_table: RoutingTable, profile: ProfileStorage<R>) -> Self {
         Self {
             pending: R::join_set(),
+            profile,
             routing_table,
         }
     }
@@ -93,6 +98,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
         message_rx: oneshot::Receiver<Message>,
     ) {
         let routing_table = self.routing_table.clone();
+        let profile = self.profile.clone();
 
         self.pending.push(async move {
             match select(message_rx, Box::pin(R::delay(TUNNEL_BUILD_EXPIRATION))).await {
@@ -105,6 +111,10 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                         ReceiveKind::ZeroHop => {}
                     }
 
+                    tunnel.hops().iter().for_each(|hop| {
+                        profile.tunnel_not_answered(hop.router_id());
+                    });
+
                     (*tunnel.tunnel_id(), Err(Error::Timeout))
                 }
                 Either::Left((Err(_), _)) => {
@@ -116,13 +126,53 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                         ReceiveKind::ZeroHop => {}
                     }
 
+                    tunnel.hops().iter().for_each(|hop| {
+                        profile.tunnel_not_answered(hop.router_id());
+                    });
+
                     (
                         *tunnel.tunnel_id(),
                         Err(Error::Channel(ChannelError::Closed)),
                     )
                 }
-                Either::Left((Ok(message), _)) =>
-                    (*tunnel.tunnel_id(), tunnel.try_build_tunnel::<R>(message)),
+                Either::Left((Ok(message), _)) => {
+                    let tunnel_id = *tunnel.tunnel_id();
+
+                    match tunnel.try_build_tunnel::<R>(message) {
+                        Err(routers) => (
+                            tunnel_id,
+                            routers
+                                .into_iter()
+                                .fold(None, |acc, (router_id, maybe_error)| match maybe_error {
+                                    // tunnel participation could not be determined
+                                    None => {
+                                        profile.unselected_for_tunnel(&router_id);
+                                        acc
+                                    }
+                                    // tunnel couldn't be built even though this router
+                                    // accepted the tunnel
+                                    Some(Ok(())) => {
+                                        profile.tunnel_accepted(&router_id);
+                                        acc
+                                    }
+                                    // router rejected tunnel or decryption/parsing failed
+                                    Some(Err(error)) => {
+                                        profile.tunnel_rejected(&router_id);
+                                        Some(Err(Error::Tunnel(error)))
+                                    }
+                                })
+                                // the error value must exist since an error was returned
+                                .expect("error value"),
+                        ),
+                        Ok(tunnel) => {
+                            tunnel.hops().iter().for_each(|router_id| {
+                                profile.tunnel_accepted(router_id);
+                            });
+
+                            (tunnel_id, Ok(tunnel))
+                        }
+                    }
+                }
             }
         });
     }
@@ -137,4 +187,129 @@ impl<R: Runtime, T: Tunnel> Stream for TunnelBuildListener<R, T> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::StaticPublicKey,
+        primitives::{MessageId, RouterId, Str, TunnelId},
+        runtime::mock::MockRuntime,
+        tunnel::{
+            hop::{
+                outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
+                TunnelBuildParameters, TunnelInfo,
+            },
+            tests::make_router,
+            NoiseContext,
+        },
+    };
+    use bytes::Bytes;
+    use rand_core::RngCore;
+    use std::time::Duration;
+    use thingbuf::mpsc;
+
+    #[tokio::test]
+    async fn response_channel_closed() {
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, router_info)| {
+                profile_storage.add_router(router_info);
+
+                ((router_hash, pk), noise_context)
+            })
+            .unzip();
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, _next_router, _message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        let (manager_tx, _manager_rx) = mpsc::channel(64);
+        let (transit_tx, _transit_rx) = mpsc::channel(64);
+        let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
+        let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
+
+        let (tx, rx) = oneshot::channel();
+        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx);
+        drop(tx);
+
+        match tokio::time::timeout(Duration::from_secs(2), listener.next())
+            .await
+            .expect("no timeout")
+        {
+            Some((_, Err(Error::Channel(ChannelError::Closed)))) => {}
+            _ => panic!("invalid return value"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_build_timeouts() {
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, router_info)| {
+                profile_storage.add_router(router_info);
+
+                ((router_hash, pk), noise_context)
+            })
+            .unzip();
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, _next_router, _message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        let (manager_tx, _manager_rx) = mpsc::channel(64);
+        let (transit_tx, _transit_rx) = mpsc::channel(64);
+        let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
+        let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
+
+        let (tx, rx) = oneshot::channel();
+        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx);
+        drop(tx);
+
+        match tokio::time::timeout(Duration::from_secs(2), listener.next())
+            .await
+            .expect("no timeout")
+        {
+            Some((_, Err(Error::Channel(ChannelError::Closed)))) => {}
+            _ => panic!("invalid return value"),
+        }
+    }
+}

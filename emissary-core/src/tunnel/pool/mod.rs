@@ -24,6 +24,7 @@ use crate::{
         MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{Lease, MessageId, RouterId, Str, TunnelId},
+    profile::ProfileStorage,
     runtime::{Counter, Gauge, Histogram, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
@@ -233,6 +234,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
         build_parameters: TunnelPoolBuildParameters,
         selector: S,
         routing_table: RoutingTable,
+        profile: ProfileStorage<R>,
         noise: NoiseContext,
         metrics: R::MetricsHandle,
     ) -> (Self, TunnelPoolHandle) {
@@ -267,8 +269,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 metrics,
                 noise,
                 outbound: HashMap::new(),
-                pending_inbound: TunnelBuildListener::new(routing_table.clone()),
-                pending_outbound: TunnelBuildListener::new(routing_table.clone()),
+                pending_inbound: TunnelBuildListener::new(routing_table.clone(), profile.clone()),
+                pending_outbound: TunnelBuildListener::new(routing_table.clone(), profile),
                 pending_tests: R::join_set(),
                 routing_table,
                 selector,
@@ -1050,6 +1052,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             "tunnel test failed",
                         );
 
+                        self.selector.register_tunnel_test_failure(&outbound, &inbound);
                         self.metrics.counter(NUM_TEST_FAILURES).increment(1);
                     }
                     Ok(elapsed) => {
@@ -1062,6 +1065,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             "tunnel test succeeded",
                         );
 
+                        self.selector.register_tunnel_test_success(&outbound, &inbound);
                         self.metrics.counter(NUM_TEST_SUCCESSES).increment(1);
                         self.metrics
                             .histogram(TUNNEL_TEST_DURATIONS)
@@ -1239,6 +1243,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -1324,6 +1329,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -1404,6 +1410,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -1501,6 +1508,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -1598,6 +1606,7 @@ mod tests {
             parameters,
             exploratory_selector.clone(),
             routing_table.clone(),
+            profile_storage.clone(),
             noise.clone(),
             handle.clone(),
         );
@@ -1661,6 +1670,7 @@ mod tests {
                 client_parameters,
                 client_selector,
                 routing_table.clone(),
+                profile_storage,
                 noise,
                 handle.clone(),
             );
@@ -1864,6 +1874,7 @@ mod tests {
             parameters,
             exploratory_selector.clone(),
             routing_table.clone(),
+            profile_storage.clone(),
             noise.clone(),
             handle.clone(),
         );
@@ -1939,6 +1950,7 @@ mod tests {
                 parameters,
                 client_selector,
                 routing_table.clone(),
+                profile_storage,
                 noise,
                 handle.clone(),
             );
@@ -2128,6 +2140,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -2218,6 +2231,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -2318,6 +2332,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );
@@ -2539,6 +2554,7 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
+            profile_storage,
             noise,
             handle.clone(),
         );

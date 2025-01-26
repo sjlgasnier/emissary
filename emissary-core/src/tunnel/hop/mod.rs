@@ -57,6 +57,11 @@ impl TunnelHop {
     pub fn outbound_session(&self) -> &OutboundSession {
         &self.key_context
     }
+
+    /// Get reference to [`TunnelHop`]'s `RouterId`.
+    pub fn router_id(&self) -> &RouterId {
+        &self.router
+    }
 }
 
 /// Tunnel direction.
