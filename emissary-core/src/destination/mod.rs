@@ -332,9 +332,12 @@ impl<R: Runtime> Destination<R> {
             .with_payload(&message)
             .build();
 
+        // select random tunnel for delivery
+        let random_lease = R::rng().next_u32() as usize % leases.len();
+
         if let Err(error) = self.tunnel_pool_handle.sender().try_send_to_tunnel(
-            leases[0].router_id.clone(),
-            leases[0].tunnel_id,
+            leases[random_lease].router_id.clone(),
+            leases[random_lease].tunnel_id,
             message,
         ) {
             tracing::debug!(
