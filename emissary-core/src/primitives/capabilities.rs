@@ -153,6 +153,11 @@ impl Capabilities {
     pub fn is_usable(&self) -> bool {
         self.usable
     }
+
+    /// Is the router considered hidden.
+    pub fn is_hidden(&self) -> bool {
+        self.capabilities.contains("H")
+    }
 }
 
 #[cfg(test)]

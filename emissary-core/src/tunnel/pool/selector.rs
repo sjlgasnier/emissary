@@ -378,8 +378,9 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
         let mut router_ids = self.profile_storage.get_router_ids(
             Bucket::Standard,
             |router_id, router_info, profile| {
-                !profile.is_failing()
+                !profile.is_failing::<R>()
                     && router_info.is_reachable()
+                    && router_info.is_usable()
                     && (self.insecure || self.can_participate(router_id))
             },
         );
@@ -391,7 +392,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             if router_ids.len() < num_hops {
                 let mut fast_router_ids =
                     self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
-                        !profile.is_failing() && router_info.is_reachable()
+                        !profile.is_failing::<R>() && router_info.is_reachable()
                     });
 
                 let num_needed = num_hops - router_ids.len();
@@ -440,7 +441,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             let fast_router_ids = self.profile_storage.get_router_ids(
                 Bucket::Fast,
                 |router_id, router_info, profile| {
-                    !profile.is_failing()
+                    !profile.is_failing::<R>()
                         && router_info.is_reachable()
                         && (self.insecure || self.can_participate(router_id))
                 },
@@ -653,8 +654,9 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
         let mut router_ids = self.exploratory.profile_storage.get_router_ids(
             Bucket::Fast,
             |router_id, router_info, profile| {
-                !profile.is_failing()
+                !profile.is_failing::<R>()
                     && router_info.is_reachable()
+                    && router_info.is_usable()
                     && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
             },
         );
@@ -664,12 +666,12 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             shuffle(&mut router_ids, &mut R::rng());
 
             if router_ids.len() < num_hops {
-                let mut standard_router_ids = self
-                    .exploratory
-                    .profile_storage
-                    .get_router_ids(Bucket::Standard, |_, router_info, profile| {
-                        !profile.is_failing() && router_info.is_reachable()
-                    });
+                let mut standard_router_ids = self.exploratory.profile_storage.get_router_ids(
+                    Bucket::Standard,
+                    |_, router_info, profile| {
+                        !profile.is_failing::<R>() && router_info.is_reachable()
+                    },
+                );
 
                 let num_needed = num_hops - router_ids.len();
                 if num_needed > standard_router_ids.len() {
@@ -717,7 +719,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             let standard_router_ids = self.exploratory.profile_storage.get_router_ids(
                 Bucket::Standard,
                 |router_id, router_info, profile| {
-                    !profile.is_failing()
+                    !profile.is_failing::<R>()
                         && router_info.is_reachable()
                         && (self.exploratory.insecure
                             || self.exploratory.can_participate(router_id))
@@ -1146,10 +1148,14 @@ mod tests {
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
         // 5 unreachable standard routers
-        for _ in 0..5 {
+        for i in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("LU")).unwrap();
+                info.addresses.insert(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_unpublished_ntcp2([i as u8; 32], 2000 + i),
+                );
                 info
             });
         }
@@ -1189,10 +1195,14 @@ mod tests {
         }
 
         // 5 unreachable fast routers
-        for _ in 0..5 {
+        for i in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("OU")).unwrap();
+                info.addresses.insert(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_unpublished_ntcp2([i as u8; 32], 2000 + i),
+                );
                 info
             });
         }

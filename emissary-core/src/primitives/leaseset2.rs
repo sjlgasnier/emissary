@@ -420,7 +420,7 @@ impl LeaseSet2 {
                         })?;
                     }
                     Some(verifying_key) => {
-                        verifying_key.verify(&bytes, &signature).map_err(|error| {
+                        verifying_key.verify(&bytes, signature).map_err(|error| {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 ?error,

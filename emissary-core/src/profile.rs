@@ -35,6 +35,14 @@ use core::{marker::PhantomData, time::Duration};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::profile";
 
+/// Last decline threshold.
+///
+/// TODO: explain
+const LAST_DECLINE_THRESHOLD: Duration = Duration::from_secs(180);
+
+/// How long the router is considered unreachable after last dial failure.
+const UNREACHABILITY_THRESHOLD: Duration = Duration::from_secs(180);
+
 /// Router bucket.
 pub enum Bucket {
     /// Any bucket.
@@ -53,11 +61,18 @@ pub struct Profile {
     /// Last activity, duration since UNIX epoch.
     pub last_activity: Duration,
 
+    /// Last time a tunnel was declined.
+    ///
+    /// `None` if there is no information.
+    pub last_declined: Option<Duration>,
+
+    /// Last time a dial failed.
+    ///
+    /// `None` if there is no information.
+    pub last_dial_failure: Option<Duration>,
+
     /// Number of accepted tunnels.
     pub num_accepted: usize,
-
-    /// Number of times the router has been selecte for a tunnel.
-    pub num_selected: usize,
 
     /// Number of successful connections.
     pub num_connection: usize,
@@ -67,6 +82,9 @@ pub struct Profile {
 
     /// Number of rejected tunnels.
     pub num_rejected: usize,
+
+    /// Number of times the router has been selecte for a tunnel.
+    pub num_selected: usize,
 
     /// Number of test failures for tunnels where the router was a selected hop.
     pub num_test_failures: usize,
@@ -83,6 +101,8 @@ impl Profile {
     fn new() -> Self {
         Self {
             last_activity: Duration::from_secs(0),
+            last_declined: None,
+            last_dial_failure: None,
             num_accepted: 0usize,
             num_connection: 0usize,
             num_dial_failures: 0usize,
@@ -94,9 +114,42 @@ impl Profile {
         }
     }
 
+    /// Has the router recently declined a tunnel.
+    ///
+    /// Decline is either an actual declination or a failure to respond to a request.
+    fn has_recently_declined<R: Runtime>(&self) -> bool {
+        self.last_declined.map_or_else(
+            || false,
+            |last_declined| R::time_since_epoch() - last_declined < LAST_DECLINE_THRESHOLD,
+        )
+    }
+
+    /// Does the router have low participation rate.
+    fn has_low_participation_rate(&self) -> bool {
+        4 * self.num_accepted < self.num_rejected
+    }
+
+    /// Is the router considered unreachable.
+    fn is_unreachable<R: Runtime>(&self) -> bool {
+        self.last_dial_failure.map_or_else(
+            || false,
+            |last_dial_failure| {
+                R::time_since_epoch() - last_dial_failure > UNREACHABILITY_THRESHOLD
+            },
+        )
+    }
+
+    /// Is the router always declining tunnels.
+    fn is_always_declining(&self) -> bool {
+        self.num_accepted == 0 && self.num_rejected >= 5
+    }
+
     /// Is the router considered failing.
-    pub fn is_failing(&self) -> bool {
-        false
+    pub fn is_failing<R: Runtime>(&self) -> bool {
+        self.has_recently_declined::<R>()
+            || self.is_unreachable::<R>()
+            || self.is_always_declining()
+            || self.has_low_participation_rate()
     }
 }
 
@@ -345,6 +398,7 @@ impl<R: Runtime> ProfileStorage<R> {
 
         profile.num_accepted += 1;
         profile.last_activity = R::time_since_epoch();
+        profile.last_declined = None;
     }
 
     /// Record that `router_id` rejected a tunnel build request.
@@ -356,6 +410,7 @@ impl<R: Runtime> ProfileStorage<R> {
 
         profile.num_rejected += 1;
         profile.last_activity = R::time_since_epoch();
+        profile.last_declined = Some(R::time_since_epoch());
     }
 
     /// Record that `router_id` failed to answer a tunnel build request.
@@ -367,6 +422,7 @@ impl<R: Runtime> ProfileStorage<R> {
 
         profile.num_unaswered += 1;
         profile.last_activity = R::time_since_epoch();
+        profile.last_declined = Some(R::time_since_epoch());
     }
 
     /// Record test success for a tunnel that `router_id` was a participant of.
@@ -422,11 +478,13 @@ impl<R: Runtime> ProfileStorage<R> {
             Some(profile) => {
                 profile.num_dial_failures += 1;
                 profile.last_activity = R::time_since_epoch();
+                profile.last_dial_failure = Some(profile.last_activity);
             }
             None => {
                 let mut profile = Profile::new();
                 profile.num_dial_failures += 1;
                 profile.last_activity = R::time_since_epoch();
+                profile.last_dial_failure = Some(profile.last_activity);
 
                 inner.insert(router_id.clone(), profile);
             }
@@ -520,6 +578,8 @@ mod tests {
                     router_id,
                     Profile {
                         last_activity: Duration::from_secs((i as u64 + 1) * 10000),
+                        last_declined: None,
+                        last_dial_failure: None,
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
@@ -568,6 +628,8 @@ mod tests {
                     router_id,
                     Profile {
                         last_activity: Duration::from_secs((i as u64 + 1) * 10000),
+                        last_declined: None,
+                        last_dial_failure: None,
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,

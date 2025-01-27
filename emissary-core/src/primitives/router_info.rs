@@ -306,7 +306,7 @@ impl RouterInfo {
     /// Router is considered reachable if its caps don't specify otherwise and it has at least one
     /// published address.
     pub fn is_reachable(&self) -> bool {
-        if !self.capabilities.is_reachable() {
+        if self.capabilities.is_hidden() {
             return false;
         }
 
@@ -327,6 +327,13 @@ impl RouterInfo {
         }
 
         false
+    }
+
+    /// Is the router usable.
+    ///
+    /// Any router who hasn't published `G` or `E` congestion caps is considered usable.
+    pub fn is_usable(&self) -> bool {
+        self.capabilities.is_usable()
     }
 
     /// Get network ID of the [`RouterInfo`].
@@ -729,12 +736,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published_ntcp2(
-                    [1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".parse().unwrap(),
-                ),
+                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),
