@@ -76,7 +76,7 @@ mod types;
 const LOG_TARGET: &str = "emissary::netdb";
 
 /// `NetDb` query timeout.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Router info republish timeout.
 const ROUTER_INFO_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
