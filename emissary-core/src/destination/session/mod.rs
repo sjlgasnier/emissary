@@ -285,13 +285,12 @@ impl<R: Runtime> SessionManager<R> {
         )
         .build();
 
-        let hash = destination_id.to_vec();
         let builder = GarlicMessageBuilder::default()
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                GarlicDeliveryInstructions::Destination { hash: &hash },
+                GarlicDeliveryInstructions::Local,
                 &database_store,
             )
             .with_ack_request();
@@ -379,13 +378,12 @@ impl<R: Runtime> SessionManager<R> {
                         )
                         .build();
 
-                        let hash = destination_id.to_vec();
                         let builder = builder
                             .with_garlic_clove(
                                 MessageType::DatabaseStore,
                                 MessageId::from(R::rng().next_u32()),
                                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                GarlicDeliveryInstructions::Destination { hash: &hash },
+                                GarlicDeliveryInstructions::Local,
                                 &database_store,
                             )
                             .with_ack_request();
