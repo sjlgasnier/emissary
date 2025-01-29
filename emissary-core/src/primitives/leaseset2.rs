@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{SigningPrivateKey, SigningPublicKey, StaticPublicKey},
-    primitives::{Destination, Mapping, RouterId, TunnelId, LOG_TARGET},
+    primitives::{Destination, Mapping, OfflineSignature, RouterId, TunnelId, LOG_TARGET},
     runtime::Runtime,
 };
 
@@ -32,16 +32,6 @@ use nom::{
 
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{iter, time::Duration};
-
-/// Signature kind for `EdDSA_SHA512_Ed25519`.
-///
-/// https://geti2p.net/spec/common-structures#key-certificates
-const SIGNATURE_KIND_EDDSA_SHA512_ED25519: u16 = 0x0007;
-
-/// Signature kind for `ECDSA_SHA256_P256`.
-///
-/// https://geti2p.net/spec/common-structures#key-certificates
-const SIGNATURE_KIND_ECDSA_SHA256_P256: u16 = 0x0001;
 
 /// Header for [`LeaseSet2`].
 ///
@@ -84,71 +74,16 @@ impl LeaseSet2Header {
             ));
         }
 
-        // save start of the signed segment so the offline signature can be verified
-        let signed_segment = rest;
-
-        let (rest, _expires) = be_u32(rest)?;
-        let (rest, signature_kind) = be_u16(rest)?;
-
-        // extract verifying key from the offline signature
-        //
-        // this key is used to verify the lease set's signature
-        let (rest, verifying_key, verifying_key_len) = match signature_kind {
-            SIGNATURE_KIND_EDDSA_SHA512_ED25519 => {
-                let (rest, key) = take(32usize)(rest)?;
-
-                // must succeed since `key` has sufficient length
-                let verifying_key = SigningPublicKey::from_bytes(
-                    &TryInto::<[u8; 32]>::try_into(key).expect("to succeed"),
-                )
-                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-                (rest, verifying_key, 32usize)
-            }
-            SIGNATURE_KIND_ECDSA_SHA256_P256 => {
-                let (rest, key) = take(64usize)(rest)?;
-                let verifying_key = SigningPublicKey::p256(key)
-                    .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-                (rest, verifying_key, 64usize)
-            }
-            _ => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?signature_kind,
-                    "unsupported offline signature kind",
-                );
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
-            }
+        let Some(verifying_key) = destination.verifying_key() else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "no verifying key specified, cannot verify offline signature",
+            );
+            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         };
 
-        // extract offline signature and verify it with the destination's verifying key
-        //
-        // the signed portion covers expiration + signature kind + verifying key
-        let (rest, signature) = take(verifying_key.signature_len())(rest)?;
-
-        match destination.verifying_key() {
-            None => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "no verifying key specified, cannot verify offline signature",
-                );
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
-            }
-            Some(key) => {
-                key.verify(&signed_segment[..(6 + verifying_key_len)], signature).map_err(
-                    |error| {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "invalid offline signature",
-                        );
-
-                        Err::Error(make_error(input, ErrorKind::Fail))
-                    },
-                )?;
-            }
-        }
+        // parse and verify offline signature and get key for verifying the lease set's signature
+        let (rest, verifying_key) = OfflineSignature::parse_frame(rest, verifying_key)?;
 
         Ok((
             rest,
@@ -1055,8 +990,6 @@ mod tests {
 
     #[test]
     fn offline_signature() {
-        crate::util::init_logger();
-
         let input = vec![
             24, 166, 169, 39, 201, 40, 81, 192, 99, 254, 57, 144, 204, 123, 19, 99, 16, 224, 218,
             218, 95, 90, 61, 49, 141, 4, 243, 119, 192, 97, 124, 47, 92, 220, 228, 185, 127, 3,

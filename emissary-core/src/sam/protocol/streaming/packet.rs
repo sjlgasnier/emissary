@@ -19,8 +19,8 @@
 #![allow(unused)]
 
 use crate::{
-    crypto::SigningPrivateKey,
-    primitives::{Destination, DestinationId},
+    crypto::{SigningPrivateKey, SigningPublicKey},
+    primitives::{Destination, DestinationId, OfflineSignature},
     sam::protocol::streaming::LOG_TARGET,
 };
 
@@ -58,8 +58,8 @@ pub struct Flags<'a> {
     /// Maximum packet size, if received.
     max_packet_size: Option<u16>,
 
-    /// Offline signature, if received.
-    offline_signature: Option<&'a [u8]>,
+    /// Signing public key from [`OfflineSignature`].
+    offline_signature: Option<SigningPublicKey>,
 
     /// Requested delay, if received.
     requested_delay: Option<u16>,
@@ -87,7 +87,31 @@ impl<'a> Flags<'a> {
         };
 
         let (rest, offline_signature) = match (flags >> 11) & 1 == 1 {
-            true => todo!("offline signatures not supported"),
+            true => match destination.as_ref() {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "cannot verify offline signature, `FROM_INLCUDED` missing",
+                    );
+                    debug_assert!(false);
+                    return Err(Err::Error(make_error(options, ErrorKind::Fail)));
+                }
+                Some(destination) => match destination.verifying_key() {
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "dsa-sha1 offline keys not supported",
+                        );
+                        return Err(Err::Error(make_error(options, ErrorKind::Fail)));
+                    }
+                    Some(verifying_key) => {
+                        let (rest, verifying_key) =
+                            OfflineSignature::parse_frame(rest, verifying_key)?;
+
+                        (rest, Some(verifying_key))
+                    }
+                },
+            },
             false => (rest, None),
         };
 
@@ -170,8 +194,8 @@ impl<'a> Flags<'a> {
     }
 
     /// Get included offline signature, if received.
-    pub fn offline_signature(&self) -> Option<&'a [u8]> {
-        self.offline_signature
+    pub fn offline_signature(&self) -> Option<&SigningPublicKey> {
+        self.offline_signature.as_ref()
     }
 }
 
