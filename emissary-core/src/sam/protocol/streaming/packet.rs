@@ -41,6 +41,9 @@ const MIN_HEADER_SIZE: usize = 22usize;
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
 
+/// DSA-SHA1 signature length.
+const DSA_SIGNATURE_LEN: usize = 40usize;
+
 /// MTU size.
 const MTU: usize = 1812usize;
 
@@ -89,7 +92,22 @@ impl<'a> Flags<'a> {
         };
 
         let (rest, signature) = match (flags >> 3) & 1 == 1 {
-            true => take(64usize)(rest).map(|(rest, signature)| (rest, Some(signature)))?,
+            true => match destination.as_ref() {
+                None => {
+                    // destination not specified, optimistically take rest of the input
+                    let (rest, signature) = take(rest.len())(rest)?;
+
+                    (rest, Some(rest))
+                }
+                Some(destination) => match destination.verifying_key() {
+                    None => {
+                        let (rest, signature) = take(DSA_SIGNATURE_LEN)(rest)?;
+                        (rest, Some(signature))
+                    }
+                    Some(verifying_key) => take(verifying_key.signature_len())(rest)
+                        .map(|(rest, signature)| (rest, Some(signature)))?,
+                },
+            },
             false => (rest, None),
         };
 
@@ -166,6 +184,7 @@ impl<'a> fmt::Debug for Flags<'a> {
 /// [`Packet`] peek info.
 ///
 /// Used to peek into packet so it can be handled correctly without fully deserializing it.
+#[derive(Debug)]
 pub struct PeekInfo {
     /// Packet flags.
     flags: u16,

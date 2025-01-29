@@ -82,9 +82,6 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 /// Maximum `SYN` retries before the remote destination is considered unreachable.
 const MAX_SYN_RETRIES: usize = 3usize;
 
-/// Signature length.
-const SIGNATURE_LEN: usize = 64usize;
-
 /// Direction of stream.
 pub enum Direction {
     /// Inbound stream.
@@ -338,23 +335,28 @@ impl<R: Runtime> StreamManager<R> {
         {
             match destination.verifying_key() {
                 None => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        "verifying key missing from destination",
-                    );
-                    return Err(StreamingError::VerifyingKeyMissing);
+                    // TODO: verify dsa signature
                 }
                 Some(verifying_key) => {
                     // signature field is the last field of options, meaning it starts at
-                    // `original.len() - payload.len() - SIGNATURE_LEN`
+                    // `original.len() - payload.len() - verifying_key.signature_len()`
                     //
                     // in order to verify the signature, the calculated signature must be filled
                     // with zeros
                     let mut original = packet.to_vec();
-                    let signature_start = original.len() - payload.len() - SIGNATURE_LEN;
-                    original[signature_start..signature_start + SIGNATURE_LEN]
-                        .copy_from_slice(&[0u8; SIGNATURE_LEN]);
+
+                    if original.len() < payload.len() + verifying_key.signature_len() {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "cannot verify signature, packet is too short",
+                        );
+                        return Err(StreamingError::Malformed);
+                    }
+
+                    let signature_start =
+                        original.len() - payload.len() - verifying_key.signature_len();
+                    original[signature_start..signature_start + verifying_key.signature_len()]
+                        .copy_from_slice(&vec![0u8; verifying_key.signature_len()]);
 
                     verifying_key.verify(&original, signature).map_err(|error| {
                         tracing::warn!(
