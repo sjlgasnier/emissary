@@ -293,6 +293,11 @@ impl<R: Runtime> ProfileStorage<R> {
         self.routers.read().get(router).cloned()
     }
 
+    /// Check if [`ProfileStorage`] contains `router_id`.
+    pub fn contains(&self, router_id: &RouterId) -> bool {
+        self.routers.read().contains_key(router_id)
+    }
+
     /// Get `RouterId`s of those routers that pass `filter`.
     pub fn get_router_ids(
         &self,
