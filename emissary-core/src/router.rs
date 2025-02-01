@@ -207,7 +207,7 @@ impl<R: Runtime> Router<R> {
                 TunnelManager::<R>::new(
                     transport_service,
                     local_router_info.clone(),
-                    local_static_key,
+                    local_static_key.clone(),
                     metrics_handle.clone(),
                     profile_storage.clone(),
                     exploratory.into(),
@@ -233,6 +233,7 @@ impl<R: Runtime> Router<R> {
                 net_id.unwrap_or(NET_ID),
                 netdb_msg_rx,
                 Bytes::from(serialized_router_info.clone()),
+                local_static_key,
             );
 
             R::spawn(netdb);

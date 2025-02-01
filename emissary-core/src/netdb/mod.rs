@@ -17,7 +17,10 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base32_encode, base64_encode, StaticPublicKey},
+    crypto::{
+        base32_encode, base64_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey,
+        StaticPrivateKey, StaticPublicKey,
+    },
     error::{Error, QueryError},
     i2np::{
         database::{
@@ -29,19 +32,20 @@ use crate::{
             },
         },
         delivery_status::DeliveryStatus,
+        garlic::{DeliveryInstructions, GarlicMessageBuilder},
         tunnel::gateway::TunnelGateway,
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
-    primitives::{Lease, LeaseSet2, RouterId, RouterInfo, TunnelId},
+    primitives::{Lease, LeaseSet2, MessageId, RouterId, RouterInfo, TunnelId},
     profile::{Bucket, ProfileStorage},
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transport::TransportService,
-    tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
+    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
@@ -327,24 +331,14 @@ pub struct NetDb<R: Runtime> {
     /// Active queries.
     active: HashMap<Bytes, QueryKind>,
 
-    /// DHT of floodfills.
-    floodfill_dht: Dht<R>,
-
-    /// DHT of non-floodfill routers.
-    ///
-    /// Available only if the router is acting as a floodfill router.
-    ///
-    /// Used to answer router exploration queries.
-    router_dht: Option<Dht<R>>,
-
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
 
     /// Has the router been configured to act as a floodfill router.
     floodfill: bool,
 
-    /// Connected routers.
-    routers: HashMap<RouterId, RouterState>,
+    /// DHT of floodfills.
+    floodfill_dht: Dht<R>,
 
     /// RX channel for receiving queries from other subsystems.
     handle_rx: mpsc::Receiver<NetDbAction, NetDbActionRecycle>,
@@ -372,6 +366,9 @@ pub struct NetDb<R: Runtime> {
     /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
     netdb_msg_rx: mpsc::Receiver<Message>,
 
+    /// Noise context.
+    noise: NoiseContext,
+
     /// Active inbound tunhnels
     outbound_tunnels: TunnelSelector<TunnelId>,
 
@@ -381,6 +378,13 @@ pub struct NetDb<R: Runtime> {
     /// Query timers.
     query_timers: R::JoinSet<Bytes>,
 
+    /// DHT of non-floodfill routers.
+    ///
+    /// Available only if the router is acting as a floodfill router.
+    ///
+    /// Used to answer router exploration queries.
+    router_dht: Option<Dht<R>>,
+
     /// Local router info publishers.
     router_info_publishers: RouterInfoPublisher<R>,
 
@@ -388,6 +392,9 @@ pub struct NetDb<R: Runtime> {
     ///
     /// This contains entries only if `floodfill` is true.
     router_infos: HashMap<Bytes, (Bytes, Duration)>,
+
+    /// Connected routers.
+    routers: HashMap<RouterId, RouterState>,
 
     /// Transport service.
     service: TransportService<R>,
@@ -405,6 +412,7 @@ impl<R: Runtime> NetDb<R> {
         net_id: u8,
         netdb_msg_rx: mpsc::Receiver<Message>,
         local_router_info: Bytes,
+        local_static_key: StaticPrivateKey,
     ) -> (Self, NetDbHandle) {
         let floodfills = profile_storage
             .get_router_ids(Bucket::Any, |_, info, _| info.is_floodfill())
@@ -436,15 +444,13 @@ impl<R: Runtime> NetDb<R> {
         (
             Self {
                 active: HashMap::new(),
+                exploratory_pool_handle,
+                floodfill,
                 floodfill_dht: Dht::new(
                     local_router_id.clone(),
                     floodfills.clone(),
                     metrics.clone(),
                 ),
-                router_dht,
-                exploratory_pool_handle,
-                floodfill,
-                routers: HashMap::new(),
                 handle_rx,
                 inbound_tunnels: TunnelSelector::new(),
                 lease_sets: HashMap::new(),
@@ -453,14 +459,17 @@ impl<R: Runtime> NetDb<R> {
                 metrics,
                 netdb_msg_rx,
                 net_id,
+                noise: NoiseContext::new(local_static_key, Bytes::from(local_router_id.to_vec())),
                 outbound_tunnels: TunnelSelector::new(),
+                profile_storage,
                 query_timers: R::join_set(),
+                router_dht,
                 router_info_publishers: RouterInfoPublisher::new(
                     local_router_id,
                     local_router_info,
                 ),
                 router_infos: HashMap::new(),
-                profile_storage,
+                routers: HashMap::new(),
                 service,
             },
             NetDbHandle::new(handle_tx),
@@ -1617,12 +1626,48 @@ impl<R: Runtime> NetDb<R> {
             })
             .build();
 
-        let message_id = R::rng().next_u32();
+        let mut message = GarlicMessageBuilder::default()
+            .with_date_time(R::time_since_epoch().as_secs() as u32)
+            .with_garlic_clove(
+                MessageType::DatabaseLookup,
+                MessageId::from(R::rng().next_u32()),
+                R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                DeliveryInstructions::Local,
+                &message,
+            )
+            .build();
+
+        let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
+        let ephemeral_public = ephemeral_secret.public();
+        let (garlic_key, garlic_tag) = {
+            let floodfill_public_key = self
+                .profile_storage
+                .reader()
+                .router_info(&floodfill)
+                .identity
+                .static_key()
+                .clone();
+
+            self.noise.derive_outbound_garlic_key(floodfill_public_key, ephemeral_secret)
+        };
+
+        // message length + poly13055 tg + ephemeral key + garlic message length
+        let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
+
+        // encryption must succeed since the parameters are managed by us
+        ChaChaPoly::new(&garlic_key)
+            .encrypt_with_ad_new(&garlic_tag, &mut message)
+            .expect("to succeed");
+
+        out.put_u32(message.len() as u32 + 32);
+        out.put_slice(&ephemeral_public.to_vec());
+        out.put_slice(&message);
+
         let message = MessageBuilder::standard()
             .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-            .with_message_type(MessageType::DatabaseLookup)
-            .with_message_id(message_id)
-            .with_payload(&message)
+            .with_message_type(MessageType::Garlic)
+            .with_message_id(R::rng().next_u32())
+            .with_payload(&out)
             .build();
 
         if let Err(error) = self.exploratory_pool_handle.sender().try_send_to_router(
@@ -1987,6 +2032,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -2082,6 +2128,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -2167,6 +2214,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -2254,6 +2302,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key1, expired_lease_set1) = {
@@ -2516,6 +2565,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -2608,6 +2658,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -2686,6 +2737,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set, expires) = {
@@ -2792,6 +2844,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -2875,6 +2928,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -2981,6 +3035,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -3044,6 +3099,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         // set timer to a shorter timeout and poll netdb until it sends a router exploration
@@ -3118,6 +3174,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key1, expired_lease_set1) = {
@@ -3348,6 +3405,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key1, expiring_router_info) = {
@@ -3570,6 +3628,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -3647,6 +3706,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -3727,6 +3787,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -3799,6 +3860,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         assert!(std::matches!(netdb.routers.get(&floodfill), None));
@@ -3841,6 +3903,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -3908,6 +3971,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4021,6 +4085,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4173,6 +4238,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4333,6 +4399,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4455,6 +4522,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4511,6 +4579,7 @@ mod tests {
             2u8,
             msg_rx,
             Bytes::from(vec![1, 2, 3, 4]),
+            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
