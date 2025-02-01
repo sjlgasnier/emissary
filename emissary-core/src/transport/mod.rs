@@ -554,12 +554,20 @@ impl<R: Runtime> Future for TransportManager<R> {
                     self.profile_storage.dial_succeeded(&router_id);
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason })) => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        %router_id,
-                        ?reason,
-                        "connection closed",
-                    );
+                    match reason {
+                        TerminationReason::Banned => tracing::warn!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?reason,
+                            "remote router banned us",
+                        ),
+                        reason => tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?reason,
+                            "connection closed",
+                        ),
+                    }
 
                     self.routers.remove(&router_id);
                     self.metrics_handle.gauge(NUM_CONNECTIONS).decrement(1);
