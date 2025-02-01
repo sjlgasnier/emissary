@@ -68,6 +68,73 @@ pub struct Flags<'a> {
     signature: Option<&'a [u8]>,
 }
 
+impl<'a> fmt::Display for Flags<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut flags = Vec::<&'static str>::new();
+
+        if self.synchronize() {
+            flags.push("SYN");
+        }
+
+        if self.close() {
+            flags.push("CLOSE")
+        }
+
+        if self.reset() {
+            flags.push("RST")
+        }
+
+        if self.signature().is_some() {
+            flags.push("SIG");
+        }
+
+        if self.from_included().is_some() {
+            flags.push("FROM_INCLUDED");
+        }
+
+        if self.echo() {
+            flags.push("ECHO");
+        }
+
+        if self.no_ack() {
+            flags.push("NACK");
+        }
+
+        if self.offline_signature().is_some() {
+            flags.push("OFFLINE_SIG");
+        }
+
+        let mut flags = {
+            if flags.is_empty() {
+                "[]".to_string()
+            } else {
+                let num_flags = flags.len();
+                let mut ret = String::from("flags = [");
+
+                for (i, flag) in flags.into_iter().enumerate() {
+                    if i + 1 < num_flags {
+                        ret += format!("{flag}, ").as_str();
+                    } else {
+                        ret += flag;
+                    }
+                }
+
+                ret + "]"
+            }
+        };
+
+        if let Some(delay) = self.delay_requested() {
+            flags += format!(", delay = {delay}").as_str();
+        }
+
+        if let Some(mtu) = self.max_packet_size() {
+            flags += format!(", mtu = {mtu}").as_str();
+        }
+
+        write!(f, "{flags}")
+    }
+}
+
 impl<'a> Flags<'a> {
     fn new(flags: u16, options: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (rest, requested_delay) = match (flags >> 6) & 1 == 1 {

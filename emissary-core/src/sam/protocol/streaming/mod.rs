@@ -754,6 +754,30 @@ impl<R: Runtime> StreamManager<R> {
             return self.on_synchronize(payload);
         }
 
+        let Packet {
+            send_stream_id,
+            recv_stream_id,
+            seq_nro,
+            ack_through,
+            nacks,
+            resend_delay,
+            flags,
+            payload,
+        } = Packet::parse(&payload).ok_or(StreamingError::Malformed)?;
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            ?send_stream_id,
+            ?recv_stream_id,
+            ?seq_nro,
+            ?ack_through,
+            ?nacks,
+            ?resend_delay,
+            %flags,
+            payload_len = ?payload.len(),
+            "ignoring unrecognized packet",
+        );
+
         Ok(())
     }
 
