@@ -25,6 +25,7 @@ futures = { package = "futures-util", version = "0.3.30", default-features = fal
 hashbrown = { version = "0.14.5", default-features = false, features = ["ahash", "inline-more"] }
 hmac = { version = "0.12.1", default-features = false }
 lazy_static = { version = "1.5.0", default-features = false }
+p256 = { version = "0.13.2", default-features = false, features = ["alloc", "ecdsa", "ecdsa-core"] }
 parking_lot = { version = "0.12.3", optional = true }
 sha2 = { version = "0.10.8", default-features = false }
 siphasher = { version = "1.0.1", default-features = false }

@@ -52,6 +52,7 @@ static ILLEGAL: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "dnt",
         "x-forwarded",
         "proxy-",
+        "if-none-match",
     ])
 });
 
@@ -159,56 +160,51 @@ impl HttpProxy {
             "inbound request",
         );
 
-        let builder = req.headers.into_iter().fold(
-            http::Request::builder().method(method.as_str()).uri(path),
-            |builder, header| {
+        Ok((host, {
+            // serialize request into a byte vector
+            let mut sanitized = Vec::new();
+
+            sanitized.extend_from_slice(&format!("{} ", method).as_bytes());
+            sanitized.extend_from_slice(&format!("{} ", path).as_bytes());
+            sanitized.extend_from_slice(&"HTTP/1.1\r\n".as_bytes());
+
+            for header in req.headers.into_iter() {
+                // if let (Some(name), value) = (name, value) {
                 if header.name.to_lowercase() == "user-agent" {
-                    return builder.header("User-Agent", "MYOB/6.66 (AN/ON)");
+                    sanitized.extend_from_slice("User-Agent: MYOB/6.66 (AN/ON)\r\n".as_bytes());
+                    continue;
                 }
 
                 if header.name.to_lowercase() == "accept-encoding" {
-                    return builder.header(header.name, header.value);
+                    sanitized.extend_from_slice("Accept-Encoding: ".as_bytes());
+                    sanitized.extend_from_slice(header.value);
+                    sanitized.extend_from_slice("\r\n".as_bytes());
+                    continue;
                 }
 
                 if header.name.to_lowercase() == "connection" {
-                    return builder.header(header.name, "close");
+                    sanitized.extend_from_slice("Connection: close\r\n".as_bytes());
+                    continue;
                 }
 
                 if ILLEGAL.iter().any(|illegal| header.name.to_lowercase().starts_with(illegal)) {
-                    return builder;
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        name = ?header.name,
+                        value = ?(std::str::from_utf8(&header.value)),
+                        "skipping illegal header",
+                    );
+                    continue;
                 }
 
-                builder.header(header.name, header.value)
-            },
-        );
-
-        let request = if body_start > request.len() {
-            builder.body(request[body_start..].to_vec())
-        } else {
-            builder.body(Vec::new())
-        }
-        .expect("to succeed");
-
-        Ok((host, {
-            // serialize request into a byte vector
-            let (parts, body) = request.into_parts();
-            let mut request = Vec::new();
-
-            request.extend_from_slice(&format!("{} ", parts.method.to_string()).as_bytes());
-            request.extend_from_slice(&format!("{} ", parts.uri.to_string()).as_bytes());
-            request.extend_from_slice(&"HTTP/1.1\r\n".as_bytes());
-
-            for (name, value) in parts.headers {
-                if let (Some(name), value) = (name, value) {
-                    request.extend_from_slice(&format!("{name}: ").as_bytes());
-                    request.extend_from_slice(value.as_bytes());
-                    request.extend_from_slice("\r\n".as_bytes());
-                }
+                sanitized.extend_from_slice(format!("{}: ", header.name).as_bytes());
+                sanitized.extend_from_slice(header.value);
+                sanitized.extend_from_slice("\r\n".as_bytes());
             }
-            request.extend_from_slice("\r\n".as_bytes());
-            request.extend_from_slice(&body);
+            sanitized.extend_from_slice("\r\n".as_bytes());
+            sanitized.extend_from_slice(&request[body_start..]);
 
-            request
+            sanitized
         }))
     }
 
@@ -391,7 +387,7 @@ mod tests {
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/"));
         assert_eq!(
-            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            req.headers.iter().find(|header| header.name == "Host").unwrap().value,
             "host.i2p".as_bytes(),
         );
     }
@@ -419,7 +415,7 @@ mod tests {
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/"));
         assert_eq!(
-            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            req.headers.iter().find(|header| header.name == "Host").unwrap().value,
             "www.host.i2p".as_bytes(),
         );
     }
@@ -445,7 +441,7 @@ mod tests {
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/"));
         assert_eq!(
-            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            req.headers.iter().find(|header| header.name == "Host").unwrap().value,
             "www.host.i2p".as_bytes(),
         );
     }
@@ -471,7 +467,7 @@ mod tests {
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.path, Some("/topics/new-topic?query=1"));
         assert_eq!(
-            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            req.headers.iter().find(|header| header.name == "Host").unwrap().value,
             "www.host.i2p".as_bytes(),
         );
     }
@@ -504,8 +500,16 @@ mod tests {
         assert_eq!(req.method, Some("POST"));
         assert_eq!(req.path, Some("/upload"));
         assert_eq!(
-            req.headers.iter().find(|header| header.name == "host").unwrap().value,
+            std::str::from_utf8(&request[_body_start..]).unwrap(),
+            "hello, world"
+        );
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "Host").unwrap().value,
             "www.host.i2p".as_bytes(),
+        );
+        assert_eq!(
+            req.headers.iter().find(|header| header.name == "Content-Length").unwrap().value,
+            "12".as_bytes(),
         );
     }
 

@@ -999,7 +999,7 @@ impl<R: Runtime> Session<R> {
         // returns the appropriate `NextKeyKind` which needs to added to into the garlic message
         message_builder = match self.send_tag_set.try_generate_next_key::<R>()? {
             Some(kind) => {
-                tracing::trace!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
@@ -1014,7 +1014,7 @@ impl<R: Runtime> Session<R> {
         // add any potential pending next key block for receive tag set
         message_builder = match self.pending_next_key.take() {
             Some(kind) => {
-                tracing::trace!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,

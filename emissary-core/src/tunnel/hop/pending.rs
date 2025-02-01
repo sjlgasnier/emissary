@@ -22,13 +22,13 @@ use crate::{
         sha256::Sha256,
         EphemeralPrivateKey,
     },
-    error::{Error, TunnelError},
+    error::TunnelError,
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBlock, GarlicMessageBuilder},
         tunnel::build::short,
         Message, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
-    primitives::{RouterId, TunnelId},
+    primitives::{RouterId, Str, TunnelId},
     runtime::Runtime,
     tunnel::hop::{
         outbound::OutboundTunnel, ReceiverKind, Tunnel, TunnelBuildParameters, TunnelBuilder,
@@ -65,6 +65,9 @@ pub struct PendingTunnel<T: Tunnel> {
     /// Pending tunnel hops.
     hops: VecDeque<TunnelHop>,
 
+    /// Name of the tunnel pool.
+    name: Str,
+
     /// Number of build records (real and fake).
     num_records: usize,
 
@@ -98,10 +101,11 @@ impl<T: Tunnel> PendingTunnel<T> {
     ) -> Result<(Self, RouterId, Message), TunnelError> {
         let TunnelBuildParameters {
             hops,
-            noise,
             message_id,
-            tunnel_info,
+            name,
+            noise,
             receiver,
+            tunnel_info,
         } = parameters;
 
         if hops.len() > MAX_BUILD_RECORDS {
@@ -250,6 +254,7 @@ impl<T: Tunnel> PendingTunnel<T> {
         Ok((
             Self {
                 hops: tunnel_hops,
+                name,
                 num_records,
                 receiver,
                 _tunnel: Default::default(),
@@ -308,12 +313,48 @@ impl<T: Tunnel> PendingTunnel<T> {
     /// This function consumes `self` and returns either a `Tunnel` which can then be used
     /// for tunnel messaging, or a `TunnelError` if the received message was malformed or one of the
     /// tunnel participants rejected the build request.
-    pub fn try_build_tunnel<R: Runtime>(self, message: Message) -> crate::Result<T> {
+    ///
+    /// On success the function returns the built tunnel.
+    ///
+    /// This function can error out in different ways:
+    ///  * build message is of invalid type
+    ///  * build message, if garlic-encrypted, fails to decrypt (OBEP only)
+    ///  * build message is of incorrect length
+    ///  * one of the routers incorrectly encrypted their record
+    ///  * one of the routers rejected the tunnel
+    ///
+    /// If the I2NP message is invalid, the last hop of the tunnel is marked as failed and the
+    /// participation status for other hops is ignored as it cannot be determined. If one of the hop
+    /// records fails to decrypt, hops preceeding that are marked as accepted/rejected based on
+    /// their self-reported status and all hops following the hop whose record failed to decrypt are
+    /// ignored as the records cannot be decrypted. In other words, on error, this function returns
+    /// a vector of (`RouterId`, Option<Result<(), TunnelError>)` where `None` means the
+    /// accept/reject status of the tunnel could not be determined, `Some(Ok(()))`, means that
+    /// the tunnel build request was accepted and `Ok(Err(error))` means the tunnel was rejected
+    /// or the tunnel build response record was malformed in some way. This allows the tunnel
+    /// pool to reward/penalize the selected routers fairly.
+    pub fn try_build_tunnel<R: Runtime>(
+        self,
+        message: Message,
+    ) -> Result<T, Vec<(RouterId, Option<Result<(), TunnelError>>)>> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel = %self.tunnel_id,
             direction = ?T::direction(),
             "handle tunnel build reply",
+        );
+
+        // initialize the return value for a possible tunnel build failure
+        //
+        // each value in `hop_results` contains the `RouterId` of the hop and the result of handling
+        // their response to the build request. `None` indicates that the record could not be parsed
+        // because a hop preceeding this hop failed to parse
+        //
+        // the hops are in reverse order as the tunnel's last hop (participant for inbound tunnels
+        // and OBEP for outbound tunnels) is the router from whom the tunnel build response is
+        // received and their record is decrypted and handled first
+        let mut hop_results = Vec::<(RouterId, Option<Result<(), TunnelError>>)>::from_iter(
+            self.hops.iter().rev().map(|hop| (hop.router_id().clone(), None)),
         );
 
         let mut payload = match (T::direction(), message.message_type) {
@@ -332,18 +373,30 @@ impl<T: Tunnel> PendingTunnel<T> {
                 // garlic decrypt the payload with OBEP's garlic key and tag
                 // and try to parse the plaintext into a `GarlicMessage`
                 let mut record = message.payload[12..].to_vec();
-                ChaChaPoly::new(&outbound_endpoint.key_context.garlic_key())
-                    .decrypt_with_ad(&outbound_endpoint.key_context.garlic_tag(), &mut record)?;
+                if let Err(error) = ChaChaPoly::new(&outbound_endpoint.key_context.garlic_key())
+                    .decrypt_with_ad(&outbound_endpoint.key_context.garlic_tag(), &mut record)
+                {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        router_id = %hop_results[0].0,
+                        ?error,
+                        "failed to decrypt tunnel build reply garlic message",
+                    );
 
-                let message = GarlicMessage::parse(&record).ok_or_else(|| {
+                    hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
+                    return Err(hop_results);
+                }
+
+                let Some(message) = GarlicMessage::parse(&record) else {
                     tracing::warn!(
                         target: LOG_TARGET,
                         tunnel_id = %self.tunnel_id,
                         "malformed garlic message as tunnel build reply",
                     );
 
-                    Error::Tunnel(TunnelError::InvalidMessage)
-                })?;
+                    hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
+                    return Err(hop_results);
+                };
 
                 // try to locate a garlic glove containing `OutboundTunnelBuildReply`
                 // and discard any other cloves as they're no interesting at this time
@@ -365,7 +418,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                             "garlic messge didn't contain valid tunnel reply",
                         );
 
-                        return Err(Error::Tunnel(TunnelError::InvalidMessage));
+                        hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
+                        return Err(hop_results);
                     }
                 }
             }
@@ -378,7 +432,8 @@ impl<T: Tunnel> PendingTunnel<T> {
                     "invalid build message reply",
                 );
 
-                return Err(Error::Tunnel(TunnelError::InvalidMessage));
+                hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
+                return Err(hop_results);
             }
         };
 
@@ -391,74 +446,98 @@ impl<T: Tunnel> PendingTunnel<T> {
                 actual_size = ?payload.len(),
                 "malformed tunnel build reply"
             );
-            return Err(Error::Tunnel(TunnelError::InvalidMessage));
+
+            hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
+            return Err(hop_results);
         }
 
-        self.hops
+        // process the tunnel build records in reverse order, processing the reply from the last hop
+        // first
+        //
+        // if one of the records fail to decrypt, the processing is short-circuited and an error is
+        // returned, indicating that not all responses were handled
+        //
+        // if all responses were decrypted successfully, the processing may still error if one of
+        // the hops rejected the tunnel
+        let mut accepted_hops = Vec::<TunnelHop>::new();
+        let num_hops = self.hops.len();
+
+        for (hop_idx, hop) in self.hops.into_iter().enumerate().rev() {
+            let mut record = payload
+                [1 + (hop_idx * SHORT_RECORD_LEN)..1 + ((1 + hop_idx) * SHORT_RECORD_LEN)]
+                .to_vec();
+
+            if let Err(error) = ChaChaPoly::with_nonce(hop.key_context.reply_key(), hop_idx as u64)
+                .decrypt_with_ad(hop.key_context.state(), &mut record)
+            {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    router_id = %hop.router_id(),
+                    tunnel_id = ?self.tunnel_id,
+                    hop_tunnel_id = ?hop.tunnel_id,
+                    ?error,
+                    "failed to decrypt build record"
+                );
+
+                hop_results[hop_idx].1 = Some(Err(TunnelError::InvalidMessage));
+                return Err(hop_results);
+            }
+
+            // was the tunnel accepted or rejected
+            let hop_status = record[201];
+
+            payload[1..]
+                .chunks_mut(218)
+                .enumerate()
+                .filter(|(index, _)| index != &hop_idx)
+                .for_each(|(index, record)| {
+                    ChaCha::with_nonce(hop.key_context.reply_key(), index as u64)
+                        .encrypt_ref(record);
+                });
+
+            match hop_status {
+                0x00 => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        tunnel_id = ?self.tunnel_id,
+                        hop_tunnel_id = ?hop.tunnel_id,
+                        direction = ?T::direction(),
+                        "tunnel accepted",
+                    );
+                    hop_results[hop_idx].1 = Some(Ok(()));
+                    accepted_hops.push(hop);
+                }
+                reason => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        tunnel_id = ?self.tunnel_id,
+                        hop_tunnel_id = ?hop.tunnel_id,
+                        direction = ?T::direction(),
+                        ?reason,
+                        "tunnel rejected",
+                    );
+                    hop_results[hop_idx].1 = Some(Err(TunnelError::TunnelRejected(reason)));
+                }
+            }
+        }
+
+        // if all hops accepted the tunnel build request, build the the tunnel
+        //
+        // otherwise return an error since one or more hops rejected the tunnel
+        if accepted_hops.len() != num_hops {
+            return Err(hop_results);
+        }
+
+        Ok(accepted_hops
             .into_iter()
-            .enumerate()
-            .rev()
-            .try_fold(
-                TunnelBuilder::new(self.tunnel_id, self.receiver),
-                |builder, (hop_idx, hop)| {
-                    let mut record = payload
-                        [1 + (hop_idx * SHORT_RECORD_LEN)..1 + ((1 + hop_idx) * SHORT_RECORD_LEN)]
-                        .to_vec();
-
-                    ChaChaPoly::with_nonce(hop.key_context.reply_key(), hop_idx as u64)
-                        .decrypt_with_ad(hop.key_context.state(), &mut record)
-                        .map_err(|error| {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                tunnel_id = ?self.tunnel_id,
-                                hop_tunnel_id = ?hop.tunnel_id,
-                                ?error,
-                                "failed to decrypt build record"
-                            );
-
-                            Error::Tunnel(TunnelError::InvalidMessage)
-                        })?;
-
-                    match record[201] {
-                        0x00 => {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                tunnel_id = ?self.tunnel_id,
-                                hop_tunnel_id = ?hop.tunnel_id,
-                                direction = ?T::direction(),
-                                "tunnel accepted",
-                            );
-                        }
-                        reason => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                tunnel_id = ?self.tunnel_id,
-                                hop_tunnel_id = ?hop.tunnel_id,
-                                direction = ?T::direction(),
-                                ?reason,
-                                "tunnel rejected",
-                            );
-
-                            return Err(Error::Tunnel(TunnelError::TunnelRejected(reason)));
-                        }
-                    }
-
-                    payload[1..]
-                        .chunks_mut(218)
-                        .enumerate()
-                        .filter(|(index, _)| index != &hop_idx)
-                        .for_each(|(index, record)| {
-                            ChaCha::with_nonce(hop.key_context.reply_key(), index as u64)
-                                .encrypt_ref(record);
-                        });
-
-                    Ok(builder.with_hop(hop))
-                },
+            .fold(
+                TunnelBuilder::new(self.name, self.tunnel_id, self.receiver),
+                |builder, hop| builder.with_hop(hop),
             )
-            .map(|builder| builder.build::<R>())
+            .build::<R>())
     }
 
-    #[cfg(test)]
+    /// Get reference to pending tunnel's hops.
     pub fn hops(&self) -> &VecDeque<TunnelHop> {
         &self.hops
     }
@@ -469,7 +548,7 @@ mod test {
     use super::*;
     use crate::{
         crypto::{EphemeralPublicKey, StaticPublicKey},
-        i2np::tunnel::gateway::TunnelGateway,
+        i2np::{tunnel::gateway::TunnelGateway, MessageBuilder},
         primitives::MessageId,
         runtime::mock::MockRuntime,
         shutdown::ShutdownContext,
@@ -508,6 +587,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -598,6 +678,7 @@ mod test {
         let (pending_tunnel, next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
+                name: Str::from("tunnel-pool"),
                 noise: local_noise,
                 message_id,
                 tunnel_info: TunnelInfo::Inbound {
@@ -649,6 +730,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -701,7 +783,7 @@ mod test {
             };
 
             if record_idx % 2 == 0 {
-                record[201] = 0x30;
+                record[201] = 30;
             } else {
                 record[201] = 0x00;
             }
@@ -717,9 +799,16 @@ mod test {
             payload,
         };
 
-        match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {
-            Error::Tunnel(TunnelError::TunnelRejected(0x30)) => {}
-            _ => panic!("invalid error"),
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) =>
+                for (i, (_, result)) in error.into_iter().enumerate() {
+                    if i % 2 == 0 {
+                        assert_eq!(result, Some(Err(TunnelError::TunnelRejected(30))));
+                    } else {
+                        assert_eq!(result, Some(Ok(())));
+                    }
+                },
+            _ => panic!("invalid result"),
         }
     }
 
@@ -740,6 +829,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -757,9 +847,16 @@ mod test {
         assert_eq!(message.payload[1..].len() % 218, 0);
 
         // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
-        match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {
-            Error::Tunnel(TunnelError::InvalidMessage) => {}
-            _ => panic!("invalid error"),
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+
+                // cipher text for the first hop was invalid so the status of later hops couldn't be
+                // determined
+                assert_eq!(error[1].1, None);
+                assert_eq!(error[2].1, None);
+            }
+            _ => panic!("invalid result"),
         }
     }
 
@@ -780,6 +877,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -799,10 +897,15 @@ mod test {
         message.message_type = MessageType::OutboundTunnelBuildReply;
         message.payload = vec![0u8; 123];
 
-        // try to parse the tunnel build request as a reply, ciphertexsts won't decrypt correctly
-        match pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap_err() {
-            Error::Tunnel(TunnelError::InvalidMessage) => {}
-            _ => panic!("invalid error"),
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+
+                // length was too short so the records couldn't be parsed
+                assert_eq!(error[1].1, None);
+                assert_eq!(error[2].1, None);
+            }
+            _ => panic!("invalid result"),
         }
     }
 
@@ -828,6 +931,7 @@ mod test {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -863,5 +967,393 @@ mod test {
 
         let message = Message::parse_standard(&payload).unwrap();
         assert!(pending_tunnel.try_build_tunnel::<MockRuntime>(message).is_ok());
+    }
+
+    #[test]
+    fn wrong_build_message_type() {
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .unzip();
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, next_router, mut message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+
+        // invalid message type
+        message.message_type = MessageType::DatabaseStore;
+
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+
+                // only the last hop is penalized
+                assert_eq!(error[1].1, None);
+                assert_eq!(error[2].1, None);
+            }
+            _ => panic!("invalid result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_message_garlic_decrypt_error() {
+        let handle = MockRuntime::register_metrics(vec![], None);
+        let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
+        let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
+        let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+
+        for _ in 0..3 {
+            let (router_hash, pk, noise_context, _) = make_router(true);
+
+            let (transit_tx, transit_rx) = channel(16);
+            let (manager_tx, _manager_rx) = channel(16);
+            let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+            let shutdown_handle = shutdown_ctx.handle();
+
+            let routing_table =
+                RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
+            hops.push((router_hash, pk));
+            ctxs.push(shutdown_ctx);
+            transit_managers.push(TransitTunnelManager::new(
+                noise_context,
+                routing_table,
+                transit_rx,
+                handle.clone(),
+                shutdown_handle,
+            ));
+        }
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, _next_router, message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise.clone(),
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        let message = (0..transit_managers.len() - 1).fold(message, |message, i| {
+            let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
+
+            Message::parse_short(&msg).unwrap()
+        });
+
+        let (_, msg) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
+
+        let Message {
+            message_type,
+            payload,
+            ..
+        } = Message::parse_short(&msg).unwrap();
+
+        assert_eq!(message_type, MessageType::TunnelGateway);
+
+        let TunnelGateway {
+            tunnel_id: recv_tunnel_id,
+            payload,
+        } = TunnelGateway::parse(&payload).unwrap();
+
+        assert_eq!(TunnelId::from(recv_tunnel_id), gateway);
+        let mut message = Message::parse_standard(&payload).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+
+        // write garbage at the start of the garlic message so it fails to decrypt
+        for i in 0..10 {
+            message.payload[5 + i] = i as u8;
+        }
+
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+
+                // only the last hop is penalized
+                assert_eq!(error[1].1, None);
+                assert_eq!(error[2].1, None);
+            }
+            _ => panic!("invalid result"),
+        }
+    }
+
+    #[test]
+    fn build_message_not_a_valid_garlic_message() {
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .unzip();
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, next_router, message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+
+        let mut msg = MessageBuilder::short()
+            .with_expiration(MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::Garlic)
+            .with_message_id(MockRuntime::rng().next_u32())
+            .with_payload(&vec![1, 2, 3, 4, 5])
+            .build();
+
+        let garlic_tag = pending_tunnel.hops.back().as_ref().unwrap().key_context.garlic_tag();
+        let garlic_key = pending_tunnel.hops.back().as_ref().unwrap().key_context.garlic_key();
+
+        // message length + poly13055 tag + garlic tag + garlic message length
+        let mut out = BytesMut::with_capacity(msg.len() + 16 + 8 + 4);
+
+        // encryption must succeed since the parameters are managed by us
+        ChaChaPoly::new(&garlic_key)
+            .encrypt_with_ad_new(&garlic_tag, &mut msg)
+            .expect("to succeed");
+
+        out.put_u32(msg.len() as u32 + 8);
+        out.put_slice(&garlic_tag);
+        out.put_slice(&msg);
+
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: message.message_id,
+            expiration: message.expiration,
+            payload: out.to_vec(),
+        };
+
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+
+                // only the last hop is penalized
+                assert_eq!(error[1].1, None);
+                assert_eq!(error[2].1, None);
+            }
+            _ => panic!("invalid result"),
+        }
+    }
+
+    #[test]
+    fn build_message_clove_not_found() {
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .unzip();
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, next_router, message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+
+        let mut msg = GarlicMessageBuilder::default().with_date_time(1337u32).build();
+
+        let garlic_tag = pending_tunnel.hops.back().as_ref().unwrap().key_context.garlic_tag();
+        let garlic_key = pending_tunnel.hops.back().as_ref().unwrap().key_context.garlic_key();
+
+        // message length + poly13055 tag + garlic tag + garlic message length
+        let mut out = BytesMut::with_capacity(msg.len() + 16 + 8 + 4);
+
+        // encryption must succeed since the parameters are managed by us
+        ChaChaPoly::new(&garlic_key)
+            .encrypt_with_ad_new(&garlic_tag, &mut msg)
+            .expect("to succeed");
+
+        out.put_u32(msg.len() as u32 + 8);
+        out.put_slice(&garlic_tag);
+        out.put_slice(&msg);
+
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: message.message_id,
+            expiration: message.expiration,
+            payload: out.to_vec(),
+        };
+
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+
+                // only the last hop is penalized
+                assert_eq!(error[1].1, None);
+                assert_eq!(error[2].1, None);
+            }
+            _ => panic!("invalid result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hop_record_decrypt_error() {
+        crate::util::init_logger();
+
+        let handle = MockRuntime::register_metrics(vec![], None);
+
+        let (hops, mut transit_managers): (
+            Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
+            Vec<(
+                GarlicHandler<MockRuntime>,
+                TransitTunnelManager<MockRuntime>,
+            )>,
+        ) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, pk, noise_context, _)| {
+                let (transit_tx, transit_rx) = channel(16);
+                let (manager_tx, _manager_rx) = channel(16);
+                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                let shutdown_handle = shutdown_ctx.handle();
+                let routing_table =
+                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+
+                (
+                    (router_hash, pk, shutdown_ctx),
+                    (
+                        GarlicHandler::new(noise_context.clone(), handle.clone()),
+                        TransitTunnelManager::new(
+                            noise_context,
+                            routing_table,
+                            transit_rx,
+                            handle.clone(),
+                            shutdown_handle,
+                        ),
+                    ),
+                )
+            })
+            .unzip();
+
+        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let _gateway = TunnelId::from(MockRuntime::rng().next_u32());
+        let (hops, _handles): (Vec<_>, Vec<_>) = hops
+            .into_iter()
+            .map(|(router_id, public_key, context)| ((router_id, public_key), context))
+            .unzip();
+        let TunnelPoolBuildParameters {
+            context_handle: handle,
+            ..
+        } = TunnelPoolBuildParameters::new(Default::default());
+        let (_tx, rx) = channel(64);
+
+        let (pending_tunnel, next_router, message) =
+            PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
+                hops: hops.clone(),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash,
+                },
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
+            .unwrap();
+
+        let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
+
+        assert_eq!(message.message_id, message_id.into());
+        assert_eq!(next_router, RouterId::from(hops[0].0.to_vec()));
+        assert_eq!(message.payload[1..].len() % 218, 0);
+
+        let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
+            message,
+            |acc, ((_, _), (_, transit_manager))| {
+                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                Message::parse_short(&message).unwrap()
+            },
+        );
+
+        assert_eq!(message.message_type, MessageType::ShortTunnelBuild);
+
+        // write garbage into first build record
+        for i in 1..20 {
+            message.payload[i] = 0u8;
+        }
+
+        match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::InvalidMessage)));
+                assert_eq!(error[1].1, Some(Ok(())));
+                assert_eq!(error[2].1, Some(Ok(())));
+            }
+            _ => panic!("invalid result"),
+        }
     }
 }

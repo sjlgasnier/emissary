@@ -1217,11 +1217,14 @@ impl<R: Runtime> Future for Stream<R> {
             };
 
             let packet = if this.inbound_context.can_close() {
-                builder.with_close()
-            } else {
                 builder
+                    .with_close()
+                    .with_from_included(this.destination.clone())
+                    .with_signature()
+                    .build_and_sign(&this.signing_key)
+            } else {
+                builder.build()
             }
-            .build()
             .to_vec();
 
             if let Err(error) = this.event_tx.try_send((this.remote.clone(), packet.to_vec())) {

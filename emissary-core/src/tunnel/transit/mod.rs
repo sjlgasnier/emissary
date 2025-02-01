@@ -403,7 +403,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
-                record[201] = 0x30; // reject
+                record[201] = 30; // reject
 
                 session.create_tunnel_keys(role)?;
                 session.encrypt_build_records(&mut payload, record_idx)?;
@@ -640,7 +640,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{StaticPrivateKey, StaticPublicKey},
-        primitives::MessageId,
+        primitives::{MessageId, Str},
         runtime::mock::MockRuntime,
         shutdown::ShutdownContext,
         tunnel::{
@@ -700,6 +700,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -767,6 +768,7 @@ mod tests {
         let (_pending_tunnel, _next_router, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
                 hops: hops.clone(),
+                name: Str::from("tunnel-pool"),
                 noise: local_noise,
                 message_id,
                 tunnel_info: TunnelInfo::Inbound {
@@ -831,6 +833,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise.clone(),
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -914,6 +917,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -1000,6 +1004,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise,
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -1063,6 +1068,7 @@ mod tests {
             PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
                 TunnelBuildParameters {
                     hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
                     noise: local_noise.clone(),
                     message_id,
                     tunnel_info: TunnelInfo::Outbound {
@@ -1101,7 +1107,11 @@ mod tests {
         assert_eq!(message.message_type, MessageType::Garlic);
 
         match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {
-            Err(Error::Tunnel(TunnelError::TunnelRejected(_))) => {}
+            Err(error) => {
+                assert_eq!(error[0].1, Some(Err(TunnelError::TunnelRejected(30))));
+                assert_eq!(error[1].1, Some(Ok(())));
+                assert_eq!(error[2].1, Some(Err(TunnelError::TunnelRejected(30))));
+            }
             _ => panic!("invalid error"),
         }
     }

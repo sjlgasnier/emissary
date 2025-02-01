@@ -49,6 +49,137 @@ pub use ssu2::Ssu2Transport;
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::transport-manager";
 
+/// Termination reason.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum TerminationReason {
+    /// Unspecified or normal termination.
+    #[default]
+    Unspecified,
+
+    /// Termination block was received.
+    TerminationReceived,
+
+    /// Idle timeout.
+    IdleTimeout,
+
+    /// Socket was closed (NTCP2 only).
+    IoError,
+
+    /// Router is shutting down.
+    RouterShutdown,
+
+    /// AEAD failure.
+    AeadFailure,
+
+    /// Incompatible options,
+    IncompatibleOptions,
+
+    /// Unsupported signature kind.
+    IncompatibleSignatureKind,
+
+    /// Clock skew.
+    ClockSkew,
+
+    /// Padding violation.
+    PaddinViolation,
+
+    /// Payload format error.
+    PayloadFormatError,
+
+    /// AEAD framing error.
+    AeadFramingError,
+
+    /// NTCP2 handshake error.
+    Ntcp2HandshakeError(u8),
+
+    /// SSU2 handshake error.
+    Ssu2HandshakeError(u8),
+
+    /// Intra frame timeout.
+    IntraFrameReadTimeout,
+
+    /// Invalid router info.
+    InvalidRouterInfo,
+
+    /// Router has been banned.
+    Banned,
+
+    /// Timeout (SSU2 only)
+    Timeout,
+
+    /// Bad token (SSU2 only).
+    BadToken,
+
+    /// Connection limit reached (SSU2 only)
+    ConnectionLimits,
+
+    /// Incompatible version (SSU2 only)
+    IncompatibleVersion,
+
+    /// Wrong network ID (SSU2 only)
+    WrongNetId,
+
+    /// Replaced by new session (SSU2 only)
+    ReplacedByNewSession,
+}
+
+impl TerminationReason {
+    /// Get [`TerminationReason`] from an NTCP2 termination reason.
+    pub fn ntcp2(value: u8) -> Self {
+        match value {
+            0 => TerminationReason::Unspecified,
+            1 => TerminationReason::TerminationReceived,
+            2 => TerminationReason::IdleTimeout,
+            3 => TerminationReason::RouterShutdown,
+            4 => TerminationReason::AeadFailure,
+            5 => TerminationReason::IncompatibleOptions,
+            6 => TerminationReason::IncompatibleSignatureKind,
+            7 => TerminationReason::ClockSkew,
+            8 => TerminationReason::PaddinViolation,
+            9 => TerminationReason::AeadFramingError,
+            10 => TerminationReason::PayloadFormatError,
+            11 => TerminationReason::Ntcp2HandshakeError(1),
+            12 => TerminationReason::Ntcp2HandshakeError(2),
+            13 => TerminationReason::Ntcp2HandshakeError(3),
+            14 => TerminationReason::IntraFrameReadTimeout,
+            15 => TerminationReason::InvalidRouterInfo,
+            16 => TerminationReason::InvalidRouterInfo,
+            17 => TerminationReason::Banned,
+            _ => TerminationReason::Unspecified,
+        }
+    }
+
+    /// Get [`TerminationReason`] from an SSU2 termination reason.
+    pub fn ssu2(value: u8) -> Self {
+        match value {
+            0 => TerminationReason::Unspecified,
+            1 => TerminationReason::TerminationReceived,
+            2 => TerminationReason::IdleTimeout,
+            3 => TerminationReason::RouterShutdown,
+            4 => TerminationReason::AeadFailure,
+            5 => TerminationReason::IncompatibleOptions,
+            6 => TerminationReason::IncompatibleSignatureKind,
+            7 => TerminationReason::ClockSkew,
+            8 => TerminationReason::PaddinViolation,
+            9 => TerminationReason::AeadFramingError,
+            10 => TerminationReason::PayloadFormatError,
+            11 => TerminationReason::Ssu2HandshakeError(1),
+            12 => TerminationReason::Ssu2HandshakeError(2),
+            13 => TerminationReason::Ssu2HandshakeError(3),
+            14 => TerminationReason::IntraFrameReadTimeout,
+            15 => TerminationReason::InvalidRouterInfo,
+            16 => TerminationReason::InvalidRouterInfo,
+            17 => TerminationReason::Banned,
+            18 => TerminationReason::BadToken,
+            19 => TerminationReason::ConnectionLimits,
+            20 => TerminationReason::IncompatibleVersion,
+            21 => TerminationReason::WrongNetId,
+            22 => TerminationReason::ReplacedByNewSession,
+            _ => TerminationReason::Unspecified,
+        }
+    }
+}
+
 /// Transport event.
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -62,13 +193,19 @@ pub enum TransportEvent {
     ConnectionClosed {
         /// ID of the disconnected router.
         router_id: RouterId,
+
+        /// Reason for the termination.
+        reason: TerminationReason,
     },
 
     /// Failed to dial peer.
     ///
     /// The connection is considered failed if we failed to reach the router
     /// or if there was an error during handshaking.
-    ConnectionFailure {},
+    ConnectionFailure {
+        /// ID of the remote router.
+        router_id: RouterId,
+    },
 }
 
 // TODO: `poll_progress()` - only poll pending streams
@@ -414,19 +551,30 @@ impl<R: Runtime> Future for TransportManager<R> {
                             self.transports[index].reject(&router_id);
                         }
                     }
+                    self.profile_storage.dial_succeeded(&router_id);
                 }
-                Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })) => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        %router_id,
-                        "connection closed",
-                    );
+                Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason })) => {
+                    match reason {
+                        TerminationReason::Banned => tracing::warn!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?reason,
+                            "remote router banned us",
+                        ),
+                        reason => tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?reason,
+                            "connection closed",
+                        ),
+                    }
 
                     self.routers.remove(&router_id);
                     self.metrics_handle.gauge(NUM_CONNECTIONS).decrement(1);
                 }
-                Poll::Ready(Some(TransportEvent::ConnectionFailure {})) => {
+                Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id })) => {
                     self.metrics_handle.counter(NUM_DIAL_FAILURES).increment(1);
+                    self.profile_storage.dial_failed(&router_id);
                 }
             }
 

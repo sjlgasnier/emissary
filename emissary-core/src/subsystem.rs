@@ -16,11 +16,14 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{i2np::Message, primitives::RouterId, Error};
+use crate::{i2np::Message, primitives::RouterId};
 
 use thingbuf::mpsc::Sender;
 
 use alloc::vec::Vec;
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::subsystem";
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub enum SubsystemKind {
@@ -191,21 +194,27 @@ impl SubsystemHandle {
         let netdb_messages = netdb_messages.into_iter().flatten().collect::<Vec<_>>();
 
         if !tunnel_messages.is_empty() {
-            self.subsystems[0]
-                .try_send(InnerSubsystemEvent::I2Np {
-                    messages: tunnel_messages,
-                })
-                .map_err(|_| Error::NotSupported)
-                .unwrap();
+            if let Err(error) = self.subsystems[0].try_send(InnerSubsystemEvent::I2Np {
+                messages: tunnel_messages,
+            }) {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %error,
+                    "failed to dispatch mesage to `TunnelManager`",
+                );
+            }
         }
 
         if !netdb_messages.is_empty() {
-            self.subsystems[1]
-                .try_send(InnerSubsystemEvent::I2Np {
-                    messages: netdb_messages,
-                })
-                .map_err(|_| Error::NotSupported)
-                .unwrap();
+            if let Err(error) = self.subsystems[1].try_send(InnerSubsystemEvent::I2Np {
+                messages: netdb_messages,
+            }) {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %error,
+                    "failed to dispatch mesage to `NetDb`",
+                );
+            }
         }
 
         Ok(())

@@ -35,7 +35,6 @@ use nom::{
 };
 
 use alloc::{string::ToString, vec, vec::Vec};
-use core::str::FromStr;
 
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
@@ -90,7 +89,7 @@ impl RouterInfo {
         };
 
         let net_id = Mapping::new(
-            Str::from_str("netId").unwrap(),
+            Str::from("netId"),
             config
                 .net_id
                 .map_or_else(|| Str::from("2"), |value| Str::from(value.to_string())),
@@ -104,10 +103,7 @@ impl RouterInfo {
             },
         };
 
-        let router_version = Mapping::new(
-            Str::from_str("router.version").unwrap(),
-            Str::from_str("0.9.62").unwrap(),
-        );
+        let router_version = Mapping::new(Str::from("router.version"), Str::from("0.9.62"));
         let caps_mapping = Mapping::new(Str::from("caps"), caps.clone());
         let options = Mapping::into_hashmap(vec![net_id, caps_mapping, router_version]);
 
@@ -310,7 +306,7 @@ impl RouterInfo {
     /// Router is considered reachable if its caps don't specify otherwise and it has at least one
     /// published address.
     pub fn is_reachable(&self) -> bool {
-        if !self.capabilities.is_reachable() {
+        if self.capabilities.is_hidden() {
             return false;
         }
 
@@ -333,9 +329,27 @@ impl RouterInfo {
         false
     }
 
+    /// Is the router usable.
+    ///
+    /// Any router who hasn't published `G` or `E` congestion caps is considered usable.
+    pub fn is_usable(&self) -> bool {
+        self.capabilities.is_usable()
+    }
+
     /// Get network ID of the [`RouterInfo`].
     pub fn net_id(&self) -> u8 {
         self.net_id
+    }
+
+    /// Check if the router is reachable via NTCP2.
+    pub fn is_reachable_ntcp2(&self) -> bool {
+        let Some(ntcp2) = self.addresses.get(&TransportKind::Ntcp2) else {
+            return false;
+        };
+
+        ntcp2.socket_address.is_some()
+            && ntcp2.options.get(&Str::from("i")).is_some()
+            && ntcp2.options.get(&Str::from("s")).is_some()
     }
 }
 
@@ -463,12 +477,9 @@ impl RouterInfo {
             ntcp2_port,
             ntcp2_host.parse().unwrap(),
         );
-        let net_id = Mapping::new(Str::from_str("netId").unwrap(), Str::from_str("2").unwrap());
-        let caps = Mapping::new(Str::from_str("caps").unwrap(), Str::from_str("L").unwrap());
-        let router_version = Mapping::new(
-            Str::from_str("router.version").unwrap(),
-            Str::from_str("0.9.62").unwrap(),
-        );
+        let net_id = Mapping::new(Str::from("netId"), Str::from("2"));
+        let caps = Mapping::new(Str::from("caps"), Str::from("L"));
+        let router_version = Mapping::new(Str::from("router.version"), Str::from("0.9.62"));
         let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
 
         RouterInfo {
@@ -725,12 +736,7 @@ mod tests {
             ),
             addresses: HashMap::from_iter([(
                 TransportKind::Ntcp2,
-                RouterAddress::new_published_ntcp2(
-                    [1u8; 32],
-                    [2u8; 16],
-                    8888,
-                    "127.0.0.1".parse().unwrap(),
-                ),
+                RouterAddress::new_unpublished_ntcp2([1u8; 32], 8888),
             )]),
             options: HashMap::from_iter([
                 (Str::from("netId"), Str::from("2")),

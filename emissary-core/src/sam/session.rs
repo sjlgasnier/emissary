@@ -275,8 +275,9 @@ impl<R: Runtime> SamSession<R> {
                 LeaseSet2 {
                     header: LeaseSet2Header {
                         destination: destination.clone(),
-                        published: R::time_since_epoch().as_secs() as u32,
                         expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                        offline_signature: None,
+                        published: R::time_since_epoch().as_secs() as u32,
                     },
                     public_keys: vec![public_key],
                     leases: inbound.values().cloned().collect(),
@@ -375,8 +376,10 @@ impl<R: Runtime> SamSession<R> {
             PendingSessionState::AwaitingSession { stream_id },
         );
 
-        let Some(message) =
-            I2cpPayloadBuilder::<R>::new(&packet).with_protocol(Protocol::Streaming).build()
+        let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
+            .with_protocol(Protocol::Streaming)
+            .with_destination_port(80)
+            .build()
         else {
             tracing::error!(
                 target: LOG_TARGET,
@@ -641,6 +644,13 @@ impl<R: Runtime> SamSession<R> {
     /// destination so fetch the initial protocol message from the protocol handler and send it to
     /// remote destination.
     fn on_lease_set_found(&mut self, destination_id: DestinationId) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            %destination_id,
+            "lease set found",
+        );
+
         match self.pending_outbound.remove(&destination_id) {
             Some(PendingSessionState::AwaitingLeaseSet { protocol }) => match protocol {
                 ProtocolKind::Stream {
@@ -654,6 +664,7 @@ impl<R: Runtime> SamSession<R> {
 
                     if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
                         .with_protocol(self.session_kind.into())
+                        .with_destination_port(80)
                         .build()
                     {
                         if let Err(error) = self.destination.send_message(&destination_id, message)
@@ -669,6 +680,15 @@ impl<R: Runtime> SamSession<R> {
                     };
                 }),
             },
+            Some(PendingSessionState::AwaitingSession { .. }) => {
+                // new stream was opened but by the the time the initial `SYN` packet was sent,
+                // remote's lease set had expired and they had not sent us, a new lease set a lease
+                // set query was started and the lease set was found
+                //
+                // the new lease set can be ignored for `PendingSessionState::AwaitinSession` since
+                // the `SYN` packet was queued in `Destination` and was sent to remote destination
+                // when the lease set was received
+            }
             state => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -686,6 +706,14 @@ impl<R: Runtime> SamSession<R> {
     ///
     /// Client is notified that the remote destination is not reachable and the socket is closed.
     fn on_lease_set_not_found(&mut self, destination_id: DestinationId, error: QueryError) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            %destination_id,
+            ?error,
+            "lease set not found",
+        );
+
         match self.pending_outbound.remove(&destination_id) {
             Some(PendingSessionState::AwaitingLeaseSet { protocol }) => {
                 tracing::warn!(
@@ -704,6 +732,21 @@ impl<R: Runtime> SamSession<R> {
                             .await;
                     });
                 }
+            }
+            Some(PendingSessionState::AwaitingSession { stream_id }) => {
+                // new stream was opened but by the the time the initial `SYN` packet was sent,
+                // remote's lease set had expired and they had not sent us, a new lease set a lease
+                // set query was started but the lease set was not found in the netdb
+                //
+                // as the remote cannot be contacted, remove the pending stream from `StreamManager`
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = ?self.session_id,
+                    %destination_id,
+                    ?stream_id,
+                    "stream awaiting session but remote lease set not found",
+                );
+                self.stream_manager.remove_session(&destination_id);
             }
             state => {
                 tracing::warn!(
@@ -824,6 +867,7 @@ impl<R: Runtime> Future for SamSession<R> {
                 })) => {
                     let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
                         .with_protocol(Protocol::Streaming)
+                        .with_destination_port(80)
                         .build()
                     else {
                         tracing::warn!(
@@ -908,8 +952,9 @@ impl<R: Runtime> Future for SamSession<R> {
                         LeaseSet2 {
                             header: LeaseSet2Header {
                                 destination: self.dest.clone(),
-                                published: R::time_since_epoch().as_secs() as u32,
                                 expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                                offline_signature: None,
+                                published: R::time_since_epoch().as_secs() as u32,
                             },
                             public_keys: vec![self.encryption_key.public()],
                             leases,

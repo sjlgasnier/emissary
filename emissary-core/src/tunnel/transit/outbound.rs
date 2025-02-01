@@ -232,7 +232,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
                             tunnel_id = %self.tunnel_id,
                             %router,
                             message_type = ?message.message_type,
-                            "fragment router delivery",
+                            "router delivery",
                         );
 
                         let message = MessageBuilder::short()
@@ -252,7 +252,8 @@ impl<R: Runtime> OutboundEndpoint<R> {
                             tunnel_id = %self.tunnel_id,
                             %router,
                             delivery_tunnel = ?tunnel_id,
-                            "fragment router delivery",
+                            message_type = ?message.message_type,
+                            "tunnel delivery",
                         );
 
                         let payload = TunnelGateway {
@@ -366,6 +367,7 @@ mod tests {
     use crate::{
         crypto::{EphemeralPublicKey, StaticPrivateKey},
         i2np::HopRole,
+        primitives::Str,
         runtime::mock::MockRuntime,
         tunnel::{
             hop::{
@@ -402,6 +404,7 @@ mod tests {
                         Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
                         obep_key.public(),
                     )],
+                    name: Str::from("tunnel-pool"),
                     noise: NoiseContext::new(
                         obgw_key,
                         Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
@@ -516,6 +519,7 @@ mod tests {
                         Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
                         obep_key.public(),
                     )],
+                    name: Str::from("tunnel-pool"),
                     noise: NoiseContext::new(
                         obgw_key,
                         Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
@@ -626,6 +630,7 @@ mod tests {
                         Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
                         obep_key.public(),
                     )],
+                    name: Str::from("tunnel-pool"),
                     noise: NoiseContext::new(
                         obgw_key,
                         Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),

@@ -155,7 +155,7 @@ impl<R: Runtime> KeyContext<R> {
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                GarlicDeliveryInstructions::Destination { hash: &hash },
+                GarlicDeliveryInstructions::Local,
                 &database_store,
             )
             .with_garlic_clove(

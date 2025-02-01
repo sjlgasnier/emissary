@@ -30,7 +30,7 @@ use crate::{
             listener::Ntcp2Listener,
             session::{Ntcp2Session, SessionManager},
         },
-        Transport, TransportEvent,
+        TerminationReason, Transport, TransportEvent,
     },
 };
 
@@ -73,7 +73,7 @@ pub struct Ntcp2Transport<R: Runtime> {
     metrics: R::MetricsHandle,
 
     /// Open connections.
-    open_connections: R::JoinSet<RouterId>,
+    open_connections: R::JoinSet<(RouterId, TerminationReason)>,
 
     /// Pending connections.
     ///
@@ -82,7 +82,9 @@ pub struct Ntcp2Transport<R: Runtime> {
     pending_connections: HashMap<RouterId, Ntcp2Session<R>>,
 
     /// Pending connections.
-    pending_handshakes: R::JoinSet<crate::Result<Ntcp2Session<R>>>,
+    ///
+    /// `RouterId` is `None` for inbound sessions.
+    pending_handshakes: R::JoinSet<Result<Ntcp2Session<R>, (Option<RouterId>, Error)>>,
 
     /// Session manager.
     session_manager: SessionManager<R>,
@@ -272,8 +274,8 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(router_id)) =>
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id })),
+            Poll::Ready(Some((router_id, reason))) =>
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason })),
         }
 
         match self.listener.poll_next_unpin(cx) {
@@ -313,14 +315,22 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
-                Some(Err(error)) => {
-                    tracing::debug!(
+                Some(Err((router_id, error))) => match router_id {
+                    Some(router_id) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?error,
+                            "failed to connect to router",
+                        );
+                        return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
+                    }
+                    None => tracing::trace!(
                         target: LOG_TARGET,
                         ?error,
-                        "failed to connect to router",
-                    );
-                    return Poll::Ready(Some(TransportEvent::ConnectionFailure {}));
-                }
+                        "failed to accept inbound connection",
+                    ),
+                },
                 None => return Poll::Ready(None),
             }
         }

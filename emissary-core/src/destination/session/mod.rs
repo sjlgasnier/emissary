@@ -72,7 +72,7 @@ const LOG_TARGET: &str = "emissary::destination::session";
 const NUM_TAGS_TO_GENERATE: usize = 128;
 
 /// Number of tag set entries consumed per key before a DH ratchet is performed.
-const SESSION_DH_RATCHET_THRESHOLD: usize = 150;
+const SESSION_DH_RATCHET_THRESHOLD: usize = 32768usize;
 
 /// How long is upper-layer protocol data awaited before a [`DatabaseStore`] message is sent to
 /// remote to update remote destination's `NetDb` with our new lease set.
@@ -285,13 +285,12 @@ impl<R: Runtime> SessionManager<R> {
         )
         .build();
 
-        let hash = destination_id.to_vec();
         let builder = GarlicMessageBuilder::default()
             .with_garlic_clove(
                 MessageType::DatabaseStore,
                 MessageId::from(R::rng().next_u32()),
                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                GarlicDeliveryInstructions::Destination { hash: &hash },
+                GarlicDeliveryInstructions::Local,
                 &database_store,
             )
             .with_ack_request();
@@ -379,13 +378,12 @@ impl<R: Runtime> SessionManager<R> {
                         )
                         .build();
 
-                        let hash = destination_id.to_vec();
                         let builder = builder
                             .with_garlic_clove(
                                 MessageType::DatabaseStore,
                                 MessageId::from(R::rng().next_u32()),
                                 R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                GarlicDeliveryInstructions::Destination { hash: &hash },
+                                GarlicDeliveryInstructions::Local,
                                 &database_store,
                             )
                             .with_ack_request();
@@ -2050,9 +2048,10 @@ mod tests {
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination: outbound_destination.clone(),
-                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                     expires: (MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60))
                         .as_secs() as u32,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                 },
                 public_keys: vec![outbound_private_key.public()],
                 leases: vec![Lease {
@@ -2279,9 +2278,10 @@ mod tests {
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination: outbound_destination.clone(),
-                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                     expires: (MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60))
                         .as_secs() as u32,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
                 },
                 public_keys: vec![outbound_private_key.public()],
                 leases: vec![Lease {
@@ -2776,5 +2776,74 @@ mod tests {
         // send ES message to alice
         let message = inbound_session.encrypt(&outbound_destination_id, vec![5u8; 4]).unwrap();
         decrypt_and_verify!(&mut outbound_session, message, vec![5u8; 4]);
+    }
+
+    #[tokio::test]
+    async fn lease_set_bundled_in_ns_retries() {
+        // create inbound `SessionManager`
+        let inbound_private_key = StaticPrivateKey::random(thread_rng());
+        let inbound_public_key = inbound_private_key.public();
+        let (inbound_leaseset, inbound_destination_id) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let inbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                inbound_destination_id,
+            )
+        };
+        let mut inbound_session = SessionManager::<MockRuntime>::new(
+            inbound_destination_id.clone(),
+            inbound_private_key,
+            inbound_leaseset,
+        );
+
+        // create outbound `SessionManager`
+        let outbound_private_key = StaticPrivateKey::random(thread_rng());
+        let (
+            outbound_leaseset,
+            outbound_destination_id,
+            _outbound_destination,
+            _outbound_signing_key,
+        ) = {
+            let (leaseset, signing_key) = LeaseSet2::random();
+            let destination = leaseset.header.destination.clone();
+            let outbound_destination_id = leaseset.header.destination.id();
+
+            (
+                Bytes::from(leaseset.serialize(&signing_key)),
+                outbound_destination_id,
+                destination,
+                signing_key,
+            )
+        };
+        let mut outbound_session = SessionManager::<MockRuntime>::new(
+            outbound_destination_id.clone(),
+            outbound_private_key.clone(),
+            outbound_leaseset,
+        );
+        outbound_session.add_remote_destination(inbound_destination_id.clone(), inbound_public_key);
+
+        // send NS and verify it contains a `DatabaseStore` clove
+        let mut message = inbound_session
+            .decrypt(Message {
+                payload: outbound_session.encrypt(&inbound_destination_id, vec![1u8; 4]).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(message
+            .find(|clove| std::matches!(clove.message_type, MessageType::DatabaseStore))
+            .is_some());
+
+        // send another NS and verify it also contains a `DatabaseStore` clove
+        let mut message = inbound_session
+            .decrypt(Message {
+                payload: outbound_session.encrypt(&inbound_destination_id, vec![1u8; 4]).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(message
+            .find(|clove| std::matches!(clove.message_type, MessageType::DatabaseStore))
+            .is_some());
     }
 }

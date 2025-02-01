@@ -17,8 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{SigningPrivateKey, StaticPublicKey},
-    primitives::{Destination, Mapping, RouterId, TunnelId, LOG_TARGET},
+    crypto::{SigningPrivateKey, SigningPublicKey, StaticPublicKey},
+    primitives::{Destination, Mapping, OfflineSignature, RouterId, TunnelId, LOG_TARGET},
     runtime::Runtime,
 };
 
@@ -33,9 +33,6 @@ use nom::{
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{iter, time::Duration};
 
-/// Signature length.
-const SIGNATURE_LEN: usize = 64usize;
-
 /// Header for [`LeaseSet2`].
 ///
 /// https://geti2p.net/spec/common-structures#leaseset2header
@@ -44,11 +41,14 @@ pub struct LeaseSet2Header {
     /// Destination for [`LeaseSet2`].
     pub destination: Destination,
 
-    /// When [`LeaseSet2`] was published.
-    pub published: u32,
-
     /// When [`LeaseSet2`] expires.
     pub expires: u32,
+
+    /// Offline key, if specified.
+    pub offline_signature: Option<SigningPublicKey>,
+
+    /// When [`LeaseSet2`] was published.
+    pub published: u32,
 }
 
 impl LeaseSet2Header {
@@ -61,20 +61,37 @@ impl LeaseSet2Header {
         let (rest, expires) = be_u16(rest)?;
         let (rest, flags) = be_u16(rest)?;
 
-        if flags & 1 == 1 {
+        // no offline signature
+        if flags & 1 == 0 {
+            return Ok((
+                rest,
+                Self {
+                    destination,
+                    expires: published.saturating_add(expires as u32),
+                    offline_signature: None,
+                    published,
+                },
+            ));
+        }
+
+        let Some(verifying_key) = destination.verifying_key() else {
             tracing::warn!(
                 target: LOG_TARGET,
-                "offline signatures not supported",
+                "no verifying key specified, cannot verify offline signature",
             );
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
-        }
+        };
+
+        // parse and verify offline signature and get key for verifying the lease set's signature
+        let (rest, verifying_key) = OfflineSignature::parse_frame(rest, verifying_key)?;
 
         Ok((
             rest,
             Self {
                 destination,
-                published,
                 expires: published.saturating_add(expires as u32),
+                offline_signature: Some(verifying_key),
+                published,
             },
         ))
     }
@@ -301,35 +318,58 @@ impl LeaseSet2 {
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         }
 
-        // verify signature
-        //
-        // TODO: optimize?
-        let (rest, signature) = take(SIGNATURE_LEN)(rest)?;
-
-        let mut bytes = BytesMut::with_capacity(input.len());
-        bytes.put_u8(3u8);
-        bytes.put_slice(&input[..input.len() - rest.len() - SIGNATURE_LEN]);
-
-        match header.destination.verifying_key() {
+        let rest = match header.destination.verifying_key() {
             None => {
+                // TODO: DSA?
+                let (rest, _signature) = take(40usize)(rest)?;
+
                 tracing::warn!(
                     target: LOG_TARGET,
                     id = %header.destination.id(),
                     "no signing key in destination, cannot verify signature",
                 );
 
-                return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                rest
+                // return Err(Err::Error(make_error(input, ErrorKind::Fail)));
             }
-            Some(signing_key) => signing_key.verify(&bytes, signature).map_err(|error| {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "invalid signature for leaseset2",
-                );
+            Some(verifying_key) => {
+                // verify signature
+                //
+                // TODO: optimize?
+                let (rest, signature) = take(verifying_key.signature_len())(rest)?;
 
-                Err::Error(make_error(input, ErrorKind::Fail))
-            })?,
-        }
+                let mut bytes = BytesMut::with_capacity(input.len());
+                bytes.put_u8(3u8);
+                bytes.put_slice(&input[..input.len() - rest.len() - verifying_key.signature_len()]);
+
+                match &header.offline_signature {
+                    None => {
+                        verifying_key.verify(&bytes, signature).map_err(|error| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "invalid signature for lease set",
+                            );
+
+                            Err::Error(make_error(input, ErrorKind::Fail))
+                        })?;
+                    }
+                    Some(verifying_key) => {
+                        verifying_key.verify(&bytes, signature).map_err(|error| {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "invalid signature for lease set with offline key",
+                            );
+
+                            Err::Error(make_error(input, ErrorKind::Fail))
+                        })?;
+                    }
+                }
+
+                rest
+            }
+        };
 
         Ok((
             rest,
@@ -409,6 +449,7 @@ impl LeaseSet2 {
     pub fn random() -> (LeaseSet2, SigningPrivateKey) {
         use crate::{crypto::StaticPrivateKey, runtime::mock::MockRuntime};
         use rand::{Rng, RngCore};
+        use std::time::SystemTime;
 
         let mut rng = rand::thread_rng();
 
@@ -437,19 +478,24 @@ impl LeaseSet2 {
             .map(|_| Lease {
                 router_id: RouterId::random(),
                 tunnel_id: TunnelId::from(rng.next_u32()),
-                expires: Duration::from_secs(rng.next_u32() as u64),
+                expires: Duration::from_secs(
+                    (SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
+                        + Duration::from_secs(9 * 60))
+                    .as_secs(),
+                ),
             })
             .collect::<Vec<_>>();
 
-        let published = rng.next_u32();
-        let expires = rng.next_u32() / 10;
+        let published = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
+            - Duration::from_secs(60);
 
         (
             LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published,
-                    expires: published.saturating_sub(expires),
+                    expires: (published + Duration::from_secs(8 * 60)).as_secs() as u32,
+                    offline_signature: None,
+                    published: published.as_secs() as u32,
                 },
                 public_keys: vec![public_key],
                 leases,
@@ -514,8 +560,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases: vec![lease1.clone(), lease2.clone()],
@@ -543,8 +590,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases: vec![],
@@ -598,8 +646,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![],
             leases: vec![lease1.clone(), lease2.clone()],
@@ -634,8 +683,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases,
@@ -730,8 +780,9 @@ mod tests {
             let lease_set = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
                     expires: Duration::from_secs(60).as_secs() as u32,
+                    offline_signature: None,
+                    published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
                 },
                 public_keys: vec![sk.public()],
                 leases: vec![lease1.clone(), lease2.clone()],
@@ -769,8 +820,9 @@ mod tests {
             let lease_set = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: (now - Duration::from_secs(60)).as_secs() as u32,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    offline_signature: None,
+                    published: (now - Duration::from_secs(60)).as_secs() as u32,
                 },
                 public_keys: vec![sk.public()],
                 leases: vec![lease1.clone(), lease2.clone()],
@@ -806,8 +858,9 @@ mod tests {
             let serialized = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
-                    published: (now).as_secs() as u32,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    offline_signature: None,
+                    published: (now).as_secs() as u32,
                 },
                 public_keys: vec![sk.public()],
                 leases: vec![lease1.clone(), lease2.clone()],
@@ -868,8 +921,9 @@ mod tests {
         let serialized = LeaseSet2 {
             header: LeaseSet2Header {
                 destination,
-                published: 1337,
                 expires: 2 * 1337,
+                offline_signature: None,
+                published: 1337,
             },
             public_keys: vec![sk.public()],
             leases: vec![lease1.clone(), lease2.clone()],
@@ -877,5 +931,105 @@ mod tests {
         .serialize(&wrong_sgk);
 
         assert!(LeaseSet2::parse(&serialized).is_none());
+    }
+
+    #[test]
+    fn p256() {
+        let input = vec![
+            47, 62, 234, 30, 115, 135, 127, 6, 199, 3, 235, 241, 51, 76, 90, 14, 215, 226, 171,
+            143, 42, 177, 22, 107, 110, 102, 234, 143, 109, 20, 219, 249, 8, 203, 186, 117, 243,
+            232, 175, 198, 124, 157, 203, 73, 96, 168, 242, 160, 153, 209, 118, 115, 230, 189, 83,
+            197, 41, 134, 222, 110, 5, 66, 255, 231, 115, 224, 91, 62, 220, 187, 44, 63, 186, 229,
+            172, 96, 28, 38, 234, 148, 84, 134, 147, 107, 13, 49, 33, 156, 191, 35, 158, 27, 56,
+            37, 137, 172, 221, 200, 227, 103, 102, 217, 23, 193, 230, 2, 125, 64, 217, 94, 140,
+            153, 247, 227, 143, 73, 100, 122, 217, 196, 116, 241, 17, 27, 6, 161, 142, 227, 171,
+            124, 113, 222, 164, 85, 99, 30, 219, 198, 10, 31, 110, 109, 66, 158, 16, 71, 107, 31,
+            24, 27, 48, 120, 98, 213, 119, 92, 46, 131, 80, 100, 3, 141, 86, 197, 46, 208, 176, 67,
+            29, 83, 106, 222, 78, 165, 116, 191, 187, 19, 94, 11, 45, 32, 93, 28, 184, 103, 101,
+            200, 103, 173, 141, 116, 75, 200, 89, 77, 2, 126, 113, 98, 152, 158, 166, 151, 230,
+            150, 25, 18, 186, 241, 33, 245, 64, 130, 191, 90, 196, 110, 165, 194, 253, 4, 204, 120,
+            120, 15, 254, 5, 185, 42, 172, 68, 25, 98, 238, 145, 125, 97, 234, 62, 45, 147, 219,
+            124, 212, 167, 25, 93, 52, 165, 195, 13, 157, 127, 191, 64, 196, 159, 62, 4, 202, 164,
+            225, 232, 21, 123, 244, 59, 87, 72, 110, 7, 51, 205, 217, 100, 139, 234, 184, 15, 84,
+            122, 148, 94, 90, 186, 209, 181, 14, 48, 186, 178, 55, 34, 150, 23, 117, 90, 116, 245,
+            76, 221, 205, 89, 166, 156, 224, 171, 200, 73, 156, 56, 129, 167, 52, 233, 149, 107, 3,
+            7, 133, 158, 209, 245, 215, 177, 96, 239, 192, 130, 3, 46, 86, 39, 66, 60, 118, 162,
+            229, 97, 173, 67, 243, 111, 65, 251, 160, 77, 147, 69, 98, 124, 136, 136, 43, 35, 99,
+            153, 139, 23, 191, 253, 8, 43, 111, 20, 109, 103, 116, 173, 242, 175, 191, 109, 74,
+            123, 241, 201, 122, 35, 72, 242, 190, 146, 5, 0, 4, 0, 1, 0, 0, 103, 142, 164, 171, 2,
+            88, 0, 0, 0, 0, 2, 0, 4, 0, 32, 186, 109, 69, 186, 154, 223, 138, 162, 52, 238, 113,
+            41, 99, 62, 176, 162, 46, 102, 191, 209, 177, 199, 42, 126, 27, 169, 119, 95, 12, 122,
+            154, 59, 0, 0, 1, 0, 105, 31, 160, 43, 230, 32, 239, 46, 192, 48, 117, 4, 139, 128,
+            125, 54, 99, 176, 122, 146, 43, 68, 31, 17, 62, 228, 5, 74, 103, 147, 205, 116, 228,
+            130, 202, 172, 229, 226, 254, 250, 76, 219, 201, 131, 124, 39, 141, 78, 57, 35, 218,
+            252, 143, 167, 65, 36, 226, 134, 192, 4, 94, 183, 43, 83, 65, 98, 123, 39, 143, 177,
+            142, 200, 75, 149, 143, 186, 23, 82, 248, 158, 26, 55, 9, 109, 187, 225, 40, 81, 0,
+            154, 130, 171, 4, 107, 238, 119, 54, 224, 116, 159, 223, 57, 214, 213, 54, 188, 253,
+            40, 220, 167, 232, 151, 236, 21, 225, 237, 75, 132, 150, 109, 44, 134, 188, 113, 231,
+            151, 34, 170, 96, 229, 186, 57, 149, 148, 47, 3, 21, 177, 181, 160, 29, 210, 225, 167,
+            33, 132, 142, 143, 178, 8, 158, 3, 223, 156, 149, 65, 199, 34, 71, 139, 144, 19, 64,
+            123, 232, 239, 68, 166, 232, 151, 70, 32, 19, 185, 136, 23, 71, 185, 83, 183, 17, 26,
+            143, 224, 121, 67, 54, 249, 58, 202, 149, 102, 145, 176, 136, 97, 174, 212, 246, 141,
+            168, 45, 208, 198, 233, 233, 164, 161, 37, 153, 74, 190, 139, 22, 205, 101, 15, 41,
+            109, 62, 186, 41, 176, 99, 111, 151, 174, 50, 180, 48, 63, 88, 166, 229, 159, 11, 131,
+            110, 227, 106, 29, 253, 171, 153, 62, 42, 143, 160, 136, 247, 60, 127, 164, 221, 43,
+            78, 3, 72, 46, 255, 164, 210, 109, 68, 40, 198, 79, 70, 132, 252, 45, 128, 105, 96, 85,
+            249, 193, 214, 10, 217, 48, 243, 148, 174, 87, 165, 225, 34, 37, 90, 168, 156, 118,
+            103, 142, 167, 3, 10, 91, 233, 157, 37, 25, 144, 226, 230, 63, 185, 23, 42, 37, 173,
+            77, 61, 3, 135, 80, 186, 187, 125, 31, 174, 26, 98, 20, 15, 244, 193, 70, 79, 11, 203,
+            170, 103, 142, 166, 214, 13, 145, 35, 198, 109, 92, 84, 207, 164, 192, 160, 158, 65,
+            32, 229, 152, 37, 159, 225, 13, 241, 71, 79, 121, 82, 95, 241, 112, 47, 69, 186, 77,
+            172, 95, 94, 30, 103, 142, 165, 230, 165, 116, 43, 1, 66, 81, 40, 86, 2, 238, 181, 67,
+            255, 202, 236, 90, 136, 92, 24, 125, 134, 249, 84, 61, 73, 83, 20, 232, 53, 229, 62,
+            143, 21, 204, 24, 200, 226, 232, 226, 13, 119, 50, 165, 163, 243, 173, 233, 198, 85,
+            52, 251, 199, 89, 220, 21, 209, 37, 158, 59, 195, 58, 40, 19, 70,
+        ];
+
+        let _ = LeaseSet2::parse(&input).unwrap();
+    }
+
+    #[test]
+    fn offline_signature() {
+        let input = vec![
+            24, 166, 169, 39, 201, 40, 81, 192, 99, 254, 57, 144, 204, 123, 19, 99, 16, 224, 218,
+            218, 95, 90, 61, 49, 141, 4, 243, 119, 192, 97, 124, 47, 92, 220, 228, 185, 127, 3,
+            193, 53, 168, 224, 23, 231, 142, 15, 167, 130, 140, 84, 234, 78, 90, 43, 150, 30, 199,
+            157, 223, 36, 94, 61, 106, 110, 85, 6, 93, 63, 173, 14, 132, 125, 253, 133, 124, 118,
+            101, 229, 231, 87, 9, 159, 211, 21, 77, 26, 196, 169, 21, 146, 37, 85, 219, 81, 76,
+            253, 183, 147, 232, 233, 118, 182, 227, 181, 107, 210, 194, 103, 219, 180, 120, 42,
+            130, 143, 241, 5, 99, 212, 107, 135, 233, 208, 119, 111, 172, 19, 61, 179, 154, 152,
+            45, 221, 144, 237, 124, 190, 68, 36, 125, 149, 148, 117, 19, 3, 94, 77, 29, 240, 7, 99,
+            7, 65, 52, 243, 174, 39, 57, 63, 201, 244, 90, 103, 119, 106, 80, 19, 155, 168, 21, 62,
+            143, 208, 58, 173, 65, 29, 163, 176, 91, 223, 244, 193, 58, 213, 170, 139, 188, 163,
+            207, 90, 153, 32, 118, 126, 51, 233, 153, 38, 248, 210, 78, 112, 60, 246, 54, 255, 18,
+            139, 184, 101, 139, 222, 4, 245, 40, 33, 49, 132, 108, 118, 53, 62, 146, 115, 155, 42,
+            252, 98, 106, 9, 252, 224, 82, 48, 112, 234, 94, 167, 27, 134, 254, 65, 87, 116, 62,
+            77, 126, 193, 244, 191, 165, 43, 139, 123, 172, 19, 117, 214, 15, 179, 240, 232, 255,
+            42, 85, 129, 119, 246, 53, 8, 171, 131, 162, 52, 204, 15, 156, 214, 51, 203, 99, 120,
+            152, 51, 16, 118, 199, 71, 59, 114, 212, 86, 31, 195, 18, 154, 78, 203, 208, 0, 152,
+            74, 7, 14, 56, 201, 198, 221, 129, 20, 22, 198, 197, 247, 105, 100, 42, 68, 54, 76, 47,
+            153, 151, 152, 83, 35, 66, 11, 48, 18, 169, 51, 142, 148, 220, 221, 166, 119, 188, 114,
+            231, 172, 159, 115, 67, 92, 138, 77, 158, 161, 4, 232, 231, 185, 66, 110, 88, 56, 156,
+            164, 173, 127, 213, 199, 247, 5, 21, 61, 208, 204, 49, 164, 34, 56, 241, 148, 80, 108,
+            141, 66, 114, 98, 65, 99, 5, 0, 4, 0, 7, 0, 0, 103, 145, 24, 146, 2, 87, 0, 1, 103,
+            211, 114, 177, 0, 7, 114, 245, 169, 33, 134, 26, 252, 238, 198, 139, 178, 162, 137,
+            244, 248, 219, 134, 158, 177, 169, 36, 111, 194, 146, 62, 64, 132, 131, 205, 60, 141,
+            119, 75, 98, 229, 232, 91, 194, 2, 167, 112, 200, 140, 187, 82, 159, 142, 104, 231, 51,
+            65, 186, 199, 13, 110, 250, 125, 184, 96, 36, 20, 106, 127, 70, 84, 46, 253, 209, 8,
+            190, 88, 186, 122, 152, 13, 39, 3, 238, 211, 221, 88, 159, 203, 116, 189, 186, 222,
+            120, 237, 193, 252, 251, 122, 55, 198, 6, 0, 0, 1, 0, 4, 0, 32, 250, 45, 143, 169, 233,
+            103, 250, 255, 190, 251, 51, 16, 101, 224, 182, 135, 254, 87, 23, 3, 174, 163, 208,
+            233, 164, 53, 89, 73, 254, 223, 166, 2, 2, 110, 27, 112, 170, 104, 203, 23, 254, 172,
+            25, 167, 58, 65, 76, 245, 160, 32, 118, 167, 7, 175, 202, 173, 248, 57, 191, 38, 151,
+            242, 201, 155, 138, 104, 137, 89, 100, 103, 145, 26, 233, 6, 136, 237, 205, 181, 252,
+            77, 120, 184, 187, 162, 8, 12, 158, 188, 212, 200, 65, 245, 132, 161, 220, 83, 103, 54,
+            20, 176, 15, 20, 159, 87, 227, 242, 4, 131, 233, 103, 145, 25, 157, 173, 224, 11, 74,
+            17, 85, 226, 29, 103, 124, 15, 113, 242, 58, 254, 240, 45, 40, 139, 193, 121, 211, 190,
+            82, 37, 199, 31, 103, 111, 110, 151, 44, 204, 145, 204, 134, 61, 81, 45, 239, 98, 43,
+            255, 143, 72, 186, 230, 83, 179, 172, 49, 63, 148, 215, 219, 175, 57, 175, 212, 122,
+            41, 207, 20, 11,
+        ];
+
+        let _ = LeaseSet2::parse(&input).unwrap();
     }
 }

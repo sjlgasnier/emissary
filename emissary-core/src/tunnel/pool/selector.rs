@@ -82,6 +82,12 @@ pub trait TunnelSelector: Send + Unpin {
 
     /// Remove tunnel from the set of active inbound tunnels.
     fn remove_inbound_tunnel(&mut self, tunnel_id: &TunnelId);
+
+    /// Register tunnel test failure.
+    fn register_tunnel_test_failure(&mut self, outbound: &TunnelId, inbound: &TunnelId);
+
+    /// Register tunnel test success.
+    fn register_tunnel_test_success(&mut self, outbound: &TunnelId, inbound: &TunnelId);
 }
 
 /// Hop selector for a tunnel pool.
@@ -289,6 +295,82 @@ impl<R: Runtime> TunnelSelector for ExploratorySelector<R> {
             self.remove_tunnel(&hops);
         }
     }
+
+    fn register_tunnel_test_failure(&mut self, outbound: &TunnelId, inbound: &TunnelId) {
+        {
+            let inner = self.outbound.read();
+
+            match inner.get(outbound) {
+                Some(hops) => hops.iter().for_each(|router_id| {
+                    self.profile_storage.tunnel_test_failed(router_id);
+                }),
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?outbound,
+                        "cannot register tunnel test failure, outbound tunnel doesn't exist",
+                    );
+                    debug_assert!(false);
+                }
+            }
+        }
+
+        {
+            let inner = self.inbound.read();
+
+            match inner.get(inbound) {
+                Some((_, hops)) => hops.iter().for_each(|router_id| {
+                    self.profile_storage.tunnel_test_failed(router_id);
+                }),
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?inbound,
+                        "cannot register tunnel test failure, inbound tunnel doesn't exist",
+                    );
+                    debug_assert!(false);
+                }
+            }
+        }
+    }
+
+    fn register_tunnel_test_success(&mut self, outbound: &TunnelId, inbound: &TunnelId) {
+        {
+            let inner = self.outbound.read();
+
+            match inner.get(outbound) {
+                Some(hops) => hops.iter().for_each(|router_id| {
+                    self.profile_storage.tunnel_test_succeeded(router_id);
+                }),
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?outbound,
+                        "cannot register tunnel test succeeded, outbound tunnel doesn't exist",
+                    );
+                    debug_assert!(false);
+                }
+            }
+        }
+
+        {
+            let inner = self.inbound.read();
+
+            match inner.get(inbound) {
+                Some((_, hops)) => hops.iter().for_each(|router_id| {
+                    self.profile_storage.tunnel_test_succeeded(router_id);
+                }),
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?inbound,
+                        "cannot register tunnel test success, inbound tunnel doesn't exist",
+                    );
+                    debug_assert!(false);
+                }
+            }
+        }
+    }
 }
 
 impl<R: Runtime> HopSelector for ExploratorySelector<R> {
@@ -296,8 +378,9 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
         let mut router_ids = self.profile_storage.get_router_ids(
             Bucket::Standard,
             |router_id, router_info, profile| {
-                !profile.is_failing()
+                !profile.is_failing::<R>()
                     && router_info.is_reachable()
+                    && router_info.is_usable()
                     && (self.insecure || self.can_participate(router_id))
             },
         );
@@ -309,7 +392,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             if router_ids.len() < num_hops {
                 let mut fast_router_ids =
                     self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
-                        !profile.is_failing() && router_info.is_reachable()
+                        !profile.is_failing::<R>() && router_info.is_reachable()
                     });
 
                 let num_needed = num_hops - router_ids.len();
@@ -320,6 +403,10 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 shuffle(&mut fast_router_ids, &mut R::rng());
                 router_ids.extend(fast_router_ids.into_iter().take(num_needed));
             }
+
+            router_ids.iter().for_each(|router_id| {
+                self.profile_storage.selected_for_tunnel(router_id);
+            });
 
             let reader = self.profile_storage.reader();
             return Some(
@@ -354,7 +441,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             let fast_router_ids = self.profile_storage.get_router_ids(
                 Bucket::Fast,
                 |router_id, router_info, profile| {
-                    !profile.is_failing()
+                    !profile.is_failing::<R>()
                         && router_info.is_reachable()
                         && (self.insecure || self.can_participate(router_id))
                 },
@@ -397,6 +484,14 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             shuffle(&mut routers, &mut R::rng());
             routers
         };
+
+        // register tunnel selection in each router's profile
+        //
+        // these are used to calculate the participation ratio, i.e., how often each router
+        // accepts/rejects a tunnel
+        router_ids.iter().for_each(|router_id| {
+            self.profile_storage.selected_for_tunnel(router_id);
+        });
 
         let reader = self.profile_storage.reader();
         Some(
@@ -492,6 +587,66 @@ impl<R: Runtime> TunnelSelector for ClientSelector<R> {
             self.exploratory.remove_tunnel(&hops);
         }
     }
+
+    fn register_tunnel_test_failure(&mut self, outbound: &TunnelId, inbound: &TunnelId) {
+        match self.outbound.get(outbound) {
+            Some(hops) => hops.iter().for_each(|router_id| {
+                self.exploratory.profile_storage.tunnel_test_failed(router_id);
+            }),
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?outbound,
+                    "cannot register tunnel test failure, outbound tunnel doesn't exist",
+                );
+                debug_assert!(false);
+            }
+        }
+
+        match self.inbound.get(inbound) {
+            Some((_, hops)) => hops.iter().for_each(|router_id| {
+                self.exploratory.profile_storage.tunnel_test_failed(router_id);
+            }),
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?inbound,
+                    "cannot register tunnel test failure, inbound tunnel doesn't exist",
+                );
+                debug_assert!(false);
+            }
+        }
+    }
+
+    fn register_tunnel_test_success(&mut self, outbound: &TunnelId, inbound: &TunnelId) {
+        match self.outbound.get(outbound) {
+            Some(hops) => hops.iter().for_each(|router_id| {
+                self.exploratory.profile_storage.tunnel_test_succeeded(router_id);
+            }),
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?outbound,
+                    "cannot register tunnel test succeeded, outbound tunnel doesn't exist",
+                );
+                debug_assert!(false);
+            }
+        }
+
+        match self.inbound.get(inbound) {
+            Some((_, hops)) => hops.iter().for_each(|router_id| {
+                self.exploratory.profile_storage.tunnel_test_succeeded(router_id);
+            }),
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?inbound,
+                    "cannot register tunnel test success, inbound tunnel doesn't exist",
+                );
+                debug_assert!(false);
+            }
+        }
+    }
 }
 
 impl<R: Runtime> HopSelector for ClientSelector<R> {
@@ -499,8 +654,9 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
         let mut router_ids = self.exploratory.profile_storage.get_router_ids(
             Bucket::Fast,
             |router_id, router_info, profile| {
-                !profile.is_failing()
+                !profile.is_failing::<R>()
                     && router_info.is_reachable()
+                    && router_info.is_usable()
                     && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
             },
         );
@@ -510,12 +666,12 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             shuffle(&mut router_ids, &mut R::rng());
 
             if router_ids.len() < num_hops {
-                let mut standard_router_ids = self
-                    .exploratory
-                    .profile_storage
-                    .get_router_ids(Bucket::Standard, |_, router_info, profile| {
-                        !profile.is_failing() && router_info.is_reachable()
-                    });
+                let mut standard_router_ids = self.exploratory.profile_storage.get_router_ids(
+                    Bucket::Standard,
+                    |_, router_info, profile| {
+                        !profile.is_failing::<R>() && router_info.is_reachable()
+                    },
+                );
 
                 let num_needed = num_hops - router_ids.len();
                 if num_needed > standard_router_ids.len() {
@@ -525,6 +681,10 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 shuffle(&mut standard_router_ids, &mut R::rng());
                 router_ids.extend(standard_router_ids.into_iter().take(num_needed));
             }
+
+            router_ids.iter().for_each(|router_id| {
+                self.exploratory.profile_storage.selected_for_tunnel(router_id);
+            });
 
             let reader = self.exploratory.profile_storage.reader();
             return Some(
@@ -559,7 +719,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             let standard_router_ids = self.exploratory.profile_storage.get_router_ids(
                 Bucket::Standard,
                 |router_id, router_info, profile| {
-                    !profile.is_failing()
+                    !profile.is_failing::<R>()
                         && router_info.is_reachable()
                         && (self.exploratory.insecure
                             || self.exploratory.can_participate(router_id))
@@ -604,6 +764,14 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             shuffle(&mut routers, &mut R::rng());
             routers
         };
+
+        // register tunnel selection in each router's profile
+        //
+        // these are used to calculate the participation ratio, i.e., how often each router
+        // accepts/rejects a tunnel
+        router_ids.iter().for_each(|router_id| {
+            self.exploratory.profile_storage.selected_for_tunnel(router_id);
+        });
 
         let reader = self.exploratory.profile_storage.reader();
         Some(
@@ -736,9 +904,10 @@ mod tests {
         // there are only 3 standard routers so 2 routers must be fast
         let mut standard = 0usize;
         let mut fast = 0usize;
+        let hops = selector.select_hops(5).unwrap();
         let reader = profile_storage.reader();
 
-        for (hash, _) in selector.select_hops(5).unwrap() {
+        for (hash, _) in hops {
             let router_info = reader.router_info(&RouterId::from(hash));
 
             if router_info.capabilities.is_fast() {
@@ -849,9 +1018,10 @@ mod tests {
         // there are only 3 fast routers so 2 routers must be standard
         let mut standard = 0usize;
         let mut fast = 0usize;
+        let hops = selector.select_hops(5).unwrap();
         let reader = profile_storage.reader();
 
-        for (hash, _) in selector.select_hops(5).unwrap() {
+        for (hash, _) in hops {
             let router_info = reader.router_info(&RouterId::from(hash));
 
             if router_info.capabilities.is_fast() {
@@ -978,10 +1148,14 @@ mod tests {
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
         // 5 unreachable standard routers
-        for _ in 0..5 {
+        for i in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("LU")).unwrap();
+                info.addresses.insert(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_unpublished_ntcp2([i as u8; 32], 2000 + i),
+                );
                 info
             });
         }
@@ -1021,10 +1195,14 @@ mod tests {
         }
 
         // 5 unreachable fast routers
-        for _ in 0..5 {
+        for i in 0..5 {
             profile_storage.add_router({
                 let mut info = RouterInfo::random::<MockRuntime>();
                 info.capabilities = Capabilities::parse(&Str::from("OU")).unwrap();
+                info.addresses.insert(
+                    TransportKind::Ntcp2,
+                    RouterAddress::new_unpublished_ntcp2([i as u8; 32], 2000 + i),
+                );
                 info
             });
         }
@@ -1088,10 +1266,9 @@ mod tests {
             true,
         );
 
+        let hops = selector.select_hops(3).unwrap();
         let reader = profile_storage.reader();
-        assert!(selector
-            .select_hops(3)
-            .unwrap()
+        assert!(hops
             .into_iter()
             .all(|(hash, _)| reader.router_info(&RouterId::from(hash)).capabilities.is_standard()));
     }
@@ -1146,10 +1323,9 @@ mod tests {
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
+        let hops = selector.select_hops(3).unwrap();
         let reader = profile_storage.reader();
-        assert!(selector
-            .select_hops(3)
-            .unwrap()
+        assert!(hops
             .into_iter()
             .all(|(hash, _)| reader.router_info(&RouterId::from(hash)).capabilities.is_fast()));
     }
@@ -1205,8 +1381,8 @@ mod tests {
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
             let mut standard = 0usize;
             let mut fast = 0usize;
-            let reader = profile_storage.reader();
             let hops = selector.select_hops(5).unwrap();
+            let reader = profile_storage.reader();
 
             for (hash, _) in &hops {
                 let router_info = reader.router_info(&RouterId::from(hash));
@@ -1288,8 +1464,8 @@ mod tests {
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
             let mut standard = 0usize;
             let mut fast = 0usize;
-            let reader = profile_storage.reader();
             let hops = selector.select_hops(5).unwrap();
+            let reader = profile_storage.reader();
 
             for (hash, _) in &hops {
                 let router_info = reader.router_info(&RouterId::from(hash));

@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPublicKey,
     i2np::{HopRole, Message},
-    primitives::{MessageId, RouterId, TunnelId},
+    primitives::{MessageId, RouterId, Str, TunnelId},
     runtime::Runtime,
     tunnel::{
         noise::{NoiseContext, OutboundSession},
@@ -57,6 +57,11 @@ impl TunnelHop {
     pub fn outbound_session(&self) -> &OutboundSession {
         &self.key_context
     }
+
+    /// Get reference to [`TunnelHop`]'s `RouterId`.
+    pub fn router_id(&self) -> &RouterId {
+        &self.router
+    }
 }
 
 /// Tunnel direction.
@@ -72,7 +77,12 @@ pub enum TunnelDirection {
 /// Common interface for local tunnels (initiated by us).
 pub trait Tunnel: Send {
     /// Create new [`Tunnel`].
-    fn new<R: Runtime>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self;
+    fn new<R: Runtime>(
+        name: Str,
+        tunnel_id: TunnelId,
+        receiver: ReceiverKind,
+        hops: Vec<TunnelHop>,
+    ) -> Self;
 
     /// Get an iterator of hop roles for the tunnel participants.
     fn hop_roles(num_hops: NonZeroUsize) -> impl Iterator<Item = HopRole>;
@@ -92,6 +102,9 @@ pub struct TunnelBuilder<T: Tunnel> {
     /// Hops.
     hops: VecDeque<TunnelHop>,
 
+    /// Name of the tunnel pool this tunnel belongs to.
+    name: Str,
+
     /// Message receiver for the tunnel.
     receiver: ReceiverKind,
 
@@ -104,9 +117,10 @@ pub struct TunnelBuilder<T: Tunnel> {
 
 impl<T: Tunnel> TunnelBuilder<T> {
     /// Create new [`TunnelBuilder`].
-    pub fn new(tunnel_id: TunnelId, receiver: ReceiverKind) -> Self {
+    pub fn new(name: Str, tunnel_id: TunnelId, receiver: ReceiverKind) -> Self {
         Self {
             hops: VecDeque::new(),
+            name,
             receiver,
             tunnel_id,
             _tunnel: Default::default(),
@@ -122,6 +136,7 @@ impl<T: Tunnel> TunnelBuilder<T> {
     // Build new tunnel from provided hops.
     pub fn build<R: Runtime>(self) -> T {
         T::new::<R>(
+            self.name,
             self.tunnel_id,
             self.receiver,
             self.hops.into_iter().rev().collect(),
@@ -213,6 +228,9 @@ impl TunnelInfo {
 pub struct TunnelBuildParameters {
     /// Tunnel hops.
     pub hops: Vec<(Bytes, StaticPublicKey)>,
+
+    /// Name of the tunnel pool.
+    pub name: Str,
 
     /// Noise context.
     pub noise: NoiseContext,

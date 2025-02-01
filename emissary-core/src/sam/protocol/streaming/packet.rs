@@ -19,8 +19,8 @@
 #![allow(unused)]
 
 use crate::{
-    crypto::SigningPrivateKey,
-    primitives::{Destination, DestinationId},
+    crypto::{SigningPrivateKey, SigningPublicKey},
+    primitives::{Destination, DestinationId, OfflineSignature},
     sam::protocol::streaming::LOG_TARGET,
 };
 
@@ -41,6 +41,9 @@ const MIN_HEADER_SIZE: usize = 22usize;
 /// Signature length.
 const SIGNATURE_LEN: usize = 64usize;
 
+/// DSA-SHA1 signature length.
+const DSA_SIGNATURE_LEN: usize = 40usize;
+
 /// MTU size.
 const MTU: usize = 1812usize;
 
@@ -55,14 +58,81 @@ pub struct Flags<'a> {
     /// Maximum packet size, if received.
     max_packet_size: Option<u16>,
 
-    /// Offline signature, if received.
-    offline_signature: Option<&'a [u8]>,
+    /// Signing public key from [`OfflineSignature`].
+    offline_signature: Option<SigningPublicKey>,
 
     /// Requested delay, if received.
     requested_delay: Option<u16>,
 
     /// Included signature, if received.
     signature: Option<&'a [u8]>,
+}
+
+impl<'a> fmt::Display for Flags<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut flags = Vec::<&'static str>::new();
+
+        if self.synchronize() {
+            flags.push("SYN");
+        }
+
+        if self.close() {
+            flags.push("CLOSE")
+        }
+
+        if self.reset() {
+            flags.push("RST")
+        }
+
+        if self.signature().is_some() {
+            flags.push("SIG");
+        }
+
+        if self.from_included().is_some() {
+            flags.push("FROM_INCLUDED");
+        }
+
+        if self.echo() {
+            flags.push("ECHO");
+        }
+
+        if self.no_ack() {
+            flags.push("NACK");
+        }
+
+        if self.offline_signature().is_some() {
+            flags.push("OFFLINE_SIG");
+        }
+
+        let mut flags = {
+            if flags.is_empty() {
+                "[]".to_string()
+            } else {
+                let num_flags = flags.len();
+                let mut ret = String::from("flags = [");
+
+                for (i, flag) in flags.into_iter().enumerate() {
+                    if i + 1 < num_flags {
+                        ret += format!("{flag}, ").as_str();
+                    } else {
+                        ret += flag;
+                    }
+                }
+
+                ret + "]"
+            }
+        };
+
+        if let Some(delay) = self.delay_requested() {
+            flags += format!(", delay = {delay}").as_str();
+        }
+
+        if let Some(mtu) = self.max_packet_size() {
+            flags += format!(", mtu = {mtu}").as_str();
+        }
+
+        write!(f, "{flags}")
+    }
 }
 
 impl<'a> Flags<'a> {
@@ -84,12 +154,51 @@ impl<'a> Flags<'a> {
         };
 
         let (rest, offline_signature) = match (flags >> 11) & 1 == 1 {
-            true => todo!("offline signatures not supported"),
+            true => match destination.as_ref() {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "cannot verify offline signature, `FROM_INLCUDED` missing",
+                    );
+                    debug_assert!(false);
+                    return Err(Err::Error(make_error(options, ErrorKind::Fail)));
+                }
+                Some(destination) => match destination.verifying_key() {
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "dsa-sha1 offline keys not supported",
+                        );
+                        return Err(Err::Error(make_error(options, ErrorKind::Fail)));
+                    }
+                    Some(verifying_key) => {
+                        let (rest, verifying_key) =
+                            OfflineSignature::parse_frame(rest, verifying_key)?;
+
+                        (rest, Some(verifying_key))
+                    }
+                },
+            },
             false => (rest, None),
         };
 
         let (rest, signature) = match (flags >> 3) & 1 == 1 {
-            true => take(64usize)(rest).map(|(rest, signature)| (rest, Some(signature)))?,
+            true => match destination.as_ref() {
+                None => {
+                    // destination not specified, optimistically take rest of the input
+                    let (rest, signature) = take(rest.len())(rest)?;
+
+                    (rest, Some(rest))
+                }
+                Some(destination) => match destination.verifying_key() {
+                    None => {
+                        let (rest, signature) = take(DSA_SIGNATURE_LEN)(rest)?;
+                        (rest, Some(signature))
+                    }
+                    Some(verifying_key) => take(verifying_key.signature_len())(rest)
+                        .map(|(rest, signature)| (rest, Some(signature)))?,
+                },
+            },
             false => (rest, None),
         };
 
@@ -152,8 +261,8 @@ impl<'a> Flags<'a> {
     }
 
     /// Get included offline signature, if received.
-    pub fn offline_signature(&self) -> Option<&'a [u8]> {
-        self.offline_signature
+    pub fn offline_signature(&self) -> Option<&SigningPublicKey> {
+        self.offline_signature.as_ref()
     }
 }
 
@@ -166,6 +275,7 @@ impl<'a> fmt::Debug for Flags<'a> {
 /// [`Packet`] peek info.
 ///
 /// Used to peek into packet so it can be handled correctly without fully deserializing it.
+#[derive(Debug)]
 pub struct PeekInfo {
     /// Packet flags.
     flags: u16,

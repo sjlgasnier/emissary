@@ -58,6 +58,11 @@ const PADDING_LEN: usize = 320usize + 32usize;
 /// https://geti2p.net/spec/common-structures#key-certificates
 const KEY_KIND_EDDSA_SHA512_ED25519: u16 = 0x0007;
 
+/// Key kind for `ECDSA_SHA256_P256`.
+///
+/// https://geti2p.net/spec/common-structures#key-certificates
+const KEY_KIND_ECDSA_SHA256_P256: u16 = 0x0001;
+
 /// Serialized [`Destination`] length with key certificate
 const DESTINATION_WITH_KEY_CERT_LEN: usize = 391usize;
 
@@ -189,6 +194,14 @@ impl Destination {
                             SigningPublicKey::from_bytes(&public_key)
                                 .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?
                         }),
+                        DESTINATION_WITH_KEY_CERT_LEN,
+                    ),
+                    KEY_KIND_ECDSA_SHA256_P256 => (
+                        rest,
+                        Some(
+                            SigningPublicKey::p256(&initial_bytes[384 - 64..384])
+                                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?,
+                        ),
                         DESTINATION_WITH_KEY_CERT_LEN,
                     ),
                     key_kind => {

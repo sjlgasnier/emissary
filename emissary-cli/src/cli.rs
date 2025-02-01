@@ -56,7 +56,7 @@ pub struct ReseedOptions {
     #[arg(long, value_delimiter = ',', num_args = 1.., value_name = "HOST")]
     pub reseed_hosts: Option<Vec<String>>,
 
-    /// Don't reseed the routere even if there aren't enough routers
+    /// Don't reseed the router even if there aren't enough routers
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub disable_reseed: Option<bool>,
 
@@ -79,10 +79,14 @@ pub struct MetricsOptions {
 #[derive(Args)]
 pub struct HttpProxyOptions {
     /// HTTP proxy port.
+    ///
+    /// Defaults to 4444
     #[arg(long, value_name = "PORT")]
     pub http_proxy_port: Option<u16>,
 
     /// HTTP proxy host.
+    ///
+    /// Defaults to 127.0.0.1
     #[arg(long, value_name = "HOST")]
     pub http_proxy_host: Option<String>,
 }

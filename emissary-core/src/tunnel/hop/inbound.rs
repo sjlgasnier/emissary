@@ -26,7 +26,7 @@ use crate::{
         tunnel::data::{DeliveryInstructions, EncryptedTunnelData, MessageKind, TunnelData},
         HopRole, Message,
     },
-    primitives::{MessageId, RouterId, TunnelId},
+    primitives::{MessageId, RouterId, Str, TunnelId},
     runtime::Runtime,
     tunnel::{
         fragment::{FragmentHandler, OwnedDeliveryInstructions},
@@ -70,6 +70,9 @@ pub struct InboundTunnel {
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
 
+    /// Name of the tunnel pool this tunnel belongs to.
+    name: Str,
+
     /// Tunnel ID.
     tunnel_id: TunnelId,
 }
@@ -91,6 +94,7 @@ impl InboundTunnel {
                 || {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        name = %self.name,
                         tunnel_id = %self.tunnel_id,
                         "decrypted tunnel data doesn't contain zero byte",
                     );
@@ -104,6 +108,7 @@ impl InboundTunnel {
         if ciphertext[..4] != checksum[..4] {
             tracing::warn!(
                 target: LOG_TARGET,
+                name = %self.name,
                 tunnel_id = %self.tunnel_id,
                 checksum = ?ciphertext[..4],
                 calculated = ?checksum[..4],
@@ -121,6 +126,7 @@ impl InboundTunnel {
         if payload_start >= ciphertext.len() {
             tracing::warn!(
                 target: LOG_TARGET,
+                name = %self.name,
                 tunnel_id = %self.tunnel_id,
                 "decrypted tunnel data doesn't contain zero byte",
             );
@@ -139,6 +145,7 @@ impl InboundTunnel {
         let tunnel_data = EncryptedTunnelData::parse(&message.payload).ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
+                name = %self.name,
                 tunnel_id = %self.tunnel_id,
                 message_id = %message.message_id,
                 "malformed tunnel data message",
@@ -149,6 +156,7 @@ impl InboundTunnel {
 
         tracing::trace!(
             target: LOG_TARGET,
+            name = %self.name,
             tunnel = %self.tunnel_id,
             message_len = ?tunnel_data.ciphertext().len(),
             "tunnel data",
@@ -180,6 +188,7 @@ impl InboundTunnel {
             .ok_or_else(|| {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    name = %self.name,
                     tunnel_id = %self.tunnel_id,
                     "malformed tunnel data message",
                 );
@@ -199,6 +208,7 @@ impl InboundTunnel {
                         delivery_instructions => {
                             tracing::warn!(
                                 target: LOG_TARGET,
+                                name = %self.name,
                                 tunnel = %self.tunnel_id,
                                 ?delivery_instructions,
                                 "unsupported delivery instructions",
@@ -241,6 +251,7 @@ impl InboundTunnel {
                     delivery_instructions => {
                         tracing::warn!(
                             target: LOG_TARGET,
+                            name = %self.name,
                             tunnel = %self.tunnel_id,
                             ?delivery_instructions,
                             "unsupported delivery instructions",
@@ -256,7 +267,12 @@ impl InboundTunnel {
 }
 
 impl Tunnel for InboundTunnel {
-    fn new<R: Runtime>(tunnel_id: TunnelId, receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+    fn new<R: Runtime>(
+        name: Str,
+        tunnel_id: TunnelId,
+        receiver: ReceiverKind,
+        hops: Vec<TunnelHop>,
+    ) -> Self {
         let (message_rx, handle) = receiver.inbound();
 
         // hop must exist since it was created by us
@@ -271,6 +287,7 @@ impl Tunnel for InboundTunnel {
             handle,
             hops,
             message_rx,
+            name,
             tunnel_id,
         }
     }
@@ -302,6 +319,7 @@ impl Future for InboundTunnel {
                 None => {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        name = %self.name,
                         tunnel_id = %self.tunnel_id,
                         "message channel closed",
                     );
@@ -310,6 +328,7 @@ impl Future for InboundTunnel {
                 Some(message) => match self.handle_tunnel_data(&message) {
                     Err(error) => tracing::warn!(
                         target: LOG_TARGET,
+                        name = %self.name,
                         tunnel = %self.tunnel_id,
                         ?error,
                         "failed to handle tunnel data",
@@ -318,6 +337,7 @@ impl Future for InboundTunnel {
                         if let Err(error) = self.handle.route_message(message) {
                             tracing::debug!(
                                 target: LOG_TARGET,
+                                name = %self.name,
                                 tunnel = %self.tunnel_id,
                                 ?error,
                                 "failed to route message",

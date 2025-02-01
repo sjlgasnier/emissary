@@ -19,7 +19,7 @@
 use crate::{
     crypto::aes::{cbc, ecb},
     i2np::{tunnel::data::TunnelDataBuilder, HopRole, MessageBuilder, MessageType},
-    primitives::{RouterId, TunnelId},
+    primitives::{RouterId, Str, TunnelId},
     runtime::Runtime,
     tunnel::hop::{ReceiverKind, Tunnel, TunnelDirection, TunnelHop},
 };
@@ -48,17 +48,20 @@ const PAYLOAD_OFFSET: RangeFrom<usize> = 20..;
 /// Outbound tunnel.
 #[derive(Debug)]
 pub struct OutboundTunnel<R: Runtime> {
-    /// Marker for `Runtime`.
-    _marker: PhantomData<R>,
-
     /// Tunnel hops.
     hops: Vec<TunnelHop>,
+
+    /// Name of the tunnel pool is tunnel belongs to.
+    name: Str,
 
     /// Random bytes used for tunnel data padding.
     padding_bytes: [u8; 1028],
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
+
+    /// Marker for `Runtime`.
+    _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> OutboundTunnel<R> {
@@ -70,6 +73,7 @@ impl<R: Runtime> OutboundTunnel<R> {
     ) -> (RouterId, impl Iterator<Item = Vec<u8>> + '_) {
         tracing::trace!(
             target: LOG_TARGET,
+            name = %self.name,
             tunnel = %self.tunnel_id,
             %router,
             message_len = ?message.len(),
@@ -130,6 +134,7 @@ impl<R: Runtime> OutboundTunnel<R> {
     ) -> (RouterId, impl Iterator<Item = Vec<u8>> + '_) {
         tracing::trace!(
             target: LOG_TARGET,
+            name = %self.name,
             tunnel = %self.tunnel_id,
             %router,
             %gateway,
@@ -184,7 +189,12 @@ impl<R: Runtime> OutboundTunnel<R> {
 }
 
 impl<R: Runtime> Tunnel for OutboundTunnel<R> {
-    fn new<U>(tunnel_id: TunnelId, _receiver: ReceiverKind, hops: Vec<TunnelHop>) -> Self {
+    fn new<U>(
+        name: Str,
+        tunnel_id: TunnelId,
+        _receiver: ReceiverKind,
+        hops: Vec<TunnelHop>,
+    ) -> Self {
         // generate random padding bytes used in `TunnelData` messages
         let padding_bytes = {
             let mut padding_bytes = [0u8; 1028];
@@ -202,10 +212,11 @@ impl<R: Runtime> Tunnel for OutboundTunnel<R> {
         };
 
         OutboundTunnel::<R> {
-            _marker: Default::default(),
             hops,
+            name,
             padding_bytes,
             tunnel_id,
+            _marker: Default::default(),
         }
     }
 

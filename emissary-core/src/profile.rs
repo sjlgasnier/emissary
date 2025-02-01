@@ -35,6 +35,14 @@ use core::{marker::PhantomData, time::Duration};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::profile";
 
+/// Last decline threshold.
+///
+/// TODO: explain
+const LAST_DECLINE_THRESHOLD: Duration = Duration::from_secs(180);
+
+/// How long the router is considered unreachable after last dial failure.
+const UNREACHABILITY_THRESHOLD: Duration = Duration::from_secs(180);
+
 /// Router bucket.
 pub enum Bucket {
     /// Any bucket.
@@ -53,6 +61,16 @@ pub struct Profile {
     /// Last activity, duration since UNIX epoch.
     pub last_activity: Duration,
 
+    /// Last time a tunnel was declined.
+    ///
+    /// `None` if there is no information.
+    pub last_declined: Option<Duration>,
+
+    /// Last time a dial failed.
+    ///
+    /// `None` if there is no information.
+    pub last_dial_failure: Option<Duration>,
+
     /// Number of accepted tunnels.
     pub num_accepted: usize,
 
@@ -64,6 +82,9 @@ pub struct Profile {
 
     /// Number of rejected tunnels.
     pub num_rejected: usize,
+
+    /// Number of times the router has been selecte for a tunnel.
+    pub num_selected: usize,
 
     /// Number of test failures for tunnels where the router was a selected hop.
     pub num_test_failures: usize,
@@ -80,19 +101,55 @@ impl Profile {
     fn new() -> Self {
         Self {
             last_activity: Duration::from_secs(0),
+            last_declined: None,
+            last_dial_failure: None,
             num_accepted: 0usize,
             num_connection: 0usize,
             num_dial_failures: 0usize,
             num_rejected: 0usize,
+            num_selected: 0usize,
             num_test_failures: 0usize,
             num_test_successes: 0usize,
             num_unaswered: 0usize,
         }
     }
 
+    /// Has the router recently declined a tunnel.
+    ///
+    /// Decline is either an actual declination or a failure to respond to a request.
+    fn has_recently_declined<R: Runtime>(&self) -> bool {
+        self.last_declined.map_or_else(
+            || false,
+            |last_declined| R::time_since_epoch() - last_declined < LAST_DECLINE_THRESHOLD,
+        )
+    }
+
+    /// Does the router have low participation rate.
+    fn has_low_participation_rate(&self) -> bool {
+        4 * self.num_accepted < self.num_rejected
+    }
+
+    /// Is the router considered unreachable.
+    fn is_unreachable<R: Runtime>(&self) -> bool {
+        self.last_dial_failure.map_or_else(
+            || false,
+            |last_dial_failure| {
+                R::time_since_epoch() - last_dial_failure > UNREACHABILITY_THRESHOLD
+            },
+        )
+    }
+
+    /// Is the router always declining tunnels.
+    fn is_always_declining(&self) -> bool {
+        self.num_accepted == 0 && self.num_rejected >= 5
+    }
+
     /// Is the router considered failing.
-    pub fn is_failing(&self) -> bool {
-        false
+    pub fn is_failing<R: Runtime>(&self) -> bool {
+        self.has_recently_declined::<R>()
+            || self.is_unreachable::<R>()
+            || self.is_always_declining()
+            || self.has_low_participation_rate()
     }
 }
 
@@ -194,13 +251,23 @@ impl<R: Runtime> ProfileStorage<R> {
     pub fn add_router(&self, router_info: RouterInfo) {
         let router_id = router_info.identity.id();
 
-        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
-            tracing::warn!(
+        if !router_info.is_reachable_ntcp2() {
+            tracing::debug!(
                 target: LOG_TARGET,
+                %router_id,
                 caps = %router_info.capabilities,
-                "tried to add unreachable/unusable router",
+                "cannot add router, ntcp2 address is not reachable",
             );
             return;
+        }
+
+        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
+            tracing::trace!(
+                target: LOG_TARGET,
+                %router_id,
+                caps = %router_info.capabilities,
+                "adding potentially unreachable/unusable router",
+            );
         }
 
         {
@@ -224,6 +291,11 @@ impl<R: Runtime> ProfileStorage<R> {
     // TODO: remove
     pub fn get(&self, router: &RouterId) -> Option<RouterInfo> {
         self.routers.read().get(router).cloned()
+    }
+
+    /// Check if [`ProfileStorage`] contains `router_id`.
+    pub fn contains(&self, router_id: &RouterId) -> bool {
+        self.routers.read().contains_key(router_id)
     }
 
     /// Get `RouterId`s of those routers that pass `filter`.
@@ -299,59 +371,129 @@ impl<R: Runtime> ProfileStorage<R> {
             .map_or(false, |router_info| router_info.is_floodfill())
     }
 
-    /// Record that `router_id` accepted a tunnel build request.
-    #[allow(unused)]
-    pub fn tunnel_build_accepted(&self, router_id: &RouterId) {
+    /// Record that `router_id` was selected for a tunnel.
+    pub fn selected_for_tunnel(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        profile.num_selected += 1;
+    }
+
+    /// Record that `router_id`'s participation for a tunnel could not be determined.
+    ///
+    /// This happens when a build record fails to decrypt, causing the entire build response to be
+    /// unparseable and hops following the malformed hop cannot be decrypted and parsed.
+    pub fn unselected_for_tunnel(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
+        profile.num_selected = profile.num_selected.saturating_sub(1);
+    }
+
+    /// Record that `router_id` accepted a tunnel build request.
+    pub fn tunnel_accepted(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_accepted += 1;
         profile.last_activity = R::time_since_epoch();
+        profile.last_declined = None;
     }
 
     /// Record that `router_id` rejected a tunnel build request.
-    #[allow(unused)]
-    pub fn tunnel_build_rejected(&self, router_id: &RouterId) {
+    pub fn tunnel_rejected(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_rejected += 1;
         profile.last_activity = R::time_since_epoch();
+        profile.last_declined = Some(R::time_since_epoch());
     }
 
     /// Record that `router_id` failed to answer a tunnel build request.
-    #[allow(unused)]
-    pub fn tunnel_build_not_answered(&self, router_id: &RouterId) {
+    pub fn tunnel_not_answered(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_unaswered += 1;
         profile.last_activity = R::time_since_epoch();
+        profile.last_declined = Some(R::time_since_epoch());
     }
 
     /// Record test success for a tunnel that `router_id` was a participant of.
-    #[allow(unused)]
     pub fn tunnel_test_succeeded(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_test_successes += 1;
         profile.last_activity = R::time_since_epoch();
     }
 
     /// Record test failure for a tunnel that `router_id` was a participant of.
-    #[allow(unused)]
     pub fn tunnel_test_failed(&self, router_id: &RouterId) {
         let mut inner = self.profiles.write();
-        let profile = inner.get_mut(router_id).expect("to exist");
 
         // profile must exist since it's controlled by us
+        let profile = inner.get_mut(router_id).expect("to exist");
+
         profile.num_test_failures += 1;
         profile.last_activity = R::time_since_epoch();
+    }
+
+    /// Record dial success for `router_id`.
+    ///
+    /// Profile might not exist if this is an inbound connection.
+    pub fn dial_succeeded(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        match inner.get_mut(router_id) {
+            Some(profile) => {
+                profile.num_connection += 1;
+                profile.last_activity = R::time_since_epoch();
+            }
+            None => {
+                let mut profile = Profile::new();
+                profile.num_connection += 1;
+                profile.last_activity = R::time_since_epoch();
+
+                inner.insert(router_id.clone(), profile);
+            }
+        }
+    }
+
+    /// Record dial failure for `router_id`.
+    ///
+    /// Profile might not exist if this is an inbound connection.
+    pub fn dial_failed(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        match inner.get_mut(router_id) {
+            Some(profile) => {
+                profile.num_dial_failures += 1;
+                profile.last_activity = R::time_since_epoch();
+                profile.last_dial_failure = Some(profile.last_activity);
+            }
+            None => {
+                let mut profile = Profile::new();
+                profile.num_dial_failures += 1;
+                profile.last_activity = R::time_since_epoch();
+                profile.last_dial_failure = Some(profile.last_activity);
+
+                inner.insert(router_id.clone(), profile);
+            }
+        }
     }
 }
 
@@ -441,10 +583,13 @@ mod tests {
                     router_id,
                     Profile {
                         last_activity: Duration::from_secs((i as u64 + 1) * 10000),
+                        last_declined: None,
+                        last_dial_failure: None,
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
                         num_rejected: i + 1,
+                        num_selected: i + 1,
                         num_test_failures: i + 1,
                         num_test_successes: i + 1,
                         num_unaswered: i + 1,
@@ -488,10 +633,13 @@ mod tests {
                     router_id,
                     Profile {
                         last_activity: Duration::from_secs((i as u64 + 1) * 10000),
+                        last_declined: None,
+                        last_dial_failure: None,
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
                         num_rejected: i + 1,
+                        num_selected: i + 1,
                         num_test_failures: i + 1,
                         num_test_successes: i + 1,
                         num_unaswered: i + 1,
@@ -504,5 +652,22 @@ mod tests {
 
         assert!(profiles.routers.read().is_empty());
         assert!(profiles.profiles.read().is_empty());
+    }
+
+    #[test]
+    fn create_profile_if_it_doesnt_exist() {
+        let profiles = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+        let router_id = RouterId::random();
+
+        assert!(profiles.routers.read().is_empty());
+        assert!(profiles.profiles.read().is_empty());
+
+        profiles.dial_succeeded(&router_id);
+
+        let reader = profiles.reader();
+        assert_eq!(
+            reader._profiles.get(&router_id).unwrap().num_connection,
+            1usize
+        );
     }
 }

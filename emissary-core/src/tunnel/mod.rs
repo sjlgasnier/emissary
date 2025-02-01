@@ -122,6 +122,9 @@ pub struct TunnelManager<R: Runtime> {
     /// Noise context for tunnels.
     noise: NoiseContext,
 
+    /// Profile storage.
+    profile: ProfileStorage<R>,
+
     /// Local router info.
     router_info: RouterInfo,
 
@@ -196,6 +199,7 @@ impl<R: Runtime> TunnelManager<R> {
                 build_parameters,
                 selector.clone(),
                 routing_table.clone(),
+                profile_storage.clone(),
                 noise.clone(),
                 metrics_handle.clone(),
             );
@@ -221,6 +225,7 @@ impl<R: Runtime> TunnelManager<R> {
                 metrics_handle: metrics_handle.clone(),
                 netdb_tx,
                 noise,
+                profile: profile_storage,
                 router_info,
                 routers: HashMap::new(),
                 routing_table,
@@ -373,14 +378,7 @@ impl<R: Runtime> TunnelManager<R> {
             %router_id,
             "failed to open connection to router",
         );
-
-        if self.routers.remove(router_id).is_none() {
-            tracing::debug!(
-                target: LOG_TARGET,
-                %router_id,
-                "connection failure for unknown router",
-            );
-        }
+        self.routers.remove(router_id);
     }
 
     /// Handle garlic message.
@@ -457,6 +455,7 @@ impl<R: Runtime> TunnelManager<R> {
             build_parameters,
             selector,
             self.routing_table.clone(),
+            self.profile.clone(),
             self.noise.clone(),
             self.metrics_handle.clone(),
         );

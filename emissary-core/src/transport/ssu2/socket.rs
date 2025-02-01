@@ -35,7 +35,7 @@ use crate::{
             },
             Packet,
         },
-        TransportEvent,
+        TerminationReason, TransportEvent,
     },
 };
 
@@ -95,7 +95,7 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Active sessions.
     ///
     /// The session returns a `(RouterId, destination connection ID)` tuple when it exits.
-    active_sessions: R::JoinSet<(RouterId, u64)>,
+    active_sessions: R::JoinSet<(RouterId, u64, TerminationReason)>,
 
     /// Receive buffer.
     buffer: Vec<u8>,
@@ -423,9 +423,9 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
         match this.active_sessions.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((router_id, _dst_id))) => {
+            Poll::Ready(Some((router_id, _dst_id, reason))) => {
                 // TODO: remove channel
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id }));
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason }));
             }
         }
 

@@ -846,6 +846,18 @@ pub struct GarlicClove {
     pub message_body: Vec<u8>,
 }
 
+impl fmt::Debug for GarlicClove {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GarlicClove")
+            .field("message_type", &self.message_type)
+            .field("message_id", &self.message_id)
+            .field("expiration", &self.expiration)
+            .field("delivery_instructions", &self.delivery_instructions)
+            .field("message_len", &self.message_body.len())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

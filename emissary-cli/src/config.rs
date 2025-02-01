@@ -37,10 +37,13 @@ use std::{
 #[derive(Debug, Serialize, Deserialize)]
 struct Profile {
     last_activity: Option<u64>,
+    last_declined: Option<u64>,
+    last_dial_failure: Option<u64>,
     num_accepted: Option<usize>,
     num_connection: Option<usize>,
     num_dial_failures: Option<usize>,
     num_rejected: Option<usize>,
+    num_selected: Option<usize>,
     num_test_failures: Option<usize>,
     num_test_successes: Option<usize>,
     num_unaswered: Option<usize>,
@@ -718,10 +721,17 @@ impl Config {
                     name,
                     emissary_core::Profile {
                         last_activity: Duration::from_secs(profile.last_activity.unwrap_or(0)),
+                        last_declined: profile
+                            .last_declined
+                            .map(|last_declined| Duration::from_secs(last_declined)),
+                        last_dial_failure: profile
+                            .last_dial_failure
+                            .map(|last_dial_failure| Duration::from_secs(last_dial_failure)),
                         num_accepted: profile.num_accepted.unwrap_or(0),
                         num_connection: profile.num_connection.unwrap_or(0),
                         num_dial_failures: profile.num_dial_failures.unwrap_or(0),
                         num_rejected: profile.num_rejected.unwrap_or(0),
+                        num_selected: profile.num_selected.unwrap_or(0),
                         num_test_failures: profile.num_test_failures.unwrap_or(0),
                         num_test_successes: profile.num_test_successes.unwrap_or(0),
                         num_unaswered: profile.num_unaswered.unwrap_or(0),
