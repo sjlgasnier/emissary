@@ -644,6 +644,13 @@ impl<R: Runtime> SamSession<R> {
     /// destination so fetch the initial protocol message from the protocol handler and send it to
     /// remote destination.
     fn on_lease_set_found(&mut self, destination_id: DestinationId) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            %destination_id,
+            "lease set found",
+        );
+
         match self.pending_outbound.remove(&destination_id) {
             Some(PendingSessionState::AwaitingLeaseSet { protocol }) => match protocol {
                 ProtocolKind::Stream {
@@ -699,6 +706,14 @@ impl<R: Runtime> SamSession<R> {
     ///
     /// Client is notified that the remote destination is not reachable and the socket is closed.
     fn on_lease_set_not_found(&mut self, destination_id: DestinationId, error: QueryError) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            %destination_id,
+            ?error,
+            "lease set not found",
+        );
+
         match self.pending_outbound.remove(&destination_id) {
             Some(PendingSessionState::AwaitingLeaseSet { protocol }) => {
                 tracing::warn!(
