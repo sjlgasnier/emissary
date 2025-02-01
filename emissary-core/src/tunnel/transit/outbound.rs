@@ -232,7 +232,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
                             tunnel_id = %self.tunnel_id,
                             %router,
                             message_type = ?message.message_type,
-                            "fragment router delivery",
+                            "router delivery",
                         );
 
                         let message = MessageBuilder::short()
@@ -252,7 +252,8 @@ impl<R: Runtime> OutboundEndpoint<R> {
                             tunnel_id = %self.tunnel_id,
                             %router,
                             delivery_tunnel = ?tunnel_id,
-                            "fragment router delivery",
+                            message_type = ?message.message_type,
+                            "tunnel delivery",
                         );
 
                         let payload = TunnelGateway {

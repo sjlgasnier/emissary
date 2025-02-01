@@ -90,13 +90,6 @@ impl<R: Runtime> InboundGateway<R> {
         &'a self,
         tunnel_gateway: &'a TunnelGateway,
     ) -> crate::Result<(RouterId, impl Iterator<Item = Vec<u8>> + 'a)> {
-        tracing::trace!(
-            target: LOG_TARGET,
-            tunnel_id = %self.tunnel_id,
-            gateway_tunnel_id = %tunnel_gateway.tunnel_id,
-            "tunnel gateway",
-        );
-
         match Message::parse_standard(tunnel_gateway.payload) {
             None => {
                 tracing::warn!(
@@ -117,7 +110,12 @@ impl<R: Runtime> InboundGateway<R> {
                 );
                 return Err(Error::Expired);
             }
-            _ => {}
+            Some(message) => tracing::trace!(
+                target: LOG_TARGET,
+                tunnel_id = %self.tunnel_id,
+                message_type = ?message.message_type,
+                "tunnel gateway",
+            ),
         }
 
         let messages = TunnelDataBuilder::new(self.next_tunnel_id)
