@@ -2343,4 +2343,56 @@ mod tests {
             _ => panic!("invalid error"),
         }
     }
+
+    #[tokio::test]
+    async fn stream_destroyed_while_opening() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager1 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // register listener for `manager1`
+        let (socket, _) = socket_factory.socket().await;
+        assert!(manager1
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true
+            })
+            .is_ok());
+
+        // create new oubound stream to `manager1`
+        let (socket, _client_stream) = socket_factory.socket().await;
+        let (_packet, stream_id) =
+            manager2.create_stream(manager1.destination_id.clone(), socket, false);
+
+        // verify there's one outbound timer active
+        assert_eq!(manager2.outbound_timers.len(), 1);
+        assert!(manager2.pending_outbound.get(&stream_id).is_some());
+        assert!(manager2.destination_streams.get(&manager1.destination_id).is_some());
+
+        // remove session and verify the timer's still active
+        manager2.remove_session(&manager1.destination_id.clone());
+
+        // verify there's one outbound timer active and that the session is gone
+        assert_eq!(manager2.outbound_timers.len(), 1);
+        assert!(manager2.pending_outbound.get(&stream_id).is_none());
+        assert!(manager2.destination_streams.get(&manager1.destination_id).is_none());
+
+        // wait for 15 seconds and verify that no event is emitted
+        assert!(tokio::time::timeout(Duration::from_secs(15), manager2.next()).await.is_err());
+
+        // verify that there are no timers anymore
+        assert!(manager2.outbound_timers.is_empty());
+        assert!(manager2.pending_outbound.get(&stream_id).is_none());
+        assert!(manager2.destination_streams.get(&manager1.destination_id).is_none());
+    }
 }

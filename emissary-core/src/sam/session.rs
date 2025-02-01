@@ -673,6 +673,15 @@ impl<R: Runtime> SamSession<R> {
                     };
                 }),
             },
+            Some(PendingSessionState::AwaitingSession { .. }) => {
+                // new stream was opened but by the the time the initial `SYN` packet was sent,
+                // remote's lease set had expired and they had not sent us, a new lease set a lease
+                // set query was started and the lease set was found
+                //
+                // the new lease set can be ignored for `PendingSessionState::AwaitinSession` since
+                // the `SYN` packet was queued in `Destination` and was sent to remote destination
+                // when the lease set was received
+            }
             state => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -708,6 +717,21 @@ impl<R: Runtime> SamSession<R> {
                             .await;
                     });
                 }
+            }
+            Some(PendingSessionState::AwaitingSession { stream_id }) => {
+                // new stream was opened but by the the time the initial `SYN` packet was sent,
+                // remote's lease set had expired and they had not sent us, a new lease set a lease
+                // set query was started but the lease set was not found in the netdb
+                //
+                // as the remote cannot be contacted, remove the pending stream from `StreamManager`
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = ?self.session_id,
+                    %destination_id,
+                    ?stream_id,
+                    "stream awaiting session but remote lease set not found",
+                );
+                self.stream_manager.remove_session(&destination_id);
             }
             state => {
                 tracing::warn!(
