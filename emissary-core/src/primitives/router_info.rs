@@ -306,7 +306,7 @@ impl RouterInfo {
     /// Router is considered reachable if its caps don't specify otherwise and it has at least one
     /// published address.
     pub fn is_reachable(&self) -> bool {
-        if self.capabilities.is_hidden() {
+        if !self.capabilities.is_reachable() {
             return false;
         }
 
