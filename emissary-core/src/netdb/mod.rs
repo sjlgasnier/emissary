@@ -307,6 +307,15 @@ enum QueryKind {
         key: Bytes,
     },
 
+    /// Router info.
+    RouterInfo {
+        /// Number of floodfills we still expect to receive a reply from.
+        num_floodfills: usize,
+
+        /// Oneshot sender for sending the result to caller.
+        tx: oneshot::Sender<Result<RouterInfo, QueryError>>,
+    },
+
     /// Router exploration.
     Exploration,
 
@@ -318,6 +327,8 @@ impl fmt::Debug for QueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Leaseset { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
+            Self::RouterInfo { .. } =>
+                f.debug_struct("QueryKind::RouterInfo").finish_non_exhaustive(),
             Self::RecursiveLeaseSetQuery { .. } =>
                 f.debug_struct("QueryKind::RecursiveLeaseSetQuery").finish_non_exhaustive(),
             Self::Exploration => f.debug_struct("QueryKind::Exploration").finish(),
@@ -1304,6 +1315,18 @@ impl<R: Runtime> NetDb<R> {
                         );
                     }
                 }
+                (
+                    DatabaseStorePayload::RouterInfo { router_info },
+                    QueryKind::RouterInfo { tx, .. },
+                ) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        router_id = %router_info.identity.id(),
+                        "router info found",
+                    );
+
+                    let _ = tx.send(Ok(router_info));
+                }
                 (payload, query) => tracing::warn!(
                     target: LOG_TARGET,
                     %payload,
@@ -1530,6 +1553,38 @@ impl<R: Runtime> NetDb<R> {
                     }
                 }
             }
+            Some(QueryKind::RouterInfo { num_floodfills, tx }) => {
+                let router_id = RouterId::from(&key);
+
+                match num_floodfills.checked_sub(1) {
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "unexpected number of failures for router info query",
+                        );
+                        debug_assert!(false);
+                        let _ = tx.send(Err(QueryError::ValueNotFound));
+                    }
+                    Some(0) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "router info not found in any of the queried floodfills",
+                        );
+                        let _ = tx.send(Err(QueryError::ValueNotFound));
+                    }
+                    Some(num_floodfills) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?num_floodfills,
+                            "router info lookup failed",
+                        );
+                        self.active.insert(key, QueryKind::RouterInfo { num_floodfills, tx });
+                    }
+                }
+            }
             Some(QueryKind::Router) => tracing::debug!(
                 target: LOG_TARGET,
                 %router_id,
@@ -1739,6 +1794,61 @@ impl<R: Runtime> NetDb<R> {
         });
     }
 
+    /// Query `RouterInfo` under `router_id` from `NetDb` and return result to caller via `tx`.
+    ///
+    /// Starts at most 3 queries in parallel and the first one that succeeds is sent to the
+    /// caller. The query is considered failed if `DatabaseSearchReply` is received from all
+    /// three floodfill routers or if the query timer expires.
+    fn on_query_router_info(
+        &mut self,
+        router_id: RouterId,
+        tx: oneshot::Sender<Result<RouterInfo, QueryError>>,
+    ) {
+        let key = Bytes::from(router_id.to_vec());
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let num_floodfills = floodfills.len();
+
+        // should not happen but bail out early if there no floodfills
+        if num_floodfills == 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "cannot query router info, no floodfills",
+            );
+
+            let _ = tx.send(Err(QueryError::NoFloodfills));
+            return;
+        }
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            %router_id,
+            ?floodfills,
+            "query router info",
+        );
+
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(R::rng().next_u32())
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_payload(
+                &DatabaseLookupBuilder::new(key.clone(), LookupType::Router)
+                    .with_reply_type(ReplyType::Router {
+                        router_id: self.local_router_id.clone(),
+                    })
+                    .build(),
+            )
+            .build();
+
+        self.send_message(&floodfills, MessageKind::NonExpiring { message });
+
+        // store router info query into active queries and start timer for the query
+        self.active.insert(key.clone(), QueryKind::RouterInfo { num_floodfills, tx });
+        self.query_timers.push(async move {
+            R::delay(Duration::from_secs(5)).await;
+            key
+        });
+    }
+
     /// Get `RouterId`'s of the floodfills closest to `key`.
     fn on_get_closest_floodfills(
         &mut self,
@@ -1920,6 +2030,8 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_query_lease_set(key, tx),
                 Poll::Ready(Some(NetDbAction::GetClosestFloodfills { key, tx })) =>
                     self.on_get_closest_floodfills(key, tx),
+                Poll::Ready(Some(NetDbAction::QueryRouterInfo { router_id, tx })) =>
+                    self.on_query_router_info(router_id, tx),
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
             }
         }
@@ -2070,11 +2182,12 @@ mod tests {
             )
         };
 
+        let reply_router = RouterId::random();
         let message = DatabaseStoreBuilder::new(key, DatabaseStoreKind::LeaseSet2 { lease_set })
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2087,9 +2200,15 @@ mod tests {
             })
             .is_ok());
         assert_eq!(netdb.lease_sets.len(), 1);
+        match rx.try_recv().unwrap() {
+            ProtocolCommand::Connect { router_id } => {
+                assert_eq!(router_id, reply_router);
+            }
+            _ => panic!("invalid event"),
+        }
         assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-            ProtocolCommand::Connect { router } => {
-                assert!(floodfills.remove(&router.identity.id()));
+            ProtocolCommand::Connect { router_id } => {
+                assert!(floodfills.remove(&router_id));
                 true
             }
             _ => false,
@@ -2413,6 +2532,7 @@ mod tests {
 
         // store first lease set that is about to expire
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key1,
                 DatabaseStoreKind::LeaseSet2 {
@@ -2422,7 +2542,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2436,9 +2556,15 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-                ProtocolCommand::Connect { router } => {
-                    assert!(floodfills.remove(&router.identity.id()));
+                ProtocolCommand::Connect { router_id } => {
+                    assert!(floodfills.remove(&router_id));
                     true
                 }
                 _ => false,
@@ -2454,6 +2580,7 @@ mod tests {
 
         // store second expiring lease set and verify floodfills are pending
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key2,
                 DatabaseStoreKind::LeaseSet2 {
@@ -2463,7 +2590,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2477,6 +2604,12 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
@@ -2494,6 +2627,7 @@ mod tests {
 
         // store non-expiring lease set and verify floodfills are pending
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key3,
                 DatabaseStoreKind::LeaseSet2 {
@@ -2503,7 +2637,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2517,6 +2651,12 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 3);
             assert_eq!(netdb.routers.len(), 6);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
@@ -2601,10 +2741,11 @@ mod tests {
             )
         };
 
+        let reply_router = RouterId::random();
         let message = DatabaseStoreBuilder::new(key, DatabaseStoreKind::RouterInfo { router_info })
             .with_reply_type(StoreReplyType::Router {
                 reply_token: MockRuntime::rng().next_u32(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2617,9 +2758,15 @@ mod tests {
             })
             .is_ok());
         assert_eq!(netdb.router_infos.len(), 1);
+        match rx.try_recv().unwrap() {
+            ProtocolCommand::Connect { router_id } => {
+                assert_eq!(router_id, reply_router);
+            }
+            _ => panic!("invalid event"),
+        }
         assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-            ProtocolCommand::Connect { router } => {
-                assert!(floodfills.remove(&router.identity.id()));
+            ProtocolCommand::Connect { router_id } => {
+                assert!(floodfills.remove(&router_id));
                 true
             }
             _ => false,
@@ -3249,6 +3396,7 @@ mod tests {
         };
 
         // store first lease set that is about to expire
+        let reply_router = RouterId::random();
         {
             let message = DatabaseStoreBuilder::new(
                 key1,
@@ -3259,7 +3407,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3273,9 +3421,15 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-                ProtocolCommand::Connect { router } => {
-                    assert!(floodfills.remove(&router.identity.id()));
+                ProtocolCommand::Connect { router_id } => {
+                    assert!(floodfills.remove(&router_id));
                     true
                 }
                 _ => false,
@@ -3291,6 +3445,7 @@ mod tests {
 
         // store second expiring lease set and verify floodfills are pending
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key2.clone(),
                 DatabaseStoreKind::LeaseSet2 {
@@ -3300,7 +3455,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3314,6 +3469,12 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
@@ -3388,15 +3549,21 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
+
+                tracing::error!("floodfilld = {id}");
+
                 storage.add_router(info);
 
                 id
             })
             .collect::<HashSet<_>>();
 
+        let local = RouterId::random();
+        tracing::error!("local router id = {local}");
+
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            local,
             true,
             service,
             storage,
@@ -3474,6 +3641,7 @@ mod tests {
         };
 
         // store first lease set that is about to expire
+        let reply_router = RouterId::random();
         {
             let message = DatabaseStoreBuilder::new(
                 key1,
@@ -3483,7 +3651,7 @@ mod tests {
             )
             .with_reply_type(StoreReplyType::Router {
                 reply_token: MockRuntime::rng().next_u32(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3497,9 +3665,15 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-                ProtocolCommand::Connect { router } => {
-                    assert!(floodfills.remove(&router.identity.id()));
+                ProtocolCommand::Connect { router_id } => {
+                    assert!(floodfills.remove(&router_id));
                     true
                 }
                 _ => false,
@@ -3514,6 +3688,7 @@ mod tests {
         }
 
         // store second expiring lease set and verify floodfills are pending
+        let reply_router = RouterId::random();
         {
             let message = DatabaseStoreBuilder::new(
                 key2.clone(),
@@ -3523,7 +3698,7 @@ mod tests {
             )
             .with_reply_type(StoreReplyType::Router {
                 reply_token: MockRuntime::rng().next_u32(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3537,6 +3712,12 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {

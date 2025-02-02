@@ -248,7 +248,7 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Insert `router` into [`ProfileStorage`].
-    pub fn add_router(&self, router_info: RouterInfo) {
+    pub fn add_router(&self, router_info: RouterInfo) -> bool {
         let router_id = router_info.identity.id();
 
         // TODO: `E` routers should be accepted
@@ -259,7 +259,7 @@ impl<R: Runtime> ProfileStorage<R> {
                 caps = %router_info.capabilities,
                 "adding potentially unreachable/unusable router",
             );
-            return;
+            return false;
         }
 
         if !router_info.is_reachable_ntcp2() {
@@ -269,7 +269,7 @@ impl<R: Runtime> ProfileStorage<R> {
                 caps = %router_info.capabilities,
                 "cannot add router, ntcp2 address is not reachable",
             );
-            return;
+            return false;
         }
 
         {
@@ -288,6 +288,8 @@ impl<R: Runtime> ProfileStorage<R> {
         if self.routers.write().insert(router_id.clone(), router_info).is_none() {
             self.profiles.write().insert(router_id, Profile::new());
         }
+
+        true
     }
 
     // TODO: remove

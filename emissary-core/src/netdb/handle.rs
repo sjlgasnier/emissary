@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPublicKey,
     error::{ChannelError, QueryError},
-    primitives::{LeaseSet2, RouterId},
+    primitives::{LeaseSet2, RouterId, RouterInfo},
 };
 
 use bytes::Bytes;
@@ -44,13 +44,22 @@ impl thingbuf::Recycle<NetDbAction> for NetDbActionRecycle {
 
 /// Query kind.
 pub enum NetDbAction {
-    /// `LeaseSet2` query.
+    /// [`LeaseSet2`] query.
     QueryLeaseSet2 {
         /// Key,
         key: Bytes,
 
         /// Oneshot sender used to send the result to caller.
         tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
+    },
+
+    /// [`RouterInfo`] query.
+    QueryRouterInfo {
+        /// Router ID.
+        router_id: RouterId,
+
+        /// Oneshot sender used to send the result to caller.
+        tx: oneshot::Sender<Result<RouterInfo, QueryError>>,
     },
 
     /// Get `RouterId`'s of the floodfills closest to `key`.
@@ -104,6 +113,25 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
+    /// Send `DatabaseLookup` for a `RouterInf` identified by `router_id`.
+    ///
+    /// On success returns a `oneshot::Receiver` the caller must poll for a reply poll for a reply.
+    /// If the query succeeded, `RouterInfo` is returned and if ti failed, `QueryError` is returned.
+    ///
+    /// If the channel towards `NetDb` is full, `ChannelError::Full` is returned and the caller must
+    /// retry later.
+    pub fn query_router_info(
+        &self,
+        router_id: RouterId,
+    ) -> Result<oneshot::Receiver<Result<RouterInfo, QueryError>>, ChannelError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx
+            .try_send(NetDbAction::QueryRouterInfo { router_id, tx })
+            .map(|_| rx)
+            .map_err(From::from)
+    }
+
     /// Get `RouterId`'s and encryption public keys of the floodfills closest to `key`.
     ///
     /// Return channel is dropped by [`NetDb`] if there are no floodfills available.
@@ -142,6 +170,22 @@ mod tests {
         match rx.try_recv() {
             Ok(NetDbAction::QueryLeaseSet2 { key, .. }) => {
                 assert_eq!(key, Bytes::from(vec![1, 2, 3, 4]));
+            }
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[test]
+    fn send_router_info_query() {
+        let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
+        let handle = NetDbHandle::new(tx);
+        let remote = RouterId::random();
+
+        assert!(handle.query_router_info(remote.clone()).is_ok());
+
+        match rx.try_recv() {
+            Ok(NetDbAction::QueryRouterInfo { router_id, .. }) => {
+                assert_eq!(router_id, remote);
             }
             _ => panic!("invalid event"),
         }
