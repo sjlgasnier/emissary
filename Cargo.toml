@@ -14,8 +14,6 @@ members = [
   "emissary-cli",
   "emissary-core",
   "emissary-util",
-  "eepnet/tests/util/",
-  "eepnet/tests/*/test-runner",
 ]
 
 default-members = ["emissary-cli"]

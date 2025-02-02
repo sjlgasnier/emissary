@@ -7,7 +7,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY emissary-core ./emissary-core
 COPY emissary-cli ./emissary-cli
 COPY emissary-util ./emissary-util
-COPY eepnet ./eepnet
 
 RUN cargo install --profile testnet --path emissary-cli
 
