@@ -19,6 +19,7 @@
 use crate::{
     crypto::SigningPrivateKey,
     error::ChannelError,
+    netdb::NetDbHandle,
     primitives::{RouterId, RouterInfo},
     profile::ProfileStorage,
     runtime::{Counter, Gauge, MetricType, MetricsHandle, Runtime},
@@ -208,12 +209,9 @@ pub enum TransportEvent {
     },
 }
 
-// TODO: `poll_progress()` - only poll pending streams
-// TODO: `poll()` - poll pending streams and listener
+/// Transport interface.
 pub trait Transport: Stream + Unpin + Send {
     /// Connect to `router`.
-    //
-    // TODO: how to signal preference for transport?
     fn connect(&mut self, router: RouterInfo);
 
     /// Accept connection and start its event loop.
@@ -392,12 +390,8 @@ impl<R: Runtime> Stream for TransportService<R> {
     }
 }
 
-/// Transport manager.
-///
-/// Transport manager is responsible for connecting the higher-level subsystems
-/// together with enabled, lower-level transports and polling for polling those
-/// transports so that they can make progress.
-pub struct TransportManager<R: Runtime> {
+/// Builder for [`TransportManager`].
+pub struct TransportManagerBuilder<R: Runtime> {
     /// Allow local addresses.
     allow_local: bool,
 
@@ -416,14 +410,11 @@ pub struct TransportManager<R: Runtime> {
     /// Metrics handle.
     metrics_handle: R::MetricsHandle,
 
-    /// Poll index for transports.
-    poll_index: usize,
-
     /// Router storage.
     profile_storage: ProfileStorage<R>,
 
-    /// Connected routers.
-    routers: HashSet<RouterId>,
+    /// Handle to [`NetDb`].
+    netdb_handle: Option<NetDbHandle>,
 
     /// Subsystem handle passed onto enabled transports.
     subsystem_handle: SubsystemHandle,
@@ -432,8 +423,8 @@ pub struct TransportManager<R: Runtime> {
     transports: Vec<Box<dyn Transport<Item = TransportEvent>>>,
 }
 
-impl<R: Runtime> TransportManager<R> {
-    /// Create new [`TransportManager`].
+impl<R: Runtime> TransportManagerBuilder<R> {
+    /// Create new [`TransportManagerBuilder`].
     pub fn new(
         local_signing_key: SigningPrivateKey,
         local_router_info: RouterInfo,
@@ -450,25 +441,14 @@ impl<R: Runtime> TransportManager<R> {
             local_router_info,
             local_signing_key,
             metrics_handle,
-            poll_index: 0usize,
-            routers: HashSet::new(),
+            netdb_handle: None,
             profile_storage,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
         }
     }
 
-    /// Collect `TransportManager`-related metric counters, gauges and histograms.
-    pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
-        let metrics = register_metrics(metrics);
-        let metrics = Ntcp2Transport::<R>::metrics(metrics);
-
-        Ssu2Transport::<R>::metrics(metrics)
-    }
-
-    /// Register new subsystem to [`TransportManager`].
-    ///
-    /// The number of subsystems is fixed and the initialization order is important.
+    //// Register subsystem.
     pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService<R> {
         let (event_tx, event_rx) = channel(64);
 
@@ -513,6 +493,68 @@ impl<R: Runtime> TransportManager<R> {
             self.profile_storage.clone(),
             self.metrics_handle.clone(),
         )))
+    }
+
+    /// Register [`NetDbHandle`].
+    pub fn register_netdb_handle(&mut self, netdb_handle: NetDbHandle) {
+        self.netdb_handle = Some(netdb_handle);
+    }
+
+    /// Build into [`TransportManager`].
+    pub fn build(self) -> TransportManager<R> {
+        TransportManager {
+            cmd_rx: self.cmd_rx,
+            local_signing_key: self.local_signing_key,
+            metrics_handle: self.metrics_handle,
+            netdb_handle: self.netdb_handle.expect("to exist"),
+            poll_index: 0usize,
+            profile_storage: self.profile_storage,
+            routers: HashSet::new(),
+            transports: self.transports,
+        }
+    }
+}
+
+/// Transport manager.
+///
+/// Transport manager is responsible for connecting the higher-level subsystems
+/// together with enabled, lower-level transports and polling for polling those
+/// transports so that they can make progress.
+pub struct TransportManager<R: Runtime> {
+    /// RX channel for receiving commands from other subsystems.
+    cmd_rx: Receiver<ProtocolCommand>,
+
+    /// Local signing key.
+    #[allow(unused)]
+    local_signing_key: SigningPrivateKey,
+
+    /// Metrics handle.
+    metrics_handle: R::MetricsHandle,
+
+    /// Handle to [`NetDb`].
+    #[allow(unused)]
+    netdb_handle: NetDbHandle,
+
+    /// Poll index for transports.
+    poll_index: usize,
+
+    /// Router storage.
+    profile_storage: ProfileStorage<R>,
+
+    /// Connected routers.
+    routers: HashSet<RouterId>,
+
+    /// Enabled transports.
+    transports: Vec<Box<dyn Transport<Item = TransportEvent>>>,
+}
+
+impl<R: Runtime> TransportManager<R> {
+    /// Collect `TransportManager`-related metric counters, gauges and histograms.
+    pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
+        let metrics = register_metrics(metrics);
+        let metrics = Ntcp2Transport::<R>::metrics(metrics);
+
+        Ssu2Transport::<R>::metrics(metrics)
     }
 }
 

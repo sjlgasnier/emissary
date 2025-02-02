@@ -28,7 +28,7 @@ use crate::{
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
-    transport::{Ntcp2Transport, Ssu2Transport, TransportManager},
+    transport::{Ntcp2Transport, Ssu2Transport, TransportManager, TransportManagerBuilder},
     tunnel::{TunnelManager, TunnelManagerHandle},
 };
 
@@ -187,10 +187,10 @@ impl<R: Runtime> Router<R> {
             }
         };
 
-        // create transport manager and initialize & start enabled transports
+        // create transport manager builder and initialize & start enabled transports
         //
         // note: order of initialization is important
-        let mut transport_manager = TransportManager::new(
+        let mut transport_manager_builder = TransportManagerBuilder::new(
             local_signing_key,
             local_router_info.clone(),
             profile_storage.clone(),
@@ -202,7 +202,8 @@ impl<R: Runtime> Router<R> {
         //
         // acquire handle to exploratory tunnel pool which is given to `NetDb`
         let (tunnel_manager_handle, exploratory_pool_handle, netdb_msg_rx) = {
-            let transport_service = transport_manager.register_subsystem(SubsystemKind::Tunnel);
+            let transport_service =
+                transport_manager_builder.register_subsystem(SubsystemKind::Tunnel);
             let (tunnel_manager, tunnel_manager_handle, tunnel_pool_handle, netdb_msg_rx) =
                 TunnelManager::<R>::new(
                     transport_service,
@@ -222,7 +223,8 @@ impl<R: Runtime> Router<R> {
 
         // initialize and start netdb
         let netdb_handle = {
-            let transport_service = transport_manager.register_subsystem(SubsystemKind::NetDb);
+            let transport_service =
+                transport_manager_builder.register_subsystem(SubsystemKind::NetDb);
             let (netdb, netdb_handle) = NetDb::<R>::new(
                 local_router_id,
                 floodfill,
@@ -240,6 +242,12 @@ impl<R: Runtime> Router<R> {
 
             netdb_handle
         };
+
+        // pass netdb handle to transport manager builder
+        //
+        // transport manager uses netdb to query remote router infos and periodically publish local
+        // router info when, e.g., it goes stale or a new external address is discovered
+        transport_manager_builder.register_netdb_handle(netdb_handle.clone());
 
         // initialize i2cp server if it was enabled
         if let Some(I2cpConfig { port }) = i2cp_config {
@@ -273,11 +281,11 @@ impl<R: Runtime> Router<R> {
         }
 
         if let Some(context) = ntcp2_context {
-            transport_manager.register_ntcp2(context);
+            transport_manager_builder.register_ntcp2(context);
         }
 
         if let Some(context) = ssu2_context {
-            transport_manager.register_ssu2(context);
+            transport_manager_builder.register_ssu2(context);
         }
 
         Ok((
@@ -285,7 +293,7 @@ impl<R: Runtime> Router<R> {
                 address_info,
                 shutdown_context,
                 shutdown_count: 0usize,
-                transport_manager,
+                transport_manager: transport_manager_builder.build(),
                 _tunnel_manager_handle: tunnel_manager_handle,
             },
             serialized_router_info,
