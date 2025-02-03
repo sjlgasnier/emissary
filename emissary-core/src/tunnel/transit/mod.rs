@@ -298,17 +298,41 @@ impl<R: Runtime> TransitTunnelManager<R> {
             }
         }
 
-        let message = MessageBuilder::short()
-            .with_message_type(match role {
-                HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
-                HopRole::InboundGateway | HopRole::Participant => MessageType::VariableTunnelBuild,
-            })
-            .with_message_id(next_message_id)
-            .with_expiration(expiration)
-            .with_payload(&payload)
-            .build();
+        match role {
+            HopRole::InboundGateway | HopRole::Participant => {
+                let message = MessageBuilder::short()
+                    .with_message_type(MessageType::VariableTunnelBuild)
+                    .with_message_id(next_message_id)
+                    .with_expiration(expiration)
+                    .with_payload(&payload)
+                    .build();
 
-        Ok((next_router, message))
+                Ok((next_router, message))
+            }
+            HopRole::OutboundEndpoint => {
+                let message = MessageBuilder::short()
+                    .with_message_type(MessageType::VariableTunnelBuildReply)
+                    .with_message_id(next_message_id)
+                    .with_expiration(expiration)
+                    .with_payload(&payload)
+                    .build();
+
+                let msg = TunnelGateway {
+                    tunnel_id: next_tunnel_id,
+                    payload: &message,
+                }
+                .serialize();
+
+                let message = MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(next_message_id)
+                    .with_expiration(expiration)
+                    .with_payload(&msg)
+                    .build();
+
+                Ok((next_router, message))
+            }
+        }
     }
 
     /// Handle short tunnel build request.
