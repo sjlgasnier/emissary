@@ -79,10 +79,26 @@ async fn main() -> anyhow::Result<()> {
                 );
 
                 routers.into_iter().for_each(|ReseedRouterInfo { name, router_info }| {
-                    if let Ok(mut file) =
-                        File::create(config.base_path.join(format!("routers/{name}")))
-                    {
-                        let _ = file.write_all(&router_info);
+                    match name.strip_prefix("routerInfo-") {
+                        Some(start) => match start.chars().next() {
+                            Some(dir) => {
+                                if let Ok(mut file) = File::create(
+                                    config.base_path.join(format!("netDb/r{dir}/{name}")),
+                                ) {
+                                    let _ = file.write_all(&router_info);
+                                }
+                            }
+                            None => tracing::warn!(
+                                target: LOG_TARGET,
+                                ?name,
+                                "malformed router info name, cannot store on disk",
+                            ),
+                        },
+                        None => tracing::warn!(
+                            target: LOG_TARGET,
+                            ?name,
+                            "malformed router info name, cannot store on disk",
+                        ),
                     }
 
                     config.routers.push(router_info);
