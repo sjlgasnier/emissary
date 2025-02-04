@@ -319,12 +319,6 @@ impl<R: Runtime> TunnelManager<R> {
     /// Store `router` into `routers` and send any pending messages to router identified by
     /// `router_id`.
     fn on_connection_established(&mut self, router_id: RouterId) {
-        tracing::trace!(
-            target: LOG_TARGET,
-            %router_id,
-            "connection established",
-        );
-
         match self.routers.remove(&router_id) {
             Some(RouterState::Dialing { pending_messages }) if !pending_messages.is_empty() => {
                 tracing::debug!(
@@ -360,13 +354,17 @@ impl<R: Runtime> TunnelManager<R> {
     }
 
     /// Handle closed connection to `router`.
-    fn on_connection_closed(&mut self, router: &RouterId) {
-        tracing::debug!(
-            target: LOG_TARGET,
-            %router,
-            "connection closed",
-        );
-        self.routers.remove(router);
+    fn on_connection_closed(&mut self, router_id: &RouterId) {
+        match self.routers.remove(router_id) {
+            Some(RouterState::Dialing { pending_messages }) if !pending_messages.is_empty() => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "dial failure for router with pending messages",
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Handle connection failure to `router_id`

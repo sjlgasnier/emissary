@@ -257,7 +257,7 @@ impl<R: Runtime> ProfileStorage<R> {
                 target: LOG_TARGET,
                 %router_id,
                 caps = %router_info.capabilities,
-                "adding potentially unreachable/unusable router",
+                "ignoring unreachable/unusable router",
             );
             return false;
         }

@@ -496,13 +496,6 @@ impl<R: Runtime> NetDb<R> {
     fn on_connection_established(&mut self, router_id: RouterId) {
         let is_floodfill = self.profile_storage.is_floodfill(&router_id);
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            %router_id,
-            ?is_floodfill,
-            "connection established",
-        );
-
         // send any pending messages to the connected router
         //
         // if the message was of the expiring kind (flooding) and the payload inside the i2np
@@ -556,21 +549,7 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle closed connection to `router`.
     fn on_connection_closed(&mut self, router_id: RouterId) {
-        match self.routers.remove(&router_id) {
-            None => tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                "connection closed",
-            ),
-            Some(_) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    "connection closed",
-                );
-                self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
-            }
-        }
+        self.routers.remove(&router_id);
     }
 
     // Handle connection failure to `router_id`.
@@ -582,11 +561,7 @@ impl<R: Runtime> NetDb<R> {
                 num_pending_messages = ?pending_messages.len(),
                 "failed to establish connection",
             ),
-            _ => tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                "failed to establish connection",
-            ),
+            _ => {}
         }
     }
 
@@ -601,12 +576,6 @@ impl<R: Runtime> NetDb<R> {
                     "failed to connect to router",
                 ),
                 Ok(()) => {
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        %router_id,
-                        "starting to dial router",
-                    );
-
                     self.routers.insert(
                         router_id.clone(),
                         RouterState::Dialing {
