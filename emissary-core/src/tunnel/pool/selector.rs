@@ -404,7 +404,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 router_ids.extend(fast_router_ids.into_iter().take(num_needed));
             }
 
-            router_ids.iter().for_each(|router_id| {
+            router_ids.iter().take(num_hops).for_each(|router_id| {
                 self.profile_storage.selected_for_tunnel(router_id);
             });
 
@@ -489,7 +489,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
         //
         // these are used to calculate the participation ratio, i.e., how often each router
         // accepts/rejects a tunnel
-        router_ids.iter().for_each(|router_id| {
+        router_ids.iter().take(num_hops).for_each(|router_id| {
             self.profile_storage.selected_for_tunnel(router_id);
         });
 
@@ -682,7 +682,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 router_ids.extend(standard_router_ids.into_iter().take(num_needed));
             }
 
-            router_ids.iter().for_each(|router_id| {
+            router_ids.iter().take(num_hops).for_each(|router_id| {
                 self.exploratory.profile_storage.selected_for_tunnel(router_id);
             });
 
@@ -769,7 +769,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
         //
         // these are used to calculate the participation ratio, i.e., how often each router
         // accepts/rejects a tunnel
-        router_ids.iter().for_each(|router_id| {
+        router_ids.iter().take(num_hops).for_each(|router_id| {
             self.exploratory.profile_storage.selected_for_tunnel(router_id);
         });
 
