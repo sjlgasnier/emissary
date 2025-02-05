@@ -524,7 +524,7 @@ pub struct TransportManager<R: Runtime> {
     netdb_handle: NetDbHandle,
 
     /// Pending router info queries.
-    pending_queries: R::JoinSet<(RouterId, Result<RouterInfo, QueryError>)>,
+    pending_queries: R::JoinSet<(RouterId, Result<(), QueryError>)>,
 
     /// Poll index for transports.
     poll_index: usize,
@@ -577,12 +577,6 @@ impl<R: Runtime> TransportManager<R> {
                     ),
                     Ok(rx) => {
                         self.pending_queries.push(async move {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                %router_id,
-                                "router info query started",
-                            );
-
                             match rx.await {
                                 Err(_) => return (router_id, Err(QueryError::Timeout)),
                                 Ok(Err(error)) => return (router_id, Err(error)),
@@ -667,29 +661,14 @@ impl<R: Runtime> Future for TransportManager<R> {
             match self.pending_queries.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some((router_id, Ok(router_info)))) => {
-                    tracing::trace!(
+                Poll::Ready(Some((router_id, Ok(())))) => {
+                    tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
-                        "router info query succeeded",
+                        "router info query succeeded, dial pending router",
                     );
 
-                    match self.profile_storage.add_router(router_info) {
-                        true => self.on_dial_router(router_id),
-                        false => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                %router_id,
-                                "failed to add queried router to profile storage",
-                            );
-
-                            // report connection failure to subsystems
-                            let mut handle = self.subsystem_handle.clone();
-                            R::spawn(async move {
-                                handle.report_connection_failure(router_id).await;
-                            });
-                        }
-                    }
+                    self.on_dial_router(router_id);
                 }
                 Poll::Ready(Some((router_id, Err(error)))) => {
                     tracing::debug!(

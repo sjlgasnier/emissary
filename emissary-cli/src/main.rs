@@ -18,11 +18,15 @@
 
 use crate::{
     cli::Arguments, config::Config, error::Error, proxy::http::HttpProxy, signal::SignalHandler,
+    storage::Storage,
 };
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::router::{Router, RouterEvent};
+use emissary_core::{
+    router::{Router, RouterEvent},
+    runtime::Runtime as _,
+};
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
 use futures::StreamExt;
 
@@ -34,6 +38,7 @@ mod error;
 mod logger;
 mod proxy;
 mod signal;
+mod storage;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -54,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     // parse router config and merge it with cli options
     let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
+    let storage = Storage::new(config.base_path.clone());
 
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
@@ -80,20 +86,17 @@ async fn main() -> anyhow::Result<()> {
 
                 routers.into_iter().for_each(|ReseedRouterInfo { name, router_info }| {
                     match name.strip_prefix("routerInfo-") {
-                        Some(start) => match start.chars().next() {
-                            Some(dir) => {
-                                if let Ok(mut file) = File::create(
-                                    config.base_path.join(format!("netDb/r{dir}/{name}")),
-                                ) {
-                                    let _ = file.write_all(&router_info);
-                                }
+                        Some(start) => {
+                            if let Err(error) =
+                                storage.store_router_info(start.to_string(), router_info.clone())
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?error,
+                                    "failed to store router info to disk",
+                                );
                             }
-                            None => tracing::warn!(
-                                target: LOG_TARGET,
-                                ?name,
-                                "malformed router info name, cannot store on disk",
-                            ),
-                        },
+                        }
                         None => tracing::warn!(
                             target: LOG_TARGET,
                             ?name,
@@ -173,6 +176,45 @@ async fn main() -> anyhow::Result<()> {
                         "emissary shut down",
                     );
                     return Ok(());
+                }
+                Some(RouterEvent::ProfileStorageBackup { routers }) => {
+                    let storage_handle = storage.clone();
+
+                    tokio::task::spawn_blocking(move || {
+                        for (router_id, router_info, profile) in routers {
+                            if let Err(error) = storage_handle.store_profile(router_id.clone(), profile) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?router_id,
+                                    ?error,
+                                    "failed to store router profile to disk",
+                                );
+                            }
+
+                            let Some(router_info) = router_info else {
+                                continue;
+                            };
+
+                            match Runtime::gzip_decompress(router_info) {
+                                Some(router_info) => {
+
+                                if let Err(error) = storage_handle.store_router_info(router_id.clone(), router_info) {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?router_id,
+                                        ?error,
+                                        "failed to store router info to disk",
+                                    );
+                                }
+                                }
+                                None => tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?router_id,
+                                    "failed to decompress router info",
+                                ),
+                            }
+                        }
+                    });
                 }
             }
         }

@@ -19,7 +19,7 @@
 use crate::{
     crypto::StaticPublicKey,
     error::{ChannelError, QueryError},
-    primitives::{LeaseSet2, RouterId, RouterInfo},
+    primitives::{LeaseSet2, RouterId},
 };
 
 use bytes::Bytes;
@@ -59,7 +59,10 @@ pub enum NetDbAction {
         router_id: RouterId,
 
         /// Oneshot sender used to send the result to caller.
-        tx: oneshot::Sender<Result<RouterInfo, QueryError>>,
+        ///
+        /// Note that the [`RouterInfo`] is not directly send to the caller but [`NetDb`] stores
+        /// the received [`RouterInfo`] directly into [`ProfileStorage`].
+        tx: oneshot::Sender<Result<(), QueryError>>,
     },
 
     /// Get `RouterId`'s of the floodfills closest to `key`.
@@ -123,7 +126,7 @@ impl NetDbHandle {
     pub fn query_router_info(
         &self,
         router_id: RouterId,
-    ) -> Result<oneshot::Receiver<Result<RouterInfo, QueryError>>, ChannelError> {
+    ) -> Result<oneshot::Receiver<Result<(), QueryError>>, ChannelError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx

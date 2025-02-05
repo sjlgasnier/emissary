@@ -313,7 +313,7 @@ enum QueryKind {
         num_floodfills: usize,
 
         /// Oneshot sender for sending the result to caller.
-        tx: oneshot::Sender<Result<RouterInfo, QueryError>>,
+        tx: oneshot::Sender<Result<(), QueryError>>,
     },
 
     /// Router exploration.
@@ -657,7 +657,12 @@ impl<R: Runtime> NetDb<R> {
         if router_info.is_floodfill() {
             self.floodfill_dht.add_router(router_id.clone());
         }
-        self.profile_storage.add_router(router_info);
+
+        // store both the new router info and its serialized form to profile storage
+        //
+        // the latter is used when a backup of profile storage is made to disk
+        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
+        self.profile_storage.discover_router(router_info, raw_router_info.clone());
 
         if !self.floodfill {
             return;
@@ -665,7 +670,6 @@ impl<R: Runtime> NetDb<R> {
 
         // parse the router info set from the database store and store it
         // in the set of router infos we keep track of
-        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
         self.router_infos.insert(
             key.clone(),
             (raw_router_info.clone(), Duration::from_millis(published)),
@@ -1235,8 +1239,14 @@ impl<R: Runtime> NetDb<R> {
                     if router_info.is_floodfill() {
                         self.floodfill_dht.add_router(router_id.clone());
                     }
-                    self.profile_storage.add_router(router_info);
                     self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
+
+                    // store both the new router info and its serialized form to profile storage
+                    //
+                    // the latter is used when a backup of profile storage is made to disk
+                    let raw_router_info =
+                        DatabaseStore::<R>::extract_raw_router_info(&message.payload);
+                    self.profile_storage.discover_router(router_info, raw_router_info.clone());
                 }
                 (
                     DatabaseStorePayload::RouterInfo { router_info },
@@ -1271,8 +1281,14 @@ impl<R: Runtime> NetDb<R> {
                     if router_info.is_floodfill() {
                         self.floodfill_dht.add_router(router_id.clone());
                     }
-                    self.profile_storage.add_router(router_info);
                     self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+
+                    // store both the new router info and its serialized form to profile storage
+                    //
+                    // the latter is used when a backup of profile storage is made to disk
+                    let raw_router_info =
+                        DatabaseStore::<R>::extract_raw_router_info(&message.payload);
+                    self.profile_storage.discover_router(router_info, raw_router_info.clone());
 
                     if let Err(error) = self.send_lease_set_query(lease_set_key, router_id.clone())
                     {
@@ -1294,7 +1310,23 @@ impl<R: Runtime> NetDb<R> {
                         "router info found",
                     );
 
-                    let _ = tx.send(Ok(router_info));
+                    // store both the new router info and its serialized form to profile storage
+                    //
+                    // the latter is used when a backup of profile storage is made to disk
+                    let raw_router_info =
+                        DatabaseStore::<R>::extract_raw_router_info(&message.payload);
+                    let router_id = router_info.identity.id();
+
+                    if self.profile_storage.discover_router(router_info, raw_router_info.clone()) {
+                        let _ = tx.send(Ok(()));
+                    } else {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "router info found but it couldn't be accepted to profile storage",
+                        );
+                        let _ = tx.send(Err(QueryError::Malformed));
+                    }
                 }
                 (payload, query) => tracing::warn!(
                     target: LOG_TARGET,
@@ -1771,7 +1803,7 @@ impl<R: Runtime> NetDb<R> {
     fn on_query_router_info(
         &mut self,
         router_id: RouterId,
-        tx: oneshot::Sender<Result<RouterInfo, QueryError>>,
+        tx: oneshot::Sender<Result<(), QueryError>>,
     ) {
         let key = Bytes::from(router_id.to_vec());
         let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();

@@ -35,7 +35,7 @@ use std::{
 };
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Profile {
+pub struct Profile {
     last_activity: Option<u64>,
     last_declined: Option<u64>,
     last_dial_failure: Option<u64>,
@@ -47,6 +47,26 @@ struct Profile {
     num_test_failures: Option<usize>,
     num_test_successes: Option<usize>,
     num_unaswered: Option<usize>,
+}
+
+impl From<emissary_core::Profile> for Profile {
+    fn from(profile: emissary_core::Profile) -> Self {
+        Profile {
+            last_activity: Some(profile.last_activity.as_secs()),
+            last_declined: profile.last_declined.map(|last_declined| last_declined.as_secs()),
+            last_dial_failure: profile
+                .last_dial_failure
+                .map(|last_dial_failure| last_dial_failure.as_secs()),
+            num_accepted: Some(profile.num_accepted),
+            num_connection: Some(profile.num_connection),
+            num_dial_failures: Some(profile.num_dial_failures),
+            num_rejected: Some(profile.num_rejected),
+            num_selected: Some(profile.num_selected),
+            num_test_failures: Some(profile.num_test_failures),
+            num_test_successes: Some(profile.num_test_successes),
+            num_unaswered: Some(profile.num_unaswered),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

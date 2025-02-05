@@ -23,7 +23,7 @@ use crate::{
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::RouterInfo,
-    profile::ProfileStorage,
+    profile::{Profile, ProfileStorage},
     runtime::Runtime,
     sam::SamServer,
     shutdown::ShutdownContext,
@@ -33,7 +33,7 @@ use crate::{
 };
 
 use bytes::Bytes;
-use futures::{FutureExt, Stream};
+use futures::{future::BoxFuture, FutureExt, Stream};
 use rand_core::RngCore;
 
 use alloc::{string::ToString, vec::Vec};
@@ -41,6 +41,7 @@ use core::{
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 /// Logging target for the file.
@@ -52,6 +53,12 @@ const NET_ID: u8 = 2u8;
 /// How many times [`Router::shutdown()`] needs to be called until the router is shutdown
 /// immediately, cancelling graceful shutdown.
 const IMMEDIATE_SHUTDOWN_COUNT: usize = 2usize;
+
+/// Profile storage backup interval.
+///
+/// How often is backup (stored to disk) taken of [`ProfileStorage`].
+// const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Protocol address information.
 #[derive(Debug, Default, Copy, Clone)]
@@ -68,10 +75,30 @@ pub struct ProtocolAddressInfo {
 pub enum RouterEvent {
     /// Router has been shut down.
     Shutdown,
+
+    /// Save backup of the contents of [`ProfileStorage`].
+    ProfileStorageBackup {
+        /// Backup of [`ProfileStorage`].
+        ///
+        /// First element is serialized [`RouterId`], second element is serialized [`RouterInfo`]
+        /// and the third element is unserialized [`Profile`].
+        ///
+        /// [`RouterInfo`] may be `None` if there has been no chance to it since the last backup.
+        routers: Vec<(String, Option<Vec<u8>>, Profile)>,
+    },
 }
 
 /// Router.
 pub struct Router<R: Runtime> {
+    /// Protocol address information.
+    address_info: ProtocolAddressInfo,
+
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
+    /// Profile storage backup timer.
+    profile_storage_backup_timer: BoxFuture<'static, ()>,
+
     /// Shutdown context.
     shutdown_context: ShutdownContext<R>,
 
@@ -82,9 +109,6 @@ pub struct Router<R: Runtime> {
     ///
     /// Polls both NTCP2 and SSU2 transports.
     transport_manager: TransportManager<R>,
-
-    /// Protocol address information.
-    address_info: ProtocolAddressInfo,
 
     /// Handle to [`TunnelManager`].
     _tunnel_manager_handle: TunnelManagerHandle,
@@ -291,6 +315,8 @@ impl<R: Runtime> Router<R> {
         Ok((
             Self {
                 address_info,
+                profile_storage,
+                profile_storage_backup_timer: Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL)),
                 shutdown_context,
                 shutdown_count: 0usize,
                 transport_manager: transport_manager_builder.build(),
@@ -341,6 +367,25 @@ impl<R: Runtime> Stream for Router<R> {
         match self.transport_manager.poll_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(()) => return Poll::Ready(None),
+        }
+
+        if self.profile_storage_backup_timer.poll_unpin(cx).is_ready() {
+            let routers = self.profile_storage.backup();
+
+            if !routers.is_empty() {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    num_routers = ?routers.len(),
+                    "taking backup of profile storage",
+                );
+
+                // reset timer and register it to the executor
+                self.profile_storage_backup_timer =
+                    Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL));
+                let _ = self.profile_storage_backup_timer.poll_unpin(cx);
+
+                return Poll::Ready(Some(RouterEvent::ProfileStorageBackup { routers }));
+            }
         }
 
         Poll::Pending
