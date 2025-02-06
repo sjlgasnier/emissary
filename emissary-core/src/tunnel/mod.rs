@@ -18,11 +18,10 @@
 
 use crate::{
     bloom::BloomFilter,
-    crypto::StaticPrivateKey,
     error::Error,
     i2np::{tunnel::data::EncryptedTunnelData, Message, MessageType},
-    primitives::{RouterId, RouterInfo},
-    profile::ProfileStorage,
+    primitives::RouterId,
+    router::context::RouterContext,
     runtime::{Counter, MetricType, MetricsHandle, Runtime},
     shutdown::ShutdownHandle,
     subsystem::SubsystemEvent,
@@ -113,20 +112,11 @@ pub struct TunnelManager<R: Runtime> {
     /// RX channel for receiving messages from other tunnel-related subsystems.
     message_rx: Receiver<RoutingKind>,
 
-    /// Metrics handle.
-    metrics_handle: R::MetricsHandle,
-
     /// TX channel for forwarding messages to [`NetDb`].
     netdb_tx: Sender<Message>,
 
-    /// Noise context for tunnels.
-    noise: NoiseContext,
-
-    /// Profile storage.
-    profile: ProfileStorage<R>,
-
-    /// Local router info.
-    router_info: RouterInfo,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Connected routers.
     routers: HashMap<RouterId, RouterState>,
@@ -145,10 +135,7 @@ impl<R: Runtime> TunnelManager<R> {
     /// new tunnel pools and a [`TunnelPoolHandle`] for the exploratory tunnel pool.
     pub fn new(
         service: TransportService<R>,
-        router_info: RouterInfo,
-        local_key: StaticPrivateKey,
-        metrics_handle: R::MetricsHandle,
-        profile_storage: ProfileStorage<R>,
+        router_ctx: RouterContext<R>,
         exploratory_config: TunnelPoolConfig,
         insecure_tunnels: bool,
         transit_shutdown_handle: ShutdownHandle,
@@ -164,12 +151,11 @@ impl<R: Runtime> TunnelManager<R> {
             "starting tunnel manager",
         );
 
-        let noise = NoiseContext::new(local_key, router_info.identity.hash());
         let (routing_table, message_rx, transit_rx) = {
             let (message_tx, message_rx) = channel(DEFAULT_CHANNEL_SIZE);
             let (transit_tx, transit_rx) = channel(DEFAULT_CHANNEL_SIZE);
             let routing_table =
-                RoutingTable::new(router_info.identity.id(), message_tx, transit_tx);
+                RoutingTable::new(router_ctx.router_id().clone(), message_tx, transit_tx);
 
             (routing_table, message_rx, transit_rx)
         };
@@ -178,10 +164,9 @@ impl<R: Runtime> TunnelManager<R> {
         //
         // `TransitTunnelManager` communicates with `TunnelManager` via `RoutingTable`
         R::spawn(TransitTunnelManager::<R>::new(
-            noise.clone(),
+            router_ctx.clone(),
             routing_table.clone(),
             transit_rx,
-            metrics_handle.clone(),
             transit_shutdown_handle,
         ));
 
@@ -191,7 +176,7 @@ impl<R: Runtime> TunnelManager<R> {
         let (pool_handle, exploratory_selector) = {
             let build_parameters = TunnelPoolBuildParameters::new(exploratory_config);
             let selector = ExploratorySelector::new(
-                profile_storage.clone(),
+                router_ctx.profile_storage().clone(),
                 build_parameters.context_handle.clone(),
                 insecure_tunnels,
             );
@@ -199,9 +184,7 @@ impl<R: Runtime> TunnelManager<R> {
                 build_parameters,
                 selector.clone(),
                 routing_table.clone(),
-                profile_storage.clone(),
-                noise.clone(),
-                metrics_handle.clone(),
+                router_ctx.clone(),
             );
             R::spawn(tunnel_pool);
 
@@ -220,13 +203,13 @@ impl<R: Runtime> TunnelManager<R> {
                 bloom_filter_timer: Box::pin(R::delay(BLOOM_FILTER_DECAY_INTERVAL)),
                 command_rx,
                 exploratory_selector,
-                garlic: GarlicHandler::new(noise.clone(), metrics_handle.clone()),
+                garlic: GarlicHandler::new(
+                    router_ctx.noise().clone(),
+                    router_ctx.metrics_handle().clone(),
+                ),
                 message_rx,
-                metrics_handle: metrics_handle.clone(),
                 netdb_tx,
-                noise,
-                profile: profile_storage,
-                router_info,
+                router_ctx,
                 routers: HashMap::new(),
                 routing_table,
                 service,
@@ -277,7 +260,7 @@ impl<R: Runtime> TunnelManager<R> {
                 );
                 pending_messages.push(message);
             }
-            None => match router_id == &self.router_info.identity.id() {
+            None => match router_id == self.router_ctx.router_id() {
                 true => {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -453,9 +436,7 @@ impl<R: Runtime> TunnelManager<R> {
             build_parameters,
             selector,
             self.routing_table.clone(),
-            self.profile.clone(),
-            self.noise.clone(),
-            self.metrics_handle.clone(),
+            self.router_ctx.clone(),
         );
         R::spawn(tunnel_pool);
 
@@ -464,7 +445,7 @@ impl<R: Runtime> TunnelManager<R> {
 
     /// Handle received message from one of the open connections.
     fn on_message(&mut self, message: Message) -> crate::Result<()> {
-        self.metrics_handle.counter(NUM_TUNNEL_MESSAGES).increment(1);
+        self.router_ctx.metrics_handle().counter(NUM_TUNNEL_MESSAGES).increment(1);
 
         // feed tunnel data into a decaying bloom filter to ensure it's unique
         //

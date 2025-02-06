@@ -24,6 +24,7 @@ use crate::{
     netdb::NetDb,
     primitives::RouterInfo,
     profile::{Profile, ProfileStorage},
+    router::context::RouterContext,
     runtime::Runtime,
     sam::SamServer,
     shutdown::ShutdownContext,
@@ -43,6 +44,8 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+
+pub mod context;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::router";
@@ -211,16 +214,23 @@ impl<R: Runtime> Router<R> {
             }
         };
 
+        // create router context that is passed onto other subsystems and contains a collection
+        // of common objects utilized by all of the subsystems
+        let router_ctx = RouterContext::new(
+            metrics_handle.clone(),
+            profile_storage.clone(),
+            local_router_id.clone(),
+            Bytes::from(serialized_router_info.clone()),
+            local_static_key.clone(),
+            local_signing_key.clone(),
+            net_id.unwrap_or(NET_ID),
+        );
+
         // create transport manager builder and initialize & start enabled transports
         //
         // note: order of initialization is important
-        let mut transport_manager_builder = TransportManagerBuilder::new(
-            local_signing_key,
-            local_router_info.clone(),
-            profile_storage.clone(),
-            metrics_handle.clone(),
-            allow_local,
-        );
+        let mut transport_manager_builder =
+            TransportManagerBuilder::new(router_ctx.clone(), allow_local);
 
         // initialize and start tunnel manager
         //
@@ -231,10 +241,7 @@ impl<R: Runtime> Router<R> {
             let (tunnel_manager, tunnel_manager_handle, tunnel_pool_handle, netdb_msg_rx) =
                 TunnelManager::<R>::new(
                     transport_service,
-                    local_router_info.clone(),
-                    local_static_key.clone(),
-                    metrics_handle.clone(),
-                    profile_storage.clone(),
+                    router_ctx.clone(),
                     exploratory.into(),
                     insecure_tunnels,
                     transit_shutdown_handle,
@@ -250,16 +257,11 @@ impl<R: Runtime> Router<R> {
             let transport_service =
                 transport_manager_builder.register_subsystem(SubsystemKind::NetDb);
             let (netdb, netdb_handle) = NetDb::<R>::new(
-                local_router_id,
+                router_ctx,
                 floodfill,
                 transport_service,
-                profile_storage.clone(),
-                metrics_handle.clone(),
                 exploratory_pool_handle,
-                net_id.unwrap_or(NET_ID),
                 netdb_msg_rx,
-                Bytes::from(serialized_router_info.clone()),
-                local_static_key,
             );
 
             R::spawn(netdb);

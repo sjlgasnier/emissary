@@ -550,6 +550,8 @@ mod test {
         crypto::{EphemeralPublicKey, StaticPublicKey},
         i2np::{tunnel::gateway::TunnelGateway, MessageBuilder},
         primitives::MessageId,
+        profile::ProfileStorage,
+        router::context::RouterContext,
         runtime::mock::MockRuntime,
         shutdown::ShutdownContext,
         tunnel::{
@@ -578,7 +580,7 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, _, local_noise, _) = make_router(true);
+        let (local_hash, _, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -637,31 +639,40 @@ mod test {
         ) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
-                let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, _manager_rx) = channel(16);
-                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
-                let shutdown_handle = shutdown_ctx.handle();
-                let routing_table =
-                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            .map(
+                |(router_hash, static_key, signing_key, noise_context, router_info)| {
+                    let (transit_tx, transit_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = channel(16);
+                    let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                    let shutdown_handle = shutdown_ctx.handle();
+                    let routing_table =
+                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-                (
-                    (router_hash, pk, shutdown_ctx),
                     (
-                        GarlicHandler::new(noise_context.clone(), handle.clone()),
-                        TransitTunnelManager::new(
-                            noise_context,
-                            routing_table,
-                            transit_rx,
-                            handle.clone(),
-                            shutdown_handle,
+                        (router_hash, static_key.public(), shutdown_ctx),
+                        (
+                            GarlicHandler::new(noise_context.clone(), handle.clone()),
+                            TransitTunnelManager::new(
+                                RouterContext::new(
+                                    handle.clone(),
+                                    ProfileStorage::new(&[], &[]),
+                                    router_info.identity.id(),
+                                    Bytes::from(router_info.serialize(&signing_key)),
+                                    static_key,
+                                    signing_key,
+                                    2u8,
+                                ),
+                                routing_table,
+                                transit_rx,
+                                shutdown_handle,
+                            ),
                         ),
-                    ),
-                )
-            })
+                    )
+                },
+            )
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let _gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -718,10 +729,12 @@ mod test {
         let (hops, noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, sk, _, noise_context, _)| {
+                ((router_hash, sk.public()), noise_context)
+            })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -817,10 +830,12 @@ mod test {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, sk, _, noise_context, _)| {
+                ((router_hash, sk.public()), noise_context)
+            })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -865,10 +880,12 @@ mod test {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, sk, _, noise_context, _)| {
+                ((router_hash, sk.public()), noise_context)
+            })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -922,7 +939,7 @@ mod test {
             })
             .unzip();
 
-        let (local_hash, _, local_noise, _) = make_router(true);
+        let (local_hash, _, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -974,10 +991,12 @@ mod test {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, sk, _, noise_context, _)| {
+                ((router_hash, sk.public()), noise_context)
+            })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -1025,7 +1044,8 @@ mod test {
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
 
         for _ in 0..3 {
-            let (router_hash, pk, noise_context, _) = make_router(true);
+            let (router_hash, static_key, signing_key, _noise_context, router_info) =
+                make_router(true);
 
             let (transit_tx, transit_rx) = channel(16);
             let (manager_tx, _manager_rx) = channel(16);
@@ -1035,18 +1055,25 @@ mod test {
             let routing_table =
                 RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-            hops.push((router_hash, pk));
+            hops.push((router_hash, static_key.public()));
             ctxs.push(shutdown_ctx);
             transit_managers.push(TransitTunnelManager::new(
-                noise_context,
+                RouterContext::new(
+                    handle.clone(),
+                    ProfileStorage::new(&[], &[]),
+                    router_info.identity.id(),
+                    Bytes::from(router_info.serialize(&signing_key)),
+                    static_key,
+                    signing_key,
+                    2u8,
+                ),
                 routing_table,
                 transit_rx,
-                handle.clone(),
                 shutdown_handle,
             ));
         }
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -1115,10 +1142,12 @@ mod test {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, sk, _, noise_context, _)| {
+                ((router_hash, sk.public()), noise_context)
+            })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -1189,10 +1218,12 @@ mod test {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| ((router_hash, pk), noise_context))
+            .map(|(router_hash, sk, _, noise_context, _)| {
+                ((router_hash, sk.public()), noise_context)
+            })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -1255,8 +1286,6 @@ mod test {
 
     #[tokio::test]
     async fn hop_record_decrypt_error() {
-        crate::util::init_logger();
-
         let handle = MockRuntime::register_metrics(vec![], None);
 
         let (hops, mut transit_managers): (
@@ -1268,31 +1297,40 @@ mod test {
         ) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
-                let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, _manager_rx) = channel(16);
-                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
-                let shutdown_handle = shutdown_ctx.handle();
-                let routing_table =
-                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            .map(
+                |(router_hash, static_key, signing_key, noise_context, router_info)| {
+                    let (transit_tx, transit_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = channel(16);
+                    let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                    let shutdown_handle = shutdown_ctx.handle();
+                    let routing_table =
+                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-                (
-                    (router_hash, pk, shutdown_ctx),
                     (
-                        GarlicHandler::new(noise_context.clone(), handle.clone()),
-                        TransitTunnelManager::new(
-                            noise_context,
-                            routing_table,
-                            transit_rx,
-                            handle.clone(),
-                            shutdown_handle,
+                        (router_hash, static_key.public(), shutdown_ctx),
+                        (
+                            GarlicHandler::new(noise_context.clone(), handle.clone()),
+                            TransitTunnelManager::new(
+                                RouterContext::new(
+                                    handle.clone(),
+                                    ProfileStorage::new(&[], &[]),
+                                    router_info.identity.id(),
+                                    Bytes::from(router_info.serialize(&signing_key)),
+                                    static_key,
+                                    signing_key,
+                                    2u8,
+                                ),
+                                routing_table,
+                                transit_rx,
+                                shutdown_handle,
+                            ),
                         ),
-                    ),
-                )
-            })
+                    )
+                },
+            )
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let _gateway = TunnelId::from(MockRuntime::rng().next_u32());

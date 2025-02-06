@@ -17,9 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{StaticPrivateKey, StaticPublicKey},
+    crypto::{SigningPrivateKey, StaticPrivateKey, StaticPublicKey},
     i2np::{tunnel::gateway, Message, MessageType},
     primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
+    profile::ProfileStorage,
+    router::context::RouterContext,
     runtime::{mock::MockRuntime, Runtime},
     shutdown::ShutdownContext,
     tunnel::{
@@ -50,15 +52,23 @@ use core::{
 use super::garlic::GarlicHandler;
 
 /// Make new router.
-pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterInfo) {
+pub fn make_router(
+    fast: bool,
+) -> (
+    Bytes,
+    StaticPrivateKey,
+    SigningPrivateKey,
+    NoiseContext,
+    RouterInfo,
+) {
     let mut static_key_bytes = vec![0u8; 32];
     let mut signing_key_bytes = vec![0u8; 32];
 
     MockRuntime::rng().fill_bytes(&mut static_key_bytes);
     MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-    let sk = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-    let pk = sk.public();
+    let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+    let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
 
     let mut router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
     if fast {
@@ -70,8 +80,9 @@ pub fn make_router(fast: bool) -> (Bytes, StaticPublicKey, NoiseContext, RouterI
 
     (
         router_hash.clone(),
-        pk,
-        NoiseContext::new(sk.clone(), router_hash),
+        static_key.clone(),
+        signing_key,
+        NoiseContext::new(static_key.clone(), router_hash),
         router_info,
     )
 }
@@ -116,7 +127,8 @@ impl fmt::Debug for TestTransitTunnelManager {
 
 impl TestTransitTunnelManager {
     pub fn new(fast: bool) -> Self {
-        let (router_hash, public_key, noise, router_info) = make_router(fast);
+        let (router_hash, static_key, signing_key, noise, router_info) = make_router(fast);
+        let public_key = static_key.public();
         let (transit_tx, transit_rx) = channel(64);
         let (message_tx, message_rx) = channel(64);
         let routing_table =
@@ -126,10 +138,17 @@ impl TestTransitTunnelManager {
         Self {
             garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![], None)),
             manager: TransitTunnelManager::<MockRuntime>::new(
-                noise,
+                RouterContext::new(
+                    MockRuntime::register_metrics(vec![], None),
+                    ProfileStorage::new(&[], &[]),
+                    router_info.identity.id(),
+                    Bytes::from(router_info.serialize(&signing_key)),
+                    static_key,
+                    signing_key,
+                    2u8,
+                ),
                 routing_table.clone(),
                 transit_rx,
-                MockRuntime::register_metrics(vec![], None),
                 _shutdown_ctx.handle(),
             ),
             message_rx,
@@ -217,7 +236,7 @@ pub fn build_outbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, _local_pk, local_noise, _router_info) = make_router(fast);
+    let (local_hash, _, _, local_noise, _) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -275,7 +294,7 @@ pub fn build_inbound_tunnel(
         })
         .unzip();
 
-    let (local_hash, _local_pk, local_noise, _router_info) = make_router(fast);
+    let (local_hash, _, _, local_noise, _) = make_router(fast);
     let message_id = MessageId::from(MockRuntime::rng().next_u32());
     let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
     let (_tx, rx) = channel(64);

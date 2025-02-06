@@ -78,7 +78,7 @@ pub struct OutboundSsu2Context {
     pub router_id: RouterId,
 
     /// Serialized local router info.
-    pub router_info: Vec<u8>,
+    pub router_info: Bytes,
 
     /// RX channel for receiving datagrams from `Ssu2Socket`.
     pub rx: Receiver<Packet>,
@@ -101,7 +101,7 @@ enum PendingSessionState {
         local_static_key: StaticPrivateKey,
 
         /// Serialized local router info.
-        router_info: Vec<u8>,
+        router_info: Bytes,
 
         /// Remote router's static key.
         static_key: StaticPublicKey,
@@ -116,7 +116,7 @@ enum PendingSessionState {
         local_static_key: StaticPrivateKey,
 
         /// Serialized local router info.
-        router_info: Vec<u8>,
+        router_info: Bytes,
     },
 
     /// Awaiting first ACK to be received.
@@ -236,7 +236,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         &mut self,
         mut pkt: Vec<u8>,
         local_static_key: StaticPrivateKey,
-        router_info: Vec<u8>,
+        router_info: Bytes,
         static_key: StaticPublicKey,
     ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         let (pkt_num, token) = match HeaderReader::new(self.intro_key, &mut pkt)?
@@ -336,7 +336,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         mut pkt: Vec<u8>,
         ephemeral_key: EphemeralPrivateKey,
         local_static_key: StaticPrivateKey,
-        router_info: Vec<u8>,
+        router_info: Bytes,
     ) -> Result<Option<PendingSsu2SessionStatus>, Ssu2Error> {
         let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_header_2 =

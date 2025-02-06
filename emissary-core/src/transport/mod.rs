@@ -17,11 +17,10 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::SigningPrivateKey,
     error::{ChannelError, QueryError},
     netdb::NetDbHandle,
     primitives::{RouterId, RouterInfo},
-    profile::ProfileStorage,
+    router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
@@ -333,11 +332,11 @@ impl<R: Runtime> TransportService<R> {
         Self,
         Receiver<ProtocolCommand>,
         Sender<InnerSubsystemEvent>,
-        ProfileStorage<R>,
+        crate::profile::ProfileStorage<R>,
     ) {
         let (event_tx, event_rx) = channel(64);
         let (cmd_tx, cmd_rx) = channel(64);
-        let profile_storage = ProfileStorage::new(&Vec::new(), &Vec::new());
+        let profile_storage = crate::profile::ProfileStorage::new(&Vec::new(), &Vec::new());
 
         (
             TransportService {
@@ -388,17 +387,8 @@ pub struct TransportManagerBuilder<R: Runtime> {
     /// TX channel passed onto other subsystems.
     cmd_tx: Sender<ProtocolCommand>,
 
-    /// Local `RouterInfo`.
-    local_router_info: RouterInfo,
-
-    /// Local signing key.
-    local_signing_key: SigningPrivateKey,
-
-    /// Metrics handle.
-    metrics_handle: R::MetricsHandle,
-
-    /// Router storage.
-    profile_storage: ProfileStorage<R>,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Handle to [`NetDb`].
     netdb_handle: Option<NetDbHandle>,
@@ -412,24 +402,15 @@ pub struct TransportManagerBuilder<R: Runtime> {
 
 impl<R: Runtime> TransportManagerBuilder<R> {
     /// Create new [`TransportManagerBuilder`].
-    pub fn new(
-        local_signing_key: SigningPrivateKey,
-        local_router_info: RouterInfo,
-        profile_storage: ProfileStorage<R>,
-        metrics_handle: R::MetricsHandle,
-        allow_local: bool,
-    ) -> Self {
+    pub fn new(router_ctx: RouterContext<R>, allow_local: bool) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
 
         Self {
             allow_local,
             cmd_rx,
             cmd_tx,
-            local_router_info,
-            local_signing_key,
-            metrics_handle,
             netdb_handle: None,
-            profile_storage,
+            router_ctx,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
         }
@@ -461,11 +442,8 @@ impl<R: Runtime> TransportManagerBuilder<R> {
         self.transports.push(Box::new(Ntcp2Transport::new(
             context,
             self.allow_local,
-            self.local_signing_key.clone(),
-            self.local_router_info.clone(),
+            self.router_ctx.clone(),
             self.subsystem_handle.clone(),
-            self.profile_storage.clone(),
-            self.metrics_handle.clone(),
         )))
     }
 
@@ -474,11 +452,8 @@ impl<R: Runtime> TransportManagerBuilder<R> {
         self.transports.push(Box::new(Ssu2Transport::new(
             context,
             self.allow_local,
-            self.local_signing_key.clone(),
-            self.local_router_info.clone(),
+            self.router_ctx.clone(),
             self.subsystem_handle.clone(),
-            self.profile_storage.clone(),
-            self.metrics_handle.clone(),
         )))
     }
 
@@ -491,13 +466,11 @@ impl<R: Runtime> TransportManagerBuilder<R> {
     pub fn build(self) -> TransportManager<R> {
         TransportManager {
             cmd_rx: self.cmd_rx,
-            local_signing_key: self.local_signing_key,
-            metrics_handle: self.metrics_handle,
+            router_ctx: self.router_ctx,
             netdb_handle: self.netdb_handle.expect("to exist"),
             pending_queries: R::join_set(),
             subsystem_handle: self.subsystem_handle,
             poll_index: 0usize,
-            profile_storage: self.profile_storage,
             routers: HashSet::new(),
             transports: self.transports,
         }
@@ -513,12 +486,8 @@ pub struct TransportManager<R: Runtime> {
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
-    /// Local signing key.
-    #[allow(unused)]
-    local_signing_key: SigningPrivateKey,
-
-    /// Metrics handle.
-    metrics_handle: R::MetricsHandle,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
@@ -528,9 +497,6 @@ pub struct TransportManager<R: Runtime> {
 
     /// Poll index for transports.
     poll_index: usize,
-
-    /// Router storage.
-    profile_storage: ProfileStorage<R>,
 
     /// Connected routers.
     routers: HashSet<RouterId>,
@@ -556,7 +522,7 @@ impl<R: Runtime> TransportManager<R> {
     /// If `router_id` is not found in local storage, send [`RouterInfo`] query for `router_id` to
     /// [`NetDb`] and if the [`RouterInfo`] is found, attempt to dial it.
     fn on_dial_router(&mut self, router_id: RouterId) {
-        match self.profile_storage.get(&router_id) {
+        match self.router_ctx.profile_storage().get(&router_id) {
             Some(router_info) => {
                 // TODO: compare transport costs
                 self.transports[0].connect(router_info);
@@ -614,7 +580,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                     match self.routers.insert(router_id.clone()) {
                         true => {
                             self.transports[index].accept(&router_id);
-                            self.metrics_handle.gauge(NUM_CONNECTIONS).increment(1);
+                            self.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).increment(1);
                         }
                         false => {
                             tracing::warn!(
@@ -625,7 +591,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                             self.transports[index].reject(&router_id);
                         }
                     }
-                    self.profile_storage.dial_succeeded(&router_id);
+                    self.router_ctx.profile_storage().dial_succeeded(&router_id);
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason })) => {
                     match reason {
@@ -644,11 +610,11 @@ impl<R: Runtime> Future for TransportManager<R> {
                     }
 
                     self.routers.remove(&router_id);
-                    self.metrics_handle.gauge(NUM_CONNECTIONS).decrement(1);
+                    self.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).decrement(1);
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id })) => {
-                    self.metrics_handle.counter(NUM_DIAL_FAILURES).increment(1);
-                    self.profile_storage.dial_failed(&router_id);
+                    self.router_ctx.metrics_handle().counter(NUM_DIAL_FAILURES).increment(1);
+                    self.router_ctx.profile_storage().dial_failed(&router_id);
                 }
             }
 

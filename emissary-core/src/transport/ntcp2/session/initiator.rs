@@ -36,7 +36,7 @@ use crate::{
     Error,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use rand_core::RngCore;
 use zeroize::Zeroize;
 
@@ -58,7 +58,7 @@ enum InitiatorState {
         iv: [u8; 16],
 
         /// Local router info.
-        local_info: Vec<u8>,
+        local_info: Bytes,
 
         /// Ephemeral private key.
         ephemeral_key: EphemeralPrivateKey,
@@ -83,7 +83,7 @@ enum InitiatorState {
         router_hash: Vec<u8>,
 
         /// Local router info.
-        local_info: Vec<u8>,
+        local_info: Bytes,
 
         /// Static private key.
         local_static_key: StaticPrivateKey,
@@ -136,7 +136,7 @@ impl Initiator {
     pub fn new<R: Runtime>(
         state: &[u8],
         chaining_key: &[u8],
-        local_info: Vec<u8>,
+        local_info: Bytes,
         local_static_key: StaticPrivateKey,
         remote_static_key: &StaticPublicKey,
         router_hash: Vec<u8>,

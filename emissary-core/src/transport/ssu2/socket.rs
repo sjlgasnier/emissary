@@ -20,6 +20,7 @@ use crate::{
     crypto::{base64_decode, sha256::Sha256, StaticPrivateKey, StaticPublicKey},
     error::Ssu2Error,
     primitives::{RouterId, RouterInfo, Str, TransportKind},
+    router::context::RouterContext,
     runtime::{JoinSet, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
     transport::{
@@ -141,10 +142,8 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
 
-    /// Local router info.
-    //
-    // TODO: bytes
-    router_info: Vec<u8>,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
@@ -163,7 +162,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         static_key: StaticPrivateKey,
         intro_key: [u8; 32],
         subsystem_handle: SubsystemHandle,
-        router_info: Vec<u8>,
+        router_ctx: RouterContext<R>,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
         let chaining_key = state.clone();
@@ -197,7 +196,7 @@ impl<R: Runtime> Ssu2Socket<R> {
             subsystem_handle,
             unvalidated_sessions: HashMap::new(),
             waker: None,
-            router_info,
+            router_ctx,
             write_state: WriteState::GetPacket,
         }
     }
@@ -318,6 +317,9 @@ impl<R: Runtime> Ssu2Socket<R> {
             "establish outbound session",
         );
 
+        let router_info = self.router_ctx.router_info();
+        let router_id = self.router_ctx.router_id().clone();
+
         let (tx, rx) = channel(CHANNEL_SIZE);
         self.sessions.insert(src_id, tx);
 
@@ -329,8 +331,8 @@ impl<R: Runtime> Ssu2Socket<R> {
             intro_key,
             local_static_key: self.static_key.clone(),
             pkt_tx: self.pkt_tx.clone(),
-            router_id: router_info.identity.id(),
-            router_info: self.router_info.clone(),
+            router_id,
+            router_info,
             rx,
             src_id,
             state,

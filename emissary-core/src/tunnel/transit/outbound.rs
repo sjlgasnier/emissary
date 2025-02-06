@@ -609,8 +609,6 @@ mod tests {
 
     #[tokio::test]
     async fn expired_fragmented_message() {
-        crate::util::init_logger();
-
         let (_tx, rx) = channel(64);
         let (transit_tx, _transit_rx) = channel(64);
         let (manager_tx, _manager_rx) = channel(64);

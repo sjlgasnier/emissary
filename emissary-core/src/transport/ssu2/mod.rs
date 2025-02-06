@@ -18,10 +18,10 @@
 
 use crate::{
     config::Ssu2Config,
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::StaticPrivateKey,
     error::{ConnectionError, Error},
     primitives::{RouterAddress, RouterId, RouterInfo},
-    profile::ProfileStorage,
+    router::context::RouterContext,
     runtime::{MetricType, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
     transport::{ssu2::socket::Ssu2Socket, Transport, TransportEvent},
@@ -75,9 +75,6 @@ pub struct Ssu2Context<R: Runtime> {
 
 /// SSU2 transport.
 pub struct Ssu2Transport<R: Runtime> {
-    /// Metrics handle.
-    _metrics: R::MetricsHandle,
-
     /// SSU2 server socket.
     socket: Ssu2Socket<R>,
 }
@@ -87,11 +84,8 @@ impl<R: Runtime> Ssu2Transport<R> {
     pub fn new(
         context: Ssu2Context<R>,
         allow_local: bool,
-        local_signing_key: SigningPrivateKey,
-        local_router_info: RouterInfo,
+        router_ctx: RouterContext<R>,
         subsystem_handle: SubsystemHandle,
-        _profile_storage: ProfileStorage<R>,
-        _metrics: R::MetricsHandle,
     ) -> Self {
         let Ssu2Context {
             socket_address,
@@ -112,9 +106,8 @@ impl<R: Runtime> Ssu2Transport<R> {
                 StaticPrivateKey::from(config.static_key),
                 config.intro_key,
                 subsystem_handle,
-                local_router_info.serialize(&local_signing_key),
+                router_ctx.clone(),
             ),
-            _metrics,
         }
     }
 
@@ -212,13 +205,12 @@ impl<R: Runtime> Stream for Ssu2Transport<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
+    use crate::{crypto::SigningPrivateKey, profile::ProfileStorage, runtime::mock::MockRuntime};
+    use bytes::Bytes;
     use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn connect_ssu2() {
-        crate::util::init_logger();
-
         let (ctx1, address1) = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
             port: 0u16,
             host: Some("127.0.0.1".parse().unwrap()),
@@ -278,20 +270,30 @@ mod tests {
         let mut transport1 = Ssu2Transport::<MockRuntime>::new(
             ctx1.unwrap(),
             true,
-            signing1,
-            router_info1,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                router_info1.identity.id(),
+                Bytes::from(router_info1.serialize(&signing1)),
+                static1,
+                signing1,
+                2u8,
+            ),
             handle1,
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
-            MockRuntime::register_metrics(Vec::new(), None),
         );
         let mut transport2 = Ssu2Transport::<MockRuntime>::new(
             ctx2.unwrap(),
             true,
-            signing2,
-            router_info2.clone(),
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                router_info2.identity.id(),
+                Bytes::from(router_info2.serialize(&signing2)),
+                static2,
+                signing2,
+                2u8,
+            ),
             handle2,
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
-            MockRuntime::register_metrics(Vec::new(), None),
         );
         tokio::spawn(async move {
             loop {
