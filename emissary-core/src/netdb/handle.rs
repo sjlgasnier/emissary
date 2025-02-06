@@ -19,6 +19,7 @@
 use crate::{
     crypto::StaticPublicKey,
     error::{ChannelError, QueryError},
+    netdb::LOG_TARGET,
     primitives::{LeaseSet2, RouterId},
 };
 
@@ -72,6 +73,15 @@ pub enum NetDbAction {
 
         /// Oneshot sender used to send the result to caller.
         tx: oneshot::Sender<Vec<(RouterId, StaticPublicKey)>>,
+    },
+
+    /// Publish [`RouterInfo`] to `NetDb`
+    PublishRouterInfo {
+        /// Router ID.
+        router_id: RouterId,
+
+        /// Serialized, uncompressed [`RouterInfo`].
+        router_info: Bytes,
     },
 
     /// Dummy value.
@@ -150,6 +160,20 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
+    /// Publish `router_info` under `router_id` in `NetDb`
+    pub fn publish_router_info(&self, router_id: RouterId, router_info: Bytes) {
+        if let Err(error) = self.tx.try_send(NetDbAction::PublishRouterInfo {
+            router_id,
+            router_info,
+        }) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to send router info for publication to netdb",
+            );
+        }
+    }
+
     #[cfg(test)]
     /// Create new [`NetDbHandle`] for testing.
     pub fn create() -> (Self, mpsc::Receiver<NetDbAction, NetDbActionRecycle>) {
@@ -162,6 +186,12 @@ impl NetDbHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        crypto::SigningPrivateKey,
+        primitives::RouterInfo,
+        runtime::{mock::MockRuntime, Runtime},
+    };
+    use rand_core::RngCore;
 
     #[test]
     fn send_leaseset_query() {
@@ -189,6 +219,39 @@ mod tests {
         match rx.try_recv() {
             Ok(NetDbAction::QueryRouterInfo { router_id, .. }) => {
                 assert_eq!(router_id, remote);
+            }
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[test]
+    fn publish_router_info() {
+        let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
+        let handle = NetDbHandle::new(tx);
+        let (router_id, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+            let router_id = router_info.identity.id();
+
+            (router_id, Bytes::from(router_info.serialize(&signing_key)))
+        };
+        handle.publish_router_info(router_id.clone(), router_info);
+
+        match rx.try_recv() {
+            Ok(NetDbAction::PublishRouterInfo {
+                router_id: key,
+                router_info,
+            }) => {
+                assert_eq!(key, router_id);
+                assert!(RouterInfo::parse(router_info).is_some());
             }
             _ => panic!("invalid event"),
         }

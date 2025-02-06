@@ -230,7 +230,7 @@ impl<R: Runtime> Router<R> {
         //
         // note: order of initialization is important
         let mut transport_manager_builder =
-            TransportManagerBuilder::new(router_ctx.clone(), allow_local);
+            TransportManagerBuilder::new(router_ctx.clone(), local_router_info, allow_local);
 
         // initialize and start tunnel manager
         //

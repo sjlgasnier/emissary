@@ -19,7 +19,7 @@
 use crate::{
     error::{ChannelError, QueryError},
     netdb::NetDbHandle,
-    primitives::{RouterId, RouterInfo},
+    primitives::{Date, RouterId, RouterInfo},
     router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::{
@@ -28,7 +28,8 @@ use crate::{
     transport::{metrics::*, ntcp2::Ntcp2Context, ssu2::Ssu2Context},
 };
 
-use futures::{Stream, StreamExt};
+use bytes::Bytes;
+use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
 
@@ -38,6 +39,7 @@ use core::{
     marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 mod metrics;
@@ -49,6 +51,11 @@ pub use ssu2::Ssu2Transport;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::transport-manager";
+
+/// Local [`RouterInfo`] republish interval.
+///
+/// Local router info gets republished to `NetDb` every 15 minutes.
+const ROUTER_INFO_REPUBLISH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Termination reason.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -387,11 +394,14 @@ pub struct TransportManagerBuilder<R: Runtime> {
     /// TX channel passed onto other subsystems.
     cmd_tx: Sender<ProtocolCommand>,
 
-    /// Router context.
-    router_ctx: RouterContext<R>,
+    /// Local router info.
+    local_router_info: RouterInfo,
 
     /// Handle to [`NetDb`].
     netdb_handle: Option<NetDbHandle>,
+
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Subsystem handle passed onto enabled transports.
     subsystem_handle: SubsystemHandle,
@@ -402,13 +412,18 @@ pub struct TransportManagerBuilder<R: Runtime> {
 
 impl<R: Runtime> TransportManagerBuilder<R> {
     /// Create new [`TransportManagerBuilder`].
-    pub fn new(router_ctx: RouterContext<R>, allow_local: bool) -> Self {
+    pub fn new(
+        router_ctx: RouterContext<R>,
+        local_router_info: RouterInfo,
+        allow_local: bool,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = channel(256);
 
         Self {
             allow_local,
             cmd_rx,
             cmd_tx,
+            local_router_info,
             netdb_handle: None,
             router_ctx,
             subsystem_handle: SubsystemHandle::new(),
@@ -466,12 +481,16 @@ impl<R: Runtime> TransportManagerBuilder<R> {
     pub fn build(self) -> TransportManager<R> {
         TransportManager {
             cmd_rx: self.cmd_rx,
-            router_ctx: self.router_ctx,
+            local_router_info: self.local_router_info,
             netdb_handle: self.netdb_handle.expect("to exist"),
             pending_queries: R::join_set(),
-            subsystem_handle: self.subsystem_handle,
             poll_index: 0usize,
+            router_ctx: self.router_ctx,
+            // publish the router info 10 seconds after booting, otherwise republish it periodically
+            // in intervals of [`ROUTER_INFO_REPUBLISH_INTERVAL`]
+            router_info_republish_timer: Box::pin(R::delay(Duration::from_secs(10))),
             routers: HashSet::new(),
+            subsystem_handle: self.subsystem_handle,
             transports: self.transports,
         }
     }
@@ -486,8 +505,8 @@ pub struct TransportManager<R: Runtime> {
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
-    /// Router context.
-    router_ctx: RouterContext<R>,
+    /// Local router info.
+    local_router_info: RouterInfo,
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
@@ -497,6 +516,12 @@ pub struct TransportManager<R: Runtime> {
 
     /// Poll index for transports.
     poll_index: usize,
+
+    /// Router context.
+    router_ctx: RouterContext<R>,
+
+    /// Router info republish timer.
+    router_info_republish_timer: BoxFuture<'static, ()>,
 
     /// Connected routers.
     routers: HashSet<RouterId>,
@@ -665,6 +690,23 @@ impl<R: Runtime> Future for TransportManager<R> {
                     "unhandled event",
                 ),
             }
+        }
+
+        if self.router_info_republish_timer.poll_unpin(cx).is_ready() {
+            // reset publish time and serialize our new router info
+            self.local_router_info.published = Date::new(R::time_since_epoch().as_millis() as u64);
+            let serialized =
+                Bytes::from(self.local_router_info.serialize(self.router_ctx.signing_key()));
+
+            // reset router info in router context so all subsystems are using the latest version of
+            // it and publish it to netdb
+            self.router_ctx.set_router_info(serialized.clone());
+            self.netdb_handle
+                .publish_router_info(self.router_ctx.router_id().clone(), serialized);
+
+            // reset timer and register it into the executor
+            self.router_info_republish_timer = Box::pin(R::delay(ROUTER_INFO_REPUBLISH_INTERVAL));
+            let _ = self.router_info_republish_timer.poll_unpin(cx);
         }
 
         Poll::Pending

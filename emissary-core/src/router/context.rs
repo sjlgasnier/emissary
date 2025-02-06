@@ -136,4 +136,9 @@ impl<R: Runtime> RouterContext<R> {
     pub fn noise(&self) -> &NoiseContext {
         &self.inner.noise
     }
+
+    /// Get reference to [`SigningPrivateKey`].
+    pub fn signing_key(&self) -> &SigningPrivateKey {
+        &self.inner.signing_key
+    }
 }

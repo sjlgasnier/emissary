@@ -56,7 +56,6 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -82,108 +81,11 @@ const LOG_TARGET: &str = "emissary::netdb";
 /// `NetDb` query timeout.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Router info republish timeout.
-const ROUTER_INFO_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-
 /// [`NetDb`] maintenance interval.
 const NETDB_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Number of router hashes to include into [`DatabaseSearchReply`].
 const SEARCH_REPLY_NUM_ROUTERS: usize = 5usize;
-
-/// Local router info publisher.
-///
-/// Publishes the router info of the local router first when the router boots up and after that
-/// periodically (1h) to prevent the router from disappearing from the global NetDb.
-///
-/// [`RouterInfoPublisher`] implements `Future` which fires periodically and instructs [`NetDb`] to
-/// call [`RouterInfoPublisher::publish()`] to get a `DatabaseStore` message and a `RouterId` of a
-/// floodfill to whom the message should be sent.
-pub struct RouterInfoPublisher<R> {
-    /// Local router ID.
-    router_id: RouterId,
-
-    /// Serialized [`RouterId`] of the local router.
-    serialized_router_id: Bytes,
-
-    /// Serialized [`RouterInfo`] of the local router.
-    serialized_router_info: Bytes,
-
-    /// Republish timer.
-    timer: BoxFuture<'static, ()>,
-
-    /// Marker for `Runtime`.
-    _runtime: PhantomData<R>,
-}
-
-impl<R: Runtime> RouterInfoPublisher<R> {
-    /// Create new [`RouterInfoPublisher`].
-    fn new(router_id: RouterId, serialized_router_info: Bytes) -> Self {
-        let serialized_router_id = Bytes::from(router_id.to_vec());
-
-        // gzip-compress the serialized router info, as required by the spec
-        //
-        // call is expected to succeed as the router info is created by emissary
-        let serialized_router_info =
-            Bytes::from(R::gzip_compress(serialized_router_info).expect("to succeed"));
-
-        Self {
-            router_id,
-            serialized_router_id,
-            serialized_router_info,
-            timer: Box::pin(R::delay(Duration::from_secs(10))),
-            _runtime: Default::default(),
-        }
-    }
-
-    /// Publish local router info to global NetDb.
-    ///
-    /// Fetches the closest floodfill to our key from `dht` and returns a DatabaseStore message
-    /// which [`NetDb`] needs to send to the selected floofill. Returns also the reply token that
-    /// was used in the DatabaseStore message, allowing [`NetDb`] to associate the response with the
-    /// router info publish.
-    ///
-    /// Returns `None` if there are no floodfills.
-    fn publish(&self) -> (u32, Vec<u8>) {
-        let reply_token = R::rng().next_u32();
-        let message = DatabaseStoreBuilder::new(
-            self.serialized_router_id.clone(),
-            DatabaseStoreKind::RouterInfo {
-                router_info: self.serialized_router_info.clone(),
-            },
-        )
-        .with_reply_type(StoreReplyType::Router {
-            reply_token,
-            router_id: self.router_id.clone(),
-        })
-        .build();
-
-        let message = MessageBuilder::short()
-            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-            .with_message_type(MessageType::DatabaseStore)
-            .with_message_id(R::rng().next_u32())
-            .with_payload(&message)
-            .build();
-
-        (reply_token, message)
-    }
-}
-
-impl<R: Runtime> Future for RouterInfoPublisher<R> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        futures::ready!(self.timer.poll_unpin(cx));
-
-        // reset timer and poll it to register it into the executor
-        {
-            self.timer = Box::pin(R::delay(ROUTER_INFO_REPUBLISH_TIMEOUT));
-            let _ = self.timer.poll_unpin(cx);
-        }
-
-        Poll::Ready(())
-    }
-}
 
 /// Tunnel selector.
 ///
@@ -384,9 +286,6 @@ pub struct NetDb<R: Runtime> {
     /// Used to answer router exploration queries.
     router_dht: Option<Dht<R>>,
 
-    /// Local router info publishers.
-    router_info_publishers: RouterInfoPublisher<R>,
-
     /// Serialized [`RouterInfo`]s received via `DatabaseStore` messages.
     ///
     /// This contains entries only if `floodfill` is true.
@@ -456,10 +355,6 @@ impl<R: Runtime> NetDb<R> {
                 query_timers: R::join_set(),
                 router_ctx: router_ctx.clone(),
                 router_dht,
-                router_info_publishers: RouterInfoPublisher::new(
-                    router_ctx.router_id().clone(),
-                    router_ctx.router_info(),
-                ),
                 router_infos: HashMap::new(),
                 routers: HashMap::new(),
                 service,
@@ -1878,6 +1773,57 @@ impl<R: Runtime> NetDb<R> {
         let _ = tx.send(floodfills);
     }
 
+    /// Publish `router_info` under `router_id` in `NetDb`.
+    fn on_publish_router_info(&mut self, router_id: RouterId, router_info: Bytes) {
+        let key = Bytes::from(router_id.to_vec());
+
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
+        if floodfills.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                %router_id,
+                "cannot send router info, no floodfills",
+            );
+            return;
+        }
+
+        // gzip-compress the serialized router info, as required by the spec
+        //
+        // call is expected to succeed as the router info is created by us
+        let serialized_router_info =
+            Bytes::from(R::gzip_compress(router_info).expect("to succeed"));
+
+        let reply_token = R::rng().next_u32();
+        let message = DatabaseStoreBuilder::new(
+            key,
+            DatabaseStoreKind::RouterInfo {
+                router_info: serialized_router_info,
+            },
+        )
+        .with_reply_type(StoreReplyType::Router {
+            reply_token,
+            router_id: self.router_ctx.router_id().clone(),
+        })
+        .build();
+
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseStore)
+            .with_message_id(R::rng().next_u32())
+            .with_payload(&message)
+            .build();
+
+        tracing::info!(
+            target: LOG_TARGET,
+            %router_id,
+            ?floodfills,
+            %reply_token,
+            "publish router info",
+        );
+
+        self.send_message(&floodfills, MessageKind::NonExpiring { message });
+    }
+
     /// Perform general maintenance of [`NetDb`].
     fn maintain_netdb(&mut self) {
         // prune expired lease sets
@@ -2030,6 +1976,10 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_get_closest_floodfills(key, tx),
                 Poll::Ready(Some(NetDbAction::QueryRouterInfo { router_id, tx })) =>
                     self.on_query_router_info(router_id, tx),
+                Poll::Ready(Some(NetDbAction::PublishRouterInfo {
+                    router_id,
+                    router_info,
+                })) => self.on_publish_router_info(router_id, router_info),
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
             }
         }
@@ -2068,29 +2018,6 @@ impl<R: Runtime> Future for NetDb<R> {
             // reset timer and register it into the executor
             self.maintenance_timer = Box::pin(R::delay(NETDB_MAINTENANCE_INTERVAL));
             let _ = self.maintenance_timer.poll_unpin(cx);
-        }
-
-        if self.router_info_publishers.poll_unpin(cx).is_ready() {
-            let key = Bytes::from(self.router_ctx.router_id().to_vec());
-
-            match self.floodfill_dht.closest(key, 1usize).collect::<Vec<_>>().pop() {
-                None => tracing::warn!(
-                    target: LOG_TARGET,
-                    "unable to publish router info, no floodfills",
-                ),
-                Some(floodfill) => {
-                    let (reply_token, message) = self.router_info_publishers.publish();
-
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        %floodfill,
-                        %reply_token,
-                        "publish local router info",
-                    );
-
-                    self.send_message(&[floodfill], MessageKind::NonExpiring { message });
-                }
-            }
         }
 
         Poll::Pending
@@ -4307,61 +4234,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_router_info_published() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-
-        // add floodfill to router storage
-        let info = RouterInfo::floodfill::<MockRuntime>();
-        let floodfill = info.identity.id();
-        storage.add_router(info);
-
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
-        let (_msg_tx, msg_rx) = channel(64);
-        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterContext::new(
-                MockRuntime::register_metrics(vec![], None),
-                storage,
-                router_info.identity.id(),
-                Bytes::from(router_info.serialize(&signing_key)),
-                static_key,
-                signing_key,
-                2u8,
-            ),
-            true,
-            service,
-            tp_handle,
-            msg_rx,
-        );
-
-        assert!(std::matches!(netdb.routers.get(&floodfill), None));
-
-        // poll netdb until the initial publish timeout is over
-        assert!(tokio::time::timeout(Duration::from_secs(20), &mut netdb).await.is_err());
-
-        match netdb.routers.get(&floodfill).expect("to exist") {
-            RouterState::Dialing { pending_messages } => {
-                assert_eq!(pending_messages.len(), 1);
-            }
-            _ => panic!("invalid state"),
-        }
-    }
-
-    #[tokio::test]
     async fn netdb_parallel_lease_set_query_first_response_succeeds() {
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
@@ -5307,6 +5179,118 @@ mod tests {
                 QueryKind::RecursiveLeaseSetQuery { .. }
             ) && closest
                 .contains(&RouterId::from(k.as_ref())))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_router_info_store() {
+        let (service, rx, subsys_tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
+        let (_msg_tx, msg_rx) = channel(64);
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let (mut netdb, handle) = NetDb::<MockRuntime>::new(
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                serialized.clone(),
+                static_key,
+                signing_key,
+                2u8,
+            ),
+            true,
+            service,
+            tp_handle,
+            msg_rx,
+        );
+
+        // publish local router info and poll netdb so the request is handled
+        handle.publish_router_info(router_info.identity.id(), serialized.clone());
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.is_err());
+
+        // verify all floodfills are being dialed
+        assert!(netdb.routers.iter().all(|(id, state)| match state {
+            RouterState::Dialing { pending_messages } if pending_messages.len() == 1 => {
+                floodfills.contains(id)
+            }
+            _ => false,
+        }));
+        assert!((0..3).all(|_| match rx.try_recv().unwrap() {
+            ProtocolCommand::Connect { router_id } => floodfills.contains(&router_id),
+            _ => false,
+        }));
+
+        // register floodfills
+        let receivers = floodfills
+            .iter()
+            .map(|router_id| {
+                let (tx, rx) = channel(64);
+
+                subsys_tx
+                    .try_send(InnerSubsystemEvent::ConnectionEstablished {
+                        router: router_id.clone(),
+                        tx,
+                    })
+                    .unwrap();
+                rx
+            })
+            .collect::<Vec<_>>();
+
+        // poll netdb so the pending messages get sent to floodfills
+        // and verify all floofills get a database store message for the local router info
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.is_err());
+        assert!(
+            receivers.into_iter().all(|rx| match rx.try_recv().unwrap() {
+                SubsystemCommand::SendMessage { message } => {
+                    let message = Message::parse_short(&message).unwrap();
+                    assert_eq!(message.message_type, MessageType::DatabaseStore);
+
+                    let store = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    match store.payload {
+                        DatabaseStorePayload::RouterInfo { .. } => {
+                            let raw_router_info =
+                                DatabaseStore::<MockRuntime>::extract_raw_router_info(
+                                    &message.payload,
+                                );
+                            let decompressed =
+                                MockRuntime::gzip_decompress(&raw_router_info).unwrap();
+
+                            assert_eq!(&decompressed, &serialized);
+
+                            true
+                        }
+                        DatabaseStorePayload::LeaseSet2 { .. } => false,
+                    }
+                }
+                _ => false,
+            })
         );
     }
 }
