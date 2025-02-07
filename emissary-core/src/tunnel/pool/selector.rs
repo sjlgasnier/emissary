@@ -162,12 +162,12 @@ impl<R: Runtime> ExploratorySelector<R> {
                     //
                     let addresses = [
                         reader
-                            .router_info(&router_id)
+                            .router_info(&router_id)?
                             .addresses
                             .get(&TransportKind::Ntcp2)
                             .and_then(|address| address.socket_address),
                         reader
-                            .router_info(&router_id)
+                            .router_info(&router_id)?
                             .addresses
                             .get(&TransportKind::Ssu2)
                             .and_then(|address| address.socket_address),
@@ -412,9 +412,11 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             return Some(
                 (0..num_hops)
                     .map(|i| {
-                        let router_info = reader.router_info(&router_ids[i]);
+                        // router info must exist since it was iterated over above
+                        let router_info = reader.router_info(&router_ids[i]).expect("to exist");
 
                         (
+                            // router info
                             router_info.identity.hash().clone(),
                             router_info.identity.static_key().clone(),
                         )
@@ -497,7 +499,8 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
         Some(
             (0..num_hops)
                 .map(|i| {
-                    let router_info = reader.router_info(&router_ids[i]);
+                    // router info must exist since it was iterated over above
+                    let router_info = reader.router_info(&router_ids[i]).expect("to exist");
 
                     (
                         router_info.identity.hash().clone(),
@@ -690,7 +693,8 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             return Some(
                 (0..num_hops)
                     .map(|i| {
-                        let router_info = reader.router_info(&router_ids[i]);
+                        // router info must exist since it was iterated over above
+                        let router_info = reader.router_info(&router_ids[i]).expect("to exist");
 
                         (
                             router_info.identity.hash().clone(),
@@ -777,7 +781,8 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
         Some(
             (0..num_hops)
                 .map(|i| {
-                    let router_info = reader.router_info(&router_ids[i]);
+                    // router info must exist since it was iterated over above
+                    let router_info = reader.router_info(&router_ids[i]).expect("to exist");
 
                     (
                         router_info.identity.hash().clone(),
@@ -908,7 +913,7 @@ mod tests {
         let reader = profile_storage.reader();
 
         for (hash, _) in hops {
-            let router_info = reader.router_info(&RouterId::from(hash));
+            let router_info = reader.router_info(&RouterId::from(hash)).unwrap();
 
             if router_info.capabilities.is_fast() {
                 fast += 1;
@@ -1022,7 +1027,7 @@ mod tests {
         let reader = profile_storage.reader();
 
         for (hash, _) in hops {
-            let router_info = reader.router_info(&RouterId::from(hash));
+            let router_info = reader.router_info(&RouterId::from(hash)).unwrap();
 
             if router_info.capabilities.is_fast() {
                 fast += 1;
@@ -1268,9 +1273,11 @@ mod tests {
 
         let hops = selector.select_hops(3).unwrap();
         let reader = profile_storage.reader();
-        assert!(hops
-            .into_iter()
-            .all(|(hash, _)| reader.router_info(&RouterId::from(hash)).capabilities.is_standard()));
+        assert!(hops.into_iter().all(|(hash, _)| reader
+            .router_info(&RouterId::from(hash))
+            .unwrap()
+            .capabilities
+            .is_standard()));
     }
 
     #[test]
@@ -1325,9 +1332,11 @@ mod tests {
 
         let hops = selector.select_hops(3).unwrap();
         let reader = profile_storage.reader();
-        assert!(hops
-            .into_iter()
-            .all(|(hash, _)| reader.router_info(&RouterId::from(hash)).capabilities.is_fast()));
+        assert!(hops.into_iter().all(|(hash, _)| reader
+            .router_info(&RouterId::from(hash))
+            .unwrap()
+            .capabilities
+            .is_fast()));
     }
 
     #[test]
@@ -1385,7 +1394,7 @@ mod tests {
             let reader = profile_storage.reader();
 
             for (hash, _) in &hops {
-                let router_info = reader.router_info(&RouterId::from(hash));
+                let router_info = reader.router_info(&RouterId::from(hash)).unwrap();
 
                 if router_info.capabilities.is_fast() {
                     fast += 1;
@@ -1468,7 +1477,7 @@ mod tests {
             let reader = profile_storage.reader();
 
             for (hash, _) in &hops {
-                let router_info = reader.router_info(&RouterId::from(hash));
+                let router_info = reader.router_info(&RouterId::from(hash)).unwrap();
 
                 if router_info.capabilities.is_fast() {
                     fast += 1;

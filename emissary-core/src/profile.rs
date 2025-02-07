@@ -165,9 +165,8 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// Get reference to [`RouterInfo`].
-    pub fn router_info(&self, router_id: &RouterId) -> &RouterInfo {
-        // router info must exist since they're managed by us
-        self.router_infos.get(router_id).expect("to succeed")
+    pub fn router_info(&self, router_id: &RouterId) -> Option<&RouterInfo> {
+        self.router_infos.get(router_id)
     }
 }
 

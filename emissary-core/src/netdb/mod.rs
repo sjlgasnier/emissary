@@ -1536,6 +1536,22 @@ impl<R: Runtime> NetDb<R> {
 
     /// Send [`LeaseSet2`] query for `key` to `floodfill`.
     fn send_lease_set_query(&mut self, key: Bytes, floodfill: RouterId) -> Result<(), QueryError> {
+        let floodfill_public_key = {
+            let reader = self.router_ctx.profile_storage().reader();
+
+            let Some(router_info) = reader.router_info(&floodfill) else {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    %floodfill,
+                    "cannot send lease set query, floodfill router info doesn't exist",
+                );
+                return Ok(());
+            };
+
+            router_info.identity.static_key().clone()
+        };
+
         let Some(Lease {
             router_id,
             tunnel_id,
@@ -1583,20 +1599,10 @@ impl<R: Runtime> NetDb<R> {
 
         let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
         let ephemeral_public = ephemeral_secret.public();
-        let (garlic_key, garlic_tag) = {
-            let floodfill_public_key = self
-                .router_ctx
-                .profile_storage()
-                .reader()
-                .router_info(&floodfill)
-                .identity
-                .static_key()
-                .clone();
-
-            self.router_ctx
-                .noise()
-                .derive_outbound_garlic_key(floodfill_public_key, ephemeral_secret)
-        };
+        let (garlic_key, garlic_tag) = self
+            .router_ctx
+            .noise()
+            .derive_outbound_garlic_key(floodfill_public_key, ephemeral_secret);
 
         // message length + poly13055 tg + ephemeral key + garlic message length
         let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
