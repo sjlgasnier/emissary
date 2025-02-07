@@ -626,6 +626,12 @@ impl<R: Runtime> Future for TransportManager<R> {
                             ?reason,
                             "remote router banned us",
                         ),
+                        TerminationReason::IdleTimeout => tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?reason,
+                            "connection closed",
+                        ),
                         reason => tracing::debug!(
                             target: LOG_TARGET,
                             %router_id,
