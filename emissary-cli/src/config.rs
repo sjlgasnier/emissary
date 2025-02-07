@@ -35,7 +35,7 @@ use std::{
 };
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Profile {
+pub struct Profile {
     last_activity: Option<u64>,
     last_declined: Option<u64>,
     last_dial_failure: Option<u64>,
@@ -47,6 +47,26 @@ struct Profile {
     num_test_failures: Option<usize>,
     num_test_successes: Option<usize>,
     num_unaswered: Option<usize>,
+}
+
+impl From<emissary_core::Profile> for Profile {
+    fn from(profile: emissary_core::Profile) -> Self {
+        Profile {
+            last_activity: Some(profile.last_activity.as_secs()),
+            last_declined: profile.last_declined.map(|last_declined| last_declined.as_secs()),
+            last_dial_failure: profile
+                .last_dial_failure
+                .map(|last_dial_failure| last_dial_failure.as_secs()),
+            num_accepted: Some(profile.num_accepted),
+            num_connection: Some(profile.num_connection),
+            num_dial_failures: Some(profile.num_dial_failures),
+            num_rejected: Some(profile.num_rejected),
+            num_selected: Some(profile.num_selected),
+            num_test_failures: Some(profile.num_test_failures),
+            num_test_successes: Some(profile.num_test_successes),
+            num_unaswered: Some(profile.num_unaswered),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -244,10 +264,18 @@ impl TryFrom<Option<PathBuf>> for Config {
         // if base path doesn't exist, create it and return empty config
         if !path.exists() {
             fs::create_dir_all(&path)?;
-            fs::create_dir_all(path.join("routers"))?;
-            fs::create_dir_all(path.join("profiles"))?;
+            Config::create_netdb_dir(path.join("netDb"))?;
+            Config::create_profiles_dir(path.join("peerProfiles"))?;
 
             return Config::new_empty(path);
+        }
+
+        if !path.join("netDb").exists() {
+            Config::create_netdb_dir(path.join("netDb"))?;
+        }
+
+        if !path.join("peerProfiles").exists() {
+            Config::create_profiles_dir(path.join("peerProfiles"))?;
         }
 
         // read static & signing keys from disk or generate new ones
@@ -462,6 +490,34 @@ impl Config {
         file.read_to_end(&mut contents).map(|_| contents).map_err(From::from)
     }
 
+    /// Create `netDb` directory.
+    fn create_netdb_dir(path: PathBuf) -> crate::Result<()> {
+        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
+
+        // create base directory `.emissary/peerProfiles`
+        fs::create_dir_all(&path)?;
+
+        for c in chars.chars() {
+            fs::create_dir_all(path.join(&format!("r{c}")))?;
+        }
+
+        Ok(())
+    }
+
+    /// Create `peerProfiles` directory.
+    fn create_profiles_dir(path: PathBuf) -> crate::Result<()> {
+        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
+
+        // create base directory `.emissary/peerProfiles`
+        fs::create_dir_all(&path)?;
+
+        for c in chars.chars() {
+            fs::create_dir_all(path.join(&format!("p{c}")))?;
+        }
+
+        Ok(())
+    }
+
     /// Create empty config.
     ///
     /// Creates a default config with NTCP2 enabled.
@@ -672,73 +728,111 @@ impl Config {
 
     /// Attempt to load router infos.
     fn load_router_infos(path: &Path) -> Vec<Vec<u8>> {
-        let Ok(router_dir) = fs::read_dir(path.join("routers")) else {
+        let Ok(router_dir) = fs::read_dir(path.join("netDb")) else {
             return Vec::new();
         };
 
         router_dir
             .into_iter()
             .filter_map(|entry| {
-                let dir = entry.ok()?;
-                let mut file = fs::File::open(dir.path()).ok()?;
+                let dir = entry.ok()?.path();
 
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents).ok()?;
+                if !dir.is_dir() {
+                    return None;
+                }
 
-                Some(contents)
+                Some(
+                    fs::read_dir(dir)
+                        .ok()?
+                        .filter_map(|entry| {
+                            let file_path = entry.ok()?.path();
+
+                            if !file_path.is_file() {
+                                return None;
+                            }
+
+                            let mut file = fs::File::open(file_path).ok()?;
+
+                            let mut contents = Vec::new();
+                            file.read_to_end(&mut contents).ok()?;
+
+                            Some(contents)
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
+            .flatten()
             .collect::<Vec<_>>()
     }
 
     /// Attempt to load router profiles.
     fn load_router_profiles(path: &Path) -> Vec<(String, emissary_core::Profile)> {
-        let Ok(profile_dir) = fs::read_dir(path.join("profiles")) else {
+        let Ok(profile_dir) = fs::read_dir(path.join("peerProfiles")) else {
             return Vec::new();
         };
 
         profile_dir
             .into_iter()
             .filter_map(|entry| {
-                let dir = entry.ok()?;
-                let mut file = fs::File::open(dir.path()).ok()?;
+                let dir = entry.ok()?.path();
 
-                let mut contents = String::new();
-                file.read_to_string(&mut contents).ok()?;
+                if !dir.is_dir() {
+                    return None;
+                }
 
-                let profile = toml::from_str::<Profile>(&contents).ok()?;
-                let name = {
-                    let input = dir.path().to_owned();
-                    let input = input.to_str().expect("to succeed");
+                Some(
+                    fs::read_dir(dir)
+                        .ok()?
+                        .filter_map(|entry| {
+                            let file_path = entry.ok()?.path();
 
-                    let start = input.find("profile-")?;
-                    let start = start + "profile-".len();
-                    let end = input.find(".toml")?;
+                            if !file_path.is_file() {
+                                return None;
+                            }
 
-                    input[start..end].to_string()
-                };
+                            let mut file = fs::File::open(&file_path).ok()?;
 
-                Some((
-                    name,
-                    emissary_core::Profile {
-                        last_activity: Duration::from_secs(profile.last_activity.unwrap_or(0)),
-                        last_declined: profile
-                            .last_declined
-                            .map(|last_declined| Duration::from_secs(last_declined)),
-                        last_dial_failure: profile
-                            .last_dial_failure
-                            .map(|last_dial_failure| Duration::from_secs(last_dial_failure)),
-                        num_accepted: profile.num_accepted.unwrap_or(0),
-                        num_connection: profile.num_connection.unwrap_or(0),
-                        num_dial_failures: profile.num_dial_failures.unwrap_or(0),
-                        num_rejected: profile.num_rejected.unwrap_or(0),
-                        num_selected: profile.num_selected.unwrap_or(0),
-                        num_test_failures: profile.num_test_failures.unwrap_or(0),
-                        num_test_successes: profile.num_test_successes.unwrap_or(0),
-                        num_unaswered: profile.num_unaswered.unwrap_or(0),
-                    },
-                ))
+                            let mut contents = String::new();
+                            file.read_to_string(&mut contents).ok()?;
+
+                            let profile = toml::from_str::<Profile>(&contents).ok()?;
+                            let name = {
+                                let input = file_path.to_str().expect("to succeed");
+                                let start = input.find("profile-")?;
+                                let start = start + "profile-".len();
+                                let end = input.find(".toml")?;
+
+                                input[start..end].to_string()
+                            };
+
+                            Some((
+                                name,
+                                emissary_core::Profile {
+                                    last_activity: Duration::from_secs(
+                                        profile.last_activity.unwrap_or(0),
+                                    ),
+                                    last_declined: profile
+                                        .last_declined
+                                        .map(|last_declined| Duration::from_secs(last_declined)),
+                                    last_dial_failure: profile.last_dial_failure.map(
+                                        |last_dial_failure| Duration::from_secs(last_dial_failure),
+                                    ),
+                                    num_accepted: profile.num_accepted.unwrap_or(0),
+                                    num_connection: profile.num_connection.unwrap_or(0),
+                                    num_dial_failures: profile.num_dial_failures.unwrap_or(0),
+                                    num_rejected: profile.num_rejected.unwrap_or(0),
+                                    num_selected: profile.num_selected.unwrap_or(0),
+                                    num_test_failures: profile.num_test_failures.unwrap_or(0),
+                                    num_test_successes: profile.num_test_successes.unwrap_or(0),
+                                    num_unaswered: profile.num_unaswered.unwrap_or(0),
+                                },
+                            ))
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
-            .collect()
+            .flatten()
+            .collect::<Vec<_>>()
     }
 
     /// Attempt to merge `arguments` with [`Config`].

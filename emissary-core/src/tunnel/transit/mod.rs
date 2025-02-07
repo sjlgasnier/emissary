@@ -28,11 +28,12 @@ use crate::{
         HopRole, Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{RouterId, TunnelId},
+    router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricsHandle, Runtime},
     shutdown::ShutdownHandle,
     tunnel::{
         metrics::*,
-        noise::{NoiseContext, TunnelKeys},
+        noise::TunnelKeys,
         routing_table::RoutingTable,
         transit::{inbound::InboundGateway, outbound::OutboundEndpoint, participant::Participant},
     },
@@ -103,11 +104,8 @@ pub struct TransitTunnelManager<R: Runtime> {
     /// RX channel for receiving messages from `TunnelManager`.
     message_rx: Receiver<Message>,
 
-    /// Metrics handle.
-    metrics_handle: R::MetricsHandle,
-
-    /// Noise context.
-    noise: NoiseContext,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -122,16 +120,14 @@ pub struct TransitTunnelManager<R: Runtime> {
 impl<R: Runtime> TransitTunnelManager<R> {
     /// Create new [`TransitTunnelManager`].
     pub fn new(
-        noise: NoiseContext,
+        router_ctx: RouterContext<R>,
         routing_table: RoutingTable,
         message_rx: Receiver<Message>,
-        metrics_handle: R::MetricsHandle,
         shutdown_handle: ShutdownHandle,
     ) -> Self {
         Self {
             message_rx,
-            metrics_handle,
-            noise,
+            router_ctx,
             routing_table,
             shutdown_handle,
             tunnels: R::join_set(),
@@ -145,10 +141,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
     ) -> Option<(usize, &'a mut [u8])> {
         (payload.len() > RECORD_SIZE && (payload.len() - 1) % RECORD_SIZE == 0)
             .then(|| {
-                payload[1..]
-                    .chunks_mut(RECORD_SIZE)
-                    .enumerate()
-                    .find(|(_, chunk)| chunk[..16] == self.noise.local_router_hash()[..16])
+                payload[1..].chunks_mut(RECORD_SIZE).enumerate().find(|(_, chunk)| {
+                    chunk[..16] == self.router_ctx.noise().local_router_hash()[..16]
+                })
             })
             .flatten()
     }
@@ -169,7 +164,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
             .find_local_record::<VARIABLE_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        let mut session = self.noise.create_long_inbound_session(
+        let mut session = self.router_ctx.noise().create_long_inbound_session(
             EphemeralPublicKey::from_bytes(&record[PUBLIC_KEY_OFFSET]).ok_or(Error::InvalidData)?,
         );
         let decrypted_record =
@@ -235,7 +230,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
         match maybe_receiver {
             None => {
-                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
+                self.router_ctx
+                    .metrics_handle()
+                    .counter(NUM_TRANSIT_TUNNELS_REJECTED)
+                    .increment(1);
 
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
@@ -244,8 +242,11 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 session.encrypt_build_record(record)?;
             }
             Some(receiver) => {
-                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
-                self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+                self.router_ctx
+                    .metrics_handle()
+                    .counter(NUM_TRANSIT_TUNNELS_ACCEPTED)
+                    .increment(1);
+                self.router_ctx.metrics_handle().gauge(NUM_TRANSIT_TUNNELS).increment(1);
 
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
@@ -267,7 +268,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             build_record.tunnel_iv_key().to_vec(),
                         )?,
                         self.routing_table.clone(),
-                        self.metrics_handle.clone(),
+                        self.router_ctx.metrics_handle().clone(),
                         receiver,
                     )),
                     HopRole::Participant => self.tunnels.push(Participant::<R>::new(
@@ -279,7 +280,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             build_record.tunnel_iv_key().to_vec(),
                         )?,
                         self.routing_table.clone(),
-                        self.metrics_handle.clone(),
+                        self.router_ctx.metrics_handle().clone(),
                         receiver,
                     )),
                     HopRole::OutboundEndpoint => self.tunnels.push(OutboundEndpoint::<R>::new(
@@ -291,24 +292,48 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             build_record.tunnel_iv_key().to_vec(),
                         )?,
                         self.routing_table.clone(),
-                        self.metrics_handle.clone(),
+                        self.router_ctx.metrics_handle().clone(),
                         receiver,
                     )),
                 }
             }
         }
 
-        let message = MessageBuilder::short()
-            .with_message_type(match role {
-                HopRole::OutboundEndpoint => MessageType::VariableTunnelBuildReply,
-                HopRole::InboundGateway | HopRole::Participant => MessageType::VariableTunnelBuild,
-            })
-            .with_message_id(next_message_id)
-            .with_expiration(expiration)
-            .with_payload(&payload)
-            .build();
+        match role {
+            HopRole::InboundGateway | HopRole::Participant => {
+                let message = MessageBuilder::short()
+                    .with_message_type(MessageType::VariableTunnelBuild)
+                    .with_message_id(next_message_id)
+                    .with_expiration(expiration)
+                    .with_payload(&payload)
+                    .build();
 
-        Ok((next_router, message))
+                Ok((next_router, message))
+            }
+            HopRole::OutboundEndpoint => {
+                let message = MessageBuilder::short()
+                    .with_message_type(MessageType::VariableTunnelBuildReply)
+                    .with_message_id(next_message_id)
+                    .with_expiration(expiration)
+                    .with_payload(&payload)
+                    .build();
+
+                let msg = TunnelGateway {
+                    tunnel_id: next_tunnel_id,
+                    payload: &message,
+                }
+                .serialize();
+
+                let message = MessageBuilder::short()
+                    .with_message_type(MessageType::TunnelGateway)
+                    .with_message_id(next_message_id)
+                    .with_expiration(expiration)
+                    .with_payload(&msg)
+                    .build();
+
+                Ok((next_router, message))
+            }
+        }
     }
 
     /// Handle short tunnel build request.
@@ -327,7 +352,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
             .find_local_record::<SHORT_RECORD_LEN>(&mut payload)
             .ok_or(Error::Tunnel(TunnelError::RecordNotFound))?;
 
-        let mut session = self.noise.create_short_inbound_session(
+        let mut session = self.router_ctx.noise().create_short_inbound_session(
             EphemeralPublicKey::from_bytes(&record[PUBLIC_KEY_OFFSET]).ok_or(Error::InvalidData)?,
         );
         let decrypted_record =
@@ -399,7 +424,10 @@ impl<R: Runtime> TransitTunnelManager<R> {
         // won't know if another participant of the tunnel rejected the tunnel or not
         let (garlic_key, garlic_tag) = match maybe_receiver {
             None => {
-                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_REJECTED).increment(1);
+                self.router_ctx
+                    .metrics_handle()
+                    .counter(NUM_TRANSIT_TUNNELS_REJECTED)
+                    .increment(1);
 
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
@@ -421,8 +449,11 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 }
             }
             Some(receiver) => {
-                self.metrics_handle.counter(NUM_TRANSIT_TUNNELS_ACCEPTED).increment(1);
-                self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+                self.router_ctx
+                    .metrics_handle()
+                    .counter(NUM_TRANSIT_TUNNELS_ACCEPTED)
+                    .increment(1);
+                self.router_ctx.metrics_handle().gauge(NUM_TRANSIT_TUNNELS).increment(1);
 
                 record[48] = 0x00; // no options
                 record[49] = 0x00;
@@ -443,7 +474,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             next_router.clone(),
                             session.finalize()?,
                             self.routing_table.clone(),
-                            self.metrics_handle.clone(),
+                            self.router_ctx.metrics_handle().clone(),
                             receiver,
                         ));
 
@@ -456,7 +487,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             next_router.clone(),
                             session.finalize()?,
                             self.routing_table.clone(),
-                            self.metrics_handle.clone(),
+                            self.router_ctx.metrics_handle().clone(),
                             receiver,
                         ));
 
@@ -473,7 +504,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             next_router.clone(),
                             tunnel_keys,
                             self.routing_table.clone(),
-                            self.metrics_handle.clone(),
+                            self.router_ctx.metrics_handle().clone(),
                             receiver,
                         ));
 
@@ -617,7 +648,7 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                         "transit tunnel expired",
                     );
                     self.routing_table.remove_tunnel(&tunnel_id);
-                    self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).decrement(1);
+                    self.router_ctx.metrics_handle().gauge(NUM_TRANSIT_TUNNELS).decrement(1);
 
                     if self.tunnels.is_empty() && self.shutdown_handle.is_shutting_down() {
                         tracing::info!(
@@ -641,6 +672,7 @@ mod tests {
     use crate::{
         crypto::{StaticPrivateKey, StaticPublicKey},
         primitives::{MessageId, Str},
+        profile::ProfileStorage,
         runtime::mock::MockRuntime,
         shutdown::ShutdownContext,
         tunnel::{
@@ -666,28 +698,37 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
-                let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, _manager_rx) = channel(16);
-                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
-                let shutdown_handle = shutdown_ctx.handle();
-                let routing_table =
-                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            .map(
+                |(router_hash, static_key, signing_key, _noise_context, router_info)| {
+                    let (transit_tx, transit_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = channel(16);
+                    let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                    let shutdown_handle = shutdown_ctx.handle();
+                    let routing_table =
+                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-                (
-                    (router_hash, pk, shutdown_ctx),
-                    TransitTunnelManager::new(
-                        noise_context,
-                        routing_table,
-                        transit_rx,
-                        handle.clone(),
-                        shutdown_handle,
-                    ),
-                )
-            })
+                    (
+                        (router_hash, static_key.public(), shutdown_ctx),
+                        TransitTunnelManager::new(
+                            RouterContext::new(
+                                handle.clone(),
+                                ProfileStorage::new(&[], &[]),
+                                router_info.identity.id(),
+                                Bytes::from(router_info.serialize(&signing_key)),
+                                static_key,
+                                signing_key,
+                                2u8,
+                            ),
+                            routing_table,
+                            transit_rx,
+                            shutdown_handle,
+                        ),
+                    )
+                },
+            )
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -728,31 +769,40 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
-                let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, _manager_rx) = channel(16);
-                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
-                let shutdown_handle = shutdown_ctx.handle();
-                let routing_table =
-                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            .map(
+                |(router_hash, static_key, signing_key, noise_context, router_info)| {
+                    let (transit_tx, transit_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = channel(16);
+                    let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                    let shutdown_handle = shutdown_ctx.handle();
+                    let routing_table =
+                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-                (
-                    (router_hash, pk, shutdown_ctx),
                     (
-                        GarlicHandler::new(noise_context.clone(), handle.clone()),
-                        TransitTunnelManager::new(
-                            noise_context,
-                            routing_table,
-                            transit_rx,
-                            handle.clone(),
-                            shutdown_handle,
+                        (router_hash, static_key.public(), shutdown_ctx),
+                        (
+                            GarlicHandler::new(noise_context.clone(), handle.clone()),
+                            TransitTunnelManager::new(
+                                RouterContext::new(
+                                    handle.clone(),
+                                    ProfileStorage::new(&[], &[]),
+                                    router_info.identity.id(),
+                                    Bytes::from(router_info.serialize(&signing_key)),
+                                    static_key,
+                                    signing_key,
+                                    2u8,
+                                ),
+                                routing_table,
+                                transit_rx,
+                                shutdown_handle,
+                            ),
                         ),
-                    ),
-                )
-            })
+                    )
+                },
+            )
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let TunnelPoolBuildParameters {
@@ -799,28 +849,37 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
-                let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, _manager_rx) = channel(16);
-                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
-                let shutdown_handle = shutdown_ctx.handle();
-                let routing_table =
-                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            .map(
+                |(router_hash, static_key, signing_key, _noise_context, router_info)| {
+                    let (transit_tx, transit_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = channel(16);
+                    let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                    let shutdown_handle = shutdown_ctx.handle();
+                    let routing_table =
+                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-                (
-                    (router_hash, pk, shutdown_ctx),
-                    TransitTunnelManager::new(
-                        noise_context,
-                        routing_table,
-                        transit_rx,
-                        handle.clone(),
-                        shutdown_handle,
-                    ),
-                )
-            })
+                    (
+                        (router_hash, static_key.public(), shutdown_ctx),
+                        TransitTunnelManager::new(
+                            RouterContext::new(
+                                handle.clone(),
+                                ProfileStorage::new(&[], &[]),
+                                router_info.identity.id(),
+                                Bytes::from(router_info.serialize(&signing_key)),
+                                static_key,
+                                signing_key,
+                                2u8,
+                            ),
+                            routing_table,
+                            transit_rx,
+                            shutdown_handle,
+                        ),
+                    )
+                },
+            )
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -883,28 +942,37 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
-                let (transit_tx, transit_rx) = channel(16);
-                let (manager_tx, _manager_rx) = channel(16);
-                let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
-                let shutdown_handle = shutdown_ctx.handle();
-                let routing_table =
-                    RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            .map(
+                |(router_hash, static_key, signing_key, _noise_context, router_info)| {
+                    let (transit_tx, transit_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = channel(16);
+                    let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+                    let shutdown_handle = shutdown_ctx.handle();
+                    let routing_table =
+                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-                (
-                    (router_hash, pk, shutdown_ctx),
-                    TransitTunnelManager::new(
-                        noise_context,
-                        routing_table,
-                        transit_rx,
-                        handle.clone(),
-                        shutdown_handle,
-                    ),
-                )
-            })
+                    (
+                        (router_hash, static_key.public(), shutdown_ctx),
+                        TransitTunnelManager::new(
+                            RouterContext::new(
+                                handle.clone(),
+                                ProfileStorage::new(&[], &[]),
+                                router_info.identity.id(),
+                                Bytes::from(router_info.serialize(&signing_key)),
+                                static_key,
+                                signing_key,
+                                2u8,
+                            ),
+                            routing_table,
+                            transit_rx,
+                            shutdown_handle,
+                        ),
+                    )
+                },
+            )
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -931,17 +999,24 @@ mod tests {
             .unwrap();
 
         // make new router which is not part of the tunnel build request
-        let (_, _, noise, _) = make_router(true);
+        let (_, static_key, signing_key, _noise, router_info) = make_router(true);
         let (transit_tx, transit_rx) = channel(16);
         let (manager_tx, _manager_rx) = channel(16);
         let routing_table = RoutingTable::new(RouterId::from(&local_hash), manager_tx, transit_tx);
         let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
         let shutdown_handle = shutdown_ctx.handle();
         let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
-            noise,
+            RouterContext::new(
+                handle.clone(),
+                ProfileStorage::new(&[], &[]),
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             routing_table,
             transit_rx,
-            handle.clone(),
             shutdown_handle,
         );
 
@@ -960,7 +1035,7 @@ mod tests {
         ) = (0..3)
             .map(|_| make_router(true))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, _)| {
+            .map(|(router_hash, static_key, signing_key, _, router_info)| {
                 let (transit_tx, transit_rx) = channel(16);
                 let (manager_tx, _manager_rx) = channel(16);
                 let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
@@ -969,19 +1044,26 @@ mod tests {
                     RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
                 (
-                    (router_hash, pk, shutdown_ctx),
+                    (router_hash, static_key.public(), shutdown_ctx),
                     TransitTunnelManager::new(
-                        noise_context,
+                        RouterContext::new(
+                            handle.clone(),
+                            ProfileStorage::new(&[], &[]),
+                            router_info.identity.id(),
+                            Bytes::from(router_info.serialize(&signing_key)),
+                            static_key,
+                            signing_key,
+                            2u8,
+                        ),
                         routing_table,
                         transit_rx,
-                        handle.clone(),
                         shutdown_handle,
                     ),
                 )
             })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_pk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -1031,7 +1113,7 @@ mod tests {
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
 
         for i in 0..3 {
-            let (router_hash, pk, noise_context, _) = make_router(true);
+            let (router_hash, static_key, signing_key, _, router_info) = make_router(true);
 
             let (transit_tx, transit_rx) = channel(16);
             let (manager_tx, _manager_rx) = channel(16);
@@ -1048,18 +1130,25 @@ mod tests {
             let routing_table =
                 RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
 
-            hops.push((router_hash, pk));
+            hops.push((router_hash, static_key.public()));
             ctxs.push(shutdown_ctx);
             transit_managers.push(TransitTunnelManager::new(
-                noise_context,
+                RouterContext::new(
+                    handle.clone(),
+                    ProfileStorage::new(&[], &[]),
+                    router_info.identity.id(),
+                    Bytes::from(router_info.serialize(&signing_key)),
+                    static_key,
+                    signing_key,
+                    2u8,
+                ),
                 routing_table,
                 transit_rx,
-                handle.clone(),
                 shutdown_handle,
             ));
         }
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -1118,10 +1207,8 @@ mod tests {
 
     #[tokio::test]
     async fn transit_manager_exits_after_all_tunnels_have_expired() {
-        crate::util::init_logger();
-
         let handle = MockRuntime::register_metrics(vec![], None);
-        let (router_hash, _pk, noise_context, _) = make_router(true);
+        let (router_hash, static_key, signing_key, _noise_context, router_info) = make_router(true);
         let (transit_tx, transit_rx) = channel(16);
         let (manager_tx, _manager_rx) = channel(16);
         let routing_table = RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
@@ -1129,10 +1216,17 @@ mod tests {
         let shutdown_handle = shutdown_ctx.handle();
 
         let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
-            noise_context,
+            RouterContext::new(
+                handle.clone(),
+                ProfileStorage::new(&[], &[]),
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             routing_table,
             transit_rx,
-            handle.clone(),
             shutdown_handle,
         );
 

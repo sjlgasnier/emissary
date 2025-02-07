@@ -24,7 +24,7 @@ use crate::{
         MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{Lease, MessageId, RouterId, Str, TunnelId},
-    profile::ProfileStorage,
+    router::context::RouterContext,
     runtime::{Counter, Gauge, Histogram, Instant, JoinSet, MetricsHandle, Runtime},
     tunnel::{
         hop::{
@@ -32,7 +32,6 @@ use crate::{
             Tunnel, TunnelBuildParameters, TunnelInfo,
         },
         metrics::*,
-        noise::NoiseContext,
         pool::{
             listener::TunnelBuildListener,
             selector::{HopSelector, TunnelSelector},
@@ -197,11 +196,8 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     /// Tunnel maintenance timer.
     maintenance_timer: BoxFuture<'static, ()>,
 
-    /// Metrics handle.
-    metrics: R::MetricsHandle,
-
-    /// Noise context.
-    noise: NoiseContext,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Active outbound tunnels.
     outbound: HashMap<TunnelId, OutboundTunnel<R>>,
@@ -234,9 +230,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
         build_parameters: TunnelPoolBuildParameters,
         selector: S,
         routing_table: RoutingTable,
-        profile: ProfileStorage<R>,
-        noise: NoiseContext,
-        metrics: R::MetricsHandle,
+        router_ctx: RouterContext<R>,
     ) -> (Self, TunnelPoolHandle) {
         let TunnelPoolBuildParameters {
             config,
@@ -266,11 +260,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 inbound_tunnels: HashMap::new(),
                 last_tunnel_test: R::now(),
                 maintenance_timer: Box::pin(R::delay(Duration::from_secs(0))),
-                metrics,
-                noise,
                 outbound: HashMap::new(),
-                pending_inbound: TunnelBuildListener::new(routing_table.clone(), profile.clone()),
-                pending_outbound: TunnelBuildListener::new(routing_table.clone(), profile),
+                pending_inbound: TunnelBuildListener::new(
+                    routing_table.clone(),
+                    router_ctx.profile_storage().clone(),
+                ),
+                pending_outbound: TunnelBuildListener::new(
+                    routing_table.clone(),
+                    router_ctx.profile_storage().clone(),
+                ),
+                router_ctx,
                 pending_tests: R::join_set(),
                 routing_table,
                 selector,
@@ -384,12 +383,12 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         TunnelBuildParameters {
                             hops,
                             name: self.config.name.clone(),
-                            noise: self.noise.clone(),
+                            noise: self.router_ctx.noise().clone(),
                             message_id,
                             tunnel_info: TunnelInfo::Outbound {
                                 gateway,
                                 tunnel_id,
-                                router_id: self.noise.local_router_hash().clone(),
+                                router_id: self.router_ctx.noise().local_router_hash().clone(),
                             },
                             receiver: ReceiverKind::Outbound,
                         },
@@ -408,7 +407,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                 ReceiveKind::ZeroHop,
                                 message_rx,
                             );
-                            self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
+                            self.router_ctx
+                                .metrics_handle()
+                                .gauge(NUM_PENDING_OUTBOUND_TUNNELS)
+                                .increment(1);
 
                             if let Err(error) = self
                                 .routing_table
@@ -464,7 +466,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         TunnelBuildParameters {
                             hops,
                             name: self.config.name.clone(),
-                            noise: self.noise.clone(),
+                            noise: self.router_ctx.noise().clone(),
                             message_id,
                             tunnel_info: TunnelInfo::Outbound {
                                 gateway,
@@ -498,7 +500,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                 },
                                 message_rx,
                             );
-                            self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).increment(1);
+                            self.router_ctx
+                                .metrics_handle()
+                                .gauge(NUM_PENDING_OUTBOUND_TUNNELS)
+                                .increment(1);
+
                             if let Err(error) = self
                                 .routing_table
                                 .send_message(router_id, message.serialize_short())
@@ -560,11 +566,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             match PendingTunnel::<InboundTunnel>::create_tunnel::<R>(TunnelBuildParameters {
                 hops,
                 name: self.config.name.clone(),
-                noise: self.noise.clone(),
+                noise: self.router_ctx.noise().clone(),
                 message_id,
                 tunnel_info: TunnelInfo::Inbound {
                     tunnel_id,
-                    router_id: self.noise.local_router_hash().clone(),
+                    router_id: self.router_ctx.noise().local_router_hash().clone(),
                 },
                 receiver: ReceiverKind::Inbound {
                     message_rx: tunnel_rx,
@@ -579,7 +585,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         ReceiveKind::RoutingTable { message_id },
                         message_rx,
                     );
-                    self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).increment(1);
+                    self.router_ctx
+                        .metrics_handle()
+                        .gauge(NUM_PENDING_INBOUND_TUNNELS)
+                        .increment(1);
 
                     match send_tunnel_id {
                         None => {
@@ -624,7 +633,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                                     "failed to send message to outbound tunnel"
                                 );
                             }
-                            self.metrics.histogram(NUM_FRAGMENTS).record(1f64);
+                            self.router_ctx.metrics_handle().histogram(NUM_FRAGMENTS).record(1f64);
                         }
                     }
                 }
@@ -716,8 +725,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
 
                     let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
                     let ephemeral_public = ephemeral_secret.public();
-                    let (key, tag) = self.noise.derive_outbound_garlic_key(
-                        self.noise.local_public_key(),
+                    let (key, tag) = self.router_ctx.noise().derive_outbound_garlic_key(
+                        self.router_ctx.noise().local_public_key(),
                         ephemeral_secret,
                     );
 
@@ -776,7 +785,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                         self.context.remove_listener(&message_id);
                     }
                 }
-                self.metrics.histogram(NUM_FRAGMENTS).record(1f64);
+                self.router_ctx.metrics_handle().histogram(NUM_FRAGMENTS).record(1f64);
 
                 debug_assert!(messages.next().is_none());
             });
@@ -807,8 +816,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     );
                     num_failed_builds += 1;
 
-                    self.metrics.counter(NUM_BUILD_FAILURES).increment(1);
-                    self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
+                    self.router_ctx.metrics_handle().counter(NUM_BUILD_FAILURES).increment(1);
+                    self.router_ctx
+                        .metrics_handle()
+                        .gauge(NUM_PENDING_OUTBOUND_TUNNELS)
+                        .decrement(1);
                 }
                 Ok(tunnel) => {
                     tracing::info!(
@@ -821,9 +833,12 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.selector.add_outbound_tunnel(tunnel_id, tunnel.hops());
                     self.outbound.insert(tunnel_id, tunnel);
                     self.tunnel_timers.add_outbound_tunnel(tunnel_id);
-                    self.metrics.gauge(NUM_PENDING_OUTBOUND_TUNNELS).decrement(1);
-                    self.metrics.gauge(NUM_OUTBOUND_TUNNELS).increment(1);
-                    self.metrics.counter(NUM_BUILD_SUCCESSES).increment(1);
+                    self.router_ctx
+                        .metrics_handle()
+                        .gauge(NUM_PENDING_OUTBOUND_TUNNELS)
+                        .decrement(1);
+                    self.router_ctx.metrics_handle().gauge(NUM_OUTBOUND_TUNNELS).increment(1);
+                    self.router_ctx.metrics_handle().counter(NUM_BUILD_SUCCESSES).increment(1);
 
                     // inform the owner of the tunnel pool that a new outbound tunnel has been built
                     if let Err(error) = self.context.register_outbound_tunnel_built(tunnel_id) {
@@ -853,8 +868,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     num_failed_builds += 1;
 
                     self.routing_table.remove_tunnel(&tunnel_id);
-                    self.metrics.counter(NUM_BUILD_FAILURES).increment(1);
-                    self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).decrement(1);
+                    self.router_ctx.metrics_handle().counter(NUM_BUILD_FAILURES).increment(1);
+                    self.router_ctx
+                        .metrics_handle()
+                        .gauge(NUM_PENDING_INBOUND_TUNNELS)
+                        .decrement(1);
                 }
                 Ok(tunnel) => {
                     tracing::info!(
@@ -893,9 +911,12 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     }
 
                     self.inbound.push(tunnel);
-                    self.metrics.gauge(NUM_INBOUND_TUNNELS).increment(1);
-                    self.metrics.gauge(NUM_PENDING_INBOUND_TUNNELS).decrement(1);
-                    self.metrics.counter(NUM_BUILD_SUCCESSES).increment(1);
+                    self.router_ctx.metrics_handle().gauge(NUM_INBOUND_TUNNELS).increment(1);
+                    self.router_ctx
+                        .metrics_handle()
+                        .gauge(NUM_PENDING_INBOUND_TUNNELS)
+                        .decrement(1);
+                    self.router_ctx.metrics_handle().counter(NUM_BUILD_SUCCESSES).increment(1);
                 }
             }
         }
@@ -917,7 +938,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.selector.remove_inbound_tunnel(&gateway_tunnel_id);
                     self.inbound_tunnels.remove(&gateway_tunnel_id);
-                    self.metrics.gauge(NUM_INBOUND_TUNNELS).decrement(1);
+                    self.router_ctx.metrics_handle().gauge(NUM_INBOUND_TUNNELS).decrement(1);
 
                     // inform the owner of the tunnel pool that an inbound tunnel has expired
                     if let Err(error) =
@@ -982,7 +1003,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                                 count + 1
                             });
-                            self.metrics.histogram(NUM_FRAGMENTS).record(count as f64);
+                            self.router_ctx
+                                .metrics_handle()
+                                .histogram(NUM_FRAGMENTS)
+                                .record(count as f64);
                         }
                     },
                     TunnelMessage::TunnelDelivery {
@@ -1025,7 +1049,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                             count + 1
                         });
-                        self.metrics.histogram(NUM_FRAGMENTS).record(count as f64);
+                        self.router_ctx
+                            .metrics_handle()
+                            .histogram(NUM_FRAGMENTS)
+                            .record(count as f64);
                     }
                     TunnelMessage::Inbound { message } => tracing::warn!(
                         target: LOG_TARGET,
@@ -1053,7 +1080,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         );
 
                         self.selector.register_tunnel_test_failure(&outbound, &inbound);
-                        self.metrics.counter(NUM_TEST_FAILURES).increment(1);
+                        self.router_ctx.metrics_handle().counter(NUM_TEST_FAILURES).increment(1);
                     }
                     Ok(elapsed) => {
                         tracing::trace!(
@@ -1066,8 +1093,9 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         );
 
                         self.selector.register_tunnel_test_success(&outbound, &inbound);
-                        self.metrics.counter(NUM_TEST_SUCCESSES).increment(1);
-                        self.metrics
+                        self.router_ctx.metrics_handle().counter(NUM_TEST_SUCCESSES).increment(1);
+                        self.router_ctx
+                            .metrics_handle()
                             .histogram(TUNNEL_TEST_DURATIONS)
                             .record(elapsed.as_millis() as f64);
                     }
@@ -1183,10 +1211,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::StaticPrivateKey,
+        crypto::{SigningPrivateKey, StaticPrivateKey},
         error::RoutingError,
         i2np::Message,
-        primitives::RouterId,
+        primitives::{RouterId, RouterInfo},
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
         tunnel::{
@@ -1218,34 +1246,40 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -1303,25 +1337,25 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
@@ -1329,9 +1363,15 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -1384,25 +1424,25 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
@@ -1410,9 +1450,15 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -1482,25 +1528,25 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
@@ -1508,9 +1554,15 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -1576,39 +1628,44 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table =
-            RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
-
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let exploratory_selector =
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false);
+        let router_ctx = RouterContext::new(
+            handle.clone(),
+            profile_storage,
+            router_info.identity.id(),
+            Bytes::from(router_info.serialize(&signing_key)),
+            static_key,
+            signing_key,
+            2u8,
+        );
 
         let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             exploratory_selector.clone(),
             routing_table.clone(),
-            profile_storage.clone(),
-            noise.clone(),
-            handle.clone(),
+            router_ctx.clone(),
         );
 
         assert!(
@@ -1670,9 +1727,7 @@ mod tests {
                 client_parameters,
                 client_selector,
                 routing_table.clone(),
-                profile_storage,
-                noise,
-                handle.clone(),
+                router_ctx.clone(),
             );
 
             let future = async {
@@ -1805,7 +1860,7 @@ mod tests {
                 (router_id, message)
             };
 
-            assert_eq!(router_id, RouterId::from(our_hash));
+            assert_eq!(&router_id, router_ctx.router_id());
 
             let message = Message::parse_short(&message).unwrap();
             routing_table.route_message(message).unwrap();
@@ -1844,39 +1899,45 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table =
-            RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
 
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let exploratory_selector =
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false);
+        let router_ctx = RouterContext::new(
+            handle.clone(),
+            profile_storage,
+            router_info.identity.id(),
+            Bytes::from(router_info.serialize(&signing_key)),
+            static_key,
+            signing_key,
+            2u8,
+        );
 
         let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             exploratory_selector.clone(),
             routing_table.clone(),
-            profile_storage.clone(),
-            noise.clone(),
-            handle.clone(),
+            router_ctx.clone(),
         );
 
         assert!(
@@ -1950,9 +2011,7 @@ mod tests {
                 parameters,
                 client_selector,
                 routing_table.clone(),
-                profile_storage,
-                noise,
-                handle.clone(),
+                router_ctx.clone(),
             );
 
             let future = async {
@@ -2075,7 +2134,7 @@ mod tests {
                 };
                 (router_id, message)
             };
-            assert_eq!(router_id, RouterId::from(our_hash));
+            assert_eq!(&router_id, router_ctx.router_id());
 
             let message = Message::parse_short(&message).unwrap();
             routing_table.route_message(message).unwrap();
@@ -2114,25 +2173,25 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
@@ -2140,9 +2199,15 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -2205,25 +2270,25 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::from(our_hash), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
@@ -2231,9 +2296,15 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -2305,36 +2376,42 @@ mod tests {
             num_outbound_hops: 2usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table =
-            RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let our_id = router_info.identity.id();
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
@@ -2492,7 +2569,7 @@ mod tests {
         };
 
         // route response to local router and verify that tunnel test is considered succeeded
-        assert_eq!(router, RouterId::from(our_hash));
+        assert_eq!(router, our_id);
 
         let message = Message::parse_short(&message).unwrap();
         routing_table.route_message(message).unwrap();
@@ -2527,26 +2604,25 @@ mod tests {
             num_outbound_hops: 2usize,
             ..Default::default()
         };
-        let our_hash = {
-            let mut our_hash = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut our_hash);
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
 
-            Bytes::from(our_hash)
-        };
-        let noise = {
-            let mut key_bytes = vec![0u8; 32];
-            MockRuntime::rng().fill_bytes(&mut key_bytes);
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
 
-            NoiseContext::new(
-                StaticPrivateKey::from_bytes(&key_bytes).unwrap(),
-                our_hash.clone(),
-            )
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::channel(64);
         let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table =
-            RoutingTable::new(RouterId::from(our_hash.clone()), manager_tx, transit_tx);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
 
@@ -2554,9 +2630,15 @@ mod tests {
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
             routing_table.clone(),
-            profile_storage,
-            noise,
-            handle.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
         );
 
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());

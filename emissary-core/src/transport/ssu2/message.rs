@@ -32,7 +32,7 @@ use crate::{
     transport::ssu2::session::active::KeyContext,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::take,
     error::{make_error, ErrorKind},
@@ -1520,7 +1520,7 @@ pub struct SessionConfirmedBuilder {
     src_id: Option<u64>,
 
     /// Serialized local router info.
-    router_info: Option<Vec<u8>>,
+    router_info: Option<Bytes>,
 
     /// Local static public key.
     static_key: Option<StaticPublicKey>,
@@ -1540,7 +1540,7 @@ impl SessionConfirmedBuilder {
     }
 
     /// Specify router info.
-    pub fn with_router_info(mut self, router_info: Vec<u8>) -> Self {
+    pub fn with_router_info(mut self, router_info: Bytes) -> Self {
         self.router_info = Some(router_info);
         self
     }

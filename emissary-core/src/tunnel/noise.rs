@@ -671,11 +671,15 @@ impl NoiseContext {
     }
 
     /// Get reference to local router hash.
+    //
+    // TODO: remove
     pub fn local_router_hash(&self) -> &Bytes {
         &self.local_router_hash
     }
 
     /// Get copy of local public key.
+    //
+    // TODO: remove
     pub fn local_public_key(&self) -> StaticPublicKey {
         self.local_key.public()
     }
@@ -776,6 +780,9 @@ impl NoiseContext {
     /// Derive keys for an outbound `GarlicMessage`.
     ///
     /// Returns a ChaCha20Poly1305 cipher key.
+    //
+    // TODO: return public key + key + tag
+    // TODO: generate ephemeral key in this function + zeroize it
     pub fn derive_outbound_garlic_key(
         &self,
         remote_public: StaticPublicKey,

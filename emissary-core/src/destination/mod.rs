@@ -1829,8 +1829,6 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_expired_lease_set() {
-        crate::util::init_logger();
-
         let (netdb_handle, rx) = NetDbHandle::create();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
         let mut destination = Destination::<MockRuntime>::new(

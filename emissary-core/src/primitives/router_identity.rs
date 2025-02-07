@@ -304,8 +304,6 @@ mod tests {
 
     #[test]
     fn expected_router_hash() {
-        crate::util::init_logger();
-
         let router = include_bytes!("../../test-vectors/router5.dat");
         let identity = RouterIdentity::parse(router).unwrap();
 

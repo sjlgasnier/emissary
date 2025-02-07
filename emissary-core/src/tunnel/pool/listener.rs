@@ -213,14 +213,14 @@ mod tests {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, router_info)| {
+            .map(|(router_hash, sk, _, noise_context, router_info)| {
                 profile_storage.add_router(router_info);
 
-                ((router_hash, pk), noise_context)
+                ((router_hash, sk.public()), noise_context)
             })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
@@ -266,14 +266,14 @@ mod tests {
         let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
             .map(|i| make_router(if i % 2 == 0 { true } else { false }))
             .into_iter()
-            .map(|(router_hash, pk, noise_context, router_info)| {
+            .map(|(router_hash, sk, _, noise_context, router_info)| {
                 profile_storage.add_router(router_info);
 
-                ((router_hash, pk), noise_context)
+                ((router_hash, sk.public()), noise_context)
             })
             .unzip();
 
-        let (local_hash, _local_pk, local_noise, _) = make_router(true);
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
         let message_id = MessageId::from(MockRuntime::rng().next_u32());
         let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());

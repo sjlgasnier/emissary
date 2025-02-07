@@ -18,10 +18,9 @@
 
 use crate::{
     config::Ntcp2Config,
-    crypto::SigningPrivateKey,
     error::{ConnectionError, Error},
     primitives::{RouterAddress, RouterId, RouterInfo},
-    profile::ProfileStorage,
+    router::context::RouterContext,
     runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener},
     subsystem::SubsystemHandle,
     transport::{
@@ -69,9 +68,6 @@ pub struct Ntcp2Transport<R: Runtime> {
     /// NTCP2 connection listener.
     listener: Ntcp2Listener<R>,
 
-    /// Metrics handle.
-    metrics: R::MetricsHandle,
-
     /// Open connections.
     open_connections: R::JoinSet<(RouterId, TerminationReason)>,
 
@@ -86,6 +82,9 @@ pub struct Ntcp2Transport<R: Runtime> {
     /// `RouterId` is `None` for inbound sessions.
     pending_handshakes: R::JoinSet<Result<Ntcp2Session<R>, (Option<RouterId>, Error)>>,
 
+    /// Router context.
+    router_ctx: RouterContext<R>,
+
     /// Session manager.
     session_manager: SessionManager<R>,
 
@@ -98,11 +97,8 @@ impl<R: Runtime> Ntcp2Transport<R> {
     pub fn new(
         context: Ntcp2Context<R>,
         allow_local: bool,
-        local_signing_key: SigningPrivateKey,
-        local_router_info: RouterInfo,
+        router_ctx: RouterContext<R>,
         subsystem_handle: SubsystemHandle,
-        profile_storage: ProfileStorage<R>,
-        metrics: R::MetricsHandle,
     ) -> Self {
         let Ntcp2Context {
             config,
@@ -113,10 +109,8 @@ impl<R: Runtime> Ntcp2Transport<R> {
         let session_manager = SessionManager::new(
             config.key,
             config.iv,
-            local_signing_key,
-            local_router_info,
+            router_ctx.clone(),
             subsystem_handle,
-            profile_storage,
             allow_local,
         );
 
@@ -129,10 +123,10 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
         Ntcp2Transport {
             listener: Ntcp2Listener::new(listener, allow_local),
-            metrics,
             open_connections: R::join_set(),
             pending_connections: HashMap::new(),
             pending_handshakes: R::join_set(),
+            router_ctx,
             session_manager,
             waker: None,
         }
@@ -209,7 +203,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
 
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
-        self.metrics.counter(NUM_OUTBOUND).increment(1);
+        self.router_ctx.metrics_handle().counter(NUM_OUTBOUND).increment(1);
 
         if let Some(waker) = self.waker.take() {
             waker.wake_by_ref();
@@ -250,7 +244,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                     %router_id,
                     "ntcp2 session rejected, closing connection",
                 );
-                self.metrics.counter(NUM_REJECTED).increment(1);
+                self.router_ctx.metrics_handle().counter(NUM_REJECTED).increment(1);
                 drop(connection);
             }
             None => {
@@ -289,7 +283,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
                 let future = self.session_manager.accept_session(stream);
                 self.pending_handshakes.push(future);
-                self.metrics.counter(NUM_INBOUND).increment(1);
+                self.router_ctx.metrics_handle().counter(NUM_INBOUND).increment(1);
             }
         }
 

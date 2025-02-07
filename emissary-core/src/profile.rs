@@ -17,11 +17,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::base64_decode,
+    crypto::{base64_decode, base64_encode},
     primitives::{RouterId, RouterInfo},
     runtime::Runtime,
 };
 
+use bytes::Bytes;
 use hashbrown::{HashMap, HashSet};
 
 #[cfg(feature = "std")]
@@ -164,15 +165,17 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// Get reference to [`RouterInfo`].
-    pub fn router_info(&self, router_id: &RouterId) -> &RouterInfo {
-        // router info must exist since they're managed by us
-        self.router_infos.get(router_id).expect("to succeed")
+    pub fn router_info(&self, router_id: &RouterId) -> Option<&RouterInfo> {
+        self.router_infos.get(router_id)
     }
 }
 
 /// Profile storage.
 #[derive(Clone)]
 pub struct ProfileStorage<R: Runtime> {
+    /// Discovered routers.
+    discovered_routers: Arc<RwLock<HashMap<RouterId, Vec<u8>>>>,
+
     /// Fast routers.
     fast: Arc<RwLock<HashSet<RouterId>>>,
 
@@ -239,6 +242,7 @@ impl<R: Runtime> ProfileStorage<R> {
             .unzip();
 
         Self {
+            discovered_routers: Default::default(),
             fast: Arc::new(RwLock::new(fast.into_iter().flatten().collect())),
             profiles: Arc::new(RwLock::new(profiles)),
             routers: Arc::new(RwLock::new(routers)),
@@ -248,8 +252,19 @@ impl<R: Runtime> ProfileStorage<R> {
     }
 
     /// Insert `router` into [`ProfileStorage`].
-    pub fn add_router(&self, router_info: RouterInfo) {
+    pub fn add_router(&self, router_info: RouterInfo) -> bool {
         let router_id = router_info.identity.id();
+
+        // TODO: `E` routers should be accepted
+        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
+            tracing::trace!(
+                target: LOG_TARGET,
+                %router_id,
+                caps = %router_info.capabilities,
+                "ignoring unreachable/unusable router",
+            );
+            return false;
+        }
 
         if !router_info.is_reachable_ntcp2() {
             tracing::debug!(
@@ -258,16 +273,7 @@ impl<R: Runtime> ProfileStorage<R> {
                 caps = %router_info.capabilities,
                 "cannot add router, ntcp2 address is not reachable",
             );
-            return;
-        }
-
-        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
-            tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                caps = %router_info.capabilities,
-                "adding potentially unreachable/unusable router",
-            );
+            return false;
         }
 
         {
@@ -286,6 +292,22 @@ impl<R: Runtime> ProfileStorage<R> {
         if self.routers.write().insert(router_id.clone(), router_info).is_none() {
             self.profiles.write().insert(router_id, Profile::new());
         }
+
+        true
+    }
+
+    /// Register [`RouterInfo`] discovered via `NetDb` queries or direct `DatabaseStore` messages.
+    pub fn discover_router(&self, router_info: RouterInfo, serialized: Bytes) -> bool {
+        let router_id = router_info.identity.id();
+
+        // if the router was accepted to profile storage, store the serialized router info
+        // which is used to make a backup of the router
+        if self.add_router(router_info) {
+            self.discovered_routers.write().insert(router_id, serialized.to_vec());
+            return true;
+        }
+
+        false
     }
 
     // TODO: remove
@@ -495,6 +517,23 @@ impl<R: Runtime> ProfileStorage<R> {
             }
         }
     }
+
+    /// Get backup of [`ProfileStorage`].
+    pub fn backup(&self) -> Vec<(String, Option<Vec<u8>>, Profile)> {
+        let profiles = self.profiles.read().clone();
+        let mut inner = self.discovered_routers.write();
+
+        profiles
+            .into_iter()
+            .map(|(router_id, profile)| {
+                (
+                    base64_encode(&router_id.to_vec()),
+                    inner.remove(&router_id),
+                    profile,
+                )
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 #[cfg(test)]
@@ -527,6 +566,7 @@ impl<R: Runtime> ProfileStorage<R> {
             .unzip();
 
         Self {
+            discovered_routers: Default::default(),
             fast: Arc::new(RwLock::new(fast.into_iter().flatten().collect())),
             profiles: Arc::new(RwLock::new(profiles)),
             routers: Arc::new(RwLock::new(routers)),

@@ -18,8 +18,7 @@
 
 use crate::{
     crypto::{
-        base32_encode, base64_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey,
-        StaticPrivateKey, StaticPublicKey,
+        base32_encode, base64_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPublicKey,
     },
     error::{Error, QueryError},
     i2np::{
@@ -38,11 +37,12 @@ use crate::{
     },
     netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
     primitives::{Lease, LeaseSet2, MessageId, RouterId, RouterInfo, TunnelId},
-    profile::{Bucket, ProfileStorage},
+    profile::Bucket,
+    router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transport::TransportService,
-    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
+    tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -56,7 +56,6 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -82,108 +81,11 @@ const LOG_TARGET: &str = "emissary::netdb";
 /// `NetDb` query timeout.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Router info republish timeout.
-const ROUTER_INFO_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-
 /// [`NetDb`] maintenance interval.
 const NETDB_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Number of router hashes to include into [`DatabaseSearchReply`].
 const SEARCH_REPLY_NUM_ROUTERS: usize = 5usize;
-
-/// Local router info publisher.
-///
-/// Publishes the router info of the local router first when the router boots up and after that
-/// periodically (1h) to prevent the router from disappearing from the global NetDb.
-///
-/// [`RouterInfoPublisher`] implements `Future` which fires periodically and instructs [`NetDb`] to
-/// call [`RouterInfoPublisher::publish()`] to get a `DatabaseStore` message and a `RouterId` of a
-/// floodfill to whom the message should be sent.
-pub struct RouterInfoPublisher<R> {
-    /// Local router ID.
-    router_id: RouterId,
-
-    /// Serialized [`RouterId`] of the local router.
-    serialized_router_id: Bytes,
-
-    /// Serialized [`RouterInfo`] of the local router.
-    serialized_router_info: Bytes,
-
-    /// Republish timer.
-    timer: BoxFuture<'static, ()>,
-
-    /// Marker for `Runtime`.
-    _runtime: PhantomData<R>,
-}
-
-impl<R: Runtime> RouterInfoPublisher<R> {
-    /// Create new [`RouterInfoPublisher`].
-    fn new(router_id: RouterId, serialized_router_info: Bytes) -> Self {
-        let serialized_router_id = Bytes::from(router_id.to_vec());
-
-        // gzip-compress the serialized router info, as required by the spec
-        //
-        // call is expected to succeed as the router info is created by emissary
-        let serialized_router_info =
-            Bytes::from(R::gzip_compress(serialized_router_info).expect("to succeed"));
-
-        Self {
-            router_id,
-            serialized_router_id,
-            serialized_router_info,
-            timer: Box::pin(R::delay(Duration::from_secs(10))),
-            _runtime: Default::default(),
-        }
-    }
-
-    /// Publish local router info to global NetDb.
-    ///
-    /// Fetches the closest floodfill to our key from `dht` and returns a DatabaseStore message
-    /// which [`NetDb`] needs to send to the selected floofill. Returns also the reply token that
-    /// was used in the DatabaseStore message, allowing [`NetDb`] to associate the response with the
-    /// router info publish.
-    ///
-    /// Returns `None` if there are no floodfills.
-    fn publish(&self) -> (u32, Vec<u8>) {
-        let reply_token = R::rng().next_u32();
-        let message = DatabaseStoreBuilder::new(
-            self.serialized_router_id.clone(),
-            DatabaseStoreKind::RouterInfo {
-                router_info: self.serialized_router_info.clone(),
-            },
-        )
-        .with_reply_type(StoreReplyType::Router {
-            reply_token,
-            router_id: self.router_id.clone(),
-        })
-        .build();
-
-        let message = MessageBuilder::short()
-            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-            .with_message_type(MessageType::DatabaseStore)
-            .with_message_id(R::rng().next_u32())
-            .with_payload(&message)
-            .build();
-
-        (reply_token, message)
-    }
-}
-
-impl<R: Runtime> Future for RouterInfoPublisher<R> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        futures::ready!(self.timer.poll_unpin(cx));
-
-        // reset timer and poll it to register it into the executor
-        {
-            self.timer = Box::pin(R::delay(ROUTER_INFO_REPUBLISH_TIMEOUT));
-            let _ = self.timer.poll_unpin(cx);
-        }
-
-        Poll::Ready(())
-    }
-}
 
 /// Tunnel selector.
 ///
@@ -307,6 +209,15 @@ enum QueryKind {
         key: Bytes,
     },
 
+    /// Router info.
+    RouterInfo {
+        /// Number of floodfills we still expect to receive a reply from.
+        num_floodfills: usize,
+
+        /// Oneshot sender for sending the result to caller.
+        tx: oneshot::Sender<Result<(), QueryError>>,
+    },
+
     /// Router exploration.
     Exploration,
 
@@ -318,6 +229,8 @@ impl fmt::Debug for QueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Leaseset { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
+            Self::RouterInfo { .. } =>
+                f.debug_struct("QueryKind::RouterInfo").finish_non_exhaustive(),
             Self::RecursiveLeaseSetQuery { .. } =>
                 f.debug_struct("QueryKind::RecursiveLeaseSetQuery").finish_non_exhaustive(),
             Self::Exploration => f.debug_struct("QueryKind::Exploration").finish(),
@@ -351,32 +264,20 @@ pub struct NetDb<R: Runtime> {
     /// This contains entries only if `floodfill` is true.
     lease_sets: HashMap<Bytes, (Bytes, Duration)>,
 
-    /// Local router ID.
-    local_router_id: RouterId,
-
     /// `NetDb` maintenance timer.
     maintenance_timer: BoxFuture<'static, ()>,
-
-    /// Metrics handle.
-    metrics: R::MetricsHandle,
-
-    // Network ID.
-    net_id: u8,
 
     /// RX channel for receiving NetDb-related messages from [`TunnelManager`].
     netdb_msg_rx: mpsc::Receiver<Message>,
 
-    /// Noise context.
-    noise: NoiseContext,
-
     /// Active inbound tunhnels
     outbound_tunnels: TunnelSelector<TunnelId>,
 
-    /// Profile storage.
-    profile_storage: ProfileStorage<R>,
-
     /// Query timers.
     query_timers: R::JoinSet<Bytes>,
+
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// DHT of non-floodfill routers.
     ///
@@ -384,9 +285,6 @@ pub struct NetDb<R: Runtime> {
     ///
     /// Used to answer router exploration queries.
     router_dht: Option<Dht<R>>,
-
-    /// Local router info publishers.
-    router_info_publishers: RouterInfoPublisher<R>,
 
     /// Serialized [`RouterInfo`]s received via `DatabaseStore` messages.
     ///
@@ -403,34 +301,31 @@ pub struct NetDb<R: Runtime> {
 impl<R: Runtime> NetDb<R> {
     /// Create new [`NetDb`].
     pub fn new(
-        local_router_id: RouterId,
+        router_ctx: RouterContext<R>,
         floodfill: bool,
         service: TransportService<R>,
-        profile_storage: ProfileStorage<R>,
-        metrics: R::MetricsHandle,
         exploratory_pool_handle: TunnelPoolHandle,
-        net_id: u8,
         netdb_msg_rx: mpsc::Receiver<Message>,
-        local_router_info: Bytes,
-        local_static_key: StaticPrivateKey,
     ) -> (Self, NetDbHandle) {
-        let floodfills = profile_storage
+        let floodfills = router_ctx
+            .profile_storage()
             .get_router_ids(Bucket::Any, |_, info, _| info.is_floodfill())
             .into_iter()
             .collect::<HashSet<_>>();
 
         let router_dht = floodfill.then(|| {
             Dht::new(
-                local_router_id.clone(),
-                profile_storage
+                router_ctx.router_id().clone(),
+                router_ctx
+                    .profile_storage()
                     .get_router_ids(Bucket::Any, |_, info, _| !info.is_floodfill())
                     .into_iter()
                     .collect::<HashSet<_>>(),
-                metrics.clone(),
+                router_ctx.metrics_handle().clone(),
             )
         });
 
-        metrics.counter(NUM_FLOODFILLS).increment(floodfills.len());
+        router_ctx.metrics_handle().counter(NUM_FLOODFILLS).increment(floodfills.len());
 
         tracing::info!(
             target: LOG_TARGET,
@@ -447,27 +342,19 @@ impl<R: Runtime> NetDb<R> {
                 exploratory_pool_handle,
                 floodfill,
                 floodfill_dht: Dht::new(
-                    local_router_id.clone(),
+                    router_ctx.router_id().clone(),
                     floodfills.clone(),
-                    metrics.clone(),
+                    router_ctx.metrics_handle().clone(),
                 ),
                 handle_rx,
                 inbound_tunnels: TunnelSelector::new(),
                 lease_sets: HashMap::new(),
-                local_router_id: local_router_id.clone(),
                 maintenance_timer: Box::pin(R::delay(Duration::from_secs(5))),
-                metrics,
                 netdb_msg_rx,
-                net_id,
-                noise: NoiseContext::new(local_static_key, Bytes::from(local_router_id.to_vec())),
                 outbound_tunnels: TunnelSelector::new(),
-                profile_storage,
                 query_timers: R::join_set(),
+                router_ctx: router_ctx.clone(),
                 router_dht,
-                router_info_publishers: RouterInfoPublisher::new(
-                    local_router_id,
-                    local_router_info,
-                ),
                 router_infos: HashMap::new(),
                 routers: HashMap::new(),
                 service,
@@ -483,14 +370,7 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle established connection to `router`.
     fn on_connection_established(&mut self, router_id: RouterId) {
-        let is_floodfill = self.profile_storage.is_floodfill(&router_id);
-
-        tracing::trace!(
-            target: LOG_TARGET,
-            %router_id,
-            ?is_floodfill,
-            "connection established",
-        );
+        let is_floodfill = self.router_ctx.profile_storage().is_floodfill(&router_id);
 
         // send any pending messages to the connected router
         //
@@ -535,7 +415,7 @@ impl<R: Runtime> NetDb<R> {
 
         if is_floodfill {
             self.floodfill_dht.add_router(router_id.clone());
-            self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+            self.router_ctx.metrics_handle().gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
         } else {
             self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
         }
@@ -545,21 +425,7 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle closed connection to `router`.
     fn on_connection_closed(&mut self, router_id: RouterId) {
-        match self.routers.remove(&router_id) {
-            None => tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                "connection closed",
-            ),
-            Some(_) => {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    %router_id,
-                    "connection closed",
-                );
-                self.metrics.gauge(NUM_CONNECTED_FLOODFILLS).decrement(1);
-            }
-        }
+        self.routers.remove(&router_id);
     }
 
     // Handle connection failure to `router_id`.
@@ -571,11 +437,7 @@ impl<R: Runtime> NetDb<R> {
                 num_pending_messages = ?pending_messages.len(),
                 "failed to establish connection",
             ),
-            _ => tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                "failed to establish connection",
-            ),
+            _ => {}
         }
     }
 
@@ -590,12 +452,6 @@ impl<R: Runtime> NetDb<R> {
                     "failed to connect to router",
                 ),
                 Ok(()) => {
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        %router_id,
-                        "starting to dial router",
-                    );
-
                     self.routers.insert(
                         router_id.clone(),
                         RouterState::Dialing {
@@ -630,17 +486,17 @@ impl<R: Runtime> NetDb<R> {
     ) {
         let router_id = router_info.identity.id();
 
-        if router_info.net_id() != self.net_id {
+        if router_info.net_id() != self.router_ctx.net_id() {
             tracing::warn!(
                 target: LOG_TARGET,
-                local_net_id = ?self.net_id,
+                local_net_id = ?self.router_ctx.net_id(),
                 remote_net_id = ?router_info.net_id(),
                 "invalid network id, ignoring router info store",
             );
             return;
         }
 
-        if router_id == self.local_router_id {
+        if &router_id == self.router_ctx.router_id() {
             tracing::warn!(
                 target: LOG_TARGET,
                 "local router id, ignoring router info store",
@@ -677,7 +533,14 @@ impl<R: Runtime> NetDb<R> {
         if router_info.is_floodfill() {
             self.floodfill_dht.add_router(router_id.clone());
         }
-        self.profile_storage.add_router(router_info);
+
+        // store both the new router info and its serialized form to profile storage
+        //
+        // the latter is used when a backup of profile storage is made to disk
+        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
+        self.router_ctx
+            .profile_storage()
+            .discover_router(router_info, raw_router_info.clone());
 
         if !self.floodfill {
             return;
@@ -685,7 +548,6 @@ impl<R: Runtime> NetDb<R> {
 
         // parse the router info set from the database store and store it
         // in the set of router infos we keep track of
-        let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
         self.router_infos.insert(
             key.clone(),
             (raw_router_info.clone(), Duration::from_millis(published)),
@@ -945,7 +807,7 @@ impl<R: Runtime> NetDb<R> {
                 (
                     MessageType::DatabaseSearchReply,
                     DatabaseSearchReply {
-                        from: self.local_router_id.to_vec(),
+                        from: self.router_ctx.router_id().to_vec(),
                         key,
                         routers,
                     }
@@ -1048,7 +910,7 @@ impl<R: Runtime> NetDb<R> {
                 (
                     MessageType::DatabaseSearchReply,
                     DatabaseSearchReply {
-                        from: self.local_router_id.to_vec(),
+                        from: self.router_ctx.router_id().to_vec(),
                         key,
                         routers,
                     }
@@ -1151,7 +1013,7 @@ impl<R: Runtime> NetDb<R> {
             message_id: R::rng().next_u32(),
             expiration: R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
             payload: DatabaseSearchReply {
-                from: self.local_router_id.to_vec(),
+                from: self.router_ctx.router_id().to_vec(),
                 key: key.clone(),
                 routers,
             }
@@ -1234,17 +1096,17 @@ impl<R: Runtime> NetDb<R> {
                         "router info query reply received",
                     );
 
-                    if router_info.net_id() != self.net_id {
+                    if router_info.net_id() != self.router_ctx.net_id() {
                         tracing::warn!(
                             target: LOG_TARGET,
-                            local_net_id = ?self.net_id,
+                            local_net_id = ?self.router_ctx.net_id(),
                             remote_net_id = ?router_info.net_id(),
                             "invalid network id, ignoring router info query reply",
                         );
                         return Ok(());
                     }
 
-                    if router_id == self.local_router_id {
+                    if &router_id == self.router_ctx.router_id() {
                         tracing::warn!(
                             target: LOG_TARGET,
                             "local router id, ignoring router info query reply",
@@ -1255,8 +1117,16 @@ impl<R: Runtime> NetDb<R> {
                     if router_info.is_floodfill() {
                         self.floodfill_dht.add_router(router_id.clone());
                     }
-                    self.profile_storage.add_router(router_info);
                     self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
+
+                    // store both the new router info and its serialized form to profile storage
+                    //
+                    // the latter is used when a backup of profile storage is made to disk
+                    let raw_router_info =
+                        DatabaseStore::<R>::extract_raw_router_info(&message.payload);
+                    self.router_ctx
+                        .profile_storage()
+                        .discover_router(router_info, raw_router_info.clone());
                 }
                 (
                     DatabaseStorePayload::RouterInfo { router_info },
@@ -1270,17 +1140,17 @@ impl<R: Runtime> NetDb<R> {
                         "router info reply received to recursive lease set query",
                     );
 
-                    if router_info.net_id() != self.net_id {
+                    if router_info.net_id() != self.router_ctx.net_id() {
                         tracing::warn!(
                             target: LOG_TARGET,
-                            local_net_id = ?self.net_id,
+                            local_net_id = ?self.router_ctx.net_id(),
                             remote_net_id = ?router_info.net_id(),
                             "invalid network id, ignoring recursive lease set query reply",
                         );
                         return Ok(());
                     }
 
-                    if router_id == self.local_router_id {
+                    if &router_id == self.router_ctx.router_id() {
                         tracing::warn!(
                             target: LOG_TARGET,
                             "local router id, ignoring recursive lease set query reply",
@@ -1291,8 +1161,16 @@ impl<R: Runtime> NetDb<R> {
                     if router_info.is_floodfill() {
                         self.floodfill_dht.add_router(router_id.clone());
                     }
-                    self.profile_storage.add_router(router_info);
                     self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+
+                    // store both the new router info and its serialized form to profile storage
+                    //
+                    // the latter is used when a backup of profile storage is made to disk
+                    let raw_router_info =
+                        DatabaseStore::<R>::extract_raw_router_info(&message.payload);
+                    self.router_ctx
+                        .profile_storage()
+                        .discover_router(router_info, raw_router_info.clone());
 
                     if let Err(error) = self.send_lease_set_query(lease_set_key, router_id.clone())
                     {
@@ -1302,6 +1180,38 @@ impl<R: Runtime> NetDb<R> {
                             ?error,
                             "failed to send recursive lease set query",
                         );
+                    }
+                }
+                (
+                    DatabaseStorePayload::RouterInfo { router_info },
+                    QueryKind::RouterInfo { tx, .. },
+                ) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        router_id = %router_info.identity.id(),
+                        "router info found",
+                    );
+
+                    // store both the new router info and its serialized form to profile storage
+                    //
+                    // the latter is used when a backup of profile storage is made to disk
+                    let raw_router_info =
+                        DatabaseStore::<R>::extract_raw_router_info(&message.payload);
+                    let router_id = router_info.identity.id();
+
+                    if self
+                        .router_ctx
+                        .profile_storage()
+                        .discover_router(router_info, raw_router_info.clone())
+                    {
+                        let _ = tx.send(Ok(()));
+                    } else {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "router info found but it couldn't be accepted to profile storage",
+                        );
+                        let _ = tx.send(Err(QueryError::Malformed));
                     }
                 }
                 (payload, query) => tracing::warn!(
@@ -1335,7 +1245,7 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(
                 &DatabaseLookupBuilder::new(key.clone(), LookupType::Router)
                     .with_reply_type(ReplyType::Router {
-                        router_id: self.local_router_id.clone(),
+                        router_id: self.router_ctx.router_id().clone(),
                     })
                     .build(),
             )
@@ -1375,7 +1285,8 @@ impl<R: Runtime> NetDb<R> {
                 );
 
                 routers.retain(|router| {
-                    router != &self.local_router_id && !self.profile_storage.contains(router)
+                    router != self.router_ctx.router_id()
+                        && !self.router_ctx.profile_storage().contains(router)
                 });
                 routers.into_iter().for_each(|lookup_key| {
                     self.send_router_info_database_lookup(
@@ -1393,7 +1304,8 @@ impl<R: Runtime> NetDb<R> {
                 // filter out already queried routers to prevent double queries
                 // and routers already know to us
                 routers.retain(|router_id| {
-                    !queried.contains(router_id) && !self.profile_storage.contains(router_id)
+                    !queried.contains(router_id)
+                        && !self.router_ctx.profile_storage().contains(router_id)
                 });
 
                 // insert `routers` into `queried` so they won't get double-queried
@@ -1530,6 +1442,38 @@ impl<R: Runtime> NetDb<R> {
                     }
                 }
             }
+            Some(QueryKind::RouterInfo { num_floodfills, tx }) => {
+                let router_id = RouterId::from(&key);
+
+                match num_floodfills.checked_sub(1) {
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "unexpected number of failures for router info query",
+                        );
+                        debug_assert!(false);
+                        let _ = tx.send(Err(QueryError::ValueNotFound));
+                    }
+                    Some(0) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "router info not found in any of the queried floodfills",
+                        );
+                        let _ = tx.send(Err(QueryError::ValueNotFound));
+                    }
+                    Some(num_floodfills) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?num_floodfills,
+                            "router info lookup failed",
+                        );
+                        self.active.insert(key, QueryKind::RouterInfo { num_floodfills, tx });
+                    }
+                }
+            }
             Some(QueryKind::Router) => tracing::debug!(
                 target: LOG_TARGET,
                 %router_id,
@@ -1543,12 +1487,12 @@ impl<R: Runtime> NetDb<R> {
 
     /// Handle I2NP message.
     fn on_message(&mut self, message: Message) -> crate::Result<()> {
-        self.metrics.counter(NUM_NETDB_MESSAGES).increment(1);
+        self.router_ctx.metrics_handle().counter(NUM_NETDB_MESSAGES).increment(1);
 
         match message.message_type {
             MessageType::DatabaseStore => return self.on_database_store(message),
             MessageType::DatabaseLookup if self.floodfill => {
-                self.metrics.counter(NUM_QUERIES).increment(1);
+                self.router_ctx.metrics_handle().counter(NUM_QUERIES).increment(1);
 
                 let DatabaseLookup {
                     ignore,
@@ -1592,6 +1536,22 @@ impl<R: Runtime> NetDb<R> {
 
     /// Send [`LeaseSet2`] query for `key` to `floodfill`.
     fn send_lease_set_query(&mut self, key: Bytes, floodfill: RouterId) -> Result<(), QueryError> {
+        let floodfill_public_key = {
+            let reader = self.router_ctx.profile_storage().reader();
+
+            let Some(router_info) = reader.router_info(&floodfill) else {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    %floodfill,
+                    "cannot send lease set query, floodfill router info doesn't exist",
+                );
+                return Ok(());
+            };
+
+            router_info.identity.static_key().clone()
+        };
+
         let Some(Lease {
             router_id,
             tunnel_id,
@@ -1639,17 +1599,10 @@ impl<R: Runtime> NetDb<R> {
 
         let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
         let ephemeral_public = ephemeral_secret.public();
-        let (garlic_key, garlic_tag) = {
-            let floodfill_public_key = self
-                .profile_storage
-                .reader()
-                .router_info(&floodfill)
-                .identity
-                .static_key()
-                .clone();
-
-            self.noise.derive_outbound_garlic_key(floodfill_public_key, ephemeral_secret)
-        };
+        let (garlic_key, garlic_tag) = self
+            .router_ctx
+            .noise()
+            .derive_outbound_garlic_key(floodfill_public_key, ephemeral_secret);
 
         // message length + poly13055 tg + ephemeral key + garlic message length
         let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
@@ -1739,6 +1692,61 @@ impl<R: Runtime> NetDb<R> {
         });
     }
 
+    /// Query `RouterInfo` under `router_id` from `NetDb` and return result to caller via `tx`.
+    ///
+    /// Starts at most 3 queries in parallel and the first one that succeeds is sent to the
+    /// caller. The query is considered failed if `DatabaseSearchReply` is received from all
+    /// three floodfill routers or if the query timer expires.
+    fn on_query_router_info(
+        &mut self,
+        router_id: RouterId,
+        tx: oneshot::Sender<Result<(), QueryError>>,
+    ) {
+        let key = Bytes::from(router_id.to_vec());
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
+        let num_floodfills = floodfills.len();
+
+        // should not happen but bail out early if there no floodfills
+        if num_floodfills == 0 {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "cannot query router info, no floodfills",
+            );
+
+            let _ = tx.send(Err(QueryError::NoFloodfills));
+            return;
+        }
+
+        tracing::debug!(
+            target: LOG_TARGET,
+            %router_id,
+            ?floodfills,
+            "query router info",
+        );
+
+        let message = MessageBuilder::short()
+            .with_message_type(MessageType::DatabaseLookup)
+            .with_message_id(R::rng().next_u32())
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_payload(
+                &DatabaseLookupBuilder::new(key.clone(), LookupType::Router)
+                    .with_reply_type(ReplyType::Router {
+                        router_id: self.router_ctx.router_id().clone(),
+                    })
+                    .build(),
+            )
+            .build();
+
+        self.send_message(&floodfills, MessageKind::NonExpiring { message });
+
+        // store router info query into active queries and start timer for the query
+        self.active.insert(key.clone(), QueryKind::RouterInfo { num_floodfills, tx });
+        self.query_timers.push(async move {
+            R::delay(Duration::from_secs(5)).await;
+            key
+        });
+    }
+
     /// Get `RouterId`'s of the floodfills closest to `key`.
     fn on_get_closest_floodfills(
         &mut self,
@@ -1751,7 +1759,8 @@ impl<R: Runtime> NetDb<R> {
             .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|router_id| {
-                self.profile_storage
+                self.router_ctx
+                    .profile_storage()
                     .get(&router_id)
                     .map(|router_info| (router_id, router_info.identity.static_key().clone()))
             })
@@ -1768,6 +1777,57 @@ impl<R: Runtime> NetDb<R> {
         }
 
         let _ = tx.send(floodfills);
+    }
+
+    /// Publish `router_info` under `router_id` in `NetDb`.
+    fn on_publish_router_info(&mut self, router_id: RouterId, router_info: Bytes) {
+        let key = Bytes::from(router_id.to_vec());
+
+        let floodfills = self.floodfill_dht.closest(&key, 3usize).collect::<Vec<_>>();
+        if floodfills.is_empty() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                %router_id,
+                "cannot send router info, no floodfills",
+            );
+            return;
+        }
+
+        // gzip-compress the serialized router info, as required by the spec
+        //
+        // call is expected to succeed as the router info is created by us
+        let serialized_router_info =
+            Bytes::from(R::gzip_compress(router_info).expect("to succeed"));
+
+        let reply_token = R::rng().next_u32();
+        let message = DatabaseStoreBuilder::new(
+            key,
+            DatabaseStoreKind::RouterInfo {
+                router_info: serialized_router_info,
+            },
+        )
+        .with_reply_type(StoreReplyType::Router {
+            reply_token,
+            router_id: self.router_ctx.router_id().clone(),
+        })
+        .build();
+
+        let message = MessageBuilder::short()
+            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
+            .with_message_type(MessageType::DatabaseStore)
+            .with_message_id(R::rng().next_u32())
+            .with_payload(&message)
+            .build();
+
+        tracing::info!(
+            target: LOG_TARGET,
+            %router_id,
+            ?floodfills,
+            %reply_token,
+            "publish router info",
+        );
+
+        self.send_message(&floodfills, MessageKind::NonExpiring { message });
     }
 
     /// Perform general maintenance of [`NetDb`].
@@ -1824,7 +1884,7 @@ impl<R: Runtime> NetDb<R> {
 
         let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Exploration)
             .with_reply_type(ReplyType::Router {
-                router_id: self.local_router_id.clone(),
+                router_id: self.router_ctx.router_id().clone(),
             })
             .build();
 
@@ -1920,6 +1980,12 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.on_query_lease_set(key, tx),
                 Poll::Ready(Some(NetDbAction::GetClosestFloodfills { key, tx })) =>
                     self.on_get_closest_floodfills(key, tx),
+                Poll::Ready(Some(NetDbAction::QueryRouterInfo { router_id, tx })) =>
+                    self.on_query_router_info(router_id, tx),
+                Poll::Ready(Some(NetDbAction::PublishRouterInfo {
+                    router_id,
+                    router_info,
+                })) => self.on_publish_router_info(router_id, router_info),
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
             }
         }
@@ -1960,29 +2026,6 @@ impl<R: Runtime> Future for NetDb<R> {
             let _ = self.maintenance_timer.poll_unpin(cx);
         }
 
-        if self.router_info_publishers.poll_unpin(cx).is_ready() {
-            let key = Bytes::from(self.local_router_id.to_vec());
-
-            match self.floodfill_dht.closest(key, 1usize).collect::<Vec<_>>().pop() {
-                None => tracing::warn!(
-                    target: LOG_TARGET,
-                    "unable to publish router info, no floodfills",
-                ),
-                Some(floodfill) => {
-                    let (reply_token, message) = self.router_info_publishers.publish();
-
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        %floodfill,
-                        %reply_token,
-                        "publish local router info",
-                    );
-
-                    self.send_message(&[floodfill], MessageKind::NonExpiring { message });
-                }
-            }
-        }
-
         Poll::Pending
     }
 }
@@ -2021,18 +2064,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -2070,11 +2131,12 @@ mod tests {
             )
         };
 
+        let reply_router = RouterId::random();
         let message = DatabaseStoreBuilder::new(key, DatabaseStoreKind::LeaseSet2 { lease_set })
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2087,9 +2149,15 @@ mod tests {
             })
             .is_ok());
         assert_eq!(netdb.lease_sets.len(), 1);
+        match rx.try_recv().unwrap() {
+            ProtocolCommand::Connect { router_id } => {
+                assert_eq!(router_id, reply_router);
+            }
+            _ => panic!("invalid event"),
+        }
         assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-            ProtocolCommand::Connect { router } => {
-                assert!(floodfills.remove(&router.identity.id()));
+            ProtocolCommand::Connect { router_id } => {
+                assert!(floodfills.remove(&router_id));
                 true
             }
             _ => false,
@@ -2117,18 +2185,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             false,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -2203,18 +2289,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -2291,18 +2395,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key1, expired_lease_set1) = {
@@ -2413,6 +2535,7 @@ mod tests {
 
         // store first lease set that is about to expire
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key1,
                 DatabaseStoreKind::LeaseSet2 {
@@ -2422,7 +2545,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2436,9 +2559,15 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-                ProtocolCommand::Connect { router } => {
-                    assert!(floodfills.remove(&router.identity.id()));
+                ProtocolCommand::Connect { router_id } => {
+                    assert!(floodfills.remove(&router_id));
                     true
                 }
                 _ => false,
@@ -2454,6 +2583,7 @@ mod tests {
 
         // store second expiring lease set and verify floodfills are pending
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key2,
                 DatabaseStoreKind::LeaseSet2 {
@@ -2463,7 +2593,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2477,10 +2607,16 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
-                    if netdb.profile_storage.is_floodfill(router_id) {
+                    if netdb.router_ctx.profile_storage().is_floodfill(router_id) {
                         assert_eq!(pending_messages.len(), 2);
                     } else {
                         assert_eq!(pending_messages.len(), 1);
@@ -2494,6 +2630,7 @@ mod tests {
 
         // store non-expiring lease set and verify floodfills are pending
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key3,
                 DatabaseStoreKind::LeaseSet2 {
@@ -2503,7 +2640,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2517,10 +2654,16 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 3);
             assert_eq!(netdb.routers.len(), 6);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
-                    if netdb.profile_storage.is_floodfill(router_id) {
+                    if netdb.router_ctx.profile_storage().is_floodfill(router_id) {
                         assert_eq!(pending_messages.len(), 3);
                     } else {
                         assert_eq!(pending_messages.len(), 1);
@@ -2554,18 +2697,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -2601,10 +2762,11 @@ mod tests {
             )
         };
 
+        let reply_router = RouterId::random();
         let message = DatabaseStoreBuilder::new(key, DatabaseStoreKind::RouterInfo { router_info })
             .with_reply_type(StoreReplyType::Router {
                 reply_token: MockRuntime::rng().next_u32(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -2617,9 +2779,15 @@ mod tests {
             })
             .is_ok());
         assert_eq!(netdb.router_infos.len(), 1);
+        match rx.try_recv().unwrap() {
+            ProtocolCommand::Connect { router_id } => {
+                assert_eq!(router_id, reply_router);
+            }
+            _ => panic!("invalid event"),
+        }
         assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-            ProtocolCommand::Connect { router } => {
-                assert!(floodfills.remove(&router.identity.id()));
+            ProtocolCommand::Connect { router_id } => {
+                assert!(floodfills.remove(&router_id));
                 true
             }
             _ => false,
@@ -2647,18 +2815,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -2726,18 +2912,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set, expires) = {
@@ -2833,18 +3037,36 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -2883,7 +3105,7 @@ mod tests {
 
                 assert_eq!(message.routers.len(), 1);
                 assert_eq!(message.routers[0], floodfills[2]);
-                assert_eq!(message.from, netdb.local_router_id.to_vec());
+                assert_eq!(message.from, netdb.router_ctx.router_id().to_vec());
                 assert_eq!(message.key, key);
             }
             _ => panic!("invalid message"),
@@ -2917,18 +3139,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -3024,18 +3264,36 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -3065,7 +3323,7 @@ mod tests {
 
                 assert_eq!(message.routers.len(), 1);
                 assert_eq!(message.routers[0], floodfills[1]);
-                assert_eq!(message.from, netdb.local_router_id.to_vec());
+                assert_eq!(message.from, netdb.router_ctx.router_id().to_vec());
                 assert_eq!(message.key, key);
             }
             _ => panic!("invalid command"),
@@ -3088,18 +3346,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             false,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         // set timer to a shorter timeout and poll netdb until it sends a router exploration
@@ -3163,18 +3439,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key1, expired_lease_set1) = {
@@ -3249,6 +3543,7 @@ mod tests {
         };
 
         // store first lease set that is about to expire
+        let reply_router = RouterId::random();
         {
             let message = DatabaseStoreBuilder::new(
                 key1,
@@ -3259,7 +3554,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3273,9 +3568,15 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-                ProtocolCommand::Connect { router } => {
-                    assert!(floodfills.remove(&router.identity.id()));
+                ProtocolCommand::Connect { router_id } => {
+                    assert!(floodfills.remove(&router_id));
                     true
                 }
                 _ => false,
@@ -3291,6 +3592,7 @@ mod tests {
 
         // store second expiring lease set and verify floodfills are pending
         {
+            let reply_router = RouterId::random();
             let message = DatabaseStoreBuilder::new(
                 key2.clone(),
                 DatabaseStoreKind::LeaseSet2 {
@@ -3300,7 +3602,7 @@ mod tests {
             .with_reply_type(StoreReplyType::Tunnel {
                 reply_token: MockRuntime::rng().next_u32(),
                 tunnel_id: TunnelId::random(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3314,10 +3616,16 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
-                    if netdb.profile_storage.is_floodfill(router_id) {
+                    if netdb.router_ctx.profile_storage().is_floodfill(router_id) {
                         assert_eq!(pending_messages.len(), 2);
                     } else {
                         assert_eq!(pending_messages.len(), 1);
@@ -3388,24 +3696,48 @@ mod tests {
             .map(|_| {
                 let info = RouterInfo::floodfill::<MockRuntime>();
                 let id = info.identity.id();
+
+                tracing::error!("floodfilld = {id}");
+
                 storage.add_router(info);
 
                 id
             })
             .collect::<HashSet<_>>();
 
+        let local = RouterId::random();
+        tracing::error!("local router id = {local}");
+
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key1, expiring_router_info) = {
@@ -3474,6 +3806,7 @@ mod tests {
         };
 
         // store first lease set that is about to expire
+        let reply_router = RouterId::random();
         {
             let message = DatabaseStoreBuilder::new(
                 key1,
@@ -3483,7 +3816,7 @@ mod tests {
             )
             .with_reply_type(StoreReplyType::Router {
                 reply_token: MockRuntime::rng().next_u32(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3497,9 +3830,15 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!((0..3).all(|_| match rx.try_recv().unwrap() {
-                ProtocolCommand::Connect { router } => {
-                    assert!(floodfills.remove(&router.identity.id()));
+                ProtocolCommand::Connect { router_id } => {
+                    assert!(floodfills.remove(&router_id));
                     true
                 }
                 _ => false,
@@ -3514,6 +3853,7 @@ mod tests {
         }
 
         // store second expiring lease set and verify floodfills are pending
+        let reply_router = RouterId::random();
         {
             let message = DatabaseStoreBuilder::new(
                 key2.clone(),
@@ -3523,7 +3863,7 @@ mod tests {
             )
             .with_reply_type(StoreReplyType::Router {
                 reply_token: MockRuntime::rng().next_u32(),
-                router_id: RouterId::random(),
+                router_id: reply_router.clone(),
             })
             .build();
 
@@ -3537,10 +3877,16 @@ mod tests {
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
+            match rx.try_recv().unwrap() {
+                ProtocolCommand::Connect { router_id } => {
+                    assert_eq!(router_id, reply_router);
+                }
+                _ => panic!("invalid event"),
+            }
             assert!(rx.try_recv().is_err());
             assert!(netdb.routers.iter().all(|(router_id, state)| match state {
                 RouterState::Dialing { pending_messages } => {
-                    if netdb.profile_storage.is_floodfill(router_id) {
+                    if netdb.router_ctx.profile_storage().is_floodfill(router_id) {
                         assert_eq!(pending_messages.len(), 2);
                     } else {
                         assert_eq!(pending_messages.len(), 1);
@@ -3617,18 +3963,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -3695,18 +4059,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, lease_set) = {
@@ -3776,18 +4158,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         let (key, router_info) = {
@@ -3840,43 +4240,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_router_info_published() {
-        let (service, _rx, _tx, storage) = TransportService::new();
-        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
-
-        // add floodfill to router storage
-        let info = RouterInfo::floodfill::<MockRuntime>();
-        let floodfill = info.identity.id();
-        storage.add_router(info);
-
-        let (_msg_tx, msg_rx) = channel(64);
-        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
-            true,
-            service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
-            tp_handle,
-            2u8,
-            msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
-        );
-
-        assert!(std::matches!(netdb.routers.get(&floodfill), None));
-
-        // poll netdb until the initial publish timeout is over
-        assert!(tokio::time::timeout(Duration::from_secs(20), &mut netdb).await.is_err());
-
-        match netdb.routers.get(&floodfill).expect("to exist") {
-            RouterState::Dialing { pending_messages } => {
-                assert_eq!(pending_messages.len(), 1);
-            }
-            _ => panic!("invalid state"),
-        }
-    }
-
-    #[tokio::test]
     async fn netdb_parallel_lease_set_query_first_response_succeeds() {
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
@@ -3892,18 +4255,36 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -3960,18 +4341,36 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4074,18 +4473,36 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4227,18 +4644,36 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4388,18 +4823,36 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4511,18 +4964,36 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4568,18 +5039,36 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
         let (_msg_tx, msg_rx) = channel(64);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
-            RouterId::random(),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
             true,
             service,
-            storage,
-            MockRuntime::register_metrics(vec![], None),
             tp_handle,
-            2u8,
             msg_rx,
-            Bytes::from(vec![1, 2, 3, 4]),
-            StaticPrivateKey::random(MockRuntime::rng()),
         );
 
         netdb.inbound_tunnels.add_tunnel(LeaseSet2::random().0.leases[0].clone());
@@ -4696,6 +5185,118 @@ mod tests {
                 QueryKind::RecursiveLeaseSetQuery { .. }
             ) && closest
                 .contains(&RouterId::from(k.as_ref())))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_router_info_store() {
+        let (service, rx, subsys_tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
+        let (_msg_tx, msg_rx) = channel(64);
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let (mut netdb, handle) = NetDb::<MockRuntime>::new(
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                serialized.clone(),
+                static_key,
+                signing_key,
+                2u8,
+            ),
+            true,
+            service,
+            tp_handle,
+            msg_rx,
+        );
+
+        // publish local router info and poll netdb so the request is handled
+        handle.publish_router_info(router_info.identity.id(), serialized.clone());
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.is_err());
+
+        // verify all floodfills are being dialed
+        assert!(netdb.routers.iter().all(|(id, state)| match state {
+            RouterState::Dialing { pending_messages } if pending_messages.len() == 1 => {
+                floodfills.contains(id)
+            }
+            _ => false,
+        }));
+        assert!((0..3).all(|_| match rx.try_recv().unwrap() {
+            ProtocolCommand::Connect { router_id } => floodfills.contains(&router_id),
+            _ => false,
+        }));
+
+        // register floodfills
+        let receivers = floodfills
+            .iter()
+            .map(|router_id| {
+                let (tx, rx) = channel(64);
+
+                subsys_tx
+                    .try_send(InnerSubsystemEvent::ConnectionEstablished {
+                        router: router_id.clone(),
+                        tx,
+                    })
+                    .unwrap();
+                rx
+            })
+            .collect::<Vec<_>>();
+
+        // poll netdb so the pending messages get sent to floodfills
+        // and verify all floofills get a database store message for the local router info
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.is_err());
+        assert!(
+            receivers.into_iter().all(|rx| match rx.try_recv().unwrap() {
+                SubsystemCommand::SendMessage { message } => {
+                    let message = Message::parse_short(&message).unwrap();
+                    assert_eq!(message.message_type, MessageType::DatabaseStore);
+
+                    let store = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    match store.payload {
+                        DatabaseStorePayload::RouterInfo { .. } => {
+                            let raw_router_info =
+                                DatabaseStore::<MockRuntime>::extract_raw_router_info(
+                                    &message.payload,
+                                );
+                            let decompressed =
+                                MockRuntime::gzip_decompress(&raw_router_info).unwrap();
+
+                            assert_eq!(&decompressed, &serialized);
+
+                            true
+                        }
+                        DatabaseStorePayload::LeaseSet2 { .. } => false,
+                    }
+                }
+                _ => false,
+            })
         );
     }
 }

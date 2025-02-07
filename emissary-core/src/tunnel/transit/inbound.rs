@@ -265,12 +265,13 @@ mod tests {
 
     #[tokio::test]
     async fn expired_tunnel_gateway_payload() {
-        let (ibgw_router_hash, ibgw_public_key, ibgw_noise, ibgw_router_info) = make_router(false);
+        let (ibgw_router_hash, ibgw_static_key, _, ibgw_noise, ibgw_router_info) =
+            make_router(false);
         let mut ibgw_garlic = GarlicHandler::<MockRuntime>::new(
             ibgw_noise.clone(),
             MockRuntime::register_metrics(vec![], None),
         );
-        let (_ibep_router_hash, _ibep_public_key, ibep_noise, ibep_router_info) =
+        let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, ibep_router_info) =
             make_router(false);
 
         let (transit_tx, _transit_rx) = channel(64);
@@ -286,7 +287,7 @@ mod tests {
 
         let (pending, router_id, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: vec![(ibgw_router_hash.clone(), ibgw_public_key)],
+                hops: vec![(ibgw_router_hash.clone(), ibgw_static_key.public())],
                 name: Str::from("tunnel-pool"),
                 noise: ibep_noise.clone(),
                 message_id: MessageId::from(MockRuntime::rng().next_u32()),
@@ -383,12 +384,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tunnel_gateway_payload() {
-        let (ibgw_router_hash, ibgw_public_key, ibgw_noise, ibgw_router_info) = make_router(false);
+        let (ibgw_router_hash, ibgw_static_key, _, ibgw_noise, ibgw_router_info) =
+            make_router(false);
         let mut ibgw_garlic = GarlicHandler::<MockRuntime>::new(
             ibgw_noise.clone(),
             MockRuntime::register_metrics(vec![], None),
         );
-        let (_ibep_router_hash, _ibep_public_key, ibep_noise, ibep_router_info) =
+        let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, ibep_router_info) =
             make_router(false);
 
         let (transit_tx, _transit_rx) = channel(64);
@@ -404,7 +406,7 @@ mod tests {
 
         let (pending, router_id, message) =
             PendingTunnel::<InboundTunnel>::create_tunnel::<MockRuntime>(TunnelBuildParameters {
-                hops: vec![(ibgw_router_hash.clone(), ibgw_public_key)],
+                hops: vec![(ibgw_router_hash.clone(), ibgw_static_key.public())],
                 name: Str::from("tunnel-pool"),
                 noise: ibep_noise.clone(),
                 message_id: MessageId::from(MockRuntime::rng().next_u32()),

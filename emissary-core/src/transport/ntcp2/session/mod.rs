@@ -31,13 +31,11 @@
 //! and responder can be found from `initiator.rs` and `responder.rs`.
 
 use crate::{
-    crypto::{
-        base64_decode, sha256::Sha256, siphash::SipHash, SigningPrivateKey, StaticPrivateKey,
-        StaticPublicKey,
-    },
+    crypto::{base64_decode, sha256::Sha256, siphash::SipHash, StaticPrivateKey, StaticPublicKey},
     error::Error,
     primitives::{RouterId, RouterInfo, Str, TransportKind},
     profile::ProfileStorage,
+    router::context::RouterContext,
     runtime::{Runtime, TcpStream},
     transport::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
@@ -115,17 +113,11 @@ pub struct SessionManager<R: Runtime> {
     /// Local NTCP2 static key.
     local_key: StaticPrivateKey,
 
-    /// Local router info.
-    local_router_info: RouterInfo,
-
-    /// Local signing key.
-    local_signing_key: SigningPrivateKey,
-
     /// State that is common for all outbound connections.
     outbound_initial_state: Bytes,
 
-    /// Router storage.
-    profile_storage: ProfileStorage<R>,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
@@ -142,10 +134,8 @@ impl<R: Runtime> SessionManager<R> {
     pub fn new(
         local_key: [u8; 32],
         local_iv: [u8; 16],
-        local_signing_key: SigningPrivateKey,
-        local_router_info: RouterInfo,
+        router_ctx: RouterContext<R>,
         subsystem_handle: SubsystemHandle,
-        profile_storage: ProfileStorage<R>,
         allow_local: bool,
     ) -> Self {
         let local_key = StaticPrivateKey::from(local_key);
@@ -163,10 +153,8 @@ impl<R: Runtime> SessionManager<R> {
             inbound_initial_state: Bytes::from(inbound_initial_state),
             local_iv,
             local_key,
-            local_router_info,
-            local_signing_key,
             outbound_initial_state: Bytes::from(outbound_initial_state),
-            profile_storage,
+            router_ctx,
             subsystem_handle,
         }
     }
@@ -175,7 +163,7 @@ impl<R: Runtime> SessionManager<R> {
     async fn create_session_inner(
         router: RouterInfo,
         net_id: u8,
-        local_info: Vec<u8>,
+        local_info: Bytes,
         local_key: StaticPrivateKey,
         outbound_initial_state: Bytes,
         chaining_key: Bytes,
@@ -309,8 +297,8 @@ impl<R: Runtime> SessionManager<R> {
         &self,
         router: RouterInfo,
     ) -> impl Future<Output = Result<Ntcp2Session<R>, (Option<RouterId>, Error)>> {
-        let net_id = self.local_router_info.net_id;
-        let local_info = self.local_router_info.serialize(&self.local_signing_key);
+        let net_id = self.router_ctx.net_id();
+        let local_info = self.router_ctx.router_info();
         let local_key = self.local_key.clone();
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
@@ -418,14 +406,14 @@ impl<R: Runtime> SessionManager<R> {
         &self,
         stream: R::TcpStream,
     ) -> impl Future<Output = Result<Ntcp2Session<R>, (Option<RouterId>, Error)>> {
-        let net_id = self.local_router_info.net_id();
-        let local_router_hash = self.local_router_info.identity.hash().to_vec();
+        let net_id = self.router_ctx.net_id();
+        let local_router_hash = self.router_ctx.router_id().to_vec();
         let inbound_initial_state = self.inbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
         let iv = self.local_iv;
-        let profile_storage = self.profile_storage.clone();
+        let profile_storage = self.router_ctx.profile_storage().clone();
 
         async move {
             Self::accept_session_inner(
@@ -447,6 +435,7 @@ impl<R: Runtime> SessionManager<R> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
         i2np::{MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
@@ -461,6 +450,7 @@ mod tests {
         subsystem::{InnerSubsystemEvent, SubsystemCommand, SubsystemHandle},
         transport::ntcp2::{listener::Ntcp2Listener, session::SessionManager},
     };
+    use bytes::Bytes;
     use futures::StreamExt;
     use hashbrown::HashMap;
     use rand::{thread_rng, RngCore};
@@ -542,6 +532,7 @@ mod tests {
                 ntcp2_key: self.ntcp2_key,
                 router_info,
                 signing_key,
+                static_key,
             }
         }
     }
@@ -551,6 +542,7 @@ mod tests {
         ntcp2_key: [u8; 32],
         router_info: RouterInfo,
         signing_key: SigningPrivateKey,
+        static_key: StaticPrivateKey,
     }
 
     #[tokio::test]
@@ -559,10 +551,16 @@ mod tests {
         let local_manager = SessionManager::new(
             local.ntcp2_key,
             local.ntcp2_iv,
-            local.signing_key,
-            local.router_info,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                local.router_info.identity.id(),
+                Bytes::from(local.router_info.serialize(&local.signing_key)),
+                local.static_key,
+                local.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -573,10 +571,16 @@ mod tests {
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
             remote.ntcp2_iv,
-            remote.signing_key,
-            remote.router_info.clone(),
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                remote.router_info.identity.id(),
+                Bytes::from(remote.router_info.serialize(&remote.signing_key)),
+                remote.static_key,
+                remote.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -604,10 +608,16 @@ mod tests {
         let local_manager = SessionManager::new(
             local.ntcp2_key,
             local.ntcp2_iv,
-            local.signing_key,
-            local.router_info,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                local.router_info.identity.id(),
+                Bytes::from(local.router_info.serialize(&local.signing_key)),
+                local.static_key,
+                local.signing_key,
+                128,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -618,10 +628,16 @@ mod tests {
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
             remote.ntcp2_iv,
-            remote.signing_key,
-            remote.router_info.clone(),
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                remote.router_info.identity.id(),
+                Bytes::from(remote.router_info.serialize(&remote.signing_key)),
+                remote.static_key,
+                remote.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -646,10 +662,16 @@ mod tests {
         let local_manager = SessionManager::new(
             local.ntcp2_key,
             local.ntcp2_iv,
-            local.signing_key,
-            local.router_info,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                local.router_info.identity.id(),
+                Bytes::from(local.router_info.serialize(&local.signing_key)),
+                local.static_key,
+                local.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -661,10 +683,16 @@ mod tests {
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
             remote.ntcp2_iv,
-            remote.signing_key,
-            remote.router_info.clone(),
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                remote.router_info.identity.id(),
+                Bytes::from(remote.router_info.serialize(&remote.signing_key)),
+                remote.static_key,
+                remote.signing_key,
+                128u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -689,10 +717,16 @@ mod tests {
         let local_manager = SessionManager::new(
             local.ntcp2_key,
             local.ntcp2_iv,
-            local.signing_key,
-            local.router_info,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                local.router_info.identity.id(),
+                Bytes::from(local.router_info.serialize(&local.signing_key)),
+                local.static_key,
+                local.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             false,
         );
 
@@ -704,10 +738,16 @@ mod tests {
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
             remote.ntcp2_iv,
-            remote.signing_key,
-            remote.router_info.clone(),
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                remote.router_info.identity.id(),
+                Bytes::from(remote.router_info.serialize(&remote.signing_key)),
+                remote.static_key,
+                remote.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -731,10 +771,16 @@ mod tests {
         let local_manager = SessionManager::new(
             local.ntcp2_key,
             local.ntcp2_iv,
-            local.signing_key,
-            local.router_info,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                local.router_info.identity.id(),
+                Bytes::from(local.router_info.serialize(&local.signing_key)),
+                local.static_key,
+                local.signing_key,
+                2u8,
+            ),
             SubsystemHandle::new(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -752,8 +798,6 @@ mod tests {
 
     #[tokio::test]
     async fn received_expired_message() {
-        crate::util::init_logger();
-
         let local = Ntcp2Builder::new().build();
         let mut local_handle = SubsystemHandle::new();
 
@@ -766,10 +810,16 @@ mod tests {
         let local_manager = SessionManager::new(
             local.ntcp2_key,
             local.ntcp2_iv,
-            local.signing_key,
-            local.router_info,
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                local.router_info.identity.id(),
+                Bytes::from(local.router_info.serialize(&local.signing_key)),
+                local.static_key,
+                local.signing_key,
+                2u8,
+            ),
             local_handle,
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 
@@ -789,10 +839,16 @@ mod tests {
         let remote_manager = SessionManager::new(
             remote.ntcp2_key,
             remote.ntcp2_iv,
-            remote.signing_key,
-            remote.router_info.clone(),
+            RouterContext::new(
+                MockRuntime::register_metrics(Vec::new(), None),
+                ProfileStorage::<MockRuntime>::new(&[], &[]),
+                remote.router_info.identity.id(),
+                Bytes::from(remote.router_info.serialize(&remote.signing_key)),
+                remote.static_key,
+                remote.signing_key,
+                2u8,
+            ),
             remote_handle.clone(),
-            ProfileStorage::<MockRuntime>::new(&[], &[]),
             true,
         );
 

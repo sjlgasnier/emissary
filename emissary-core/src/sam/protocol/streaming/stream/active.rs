@@ -3014,8 +3014,6 @@ mod tests {
 
     #[tokio::test]
     async fn remote_closes_socket() {
-        crate::util::init_logger();
-
         let (
             stream,
             StreamBuilder {

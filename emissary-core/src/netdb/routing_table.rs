@@ -30,9 +30,10 @@ use crate::{
     runtime::Runtime,
 };
 
+use hashbrown::HashSet;
+
 use alloc::vec::Vec;
 use core::ops::Deref;
-use hashbrown::HashSet;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb::routing-table";
