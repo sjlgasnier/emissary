@@ -889,6 +889,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rand",
  "rand_core",
+ "reqwest",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

@@ -24,7 +24,7 @@ use crate::{
     error::{ChannelError, ConnectionError, Error},
     netdb::NetDbHandle,
     primitives::{DestinationId, Str},
-    runtime::{JoinSet, Runtime, TcpListener, UdpSocket},
+    runtime::{AddressBook, JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
         parser::{Datagram, HostKind},
         pending::{
@@ -203,6 +203,7 @@ impl<R: Runtime> SamServer<R> {
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
+        _address_book: Option<Arc<dyn AddressBook>>,
     ) -> crate::Result<Self> {
         let listener = R::TcpListener::bind(SocketAddr::new(
             host.parse::<IpAddr>().expect("valid address"),

@@ -94,17 +94,20 @@ impl HttpProxy {
             "starting http proxy",
         );
 
+        // create session before starting the tcp listener for the proxy
+        let session = Session::<style::Stream>::new(SessionOptions {
+            publish: false,
+            samv3_tcp_port,
+            nickname: "http-proxy".to_string(),
+            ..Default::default()
+        })
+        .await?;
+
         Ok(Self {
             listener: TcpListener::bind(format!("{}:{}", config.host, config.port)).await?,
             requests: JoinSet::new(),
             responses: JoinSet::new(),
-            session: Session::<style::Stream>::new(SessionOptions {
-                publish: false,
-                samv3_tcp_port,
-                nickname: "http-proxy".to_string(),
-                ..Default::default()
-            })
-            .await?,
+            session,
         })
     }
 

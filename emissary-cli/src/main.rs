@@ -17,8 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    cli::Arguments, config::Config, error::Error, proxy::http::HttpProxy, signal::SignalHandler,
-    storage::Storage,
+    address_book::AddressBookManager, cli::Arguments, config::Config, error::Error,
+    proxy::http::HttpProxy, signal::SignalHandler, storage::Storage,
 };
 
 use anyhow::anyhow;
@@ -32,6 +32,7 @@ use futures::StreamExt;
 
 use std::{fs::File, io::Write};
 
+mod address_book;
 mod cli;
 mod config;
 mod error;
@@ -63,6 +64,10 @@ async fn main() -> anyhow::Result<()> {
 
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
+
+    // create address book and allocate address book handle
+    let address_book_manager = AddressBookManager::new(config.base_path.clone());
+    let address_book_handle = address_book_manager.handle();
 
     // try to reseed the router if there aren't enough known routers
     if (config.routers.len() < RESEED_THRESHOLD && !config.reseed.disable)
@@ -125,7 +130,10 @@ async fn main() -> anyhow::Result<()> {
 
     let path = config.base_path.clone();
     let http = config.http_proxy.take();
-    let (mut router, local_router_info) = Router::<Runtime>::new(config.into()).await.unwrap();
+    let (mut router, local_router_info) =
+        Router::<Runtime>::with_address_book(config.into(), address_book_handle)
+            .await
+            .unwrap();
 
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
@@ -135,6 +143,12 @@ async fn main() -> anyhow::Result<()> {
     // sam must also be enabled for the http proxy to work
     match (http, router.protocol_address_info().sam_tcp) {
         (Some(config), Some(address)) => {
+            // start event loop of address book manager
+            //
+            // address book depends on the http proxy as it downloads hosts.txt from inside i2p
+            tokio::spawn(address_book_manager.start(config.port, config.host.clone()));
+
+            // start event loop of http proxy
             tokio::spawn(async move {
                 match HttpProxy::new(config, address.port()).await {
                     Ok(proxy) => {
@@ -196,17 +210,15 @@ async fn main() -> anyhow::Result<()> {
                             };
 
                             match Runtime::gzip_decompress(router_info) {
-                                Some(router_info) => {
-
-                                if let Err(error) = storage_handle.store_router_info(router_id.clone(), router_info) {
-                                    tracing::warn!(
-                                        target: LOG_TARGET,
-                                        ?router_id,
-                                        ?error,
-                                        "failed to store router info to disk",
-                                    );
-                                }
-                                }
+                                Some(router_info) =>
+                                    if let Err(error) = storage_handle.store_router_info(router_id.clone(), router_info) {
+                                        tracing::warn!(
+                                            target: LOG_TARGET,
+                                            ?router_id,
+                                            ?error,
+                                            "failed to store router info to disk",
+                                        );
+                                    },
                                 None => tracing::warn!(
                                     target: LOG_TARGET,
                                     ?router_id,

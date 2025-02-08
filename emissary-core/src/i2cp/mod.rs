@@ -28,14 +28,14 @@ use crate::{
         socket::I2cpSocket,
     },
     netdb::NetDbHandle,
-    runtime::{JoinSet, Runtime, TcpListener},
+    runtime::{AddressBook, JoinSet, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
     util::AsyncReadExt,
 };
 
 use futures::StreamExt;
 
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -87,6 +87,7 @@ impl<R: Runtime> I2cpServer<R> {
         port: u16,
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
+        _address_book: Option<Arc<dyn AddressBook>>,
     ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
