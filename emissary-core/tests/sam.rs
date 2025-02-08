@@ -16,7 +16,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use emissary_core::{router::Router, Config, MetricsConfig, Ntcp2Config, SamConfig};
+use emissary_core::{
+    router::Router, runtime::AddressBook, Config, MetricsConfig, Ntcp2Config, SamConfig,
+};
 use emissary_util::runtime::tokio::Runtime;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use rand::{thread_rng, RngCore};
@@ -30,7 +32,7 @@ use yosemite::{
     DestinationKind, Error, I2pError, ProtocolError, RouterApi, Session, SessionOptions,
 };
 
-use std::{fs::File, io::Read, time::Duration};
+use std::{fs::File, future::Future, io::Read, pin::Pin, sync::Arc, time::Duration};
 
 async fn make_router(
     floodfill: bool,
@@ -1327,6 +1329,139 @@ async fn unpublished_destination() {
         Err(Error::Protocol(ProtocolError::Router(I2pError::CantReachPeer))) => {}
         _ => panic!("unexpected result"),
     }
+
+    assert!(handle.await.is_ok());
+}
+
+#[tokio::test]
+async fn host_lookup() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
+    let mut router_infos = Vec::<Vec<u8>>::new();
+    let net_id = (thread_rng().next_u32() % 255) as u8;
+
+    for i in 0..6 {
+        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+
+        router_infos.push(router_info);
+        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    }
+
+    // create router for the sam server
+    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let sam_port = router.protocol_address_info().sam_tcp.unwrap().port();
+    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+
+    // let the network boot up
+    tokio::time::sleep(Duration::from_secs(40)).await;
+
+    let mut session1 = tokio::time::timeout(
+        Duration::from_secs(30),
+        Session::<Stream>::new(SessionOptions {
+            samv3_tcp_port: sam_port,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("no timeout")
+    .expect("to succeed");
+    let dest = session1.destination().to_owned();
+
+    let handle = tokio::spawn(async move {
+        let mut stream = tokio::time::timeout(Duration::from_secs(120), session1.accept())
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        stream.write_all(b"hello, world!\n").await.unwrap();
+
+        let mut buffer = vec![0u8; 64];
+        let nread = stream.read(&mut buffer).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&buffer[..nread]),
+            Ok("goodbye, world!\n")
+        );
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let config = Config {
+        net_id: Some(net_id),
+        floodfill: false,
+        insecure_tunnels: true,
+        allow_local: true,
+        metrics: MetricsConfig {
+            disable_metrics: true,
+            ..Default::default()
+        },
+        ntcp2: Some(Ntcp2Config {
+            port: 0u16,
+            iv: {
+                let mut iv = [0u8; 16];
+                thread_rng().fill_bytes(&mut iv);
+                iv
+            },
+            key: {
+                let mut key = [0u8; 32];
+                thread_rng().fill_bytes(&mut key);
+                key
+            },
+            host: Some("127.0.0.1".parse().unwrap()),
+            publish: true,
+        }),
+        routers: router_infos.clone(),
+        samv3_config: Some(SamConfig {
+            tcp_port: 0u16,
+            udp_port: 0u16,
+            host: "127.0.0.1".to_string(),
+        }),
+        ..Default::default()
+    };
+
+    struct AddressBookImpl {
+        dest: String,
+    }
+
+    impl AddressBook for AddressBookImpl {
+        fn resolve(&self, _: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
+            let dest = self.dest.clone();
+            Box::pin(async move { Some(dest) })
+        }
+    }
+
+    let (mut router, _) =
+        Router::<Runtime>::with_address_book(config, Arc::new(AddressBookImpl { dest }))
+            .await
+            .unwrap();
+    let sam_port = router.protocol_address_info().sam_tcp.unwrap().port();
+    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+
+    tokio::time::sleep(Duration::from_secs(30)).await;
+
+    let mut session2 = tokio::time::timeout(
+        Duration::from_secs(30),
+        Session::<Stream>::new(SessionOptions {
+            samv3_tcp_port: sam_port,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("no timeout")
+    .expect("to succeed");
+
+    let mut stream = tokio::time::timeout(Duration::from_secs(10), session2.connect("host.i2p"))
+        .await
+        .expect("no timeout")
+        .expect("to succeed");
+
+    let mut buffer = vec![0u8; 64];
+    let nread = stream.read(&mut buffer).await.unwrap();
+
+    assert_eq!(std::str::from_utf8(&buffer[..nread]), Ok("hello, world!\n"));
+
+    stream.write_all(b"goodbye, world!\n").await.unwrap();
 
     assert!(handle.await.is_ok());
 }
