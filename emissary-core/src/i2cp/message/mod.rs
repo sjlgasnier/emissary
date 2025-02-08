@@ -92,7 +92,7 @@ pub enum RequestKind {
     /// Host name.
     HostName {
         /// Host name.
-        _host_name: Str,
+        host_name: Str,
     },
 
     /// Hash.
@@ -501,7 +501,7 @@ impl Message {
                 _hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
             },
             1 => RequestKind::HostName {
-                _host_name: Str::parse_frame(rest).ok()?.1,
+                host_name: Str::parse_frame(rest).ok()?.1,
             },
             kind => {
                 tracing::warn!(

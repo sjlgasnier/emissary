@@ -62,6 +62,9 @@ const I2CP_PROTOCOL_BYTE: u8 = 0x2a;
 /// Listens to incoming I2CP streams and dispatches them to a separate event loop
 /// after the I2CP protocol byte has been received.
 pub struct I2cpServer<R: Runtime> {
+    /// Address book,
+    address_book: Option<Arc<dyn AddressBook>>,
+
     /// TCP listener.
     listener: R::TcpListener,
 
@@ -87,7 +90,7 @@ impl<R: Runtime> I2cpServer<R> {
         port: u16,
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
-        _address_book: Option<Arc<dyn AddressBook>>,
+        address_book: Option<Arc<dyn AddressBook>>,
     ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
@@ -101,6 +104,7 @@ impl<R: Runtime> I2cpServer<R> {
             .ok_or(Error::Connection(ConnectionError::BindFailure))?;
 
         Ok(Self {
+            address_book,
             listener,
             netdb_handle,
             next_session_id: 1u16,
@@ -178,6 +182,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                 Poll::Ready(Some(Ok(stream))) => {
                     let session_id = self.next_session_id();
                     let tunnel_manager_handle = self.tunnel_manager_handle.clone();
+                    let address_book = self.address_book.clone();
 
                     tracing::trace!(
                         target: LOG_TARGET,
@@ -189,6 +194,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         session_id,
                         I2cpSocket::new(stream),
                         tunnel_manager_handle,
+                        address_book,
                     ));
                 }
             }
