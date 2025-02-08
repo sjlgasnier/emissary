@@ -115,6 +115,11 @@ pub struct HttpProxyConfig {
     pub host: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddressBookConfig {
+    pub default: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
     disable: bool,
@@ -132,6 +137,8 @@ impl From<MetricsConfig> for emissary_core::MetricsConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
+    #[serde(rename = "address-book")]
+    address_book: Option<AddressBookConfig>,
     #[serde(default)]
     allow_local: bool,
     caps: Option<String>,
@@ -154,6 +161,9 @@ struct EmissaryConfig {
 
 /// Router configuration.
 pub struct Config {
+    /// Address book config.
+    pub address_book: Option<AddressBookConfig>,
+
     /// Allow local addresses.
     pub allow_local: bool,
 
@@ -528,6 +538,11 @@ impl Config {
         let (ssu2_static_key, ssu2_intro_key) = Self::create_ssu2_keys(base_path.clone())?;
 
         let config = EmissaryConfig {
+            address_book: Some(AddressBookConfig {
+                default: String::from(
+                    "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                ),
+            }),
             allow_local: false,
             caps: None,
             exploratory: None,
@@ -572,6 +587,11 @@ impl Config {
         );
 
         Ok(Self {
+            address_book: Some(AddressBookConfig {
+                default: String::from(
+                    "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                ),
+            }),
             allow_local: false,
             base_path,
             caps: None,
@@ -636,6 +656,11 @@ impl Config {
             Some(config) => config,
             None => {
                 let config = EmissaryConfig {
+                    address_book: Some(AddressBookConfig {
+                        default: String::from(
+                            "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                        ),
+                    }),
                     allow_local: false,
                     caps: None,
                     exploratory: None,
@@ -679,6 +704,11 @@ impl Config {
         };
 
         Ok(Self {
+            address_book: Some(AddressBookConfig {
+                default: String::from(
+                    "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                ),
+            }),
             allow_local: config.allow_local,
             base_path,
             caps: config.caps,
@@ -1030,6 +1060,7 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
+            address_book: None,
             allow_local: false,
             caps: None,
             exploratory: None,

@@ -16,56 +16,158 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![allow(unused)]
+use crate::config::AddressBookConfig;
 
 use emissary_core::runtime::AddressBook;
 use reqwest::{
-    header::{HeaderMap, HeaderValue, CONNECTION, USER_AGENT},
-    Client,
+    header::{HeaderMap, HeaderValue, CONNECTION},
+    Client, Proxy,
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
 };
 
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
+/// Logging target for the file
+const LOG_TARGET: &str = "emissary::address-book";
 
 /// Address book.
 pub struct AddressBookManager {
     /// Path to address book.
-    address_book: &'static str,
+    address_book_path: &'static str,
+
+    /// URL which hosts.txt is downloaded from.
+    hosts_url: String,
 }
 
 impl AddressBookManager {
     /// Create new [`AddressBookManager`].
-    pub fn new(base_path: PathBuf) -> Self {
+    pub fn new(base_path: PathBuf, config: AddressBookConfig) -> Self {
         Self {
-            address_book: base_path
+            address_book_path: base_path
                 .join("addressbook/addresses")
                 .to_str()
                 .expect("to succeed")
                 .to_string()
                 .leak(),
+            hosts_url: config.default,
         }
     }
 
     /// Get opaque handling implementing [`AddressBook`].
     pub fn handle(&self) -> Arc<dyn AddressBook> {
         Arc::new(AddressBookHandle {
-            address_book: self.address_book,
+            address_book_path: self.address_book_path,
         })
     }
 
     /// Start event loop for [`AddressBookManager`].
     pub async fn start(self, http_port: u16, http_host: String) {
-        todo!();
+        if Path::new(self.address_book_path).exists() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "address book exists, skipping download",
+            );
+            return;
+        }
+
+        tracing::info!(
+            target: LOG_TARGET,
+            ?http_port,
+            ?http_host,
+            hosts_url = ?self.hosts_url,
+            "create address book",
+        );
+
+        loop {
+            let client = Client::builder()
+                .proxy(Proxy::http(format!("http://{http_host}:{http_port}")).expect("to succeed"))
+                .build()
+                .expect("to succeed");
+
+            let response = match client
+                .get(format!("{}", self.hosts_url))
+                .headers(HeaderMap::from_iter([(
+                    CONNECTION,
+                    HeaderValue::from_static("close"),
+                )]))
+                .send()
+                .await
+            {
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        server = ?self.hosts_url,
+                        ?error,
+                        "failed to fetch hosts.txt"
+                    );
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    continue;
+                }
+                Ok(response) => response,
+            };
+
+            if !response.status().is_success() {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    server = ?self.hosts_url,
+                    status = ?response.status(),
+                    "request to address book server failed",
+                );
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                continue;
+            }
+
+            let response = match response.bytes().await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        server = ?self.hosts_url,
+                        ?error,
+                        "failed to get response from address book server"
+                    );
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    continue;
+                }
+            };
+
+            let mut file = tokio::fs::File::create(self.address_book_path).await.unwrap();
+            file.write_all(&response).await.unwrap();
+            break;
+        }
     }
 }
 
+/// Address book handle.
 #[derive(Clone)]
 pub struct AddressBookHandle {
     /// Path to address book.
-    address_book: &'static str,
+    address_book_path: &'static str,
 }
 
 impl AddressBook for AddressBookHandle {
-    fn resolve(&self, name: String) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send>> {
-        Box::pin(async move { None })
+    fn resolve(&self, host: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> {
+        let path = self.address_book_path;
+
+        Box::pin(async move {
+            let file = tokio::fs::File::open(path).await.ok()?;
+            let mut reader = BufReader::new(file).lines();
+
+            while let Ok(line) = reader.next_line().await {
+                if let Some((key, value)) = line?.split_once('=') {
+                    if key.trim() == host {
+                        return Some(value.trim().to_string());
+                    }
+                }
+            }
+
+            None
+        })
     }
 }

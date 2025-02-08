@@ -199,6 +199,6 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
 }
 
 pub trait AddressBook: Unpin + Send + Sync + 'static {
-    /// Attempt to resolve `name` into a base32-encoded key of a remote `Destination`.
-    fn resolve(&self, name: String) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send>>;
+    /// Attempt to resolve `host` into a base64-encoded `Destination`.
+    fn resolve(&self, host: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
 }

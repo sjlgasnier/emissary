@@ -65,10 +65,6 @@ async fn main() -> anyhow::Result<()> {
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
 
-    // create address book and allocate address book handle
-    let address_book_manager = AddressBookManager::new(config.base_path.clone());
-    let address_book_handle = address_book_manager.handle();
-
     // try to reseed the router if there aren't enough known routers
     if (config.routers.len() < RESEED_THRESHOLD && !config.reseed.disable)
         || arguments.reseed.force_reseed.unwrap_or(false)
@@ -130,10 +126,24 @@ async fn main() -> anyhow::Result<()> {
 
     let path = config.base_path.clone();
     let http = config.http_proxy.take();
-    let (mut router, local_router_info) =
-        Router::<Runtime>::with_address_book(config.into(), address_book_handle)
+
+    let (mut router, local_router_info, address_book_manager) = match config.address_book.take() {
+        None => Router::<Runtime>::new(config.into())
             .await
-            .unwrap();
+            .map(|(router, info)| (router, info, None)),
+
+        Some(address_book_config) => {
+            // create address book, allocate address book handle and pass it to `Router`
+            let address_book_manager =
+                AddressBookManager::new(config.base_path.clone(), address_book_config);
+            let address_book_handle = address_book_manager.handle();
+
+            Router::<Runtime>::with_address_book(config.into(), address_book_handle)
+                .await
+                .map(|(router, info)| (router, info, Some(address_book_manager)))
+        }
+    }
+    .map_err(|error| anyhow!(error))?;
 
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
@@ -143,10 +153,12 @@ async fn main() -> anyhow::Result<()> {
     // sam must also be enabled for the http proxy to work
     match (http, router.protocol_address_info().sam_tcp) {
         (Some(config), Some(address)) => {
-            // start event loop of address book manager
+            // start event loop of address book manager if address book was enabled
             //
             // address book depends on the http proxy as it downloads hosts.txt from inside i2p
-            tokio::spawn(address_book_manager.start(config.port, config.host.clone()));
+            if let Some(address_book_manager) = address_book_manager {
+                tokio::spawn(address_book_manager.start(config.port, config.host.clone()));
+            }
 
             // start event loop of http proxy
             tokio::spawn(async move {
