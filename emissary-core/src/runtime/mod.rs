@@ -197,3 +197,8 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
     /// GZIP-decompress `bytes` and return the decompressed byte vector.
     fn gzip_decompress(bytes: impl AsRef<[u8]>) -> Option<Vec<u8>>;
 }
+
+pub trait AddressBook: Unpin + Send + Sync + 'static {
+    /// Attempt to resolve `host` into a base64-encoded `Destination`.
+    fn resolve(&self, host: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
+}

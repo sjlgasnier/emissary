@@ -34,7 +34,7 @@ use crate::{
         socket::I2cpSocket,
     },
     primitives::{Date, DestinationId, Lease, Str, TunnelId},
-    runtime::Runtime,
+    runtime::{AddressBook, Runtime},
     tunnel::{TunnelManagerHandle, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
 };
 
@@ -42,7 +42,7 @@ use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use hashbrown::{HashMap, HashSet};
 
-use alloc::{boxed::Box, string::ToString, vec::Vec};
+use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::{
     fmt,
     future::Future,
@@ -57,6 +57,9 @@ const LOG_TARGET: &str = "emissary::i2cp::pending-session";
 
 /// I2CP client session context.
 pub struct I2cpSessionContext<R: Runtime> {
+    /// Address book.
+    pub address_book: Option<Arc<dyn AddressBook>>,
+
     /// Destination ID.
     pub destination_id: DestinationId,
 
@@ -222,6 +225,9 @@ impl<R: Runtime> PendingSessionState<R> {
 
 /// Pending I2CP client session.
 pub struct PendingI2cpSession<R: Runtime> {
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
+
     /// State of the pending session.
     state: PendingSessionState<R>,
 
@@ -235,8 +241,10 @@ impl<R: Runtime> PendingI2cpSession<R> {
         session_id: u16,
         socket: I2cpSocket<R>,
         tunnel_manager_handle: TunnelManagerHandle,
+        address_book: Option<Arc<dyn AddressBook>>,
     ) -> Self {
         Self {
+            address_book,
             state: PendingSessionState::Inactive { session_id, socket },
             tunnel_manager_handle,
         }
@@ -389,6 +397,7 @@ impl<R: Runtime> PendingI2cpSession<R> {
                     // the lease set is returned to the active session constructor which publishes
                     // it to netdb
                     return Some(I2cpSessionContext {
+                        address_book: self.address_book.clone(),
                         inbound,
                         options,
                         outbound,

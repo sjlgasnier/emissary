@@ -17,10 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    crypto::base64_decode,
     destination::{Destination, DestinationEvent, LeaseSetStatus},
     i2cp::{
         message::{
-            BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload,
+            BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload, RequestKind,
             RequestVariableLeaseSet, SessionId, SessionStatus, SessionStatusKind, SetDate,
         },
         payload::I2cpParameters,
@@ -30,14 +31,14 @@ use crate::{
     netdb::NetDbHandle,
     primitives::{Date, DestinationId, Str},
     protocol::Protocol,
-    runtime::Runtime,
+    runtime::{AddressBook, JoinSet, Runtime},
 };
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use hashbrown::HashMap;
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -66,11 +67,17 @@ struct PendingMessage {
 
 /// I2CP client session.
 pub struct I2cpSession<R: Runtime> {
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
+
     /// Destination.
     destination: Destination<R>,
 
     /// Next message ID.
     next_message_id: u32,
+
+    /// Pending host lookups.
+    host_lookups: R::JoinSet<Option<(SessionId, u32, BytesMut)>>,
 
     /// Session options.
     #[allow(unused)]
@@ -90,6 +97,7 @@ impl<R: Runtime> I2cpSession<R> {
     /// Create new [`I2cpSession`] from `stream`.
     pub fn new(netdb_handle: NetDbHandle, context: I2cpSessionContext<R>) -> Self {
         let I2cpSessionContext {
+            address_book,
             inbound,
             outbound,
             session_id,
@@ -130,7 +138,9 @@ impl<R: Runtime> I2cpSession<R> {
         destination.publish_lease_set(Bytes::from(destination_id.to_vec()), leaseset);
 
         Self {
+            address_book,
             destination,
+            host_lookups: R::join_set(),
             next_message_id: 0u32,
             options,
             pending_connections: HashMap::new(),
@@ -219,11 +229,45 @@ impl<R: Runtime> I2cpSession<R> {
                     "host lookup, address book not implemented",
                 );
 
-                self.socket.send_message(HostReply::new(
-                    session_id.as_u16(),
-                    request_id,
-                    HostReplyKind::Failure,
-                ));
+                match (self.address_book.clone(), kind) {
+                    (Some(address_book), RequestKind::HostName { host_name }) => {
+                        self.host_lookups.push(async move {
+                            let destination = address_book.resolve(host_name.to_string()).await?;
+
+                            Some((
+                                session_id,
+                                request_id,
+                                BytesMut::from(&base64_decode(destination)?[..]),
+                            ))
+                        });
+                    }
+                    (None, kind) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?kind,
+                            "address book doesn't exist",
+                        );
+
+                        self.socket.send_message(HostReply::new(
+                            session_id.as_u16(),
+                            request_id,
+                            HostReplyKind::Failure,
+                        ));
+                    }
+                    (Some(_), RequestKind::Hash { _hash }) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            hash = ?_hash,
+                            "hash-based host lookup not supported",
+                        );
+
+                        self.socket.send_message(HostReply::new(
+                            session_id.as_u16(),
+                            request_id,
+                            HostReplyKind::Failure,
+                        ));
+                    }
+                }
             }
             Message::CreateLeaseSet2 {
                 session_id,
@@ -423,6 +467,25 @@ impl<R: Runtime> Future for I2cpSession<R> {
                     );
 
                     // TODO: implement
+                }
+            }
+        }
+
+        loop {
+            match self.host_lookups.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                // TODO: better error reporting
+                Poll::Ready(Some(None)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    "failed to resolve host",
+                ),
+                Poll::Ready(Some(Some((session_id, request_id, destination)))) => {
+                    self.socket.send_message(HostReply::new(
+                        session_id.as_u16(),
+                        request_id,
+                        HostReplyKind::Success { destination },
+                    ));
                 }
             }
         }

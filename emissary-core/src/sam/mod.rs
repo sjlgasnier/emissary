@@ -21,10 +21,11 @@
 //! https://geti2p.net/en/docs/api/samv3
 
 use crate::{
+    crypto::base64_decode,
     error::{ChannelError, ConnectionError, Error},
     netdb::NetDbHandle,
-    primitives::{DestinationId, Str},
-    runtime::{JoinSet, Runtime, TcpListener, UdpSocket},
+    primitives::{Destination, DestinationId, Str},
+    runtime::{AddressBook, JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
         parser::{Datagram, HostKind},
         pending::{
@@ -32,6 +33,7 @@ use crate::{
             session::{PendingSamSession, SamSessionContext},
         },
         session::{SamSession, SamSessionCommand, SamSessionCommandRecycle},
+        socket::SamSocket,
     },
     tunnel::{TunnelManagerHandle, TunnelPoolConfig},
 };
@@ -146,11 +148,11 @@ enum DatagramWriterState {
 
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
+
     /// Active destinations.
     active_destinations: HashSet<DestinationId>,
-
-    /// Session ID to `DestinationId` mappings.
-    session_id_destinations: HashMap<Arc<str>, DestinationId>,
 
     /// Active SAMV3 sessions.
     active_sessions: SessionContext<R, Arc<str>>,
@@ -163,6 +165,16 @@ pub struct SamServer<R: Runtime> {
 
     /// Datagra writer state.
     datagram_writer_state: DatagramWriterState,
+
+    /// Pending host lookups.
+    host_lookups: R::JoinSet<
+        Option<(
+            Arc<str>,
+            SamSocket<R>,
+            DestinationId,
+            HashMap<String, String>,
+        )>,
+    >,
 
     /// TCP listener.
     listener: R::TcpListener,
@@ -187,6 +199,9 @@ pub struct SamServer<R: Runtime> {
     /// Datagram read buffer.
     read_buffer: Vec<u8>,
 
+    /// Session ID to `DestinationId` mappings.
+    session_id_destinations: HashMap<Arc<str>, DestinationId>,
+
     /// SAMv3 datagram socket.
     socket: R::UdpSocket,
 
@@ -203,6 +218,7 @@ impl<R: Runtime> SamServer<R> {
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
+        address_book: Option<Arc<dyn AddressBook>>,
     ) -> crate::Result<Self> {
         let listener = R::TcpListener::bind(SocketAddr::new(
             host.parse::<IpAddr>().expect("valid address"),
@@ -229,11 +245,13 @@ impl<R: Runtime> SamServer<R> {
         let (datagram_tx, datagram_rx) = channel(1024);
 
         Ok(Self {
+            address_book,
             active_destinations: HashSet::new(),
             active_sessions: SessionContext::new(),
             datagram_rx,
             datagram_tx,
             datagram_writer_state: DatagramWriterState::GetMessage,
+            host_lookups: R::join_set(),
             listener,
             metrics,
             netdb_handle,
@@ -495,13 +513,36 @@ impl<R: Runtime> Future for SamServer<R> {
                                 )
                             }
                         }
-                        HostKind::Host { host } => {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                %host,
-                                "lookup host",
-                            );
-                        }
+                        HostKind::Host { host } => match &this.address_book {
+                            None => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %session_id,
+                                    %host,
+                                    "host lookup requested but address book not specified",
+                                );
+                                debug_assert!(false);
+                            }
+                            Some(address_book) => {
+                                tracing::trace!(
+                                    target: LOG_TARGET,
+                                    %session_id,
+                                    %host,
+                                    "resolve host",
+                                );
+
+                                // attempt to resolve `host` into a `DestinationId`
+                                let address_book = Arc::clone(&address_book);
+
+                                this.host_lookups.push(async move {
+                                    let destination = address_book.resolve(host).await?;
+                                    let destination = base64_decode(destination)?;
+                                    let destination = Destination::parse(&destination)?;
+
+                                    Some((session_id, socket, destination.id(), options))
+                                });
+                            }
+                        },
                     },
                     ConnectionKind::Accept {
                         session_id,
@@ -605,6 +646,34 @@ impl<R: Runtime> Future for SamServer<R> {
                         this.active_destinations.remove(&destination_id);
                     }
                 }
+            }
+        }
+
+        loop {
+            match this.host_lookups.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(()),
+                // TODO: better error reporting
+                Poll::Ready(Some(None)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    "failed to resolve host",
+                ),
+                Poll::Ready(Some(Some((session_id, socket, destination_id, options)))) =>
+                    if let Err(error) = this.active_sessions.send_command(
+                        &session_id,
+                        SamSessionCommand::Connect {
+                            socket,
+                            destination_id,
+                            options,
+                        },
+                    ) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %session_id,
+                            ?error,
+                            "failed to send `STREAM CONNECT` to active session",
+                        )
+                    },
             }
         }
 

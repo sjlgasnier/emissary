@@ -549,6 +549,12 @@ impl<R: Runtime> TransportManager<R> {
     fn on_dial_router(&mut self, router_id: RouterId) {
         match self.router_ctx.profile_storage().get(&router_id) {
             Some(router_info) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "start dialing router",
+                );
+
                 // TODO: compare transport costs
                 self.transports[0].connect(router_info);
             }
@@ -644,6 +650,12 @@ impl<R: Runtime> Future for TransportManager<R> {
                     self.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).decrement(1);
                 }
                 Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id })) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "failed to dial router",
+                    );
+
                     self.router_ctx.metrics_handle().counter(NUM_DIAL_FAILURES).increment(1);
                     self.router_ctx.profile_storage().dial_failed(&router_id);
                 }

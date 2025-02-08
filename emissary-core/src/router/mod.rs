@@ -25,7 +25,7 @@ use crate::{
     primitives::RouterInfo,
     profile::{Profile, ProfileStorage},
     router::context::RouterContext,
-    runtime::Runtime,
+    runtime::{AddressBook, Runtime},
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
@@ -37,7 +37,7 @@ use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, Stream};
 use rand_core::RngCore;
 
-use alloc::{string::ToString, vec::Vec};
+use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::{
     net::SocketAddr,
     pin::Pin,
@@ -60,8 +60,8 @@ const IMMEDIATE_SHUTDOWN_COUNT: usize = 2usize;
 /// Profile storage backup interval.
 ///
 /// How often is backup (stored to disk) taken of [`ProfileStorage`].
-// const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(30);
+const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+// const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Protocol address information.
 #[derive(Debug, Default, Copy, Clone)]
@@ -118,8 +118,25 @@ pub struct Router<R: Runtime> {
 }
 
 impl<R: Runtime> Router<R> {
-    /// Create new [`Router`].
-    pub async fn new(mut config: Config) -> crate::Result<(Self, Vec<u8>)> {
+    /// Create new [`Router`] from `config`
+    pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
+        Self::make_router(config, None).await
+    }
+
+    /// Create new [`Router`] from `config` and pass `address_book` to SAM and I2CP.
+    pub async fn with_address_book(
+        config: Config,
+        address_book: Arc<dyn AddressBook>,
+    ) -> crate::Result<(Self, Vec<u8>)> {
+        Self::make_router(config, Some(address_book)).await
+    }
+
+    /// Create new [`Router`] from `config` and pass `address_book` to [`SamServer`] and
+    /// [`I2cpServer`] if address book support was enabled.
+    async fn make_router(
+        mut config: Config,
+        address_book: Option<Arc<dyn AddressBook>>,
+    ) -> crate::Result<(Self, Vec<u8>)> {
         // attempt to initialize the ntcp2 transport from provided config
         //
         // this is done prior to constructing local router info in case ntcp2 config contained an
@@ -277,9 +294,13 @@ impl<R: Runtime> Router<R> {
 
         // initialize i2cp server if it was enabled
         if let Some(I2cpConfig { port }) = i2cp_config {
-            let i2cp_server =
-                I2cpServer::<R>::new(port, netdb_handle.clone(), tunnel_manager_handle.clone())
-                    .await?;
+            let i2cp_server = I2cpServer::<R>::new(
+                port,
+                netdb_handle.clone(),
+                tunnel_manager_handle.clone(),
+                address_book.clone(),
+            )
+            .await?;
 
             R::spawn(i2cp_server);
         }
@@ -297,6 +318,7 @@ impl<R: Runtime> Router<R> {
                 netdb_handle.clone(),
                 tunnel_manager_handle.clone(),
                 metrics_handle,
+                address_book,
             )
             .await?;
 
