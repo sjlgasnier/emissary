@@ -20,7 +20,7 @@ use emissary_core::{
     router::Router, runtime::AddressBook, Config, MetricsConfig, Ntcp2Config, SamConfig,
 };
 use emissary_util::runtime::tokio::Runtime;
-use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
+use futures::StreamExt;
 use rand::{thread_rng, RngCore};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -874,7 +874,7 @@ async fn closed_stream_detected() {
             std::str::from_utf8(&buffer[..nread]),
             Ok("goodbye, world!\n")
         );
-        stream.close().await.unwrap();
+        stream.shutdown().await.unwrap();
         drop(stream);
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
@@ -969,7 +969,7 @@ async fn close_and_reconnect() {
                 std::str::from_utf8(&buffer[..nread]),
                 Ok("goodbye, world!\n")
             );
-            stream.close().await.unwrap();
+            stream.shutdown().await.unwrap();
             drop(stream);
         }
         tokio::time::sleep(Duration::from_secs(5)).await;

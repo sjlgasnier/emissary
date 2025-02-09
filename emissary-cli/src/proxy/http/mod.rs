@@ -24,13 +24,12 @@ use crate::{
     },
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinSet,
 };
-use yosemite::{style, Session, SessionOptions, Stream};
+use yosemite::{style, Session, SessionOptions, Stream, StreamOptions};
 
 use std::{sync::LazyLock, time::Duration};
 
@@ -319,7 +318,9 @@ impl HttpProxy {
                     }
                 },
                 request = self.requests.join_next(), if !self.requests.is_empty() => match request {
-                    Some(Ok(Some(Request { mut stream, host, request }))) => match self.session.connect(&host).await {
+                    Some(Ok(Some(Request { mut stream, host, request }))) => match self.session.connect_with_options(
+                        &host, StreamOptions { dst_port: 80, ..Default::default() }).await
+                    {
                         Ok(i2p_stream) => {
                             self.responses.spawn(Self::send_response(stream, i2p_stream, request));
                         }

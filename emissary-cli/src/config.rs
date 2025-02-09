@@ -120,6 +120,15 @@ pub struct AddressBookConfig {
     pub default: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TunnelConfig {
+    pub name: String,
+    pub address: Option<String>,
+    pub port: u16,
+    pub destination: String,
+    pub destination_port: Option<u16>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
     disable: bool,
@@ -157,6 +166,7 @@ struct EmissaryConfig {
     reseed: Option<ReseedConfig>,
     sam: Option<SamConfig>,
     ssu2: Option<Ssu2Config>,
+    tunnels: Vec<TunnelConfig>,
 }
 
 /// Router configuration.
@@ -223,6 +233,9 @@ pub struct Config {
 
     /// Static key.
     pub static_key: [u8; 32],
+
+    /// Tunnel config.
+    pub tunnels: Vec<TunnelConfig>,
 }
 
 impl From<Config> for emissary_core::Config {
@@ -564,17 +577,18 @@ impl Config {
                 host: None,
                 publish: Some(false),
             }),
-            ssu2: Some(Ssu2Config {
-                port: 8888u16,
-                host: None,
-                publish: Some(false),
-            }),
+            reseed: None,
             sam: Some(SamConfig {
                 tcp_port: 7656,
                 udp_port: 7655,
                 host: None,
             }),
-            reseed: None,
+            ssu2: Some(Ssu2Config {
+                port: 8888u16,
+                host: None,
+                publish: Some(false),
+            }),
+            tunnels: Vec::new(),
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -637,6 +651,7 @@ impl Config {
                 publish: false,
             }),
             static_key,
+            tunnels: Vec::new(),
         })
     }
 
@@ -693,6 +708,7 @@ impl Config {
                         udp_port: 7655,
                         host: None,
                     }),
+                    tunnels: Vec::new(),
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -753,6 +769,7 @@ impl Config {
             }),
             signing_key,
             static_key,
+            tunnels: config.tunnels,
         })
     }
 
@@ -1076,9 +1093,10 @@ mod tests {
                 host: None,
                 publish: None,
             }),
-            ssu2: None,
             reseed: None,
             sam: None,
+            ssu2: None,
+            tunnels: Vec::new(),
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();

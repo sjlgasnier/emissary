@@ -18,7 +18,7 @@
 
 use crate::{
     address_book::AddressBookManager, cli::Arguments, config::Config, error::Error,
-    proxy::http::HttpProxy, signal::SignalHandler, storage::Storage,
+    proxy::http::HttpProxy, signal::SignalHandler, storage::Storage, tunnel::Tunnel,
 };
 
 use anyhow::anyhow;
@@ -30,7 +30,7 @@ use emissary_core::{
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
 use futures::StreamExt;
 
-use std::{fs::File, io::Write};
+use std::{fs::File, io::Write, mem};
 
 mod address_book;
 mod cli;
@@ -40,6 +40,7 @@ mod logger;
 mod proxy;
 mod signal;
 mod storage;
+mod tunnel;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -126,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
 
     let path = config.base_path.clone();
     let http = config.http_proxy.take();
+    let client_tunnels = mem::take(&mut config.tunnels);
 
     let (mut router, local_router_info, address_book_manager) = match config.address_book.take() {
         None => Router::<Runtime>::new(config.into())
@@ -148,11 +150,10 @@ async fn main() -> anyhow::Result<()> {
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
 
-    // start http proxy if it was enabled
-    //
-    // sam must also be enabled for the http proxy to work
-    match (http, router.protocol_address_info().sam_tcp) {
-        (Some(config), Some(address)) => {
+    // if sam was enabled, start all enabled proxies, client tunnels and the address book
+    if let Some(address) = router.protocol_address_info().sam_tcp {
+        // start http proxy if it was enabled
+        if let Some(config) = http {
             // start event loop of address book manager if address book was enabled
             //
             // address book depends on the http proxy as it downloads hosts.txt from inside i2p
@@ -182,11 +183,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
         }
-        (Some(_), None) => tracing::warn!(
-            target: LOG_TARGET,
-            "sam not enabled, cannot start http proxy",
-        ),
-        (_, _) => {}
+
+        tracing::error!(target: LOG_TARGET, "start clien tunnels = {client_tunnels:#?}");
+
+        // start client tunnels
+        for config in client_tunnels {
+            tokio::spawn(Tunnel::start(config, address.port()));
+        }
     }
 
     loop {

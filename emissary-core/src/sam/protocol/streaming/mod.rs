@@ -119,8 +119,14 @@ pub enum StreamManagerEvent {
         /// ID of remote destination.
         destination_id: DestinationId,
 
+        /// Destination port.
+        dst_port: u16,
+
         /// Packet.
         packet: Vec<u8>,
+
+        /// Source port.
+        src_port: u16,
     },
 
     /// [`StreamManager`] has been shut down.
@@ -204,17 +210,23 @@ struct PendingOutboundStream<R: Runtime> {
     /// ID of the remote destination.
     destination_id: DestinationId,
 
+    /// Destination port.
+    dst_port: u16,
+
+    /// Number of `SYN`s sent thus far.
+    num_sent: usize,
+
+    /// Serialised `SYN` packet.
+    packet: Vec<u8>,
+
     /// Has the stream configured to be silent.
     silent: bool,
 
     /// SAMv3 client socket that was used to send `STREAM CONNECT` command.
     socket: SamSocket<R>,
 
-    /// Serialised `SYN` packet.
-    packet: Vec<u8>,
-
-    /// Number of `SYN`s sent thus far.
-    num_sent: usize,
+    /// Source port.
+    src_port: u16,
 }
 
 /// I2P virtual stream manager.
@@ -237,13 +249,13 @@ pub struct StreamManager<R: Runtime> {
     listener: StreamListener<R>,
 
     /// RX channel for receiving [`Packet`]s from active streams.
-    outbound_rx: Receiver<(DestinationId, Vec<u8>)>,
+    outbound_rx: Receiver<(DestinationId, Vec<u8>, u16, u16)>,
 
     /// Timers for outbound streams.
     outbound_timers: R::JoinSet<u32>,
 
     /// TX channel given to active streams they use for sending messages to the network.
-    outbound_tx: Sender<(DestinationId, Vec<u8>)>,
+    outbound_tx: Sender<(DestinationId, Vec<u8>, u16, u16)>,
 
     /// Pending events.
     pending_events: VecDeque<StreamManagerEvent>,
@@ -305,7 +317,12 @@ impl<R: Runtime> StreamManager<R> {
     /// active listeners, mark the stream as pending and start a timer for waiting for a new
     /// listener to be registered. If no listener is registered within the time window, the stream
     /// is closed.
-    fn on_synchronize(&mut self, packet: Vec<u8>) -> Result<(), StreamingError> {
+    fn on_synchronize(
+        &mut self,
+        packet: Vec<u8>,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Result<(), StreamingError> {
         let Packet {
             send_stream_id,
             recv_stream_id,
@@ -386,6 +403,8 @@ impl<R: Runtime> StreamManager<R> {
             destination_id,
             silent,
             socket,
+            dst_port,
+            src_port,
             ..
         }) = self.pending_outbound.remove(&send_stream_id)
         {
@@ -404,7 +423,11 @@ impl<R: Runtime> StreamManager<R> {
                 },
                 recv_stream_id,
                 destination_id.clone(),
-                StreamKind::Outbound { send_stream_id },
+                StreamKind::Outbound {
+                    dst_port,
+                    send_stream_id,
+                    src_port,
+                },
             );
 
             return Ok(());
@@ -469,7 +492,8 @@ impl<R: Runtime> StreamManager<R> {
                     payload.to_vec(),
                     &self.signing_key,
                 );
-                let _ = self.outbound_tx.try_send((destination_id.clone(), packet));
+                let _ =
+                    self.outbound_tx.try_send((destination_id.clone(), packet, dst_port, src_port));
 
                 self.pending_inbound.insert(recv_stream_id, pending);
                 self.destination_streams
@@ -670,7 +694,12 @@ impl<R: Runtime> StreamManager<R> {
 
     /// Handle `payload` received from `src_port` to `dst_port`.
     pub fn on_packet(&mut self, payload: I2cpPayload) -> Result<(), StreamingError> {
-        let I2cpPayload { payload, .. } = payload;
+        let I2cpPayload {
+            payload,
+            dst_port,
+            src_port,
+            ..
+        } = payload;
 
         let packet = Packet::peek(&payload).ok_or(StreamingError::Malformed)?;
 
@@ -704,7 +733,12 @@ impl<R: Runtime> StreamManager<R> {
             match stream.on_packet(payload) {
                 PendingStreamResult::DoNothing => {}
                 PendingStreamResult::Send { packet } => {
-                    let _ = self.outbound_tx.try_send((stream.destination_id.clone(), packet));
+                    let _ = self.outbound_tx.try_send((
+                        stream.destination_id.clone(),
+                        packet,
+                        dst_port,
+                        src_port,
+                    ));
                 }
                 PendingStreamResult::SendAndDestroy { packet: pkt } => {
                     tracing::debug!(
@@ -713,7 +747,12 @@ impl<R: Runtime> StreamManager<R> {
                         recv_stream_id = ?packet.recv_stream_id(),
                         "send packet and destroy pending stream",
                     );
-                    let _ = self.outbound_tx.try_send((stream.destination_id.clone(), pkt));
+                    let _ = self.outbound_tx.try_send((
+                        stream.destination_id.clone(),
+                        pkt,
+                        dst_port,
+                        src_port,
+                    ));
 
                     if let Some(PendingStream { destination_id, .. }) =
                         self.pending_inbound.remove(&packet.recv_stream_id())
@@ -751,7 +790,7 @@ impl<R: Runtime> StreamManager<R> {
         //
         // any new streams are ignored if stream manager is shutting down
         if packet.synchronize() && !self.shutdown_handler.shutting_down() {
-            return self.on_synchronize(payload);
+            return self.on_synchronize(payload, src_port, dst_port);
         }
 
         let Packet {
@@ -791,8 +830,18 @@ impl<R: Runtime> StreamManager<R> {
         &mut self,
         destination_id: DestinationId,
         socket: SamSocket<R>,
-        silent: bool,
-    ) -> (BytesMut, u32) {
+        options: HashMap<String, String>,
+    ) -> (u32, BytesMut, u16, u16) {
+        let silent = options
+            .get("SILENT")
+            .map_or(false, |value| value.parse::<bool>().unwrap_or(false));
+        let src_port = options
+            .get("FROM_PORT")
+            .map_or(0u16, |value| value.parse::<u16>().unwrap_or(0u16));
+        let dst_port = options
+            .get("TO_PORT")
+            .map_or(0u16, |value| value.parse::<u16>().unwrap_or(0u16));
+
         // generate free receive stream id
         let recv_stream_id = {
             let mut rng = R::rng();
@@ -832,10 +881,12 @@ impl<R: Runtime> StreamManager<R> {
             recv_stream_id,
             PendingOutboundStream {
                 destination_id: destination_id.clone(),
-                silent,
-                socket,
+                dst_port,
                 num_sent: 1usize,
                 packet: packet.clone().to_vec(),
+                silent,
+                socket,
+                src_port,
             },
         );
         self.destination_streams
@@ -847,7 +898,7 @@ impl<R: Runtime> StreamManager<R> {
             recv_stream_id
         });
 
-        (packet, recv_stream_id)
+        (recv_stream_id, packet, src_port, dst_port)
     }
 
     /// Remove all streaming context associated with `destination_id`.
@@ -941,10 +992,12 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
         match self.outbound_rx.poll_recv(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((destination_id, packet))) =>
+            Poll::Ready(Some((destination_id, packet, src_port, dst_port))) =>
                 return Poll::Ready(Some(StreamManagerEvent::SendPacket {
                     destination_id,
+                    dst_port,
                     packet,
+                    src_port,
                 })),
         }
 
@@ -1005,6 +1058,8 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         destination_id,
                         packet,
                         ref mut num_sent,
+                        dst_port,
+                        src_port,
                         ..
                     }) = self.pending_outbound.get_mut(&stream_id)
                     else {
@@ -1014,6 +1069,8 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                     // pending stream still exists, check if the packet should be resent
                     // or if the stream should be destroyed
                     if *num_sent < MAX_SYN_RETRIES {
+                        let dst_port = *dst_port;
+                        let src_port = *src_port;
                         let destination_id = destination_id.clone();
                         let packet = packet.clone();
                         *num_sent += 1;
@@ -1035,7 +1092,9 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
 
                         return Poll::Ready(Some(StreamManagerEvent::SendPacket {
                             destination_id,
+                            dst_port,
                             packet,
+                            src_port,
                         }));
                     } else {
                         // stream must exist since it was just fetched from `pending_outbound`
@@ -1318,6 +1377,7 @@ mod tests {
             StreamManagerEvent::SendPacket {
                 destination_id: remote,
                 packet,
+                ..
             } => {
                 let Packet {
                     send_stream_id,
@@ -1389,6 +1449,7 @@ mod tests {
             StreamManagerEvent::SendPacket {
                 destination_id: remote,
                 packet,
+                ..
             } => {
                 let Packet {
                     send_stream_id,
@@ -1462,6 +1523,7 @@ mod tests {
             StreamManagerEvent::SendPacket {
                 destination_id: remote,
                 packet,
+                ..
             } => {
                 let Packet {
                     send_stream_id,
@@ -1524,6 +1586,7 @@ mod tests {
             StreamManagerEvent::SendPacket {
                 destination_id: remote,
                 packet,
+                ..
             } => {
                 let Packet {
                     send_stream_id,
@@ -1577,6 +1640,7 @@ mod tests {
                     StreamManagerEvent::SendPacket {
                         destination_id: remote,
                         packet,
+                        ..
                     } => {
                         let Packet {
                             send_stream_id,
@@ -1650,8 +1714,8 @@ mod tests {
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let (packet, _stream_id) =
-            manager2.create_stream(manager1.destination_id.clone(), socket, false);
+        let (_stream_id, packet, _, _) =
+            manager2.create_stream(manager1.destination_id.clone(), socket, HashMap::new());
 
         assert!(manager1
             .on_packet(I2cpPayload {
@@ -1676,6 +1740,7 @@ mod tests {
                 StreamManagerEvent::SendPacket {
                     destination_id,
                     packet,
+                    ..
                 } => (destination_id, packet),
                 _ => panic!("invalid event"),
             };
@@ -1720,7 +1785,7 @@ mod tests {
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let _ = manager2.create_stream(remote.clone(), socket, false);
+        let _ = manager2.create_stream(remote.clone(), socket, HashMap::new());
 
         // verify the syn packet is sent twice more
         for _ in 0..2 {
@@ -1732,6 +1797,7 @@ mod tests {
                 StreamManagerEvent::SendPacket {
                     destination_id,
                     packet,
+                    ..
                 } if destination_id == remote => {
                     assert!(Packet::parse(&packet).unwrap().flags.synchronize());
                 }
@@ -2019,8 +2085,8 @@ mod tests {
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let (packet, _stream_id) =
-            manager2.create_stream(manager1.destination_id.clone(), socket, false);
+        let (_stream_id, packet, _, _) =
+            manager2.create_stream(manager1.destination_id.clone(), socket, HashMap::new());
 
         assert!(manager1
             .on_packet(I2cpPayload {
@@ -2045,6 +2111,7 @@ mod tests {
                 StreamManagerEvent::SendPacket {
                     destination_id,
                     packet,
+                    ..
                 } => (destination_id, packet),
                 _ => panic!("invalid event"),
             };
@@ -2395,8 +2462,8 @@ mod tests {
 
         // create new oubound stream to `manager1`
         let (socket, _client_stream) = socket_factory.socket().await;
-        let (_packet, stream_id) =
-            manager2.create_stream(manager1.destination_id.clone(), socket, false);
+        let (stream_id, _packet, _, _) =
+            manager2.create_stream(manager1.destination_id.clone(), socket, HashMap::new());
 
         // verify there's one outbound timer active
         assert_eq!(manager2.outbound_timers.len(), 1);
@@ -2418,5 +2485,97 @@ mod tests {
         assert!(manager2.outbound_timers.is_empty());
         assert!(manager2.pending_outbound.get(&stream_id).is_none());
         assert!(manager2.destination_streams.get(&manager1.destination_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn dst_and_src_ports_specified() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager1 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        // register listener for `manager1`
+        let (socket, _) = socket_factory.socket().await;
+        assert!(manager1
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true
+            })
+            .is_ok());
+
+        // create new oubound stream to `manager1`
+        let (socket, client_stream) = socket_factory.socket().await;
+        let (_stream_id, packet, src_port, dst_port) = manager2.create_stream(
+            manager1.destination_id.clone(),
+            socket,
+            HashMap::from_iter([
+                (String::from("FROM_PORT"), String::from("1337")),
+                (String::from("TO_PORT"), String::from("1338")),
+            ]),
+        );
+        assert_eq!(src_port, 1337);
+        assert_eq!(dst_port, 1338);
+
+        assert!(manager1
+            .on_packet(I2cpPayload {
+                src_port,
+                dst_port,
+                protocol: Protocol::Streaming,
+                payload: packet.to_vec()
+            })
+            .is_ok());
+
+        assert!(std::matches!(
+            manager1.next().await,
+            Some(StreamManagerEvent::StreamOpened { .. })
+        ));
+
+        let (destination_id, packet) =
+            match tokio::time::timeout(Duration::from_secs(5), manager1.next())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                StreamManagerEvent::SendPacket {
+                    destination_id,
+                    packet,
+                    ..
+                } => (destination_id, packet),
+                _ => panic!("invalid event"),
+            };
+
+        assert_eq!(destination_id, manager2.destination_id);
+        assert!(manager2
+            .on_packet(I2cpPayload {
+                src_port: 1337u16,
+                dst_port: 1338u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = manager1.next() => {}
+                    _ = manager2.next() => {}
+                }
+            }
+        });
+
+        let mut reader = tokio::io::BufReader::new(client_stream);
+        let mut response = String::new();
+        reader.read_line(&mut response).await.unwrap();
+
+        assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
     }
 }
