@@ -238,8 +238,14 @@ pub enum StreamKind {
 
     /// Outbound stream.
     Outbound {
+        /// Destination port.
+        dst_port: u16,
+
         /// Selected send stream ID.
         send_stream_id: u32,
+
+        /// Source port.
+        src_port: u16,
     },
 }
 
@@ -252,7 +258,7 @@ pub struct StreamContext {
     pub cmd_rx: Receiver<StreamEvent>,
 
     /// TX channel for sending [`Packet`]s to the network.
-    pub event_tx: Sender<(DestinationId, Vec<u8>)>,
+    pub event_tx: Sender<(DestinationId, Vec<u8>, u16, u16)>,
 
     /// ID of the local destination.
     pub local: DestinationId,
@@ -486,8 +492,11 @@ pub struct Stream<R: Runtime> {
     /// Local destination.
     destination: Destination,
 
+    /// Destination port.
+    dst_port: u16,
+
     /// TX channel for sending [`Packet`]s to the network.
-    event_tx: Sender<(DestinationId, Vec<u8>)>,
+    event_tx: Sender<(DestinationId, Vec<u8>, u16, u16)>,
 
     /// Inbound context for packets received from the network.
     inbound_context: InboundContext<R>,
@@ -528,6 +537,9 @@ pub struct Stream<R: Runtime> {
     /// Signing key.
     signing_key: SigningPrivateKey,
 
+    /// Source port.
+    src_port: u16,
+
     /// Underlying TCP stream used to communicate with the client.
     stream: R::TcpStream,
 
@@ -560,7 +572,7 @@ impl<R: Runtime> Stream<R> {
             destination,
         } = context;
 
-        let (send_stream_id, initial_message, highest_ack) = match state {
+        let (send_stream_id, initial_message, highest_ack, src_port, dst_port) = match state {
             StreamKind::Inbound { payload } => {
                 let send_stream_id = R::rng().next_u32();
                 let packet = PacketBuilder::new(send_stream_id)
@@ -571,7 +583,8 @@ impl<R: Runtime> Stream<R> {
                     .with_signature()
                     .build_and_sign(&signing_key);
 
-                event_tx.try_send((remote.clone(), packet.to_vec())).unwrap();
+                // TODO: correct?
+                event_tx.try_send((remote.clone(), packet.to_vec(), 0u16, 0u16)).unwrap();
 
                 (
                     send_stream_id,
@@ -585,6 +598,8 @@ impl<R: Runtime> Stream<R> {
                         (None, true) => None,
                     },
                     0u32,
+                    0u16, // TODO: correct?
+                    0u16, // TODO: correct?
                 )
             }
             StreamKind::InboundPending {
@@ -619,12 +634,20 @@ impl<R: Runtime> Stream<R> {
                         }
                     },
                     seq_nro,
+                    0u16, // TODO: correct?
+                    0u16, // TODO: correct?
                 )
             }
-            StreamKind::Outbound { send_stream_id } => (
+            StreamKind::Outbound {
+                dst_port,
+                send_stream_id,
+                src_port,
+            } => (
                 send_stream_id,
                 initial_message.is_some().then(|| b"STREAM STATUS RESULT=OK\n".to_vec()),
                 0u32,
+                src_port,
+                dst_port,
             ),
         };
 
@@ -632,6 +655,7 @@ impl<R: Runtime> Stream<R> {
             close_requested: false,
             cmd_rx,
             destination,
+            dst_port,
             event_tx,
             inbound_context: InboundContext::new(highest_ack),
             local,
@@ -646,6 +670,7 @@ impl<R: Runtime> Stream<R> {
             rtt: Rtt::new(),
             send_stream_id,
             signing_key,
+            src_port,
             stream,
             unacked: BTreeMap::new(),
             window_size: INITIAL_WINDOW_SIZE,
@@ -740,7 +765,14 @@ impl<R: Runtime> Stream<R> {
                 .with_signature()
                 .build_and_sign(&self.signing_key);
 
-            self.event_tx.try_send((self.remote.clone(), packet.to_vec())).unwrap();
+            self.event_tx
+                .try_send((
+                    self.remote.clone(),
+                    packet.to_vec(),
+                    self.src_port,
+                    self.dst_port,
+                ))
+                .unwrap();
         }
 
         if flags.reset() {
@@ -852,7 +884,12 @@ impl<R: Runtime> Stream<R> {
             if self.unacked.len() >= self.window_size {
                 self.pending.insert(seq_nro, packet);
             } else {
-                match self.event_tx.try_send((self.remote.clone(), packet.packet.clone())) {
+                match self.event_tx.try_send((
+                    self.remote.clone(),
+                    packet.packet.clone(),
+                    self.src_port,
+                    self.dst_port,
+                )) {
                     Err(_) => {
                         self.pending.insert(seq_nro, packet);
                     }
@@ -889,8 +926,12 @@ impl<R: Runtime> Stream<R> {
                 "resend packet"
             );
 
-            if let Err(error) = self.event_tx.try_send((self.remote.clone(), packet.packet.clone()))
-            {
+            if let Err(error) = self.event_tx.try_send((
+                self.remote.clone(),
+                packet.packet.clone(),
+                self.src_port,
+                self.dst_port,
+            )) {
                 tracing::warn!(
                     target: LOG_TARGET,
                     local = %self.local,
@@ -962,7 +1003,12 @@ impl<R: Runtime> Stream<R> {
                 },
             );
         } else {
-            match self.event_tx.try_send((self.remote.clone(), packet.clone())) {
+            match self.event_tx.try_send((
+                self.remote.clone(),
+                packet.clone(),
+                self.src_port,
+                self.dst_port,
+            )) {
                 Err(_) => {
                     self.pending.insert(
                         seq_nro,
@@ -1141,10 +1187,12 @@ impl<R: Runtime> Future for Stream<R> {
                             // packet must exist since its key existed in `pending`
                             let mut packet = this.pending.remove(&seq_nro).expect("to exist");
 
-                            match this
-                                .event_tx
-                                .try_send((this.remote.clone(), packet.packet.clone()))
-                            {
+                            match this.event_tx.try_send((
+                                this.remote.clone(),
+                                packet.packet.clone(),
+                                this.src_port,
+                                this.dst_port,
+                            )) {
                                 Err(_) => {
                                     this.pending.insert(seq_nro, packet);
                                     count
@@ -1227,7 +1275,12 @@ impl<R: Runtime> Future for Stream<R> {
             }
             .to_vec();
 
-            if let Err(error) = this.event_tx.try_send((this.remote.clone(), packet.to_vec())) {
+            if let Err(error) = this.event_tx.try_send((
+                this.remote.clone(),
+                packet.to_vec(),
+                this.src_port,
+                this.dst_port,
+            )) {
                 tracing::trace!(
                     target: LOG_TARGET,
                     local = %this.local,
@@ -1263,7 +1316,7 @@ mod tests {
 
     struct StreamBuilder {
         cmd_tx: Sender<StreamEvent>,
-        event_rx: Receiver<(DestinationId, Vec<u8>)>,
+        event_rx: Receiver<(DestinationId, Vec<u8>, u16, u16)>,
         stream: tokio::net::TcpStream,
     }
 
@@ -1355,7 +1408,7 @@ mod tests {
 
         // all four messages acked with one packet
         {
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("event")
                 .expect("to succeed");
@@ -1387,7 +1440,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("event")
             .expect("to succeed");
@@ -1459,7 +1512,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("event")
                 .expect("to succeed");
@@ -1502,7 +1555,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("event")
                 .expect("to succeed");
@@ -1548,7 +1601,7 @@ mod tests {
                     .unwrap();
             }
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("event")
                 .expect("to succeed");
@@ -1592,7 +1645,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("event")
                 .expect("to succeed");
@@ -1636,7 +1689,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("event")
                 .expect("to succeed");
@@ -1891,10 +1944,10 @@ mod tests {
             .unwrap();
 
         // ignore syn
-        let (_, mut prev) = event_rx.recv().await.unwrap();
+        let (_, mut prev, _, _) = event_rx.recv().await.unwrap();
 
         // verify the last packet sent by the stream has the `CLOSE` flag set
-        while let Ok((_, packet)) = event_rx.try_recv() {
+        while let Ok((_, packet, _, _)) = event_rx.try_recv() {
             prev = packet;
         }
 
@@ -1983,7 +2036,7 @@ mod tests {
 
         // verify the last packet sent by the stream has the `CLOSE` flag set
         loop {
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .expect("no timeout")
                 .expect("to succeed");
@@ -2023,7 +2076,7 @@ mod tests {
         // poll stream and send outbound packets
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-        let (_, packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2089,7 +2142,7 @@ mod tests {
         // poll stream and send outbound packets
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let (_, first_packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2115,7 +2168,7 @@ mod tests {
             }
         };
 
-        let (_, second_packet) = tokio::time::timeout(Duration::from_secs(15), future)
+        let (_, second_packet, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2158,7 +2211,7 @@ mod tests {
         // poll stream and send outbound packets
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let (_, first_packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2194,7 +2247,7 @@ mod tests {
         // poll stream and send outbound packets
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let (_, first_packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2218,7 +2271,7 @@ mod tests {
             }
         };
 
-        let (_, second_packet) = tokio::time::timeout(Duration::from_secs(15), future)
+        let (_, second_packet, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2269,7 +2322,7 @@ mod tests {
         // poll stream and send outbound packets
         tokio::time::timeout(Duration::from_secs(1), &mut stream).await.unwrap_err();
 
-        let (_, first_packet) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let (_, first_packet, _, _) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2352,7 +2405,7 @@ mod tests {
             }
         };
 
-        let (_, third_packet) = tokio::time::timeout(Duration::from_secs(15), future)
+        let (_, third_packet, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
             .await
             .expect("no timeout")
             .expect("to succeed");
@@ -2593,13 +2646,13 @@ mod tests {
         });
 
         // ignore syn
-        let (_, _) = event_rx.recv().await.unwrap();
+        let (_, _, _, _) = event_rx.recv().await.unwrap();
 
         // send 11 packets, each with 100ms delay
         for i in 1..=11 {
             client.write_all(&vec![i as u8; 256]).await.unwrap();
 
-            let (_, packet) = event_rx.recv().await.unwrap();
+            let (_, packet, _, _) = event_rx.recv().await.unwrap();
             let packet = Packet::parse(&packet).unwrap();
 
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2637,7 +2690,7 @@ mod tests {
         ) = StreamBuilder::build_stream().await;
 
         // ignore syn
-        let (_, _) = event_rx.recv().await.unwrap();
+        let (_, _, _, _) = event_rx.recv().await.unwrap();
 
         assert_eq!(stream.window_size, INITIAL_WINDOW_SIZE);
 
@@ -2654,7 +2707,7 @@ mod tests {
                 }
             };
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(15), future)
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
                 .await
                 .expect("no timeout")
                 .expect("to succeed");
@@ -2692,7 +2745,7 @@ mod tests {
             };
 
             // read packet and ignore it
-            let (_, ignored) = tokio::time::timeout(Duration::from_secs(15), future)
+            let (_, ignored, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
                 .await
                 .expect("no timeout")
                 .expect("to succeed");
@@ -2707,7 +2760,7 @@ mod tests {
             };
 
             // read it again and verify it's the same as `ignored`
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(15), future)
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
                 .await
                 .expect("no timeout")
                 .expect("to succeed");
@@ -2745,7 +2798,7 @@ mod tests {
                 }
             };
 
-            let (_, packet) = tokio::time::timeout(Duration::from_secs(15), future)
+            let (_, packet, _, _) = tokio::time::timeout(Duration::from_secs(15), future)
                 .await
                 .expect("no timeout")
                 .expect("to succeed");
@@ -2781,7 +2834,7 @@ mod tests {
         for i in 0..100 {
             client.write_all(&vec![i as u8; 256]).await.unwrap();
 
-            let (_, packet) = event_rx.recv().await.unwrap();
+            let (_, packet, _, _) = event_rx.recv().await.unwrap();
             let packet = Packet::parse(&packet).unwrap();
 
             cmd_tx

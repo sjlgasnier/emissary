@@ -2166,7 +2166,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3439,16 +3439,15 @@ dependencies = [
 
 [[package]]
 name = "yosemite"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ca5611dd23a6378adff89071bbb982dfe34554197e54f0c53f54a13fd11553b"
+checksum = "63b9d12b8597a044d2d09f5979beecd19134e5f6d0c3a6284907da2567ad35bb"
 dependencies = [
  "futures",
  "nom",
  "rand",
  "thiserror 1.0.69",
  "tokio",
- "tokio-util",
  "tracing",
 ]
 

@@ -353,18 +353,16 @@ impl<R: Runtime> SamSession<R> {
         socket: SamSocket<R>,
         options: HashMap<String, String>,
     ) {
+        let (stream_id, packet, src_port, dst_port) =
+            self.stream_manager.create_stream(destination_id.clone(), socket, options);
+
         tracing::trace!(
             target: LOG_TARGET,
             %destination_id,
+            ?stream_id,
+            ?src_port,
+            ?dst_port,
             "create pending outbound stream",
-        );
-
-        let (packet, stream_id) = self.stream_manager.create_stream(
-            destination_id.clone(),
-            socket,
-            options
-                .get("SILENT")
-                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
         );
 
         // mark the stream as pending & waiting for session to be opened
@@ -378,7 +376,8 @@ impl<R: Runtime> SamSession<R> {
 
         let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
             .with_protocol(Protocol::Streaming)
-            .with_destination_port(80)
+            .with_source_port(src_port)
+            .with_destination_port(dst_port)
             .build()
         else {
             tracing::error!(
@@ -664,7 +663,6 @@ impl<R: Runtime> SamSession<R> {
 
                     if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
                         .with_protocol(self.session_kind.into())
-                        .with_destination_port(80)
                         .build()
                     {
                         if let Err(error) = self.destination.send_message(&destination_id, message)
@@ -862,12 +860,15 @@ impl<R: Runtime> Future for SamSession<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
                 Poll::Ready(Some(StreamManagerEvent::SendPacket {
+                    dst_port,
                     destination_id,
                     packet,
+                    src_port,
                 })) => {
                     let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
                         .with_protocol(Protocol::Streaming)
-                        .with_destination_port(80)
+                        .with_source_port(src_port)
+                        .with_destination_port(dst_port)
                         .build()
                     else {
                         tracing::warn!(
