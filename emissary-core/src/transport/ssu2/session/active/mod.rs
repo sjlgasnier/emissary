@@ -26,35 +26,33 @@ use crate::{
     transport::{
         ssu2::{
             message::{Block, DataMessageBuilder},
+            session::active::duplicate::DuplicateFilter,
             Packet,
         },
         TerminationReason,
     },
 };
 
-use futures::{future::BoxFuture, FutureExt};
-use hashbrown::{HashMap, HashSet};
+use futures::FutureExt;
+use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{
-    boxed::Box,
     collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
 use core::{
     future::Future,
-    marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
 
+mod duplicate;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::session::active";
-
-/// Duplicate filter decay interval.
-const DUPLICATE_FILTER_DECAY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Key context for an active session.
 pub struct KeyContext {
@@ -69,36 +67,6 @@ impl KeyContext {
     /// Create new [`KeyContext`].
     pub fn new(k_data: [u8; 32], k_header_2: [u8; 32]) -> Self {
         Self { k_data, k_header_2 }
-    }
-}
-
-/// Duplicate message filter.
-#[derive(Default)]
-pub struct DuplicateFilter {
-    /// Current filter.
-    current: HashSet<u32>,
-
-    /// Previous filter.
-    previous: HashSet<u32>,
-}
-
-impl DuplicateFilter {
-    /// Attempt to insert `message_id` into [`DuplicateFilter`].
-    ///
-    /// Returns `true` if `bytes` doesn't exist in the filter and `false` if it does.
-    pub fn insert(&mut self, message_id: u32) -> bool {
-        if self.current.contains(&message_id) || self.previous.contains(&message_id) {
-            tracing::error!("ignore dpulicate message");
-            return false;
-        }
-
-        self.current.insert(message_id);
-        true
-    }
-
-    /// Decay [`BloomFilter`].
-    pub fn decay(&mut self) {
-        self.previous = core::mem::take(&mut self.current);
     }
 }
 
@@ -285,13 +253,7 @@ pub struct Ssu2Session<R: Runtime> {
     subsystem_handle: SubsystemHandle,
 
     /// Duplicate message filter.
-    duplicate_filter: DuplicateFilter,
-
-    /// Duplicate filter decay timer.
-    duplicate_filter_timer: BoxFuture<'static, ()>,
-
-    /// Marker for `Runtime`.
-    _runtime: PhantomData<R>,
+    duplicate_filter: DuplicateFilter<R>,
 }
 
 impl<R: Runtime> Ssu2Session<R> {
@@ -313,8 +275,7 @@ impl<R: Runtime> Ssu2Session<R> {
         Self {
             address: context.address,
             cmd_rx,
-            duplicate_filter: DuplicateFilter::default(),
-            duplicate_filter_timer: Box::pin(R::delay(DUPLICATE_FILTER_DECAY_INTERVAL)),
+            duplicate_filter: DuplicateFilter::new(),
             cmd_tx,
             dst_id: context.dst_id,
             fragment_handler: FragmentHandler::default(),
@@ -328,7 +289,6 @@ impl<R: Runtime> Ssu2Session<R> {
             router_id: context.router_id,
             send_key_ctx: context.send_key_ctx,
             subsystem_handle,
-            _runtime: Default::default(),
         }
     }
 
@@ -622,14 +582,10 @@ impl<R: Runtime> Future for Ssu2Session<R> {
             }
         }
 
-        futures::ready!(self.duplicate_filter_timer.poll_unpin(cx));
-
-        // create new timer and register it into the executor
-        {
-            self.duplicate_filter.decay();
-            self.duplicate_filter_timer = Box::pin(R::delay(DUPLICATE_FILTER_DECAY_INTERVAL));
-            let _ = self.duplicate_filter_timer.poll_unpin(cx);
-        }
+        // poll duplicate message filter
+        //
+        // the future doesn't return anything but must be polled so the filter decays
+        futures::ready!(self.duplicate_filter.poll_unpin(cx));
 
         Poll::Pending
     }
