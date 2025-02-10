@@ -17,9 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, sha256::Sha256, StaticPrivateKey, StaticPublicKey},
+    crypto::{sha256::Sha256, StaticPrivateKey},
     error::Ssu2Error,
-    primitives::{RouterId, RouterInfo, Str, TransportKind},
+    primitives::{RouterId, RouterInfo, TransportKind},
     router::context::RouterContext,
     runtime::{JoinSet, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
@@ -287,22 +287,14 @@ impl<R: Runtime> Ssu2Socket<R> {
     pub fn connect(&mut self, router_info: RouterInfo) {
         // must succeed since `TransportManager` has ensured `router_info` contains
         // a valid and reachable ssu2 router address
-        //
-        // TODO: add helper code for all of this in `RouterAddress`
-        let address = router_info.addresses.get(&TransportKind::Ssu2).expect("to exist");
-        let intro_key = {
-            let intro_key = address.options.get(&Str::from("i")).expect("to exist");
-            let intro_key = base64_decode(intro_key.as_bytes()).expect("to succeed");
-
-            TryInto::<[u8; 32]>::try_into(intro_key).expect("to succeed")
-        };
-        let static_key = {
-            let static_key = address.options.get(&Str::from("s")).expect("to exist");
-            let static_key = base64_decode(static_key.as_bytes()).expect("to succeed");
-
-            StaticPublicKey::from_bytes(&static_key).expect("to succeed")
-        };
-        let address = address.socket_address.expect("to exist");
+        let intro_key = router_info.ssu2_intro_key().expect("to succeed");
+        let static_key = router_info.ssu2_static_key().expect("to succeed");
+        let address = router_info
+            .addresses
+            .get(&TransportKind::Ssu2)
+            .expect("to exist")
+            .socket_address
+            .expect("to exist");
 
         let state = Sha256::new().update(&self.outbound_state).update(&static_key).finalize();
         let src_id = R::rng().next_u64();

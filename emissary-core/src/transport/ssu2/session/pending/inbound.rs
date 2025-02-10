@@ -18,11 +18,10 @@
 
 use crate::{
     crypto::{
-        base64_decode, chachapoly::ChaChaPoly, hmac::Hmac, noise::NoiseContext,
-        EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
+        chachapoly::ChaChaPoly, hmac::Hmac, noise::NoiseContext, EphemeralPrivateKey,
+        StaticPrivateKey, StaticPublicKey,
     },
     error::Ssu2Error,
-    primitives::{Str, TransportKind},
     runtime::Runtime,
     transport::ssu2::{
         message::{
@@ -459,17 +458,14 @@ impl<R: Runtime> InboundSsu2Session<R> {
             return Err(Ssu2Error::Malformed);
         };
 
-        // TODO: `RouterInfo::ssu2_intro_key()`
-        let intro_key = router_info
-            .addresses
-            .get(&TransportKind::Ssu2)
-            .unwrap()
-            .options
-            .get(&Str::from("i"))
-            .unwrap();
-        let intro_key = base64_decode(intro_key.as_bytes()).unwrap();
-        let intro_key = TryInto::<[u8; 32]>::try_into(intro_key).unwrap();
-
+        let Some(intro_key) = router_info.ssu2_intro_key() else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "router info doesn't contain ssu2 intro key",
+            );
+            debug_assert!(false);
+            return Err(Ssu2Error::Malformed);
+        };
         let temp_key = Hmac::new(self.noise_ctx.chaining_key()).update([]).finalize();
         let k_ab = Hmac::new(&temp_key).update([0x01]).finalize();
         let k_ba = Hmac::new(&temp_key).update(&k_ab).update([0x02]).finalize();

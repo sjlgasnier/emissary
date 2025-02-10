@@ -18,7 +18,7 @@
 
 use crate::{
     config::Config,
-    crypto::{SigningPrivateKey, StaticPrivateKey},
+    crypto::{base64_decode, SigningPrivateKey, StaticPrivateKey, StaticPublicKey},
     primitives::{
         router_address::TransportKind, Capabilities, Date, Mapping, RouterAddress, RouterIdentity,
         Str, LOG_TARGET,
@@ -350,6 +350,38 @@ impl RouterInfo {
         ntcp2.socket_address.is_some()
             && ntcp2.options.get(&Str::from("i")).is_some()
             && ntcp2.options.get(&Str::from("s")).is_some()
+    }
+
+    /// Attempt to get SSU2 intro key from [`RouterInfo`]
+    pub fn ssu2_intro_key(&self) -> Option<[u8; 32]> {
+        let intro_key = self.addresses.get(&TransportKind::Ssu2)?.options.get(&Str::from("i"))?;
+        let intro_key = base64_decode(intro_key.as_bytes())?;
+
+        TryInto::<[u8; 32]>::try_into(intro_key).ok()
+    }
+
+    /// Attempt to get SSU2 static key from [`RouterInfo`].
+    pub fn ssu2_static_key(&self) -> Option<StaticPublicKey> {
+        let static_key = self.addresses.get(&TransportKind::Ssu2)?.options.get(&Str::from("s"))?;
+        let static_key = base64_decode(static_key.as_bytes())?;
+
+        StaticPublicKey::from_bytes(&static_key)
+    }
+
+    /// Attempt to get NTCP2 static key from [`RouterInfo`].
+    pub fn ntcp2_static_key(&self) -> Option<StaticPublicKey> {
+        let static_key = self.addresses.get(&TransportKind::Ntcp2)?.options.get(&Str::from("s"))?;
+        let static_key = base64_decode(static_key.as_bytes())?;
+
+        StaticPublicKey::from_bytes(&static_key)
+    }
+
+    /// Attempt to get NTCP2 IV from [`RouterInfo`].
+    pub fn ntcp2_iv(&self) -> Option<[u8; 16]> {
+        let iv = self.addresses.get(&TransportKind::Ntcp2)?.options.get(&Str::from("i"))?;
+        let iv = base64_decode(iv.as_bytes())?;
+
+        TryInto::<[u8; 16]>::try_into(iv).ok()
     }
 }
 
