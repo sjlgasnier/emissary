@@ -19,14 +19,14 @@
 use crate::{
     crypto::chachapoly::{ChaCha, ChaChaPoly},
     error::Ssu2Error,
-    i2np::{Message, MessageType as I2npMessageType},
-    primitives::{MessageId, RouterId},
+    i2np::Message,
+    primitives::RouterId,
     runtime::Runtime,
     subsystem::{SubsystemCommand, SubsystemHandle},
     transport::{
         ssu2::{
             message::{Block, DataMessageBuilder},
-            session::active::duplicate::DuplicateFilter,
+            session::active::{duplicate::DuplicateFilter, fragment::FragmentHandler},
             Packet,
         },
         TerminationReason,
@@ -34,27 +34,25 @@ use crate::{
 };
 
 use futures::FutureExt;
-use hashbrown::HashMap;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 
 mod duplicate;
+mod fragment;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::session::active";
 
 /// Key context for an active session.
+//
+// TODO: remove?
 pub struct KeyContext {
     /// Key for encrypting/decrypting `Data` payloads.
     pub k_data: [u8; 32],
@@ -67,111 +65,6 @@ impl KeyContext {
     /// Create new [`KeyContext`].
     pub fn new(k_data: [u8; 32], k_header_2: [u8; 32]) -> Self {
         Self { k_data, k_header_2 }
-    }
-}
-
-/// Fragmented I2NP message.
-#[derive(Default)]
-struct Fragment {
-    /// Fragments.
-    fragments: BTreeMap<u8, Vec<u8>>,
-
-    /// Total of fragments.
-    ///
-    /// `None` if last fragment hasn't been received.
-    num_fragments: Option<usize>,
-
-    /// Message info.
-    ///
-    /// `None` if the first fragment hasn't been received.
-    info: Option<(I2npMessageType, MessageId, u32)>,
-
-    /// Total size of the I2NP message.
-    total_size: usize,
-}
-
-impl Fragment {
-    /// Check if [`Fragment`] is ready for assembly.
-    pub fn is_ready(&self) -> bool {
-        self.num_fragments.is_some()
-            && self.info.is_some()
-            && self.num_fragments == Some(self.fragments.len())
-    }
-
-    /// Construct I2NP message from received fragments.
-    pub fn construct(mut self) -> Option<Message> {
-        let (message_type, message_id, expiration) = self.info.take()?;
-        let payload = self.fragments.into_values().fold(
-            Vec::<u8>::with_capacity(self.total_size),
-            |mut payload, fragment| {
-                payload.extend_from_slice(&fragment);
-                payload
-            },
-        );
-
-        Some(Message {
-            message_type,
-            message_id: *message_id,
-            expiration: Duration::from_secs(expiration as u64),
-            payload,
-        })
-    }
-}
-
-/// Fragment handler.
-#[derive(Default)]
-struct FragmentHandler {
-    /// Fragmented messages.
-    messages: HashMap<MessageId, Fragment>,
-}
-
-impl FragmentHandler {
-    /// Handle first fragment.
-    ///
-    /// If all fragments have been received, the constructed message is received.
-    pub fn first_fragment(
-        &mut self,
-        message_type: I2npMessageType,
-        message_id: MessageId,
-        expiration: u32,
-        payload: Vec<u8>,
-    ) -> Option<Message> {
-        let message = self.messages.entry(message_id).or_default();
-
-        message.total_size += payload.len();
-        message.fragments.insert(0u8, payload.to_vec());
-        message.info = Some((message_type, message_id, expiration));
-
-        message
-            .is_ready()
-            .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
-            .flatten()
-    }
-
-    /// Handle follow-on fragment.
-    ///
-    /// If all fragments have been received, the constructed message is received.
-    pub fn follow_on_fragment(
-        &mut self,
-        message_id: MessageId,
-        sequence: u8,
-        last: bool,
-        payload: Vec<u8>,
-    ) -> Option<Message> {
-        let message = self.messages.entry(message_id).or_default();
-
-        message.total_size += payload.len();
-        message.fragments.insert(sequence, payload.to_vec());
-
-        if last {
-            // +1 one for the first fragment
-            message.num_fragments = Some(sequence as usize + 1usize);
-        }
-
-        message
-            .is_ready()
-            .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
-            .flatten()
     }
 }
 
@@ -232,7 +125,7 @@ pub struct Ssu2Session<R: Runtime> {
     pkt_tx: Sender<Packet>,
 
     /// Fragment handler.
-    fragment_handler: FragmentHandler,
+    fragment_handler: FragmentHandler<R>,
 
     /// Key context for inbound packets.
     recv_key_ctx: KeyContext,
@@ -275,13 +168,13 @@ impl<R: Runtime> Ssu2Session<R> {
         Self {
             address: context.address,
             cmd_rx,
-            duplicate_filter: DuplicateFilter::new(),
             cmd_tx,
             dst_id: context.dst_id,
-            fragment_handler: FragmentHandler::default(),
-            pkt_highest_seen: 0u32,
-            num_unacked: 0u8,
+            duplicate_filter: DuplicateFilter::new(),
+            fragment_handler: FragmentHandler::<R>::new(),
             intro_key: context.intro_key,
+            num_unacked: 0u8,
+            pkt_highest_seen: 0u32,
             pkt_num: 1u32, // TODO: may not be correct for outbound sessions
             pkt_rx: context.pkt_rx,
             pkt_tx,
@@ -582,10 +475,11 @@ impl<R: Runtime> Future for Ssu2Session<R> {
             }
         }
 
-        // poll duplicate message filter
+        // poll duplicate message filter and fragment handler
         //
-        // the future doesn't return anything but must be polled so the filter decays
-        futures::ready!(self.duplicate_filter.poll_unpin(cx));
+        // the futures don't return anything but must be polled so they make progress
+        let _ = self.duplicate_filter.poll_unpin(cx);
+        let _ = self.fragment_handler.poll_unpin(cx);
 
         Poll::Pending
     }
