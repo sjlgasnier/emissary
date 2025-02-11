@@ -33,10 +33,11 @@ use crate::{
                     outbound::{OutboundSsu2Context, OutboundSsu2Session},
                     PendingSsu2SessionStatus,
                 },
+                terminating::{TerminatingSsu2Session, TerminationContext},
             },
             Packet,
         },
-        TerminationReason, TransportEvent,
+        TransportEvent,
     },
 };
 
@@ -96,7 +97,7 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Active sessions.
     ///
     /// The session returns a `(RouterId, destination connection ID)` tuple when it exits.
-    active_sessions: R::JoinSet<(RouterId, u64, TerminationReason)>,
+    active_sessions: R::JoinSet<TerminationContext>,
 
     /// Receive buffer.
     buffer: Vec<u8>,
@@ -130,6 +131,9 @@ pub struct Ssu2Socket<R: Runtime> {
     /// TX channel given to active sessions.
     pkt_tx: Sender<Packet>,
 
+    /// Router context.
+    router_ctx: RouterContext<R>,
+
     /// SSU2 sessions.
     sessions: HashMap<u64, Sender<Packet>>,
 
@@ -142,8 +146,8 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
 
-    /// Router context.
-    router_ctx: RouterContext<R>,
+    /// Terminating sessions.
+    terminating_session: R::JoinSet<(RouterId, u64)>,
 
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
@@ -190,13 +194,14 @@ impl<R: Runtime> Ssu2Socket<R> {
             pending_sessions: R::join_set(),
             pkt_rx,
             pkt_tx,
+            router_ctx,
             sessions: HashMap::new(),
             socket,
             static_key,
             subsystem_handle,
+            terminating_session: R::join_set(),
             unvalidated_sessions: HashMap::new(),
             waker: None,
-            router_ctx,
             write_state: WriteState::GetPacket,
         }
     }
@@ -414,12 +419,17 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             }
         }
 
-        match this.active_sessions.poll_next_unpin(cx) {
-            Poll::Pending => {}
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((router_id, _dst_id, reason))) => {
-                // TODO: remove channel
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason }));
+        loop {
+            match this.active_sessions.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(termination_ctx)) => {
+                    this.terminating_session
+                        .push(TerminatingSsu2Session::<R>::new(termination_ctx));
+                    // // TODO: remove channel
+                    // return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason
+                    // }));
+                }
             }
         }
 

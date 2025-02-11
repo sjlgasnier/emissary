@@ -18,3 +18,20 @@
 
 pub mod active;
 pub mod pending;
+pub mod terminating;
+
+/// Key context for an active session.
+pub struct KeyContext {
+    /// Key for encrypting/decrypting `Data` payloads.
+    pub k_data: [u8; 32],
+
+    /// Key for encrypting/decrypting second part of the header.
+    pub k_header_2: [u8; 32],
+}
+
+impl KeyContext {
+    /// Create new [`KeyContext`].
+    pub fn new(k_data: [u8; 32], k_header_2: [u8; 32]) -> Self {
+        Self { k_data, k_header_2 }
+    }
+}

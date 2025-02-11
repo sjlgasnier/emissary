@@ -28,10 +28,7 @@ use crate::{
             Block, DataMessageBuilder, HeaderKind, HeaderReader, RetryBuilder,
             SessionCreatedBuilder,
         },
-        session::{
-            active::{KeyContext, Ssu2SessionContext},
-            pending::PendingSsu2SessionStatus,
-        },
+        session::{active::Ssu2SessionContext, pending::PendingSsu2SessionStatus, KeyContext},
         Packet,
     },
 };

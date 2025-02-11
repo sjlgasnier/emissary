@@ -29,10 +29,7 @@ use crate::{
             HeaderKind, HeaderReader, SessionConfirmedBuilder, SessionRequestBuilder,
             TokenRequestBuilder,
         },
-        session::{
-            active::{KeyContext, Ssu2SessionContext},
-            pending::PendingSsu2SessionStatus,
-        },
+        session::{active::Ssu2SessionContext, pending::PendingSsu2SessionStatus, KeyContext},
         Packet,
     },
 };

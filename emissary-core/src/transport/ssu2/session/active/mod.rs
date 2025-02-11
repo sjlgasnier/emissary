@@ -26,7 +26,11 @@ use crate::{
     transport::{
         ssu2::{
             message::{Block, DataMessageBuilder},
-            session::active::{duplicate::DuplicateFilter, fragment::FragmentHandler},
+            session::{
+                active::{duplicate::DuplicateFilter, fragment::FragmentHandler},
+                terminating::TerminationContext,
+                KeyContext,
+            },
             Packet,
         },
         TerminationReason,
@@ -49,24 +53,6 @@ mod fragment;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::session::active";
-
-/// Key context for an active session.
-//
-// TODO: remove?
-pub struct KeyContext {
-    /// Key for encrypting/decrypting `Data` payloads.
-    pub k_data: [u8; 32],
-
-    /// Key for encrypting/decrypting second part of the header.
-    pub k_header_2: [u8; 32],
-}
-
-impl KeyContext {
-    /// Create new [`KeyContext`].
-    pub fn new(k_data: [u8; 32], k_header_2: [u8; 32]) -> Self {
-        Self { k_data, k_header_2 }
-    }
-}
 
 /// SSU2 active session context.
 pub struct Ssu2SessionContext {
@@ -418,7 +404,7 @@ impl<R: Runtime> Ssu2Session<R> {
     }
 
     /// Run the event loop of an active SSU2 session.
-    pub async fn run(mut self) -> (RouterId, u64, TerminationReason) {
+    pub async fn run(mut self) -> TerminationContext {
         self.subsystem_handle
             .report_connection_established(self.router_id.clone(), self.cmd_tx.clone())
             .await;
@@ -430,7 +416,19 @@ impl<R: Runtime> Ssu2Session<R> {
         let reason = (&mut self).await;
 
         self.subsystem_handle.report_connection_closed(self.router_id.clone()).await;
-        (self.router_id, self.dst_id, reason)
+
+        TerminationContext {
+            address: self.address,
+            dst_id: self.dst_id,
+            intro_key: self.intro_key,
+            next_pkt_num: self.next_pkt_num(),
+            reason,
+            recv_key_ctx: self.recv_key_ctx,
+            router_id: self.router_id,
+            rx: self.pkt_rx,
+            send_key_ctx: self.send_key_ctx,
+            tx: self.pkt_tx,
+        }
     }
 }
 

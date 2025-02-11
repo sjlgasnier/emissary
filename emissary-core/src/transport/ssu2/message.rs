@@ -29,7 +29,7 @@ use crate::{
     i2np::{Message, MessageType as I2npMessageType},
     primitives::{MessageId, RouterInfo},
     runtime::Runtime,
-    transport::ssu2::session::active::KeyContext,
+    transport::{ssu2::session::KeyContext, TerminationReason},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -986,6 +986,9 @@ pub struct DataMessageBuilder<'a> {
 
     /// Packet number.
     pkt_num: Option<u32>,
+
+    /// Termination reason.
+    termination_reason: Option<TerminationReason>,
 }
 
 impl<'a> DataMessageBuilder<'a> {
@@ -1077,6 +1080,12 @@ impl<'a> DataMessageBuilder<'a> {
             .saturating_add(1usize) // num acks
             .saturating_add(ranges.as_ref().map_or(0usize, |ranges| ranges.len() * 2)); // ranges
         self.acks = Some((ack_through, num_acks, ranges));
+        self
+    }
+
+    /// Add termination block.
+    pub fn with_termination(mut self, termination_reason: TerminationReason) -> Self {
+        self.termination_reason = Some(termination_reason);
         self
     }
 
@@ -1646,6 +1655,12 @@ pub enum HeaderKind {
         /// Source connection ID.
         src_id: u64,
     },
+
+    /// Data.
+    Data {
+        /// Packet number.
+        pkt_num: u32,
+    },
 }
 
 impl fmt::Debug for HeaderKind {
@@ -1693,6 +1708,8 @@ impl fmt::Debug for HeaderKind {
                 .field("pkt_num", &pkt_num)
                 .field("src_id", &src_id)
                 .finish(),
+            Self::Data { pkt_num } =>
+                f.debug_struct("HeaderKind::Data").field("pkt_num", &pkt_num).finish(),
         }
     }
 }
@@ -1810,10 +1827,9 @@ impl<'a> HeaderReader<'a> {
             MessageType::SessionConfirmed => Some(HeaderKind::SessionConfirmed {
                 pkt_num: u32::from_be(header as u32),
             }),
-            MessageType::Data => {
-                tracing::error!("Data");
-                None
-            }
+            MessageType::Data => Some(HeaderKind::Data {
+                pkt_num: u32::from_be(header as u32),
+            }),
             MessageType::Retry => {
                 if ((header >> 40) as u8) != PROTOCOL_VERSION {
                     return None;
