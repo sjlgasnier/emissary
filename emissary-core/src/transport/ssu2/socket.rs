@@ -468,7 +468,48 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
-                Poll::Ready(Some(PendingSsu2SessionStatus::SessionTermianted {})) => todo!(),
+                Poll::Ready(Some(PendingSsu2SessionStatus::SessionTermianted {
+                    connection_id,
+                    router_id,
+                })) => match router_id {
+                    None => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?connection_id,
+                            "pending inbound session terminated",
+                        );
+                    }
+                    Some(router_id) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?connection_id,
+                            "pending outbound session terminated",
+                        );
+                        return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
+                    }
+                },
+                Poll::Ready(Some(PendingSsu2SessionStatus::Timeout {
+                    connection_id,
+                    router_id,
+                })) => match router_id {
+                    None => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?connection_id,
+                            "pending inbound session timed out",
+                        );
+                    }
+                    Some(router_id) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?connection_id,
+                            "pending outbound session timed out",
+                        );
+                        return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
+                    }
+                },
                 Poll::Ready(Some(PendingSsu2SessionStatus::SocketClosed)) =>
                     return Poll::Ready(None),
             }
