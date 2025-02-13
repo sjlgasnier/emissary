@@ -583,11 +583,7 @@ impl Config {
                 udp_port: 7655,
                 host: None,
             }),
-            ssu2: Some(Ssu2Config {
-                port: 8888u16,
-                host: None,
-                publish: Some(false),
-            }),
+            ssu2: None,
             tunnels: Vec::new(),
         };
         let config = toml::to_string(&config).expect("to succeed");
@@ -697,11 +693,7 @@ impl Config {
                         host: None,
                         publish: Some(false),
                     }),
-                    ssu2: Some(Ssu2Config {
-                        port: 8888u16,
-                        host: None,
-                        publish: Some(false),
-                    }),
+                    ssu2: None,
                     reseed: None,
                     sam: Some(SamConfig {
                         tcp_port: 7656,

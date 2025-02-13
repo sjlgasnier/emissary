@@ -30,14 +30,16 @@ use crate::{
             TokenRequestBuilder,
         },
         session::{
-            active::{KeyContext, Ssu2SessionContext},
-            pending::PendingSsu2SessionStatus,
+            active::Ssu2SessionContext,
+            pending::{PacketRetransmitter, PacketRetransmitterEvent, PendingSsu2SessionStatus},
+            KeyContext,
         },
         Packet,
     },
 };
 
 use bytes::Bytes;
+use futures::FutureExt;
 use thingbuf::mpsc::{Receiver, Sender};
 use zeroize::Zeroize;
 
@@ -140,6 +142,9 @@ pub struct OutboundSsu2Session<R: Runtime> {
     /// Noise context.
     noise_ctx: NoiseContext,
 
+    /// Packet retransmitter.
+    pkt_retransmitter: PacketRetransmitter<R>,
+
     /// TX channel for sending packets to [`Ssu2Socket`].
     pkt_tx: Sender<Packet>,
 
@@ -192,8 +197,10 @@ impl<R: Runtime> OutboundSsu2Session<R> {
             .build::<R>()
             .to_vec();
 
-        // TODO: retransmissions
-        if let Err(error) = pkt_tx.try_send(Packet { pkt, address }) {
+        if let Err(error) = pkt_tx.try_send(Packet {
+            pkt: pkt.clone(),
+            address,
+        }) {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?error,
@@ -210,6 +217,7 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                 TryInto::<[u8; 32]>::try_into(chaining_key.to_vec()).expect("to succeed"),
                 TryInto::<[u8; 32]>::try_into(state.to_vec()).expect("to succeed"),
             ),
+            pkt_retransmitter: PacketRetransmitter::token_request(pkt),
             pkt_tx,
             router_id,
             rx: Some(rx),
@@ -297,9 +305,12 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         // MixHash(ciphertext)
         self.noise_ctx.mix_hash(message.payload());
 
-        // TODO: retransmissions
+        // reset packet retransmitter to track `SessionRequest` and send the message to remote
+        let pkt = message.build().to_vec();
+        self.pkt_retransmitter = PacketRetransmitter::session_request(pkt.clone());
+
         if let Err(error) = self.pkt_tx.try_send(Packet {
-            pkt: message.build().to_vec(),
+            pkt,
             address: self.address,
         }) {
             tracing::warn!(
@@ -418,9 +429,12 @@ impl<R: Runtime> OutboundSsu2Session<R> {
         message.encrypt_header(self.intro_key, k_header_2);
         cipher_key.zeroize();
 
-        // TODO: retransmissions
+        // reset packet retransmitter to track `SessionConfirmed` and send the message to remote
+        let pkt = message.build().to_vec();
+        self.pkt_retransmitter = PacketRetransmitter::session_confirmed(pkt.clone());
+
         if let Err(error) = self.pkt_tx.try_send(Packet {
-            pkt: message.build().to_vec(),
+            pkt,
             address: self.address,
         }) {
             tracing::warn!(
@@ -527,7 +541,10 @@ impl<R: Runtime> OutboundSsu2Session<R> {
                     "outbound session state is poisoned",
                 );
                 debug_assert!(false);
-                Ok(Some(PendingSsu2SessionStatus::SessionTermianted {}))
+                Ok(Some(PendingSsu2SessionStatus::SessionTermianted {
+                    router_id: Some(self.router_id.clone()),
+                    connection_id: self.src_id,
+                }))
             }
         }
     }
@@ -541,7 +558,7 @@ impl<R: Runtime> Future for OutboundSsu2Session<R> {
             let pkt = match &mut self.rx {
                 None => return Poll::Ready(PendingSsu2SessionStatus::SocketClosed),
                 Some(rx) => match rx.poll_recv(cx) {
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => break,
                     Poll::Ready(None) =>
                         return Poll::Ready(PendingSsu2SessionStatus::SocketClosed),
                     Poll::Ready(Some(Packet { pkt, .. })) => pkt,
@@ -560,6 +577,31 @@ impl<R: Runtime> Future for OutboundSsu2Session<R> {
                     "failed to handle packet",
                 ),
             }
+        }
+
+        match futures::ready!(self.pkt_retransmitter.poll_unpin(cx)) {
+            PacketRetransmitterEvent::Retransmit { pkt } => {
+                if let Err(error) = self.pkt_tx.try_send(Packet {
+                    pkt: pkt.clone(),
+                    address: self.address,
+                }) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        router_id = %self.router_id,
+                        dst_id = ?self.dst_id,
+                        src_id = ?self.src_id,
+                        ?error,
+                        "failed to send packet for retransmission",
+                    );
+                }
+
+                Poll::Pending
+            }
+            PacketRetransmitterEvent::Timeout =>
+                return Poll::Ready(PendingSsu2SessionStatus::Timeout {
+                    connection_id: self.src_id,
+                    router_id: Some(self.router_id.clone()),
+                }),
         }
     }
 }

@@ -17,9 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_decode, sha256::Sha256, StaticPrivateKey, StaticPublicKey},
+    crypto::{sha256::Sha256, StaticPrivateKey},
     error::Ssu2Error,
-    primitives::{RouterId, RouterInfo, Str, TransportKind},
+    primitives::{RouterId, RouterInfo, TransportKind},
     router::context::RouterContext,
     runtime::{JoinSet, Runtime, UdpSocket},
     subsystem::SubsystemHandle,
@@ -33,10 +33,11 @@ use crate::{
                     outbound::{OutboundSsu2Context, OutboundSsu2Session},
                     PendingSsu2SessionStatus,
                 },
+                terminating::{TerminatingSsu2Session, TerminationContext},
             },
             Packet,
         },
-        TerminationReason, TransportEvent,
+        TransportEvent,
     },
 };
 
@@ -96,7 +97,7 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Active sessions.
     ///
     /// The session returns a `(RouterId, destination connection ID)` tuple when it exits.
-    active_sessions: R::JoinSet<(RouterId, u64, TerminationReason)>,
+    active_sessions: R::JoinSet<TerminationContext>,
 
     /// Receive buffer.
     buffer: Vec<u8>,
@@ -130,6 +131,9 @@ pub struct Ssu2Socket<R: Runtime> {
     /// TX channel given to active sessions.
     pkt_tx: Sender<Packet>,
 
+    /// Router context.
+    router_ctx: RouterContext<R>,
+
     /// SSU2 sessions.
     sessions: HashMap<u64, Sender<Packet>>,
 
@@ -142,8 +146,8 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
 
-    /// Router context.
-    router_ctx: RouterContext<R>,
+    /// Terminating sessions.
+    terminating_session: R::JoinSet<(RouterId, u64)>,
 
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, Ssu2SessionContext>,
@@ -190,13 +194,14 @@ impl<R: Runtime> Ssu2Socket<R> {
             pending_sessions: R::join_set(),
             pkt_rx,
             pkt_tx,
+            router_ctx,
             sessions: HashMap::new(),
             socket,
             static_key,
             subsystem_handle,
+            terminating_session: R::join_set(),
             unvalidated_sessions: HashMap::new(),
             waker: None,
-            router_ctx,
             write_state: WriteState::GetPacket,
         }
     }
@@ -287,22 +292,14 @@ impl<R: Runtime> Ssu2Socket<R> {
     pub fn connect(&mut self, router_info: RouterInfo) {
         // must succeed since `TransportManager` has ensured `router_info` contains
         // a valid and reachable ssu2 router address
-        //
-        // TODO: add helper code for all of this in `RouterAddress`
-        let address = router_info.addresses.get(&TransportKind::Ssu2).expect("to exist");
-        let intro_key = {
-            let intro_key = address.options.get(&Str::from("i")).expect("to exist");
-            let intro_key = base64_decode(intro_key.as_bytes()).expect("to succeed");
-
-            TryInto::<[u8; 32]>::try_into(intro_key).expect("to succeed")
-        };
-        let static_key = {
-            let static_key = address.options.get(&Str::from("s")).expect("to exist");
-            let static_key = base64_decode(static_key.as_bytes()).expect("to succeed");
-
-            StaticPublicKey::from_bytes(&static_key).expect("to succeed")
-        };
-        let address = address.socket_address.expect("to exist");
+        let intro_key = router_info.ssu2_intro_key().expect("to succeed");
+        let static_key = router_info.ssu2_static_key().expect("to succeed");
+        let address = router_info
+            .addresses
+            .get(&TransportKind::Ssu2)
+            .expect("to exist")
+            .socket_address
+            .expect("to exist");
 
         let state = Sha256::new().update(&self.outbound_state).update(&static_key).finalize();
         let src_id = R::rng().next_u64();
@@ -422,12 +419,17 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             }
         }
 
-        match this.active_sessions.poll_next_unpin(cx) {
-            Poll::Pending => {}
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((router_id, _dst_id, reason))) => {
-                // TODO: remove channel
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason }));
+        loop {
+            match this.active_sessions.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(termination_ctx)) => {
+                    this.terminating_session
+                        .push(TerminatingSsu2Session::<R>::new(termination_ctx));
+                    // // TODO: remove channel
+                    // return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason
+                    // }));
+                }
             }
         }
 
@@ -466,7 +468,48 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
-                Poll::Ready(Some(PendingSsu2SessionStatus::SessionTermianted {})) => todo!(),
+                Poll::Ready(Some(PendingSsu2SessionStatus::SessionTermianted {
+                    connection_id,
+                    router_id,
+                })) => match router_id {
+                    None => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?connection_id,
+                            "pending inbound session terminated",
+                        );
+                    }
+                    Some(router_id) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?connection_id,
+                            "pending outbound session terminated",
+                        );
+                        return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
+                    }
+                },
+                Poll::Ready(Some(PendingSsu2SessionStatus::Timeout {
+                    connection_id,
+                    router_id,
+                })) => match router_id {
+                    None => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?connection_id,
+                            "pending inbound session timed out",
+                        );
+                    }
+                    Some(router_id) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            ?connection_id,
+                            "pending outbound session timed out",
+                        );
+                        return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
+                    }
+                },
                 Poll::Ready(Some(PendingSsu2SessionStatus::SocketClosed)) =>
                     return Poll::Ready(None),
             }

@@ -140,7 +140,7 @@ impl Initiator {
         local_static_key: StaticPrivateKey,
         remote_static_key: &StaticPublicKey,
         router_hash: Vec<u8>,
-        remote_iv: Vec<u8>,
+        remote_iv: [u8; 16],
         net_id: u8,
     ) -> crate::Result<(Self, BytesMut)> {
         tracing::trace!(

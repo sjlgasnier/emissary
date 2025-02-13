@@ -58,7 +58,7 @@ const LOG_TARGET: &str = "emissary::transport-manager";
 const ROUTER_INFO_REPUBLISH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Termination reason.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum TerminationReason {
     /// Unspecified or normal termination.
     #[default]

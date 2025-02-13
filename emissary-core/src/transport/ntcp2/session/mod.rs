@@ -31,9 +31,9 @@
 //! and responder can be found from `initiator.rs` and `responder.rs`.
 
 use crate::{
-    crypto::{base64_decode, sha256::Sha256, siphash::SipHash, StaticPrivateKey, StaticPublicKey},
+    crypto::{sha256::Sha256, siphash::SipHash, StaticPrivateKey},
     error::Error,
-    primitives::{RouterId, RouterInfo, Str, TransportKind},
+    primitives::{RouterId, RouterInfo, TransportKind},
     profile::ProfileStorage,
     router::context::RouterContext,
     runtime::{Runtime, TcpStream},
@@ -47,7 +47,7 @@ use crate::{
 use bytes::Bytes;
 
 use alloc::{vec, vec::Vec};
-use core::{future::Future, net::IpAddr, str::FromStr};
+use core::{future::Future, net::IpAddr};
 
 mod active;
 mod initiator;
@@ -173,24 +173,25 @@ impl<R: Runtime> SessionManager<R> {
         let router_id = router.identity.id();
 
         let (remote_key, iv, socket_address) = {
-            let ntcp2 = router.addresses.get(&TransportKind::Ntcp2).ok_or(Error::NotSupported)?;
-
-            let static_key =
-                ntcp2.options.get(&Str::from_str("s").expect("to succeed")).ok_or_else(|| {
-                    tracing::warn!(target: LOG_TARGET, "static key missing from ntcp2 info");
-                    Error::InvalidData
-                })?;
-
-            let iv =
-                ntcp2.options.get(&Str::from_str("i").expect("to succeed")).ok_or_else(|| {
-                    tracing::warn!(target: LOG_TARGET, "iv missing from ntcp2 info");
-                    Error::InvalidData
-                })?;
-
-            let socket_address = ntcp2.socket_address.ok_or_else(|| {
-                tracing::debug!(target: LOG_TARGET, "router doesn't have socket address");
+            let static_key = router.ntcp2_static_key().ok_or_else(|| {
+                tracing::warn!(target: LOG_TARGET, "static key missing from ntcp2 info");
                 Error::InvalidData
             })?;
+            let iv = router.ntcp2_iv().ok_or_else(|| {
+                tracing::warn!(target: LOG_TARGET, "iv missing from ntcp2 info");
+                Error::InvalidData
+            })?;
+
+            // transprot must exist since static key and iv were found
+            let socket_address = router
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .expect("to exist")
+                .socket_address
+                .ok_or_else(|| {
+                    tracing::debug!(target: LOG_TARGET, "router doesn't have socket address");
+                    Error::InvalidData
+                })?;
 
             match socket_address.ip() {
                 IpAddr::V4(address) if !is_global(address) && !allow_local => {
@@ -204,34 +205,7 @@ impl<R: Runtime> SessionManager<R> {
                 _ => {}
             }
 
-            (
-                StaticPublicKey::from_bytes(&base64_decode(static_key.as_bytes()).ok_or_else(
-                    || {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            "failed to base64-decode ntcp2 static key"
-                        );
-
-                        Error::InvalidData
-                    },
-                )?)
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        "failed to create public key from ntcp2 record",
-                    );
-                    Error::InvalidData
-                })?,
-                base64_decode(iv.as_bytes()).ok_or_else(|| {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        "failed to base64-decode ntcp2 iv"
-                    );
-
-                    Error::InvalidData
-                })?,
-                socket_address,
-            )
+            (static_key, iv, socket_address)
         };
 
         tracing::trace!(

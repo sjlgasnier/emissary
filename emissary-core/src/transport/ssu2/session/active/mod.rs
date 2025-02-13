@@ -19,193 +19,45 @@
 use crate::{
     crypto::chachapoly::{ChaCha, ChaChaPoly},
     error::Ssu2Error,
-    i2np::{Message, MessageType as I2npMessageType},
-    primitives::{MessageId, RouterId},
+    i2np::Message,
+    primitives::RouterId,
     runtime::Runtime,
     subsystem::{SubsystemCommand, SubsystemHandle},
     transport::{
         ssu2::{
             message::{Block, DataMessageBuilder},
+            session::{
+                active::{
+                    ack::{LocalAckManager, RemoteAckManager},
+                    duplicate::DuplicateFilter,
+                    fragment::FragmentHandler,
+                },
+                terminating::TerminationContext,
+                KeyContext,
+            },
             Packet,
         },
         TerminationReason,
     },
 };
 
-use futures::{future::BoxFuture, FutureExt};
-use hashbrown::{HashMap, HashSet};
+use futures::FutureExt;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{
-    boxed::Box,
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     future::Future,
-    marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
+
+mod ack;
+mod duplicate;
+mod fragment;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::ssu2::session::active";
-
-/// Duplicate filter decay interval.
-const DUPLICATE_FILTER_DECAY_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-/// Key context for an active session.
-pub struct KeyContext {
-    /// Key for encrypting/decrypting `Data` payloads.
-    pub k_data: [u8; 32],
-
-    /// Key for encrypting/decrypting second part of the header.
-    pub k_header_2: [u8; 32],
-}
-
-impl KeyContext {
-    /// Create new [`KeyContext`].
-    pub fn new(k_data: [u8; 32], k_header_2: [u8; 32]) -> Self {
-        Self { k_data, k_header_2 }
-    }
-}
-
-/// Duplicate message filter.
-#[derive(Default)]
-pub struct DuplicateFilter {
-    /// Current filter.
-    current: HashSet<u32>,
-
-    /// Previous filter.
-    previous: HashSet<u32>,
-}
-
-impl DuplicateFilter {
-    /// Attempt to insert `message_id` into [`DuplicateFilter`].
-    ///
-    /// Returns `true` if `bytes` doesn't exist in the filter and `false` if it does.
-    pub fn insert(&mut self, message_id: u32) -> bool {
-        if self.current.contains(&message_id) || self.previous.contains(&message_id) {
-            tracing::error!("ignore dpulicate message");
-            return false;
-        }
-
-        self.current.insert(message_id);
-        true
-    }
-
-    /// Decay [`BloomFilter`].
-    pub fn decay(&mut self) {
-        self.previous = core::mem::take(&mut self.current);
-    }
-}
-
-/// Fragmented I2NP message.
-#[derive(Default)]
-struct Fragment {
-    /// Fragments.
-    fragments: BTreeMap<u8, Vec<u8>>,
-
-    /// Total of fragments.
-    ///
-    /// `None` if last fragment hasn't been received.
-    num_fragments: Option<usize>,
-
-    /// Message info.
-    ///
-    /// `None` if the first fragment hasn't been received.
-    info: Option<(I2npMessageType, MessageId, u32)>,
-
-    /// Total size of the I2NP message.
-    total_size: usize,
-}
-
-impl Fragment {
-    /// Check if [`Fragment`] is ready for assembly.
-    pub fn is_ready(&self) -> bool {
-        self.num_fragments.is_some()
-            && self.info.is_some()
-            && self.num_fragments == Some(self.fragments.len())
-    }
-
-    /// Construct I2NP message from received fragments.
-    pub fn construct(mut self) -> Option<Message> {
-        let (message_type, message_id, expiration) = self.info.take()?;
-        let payload = self.fragments.into_values().fold(
-            Vec::<u8>::with_capacity(self.total_size),
-            |mut payload, fragment| {
-                payload.extend_from_slice(&fragment);
-                payload
-            },
-        );
-
-        Some(Message {
-            message_type,
-            message_id: *message_id,
-            expiration: Duration::from_secs(expiration as u64),
-            payload,
-        })
-    }
-}
-
-/// Fragment handler.
-#[derive(Default)]
-struct FragmentHandler {
-    /// Fragmented messages.
-    messages: HashMap<MessageId, Fragment>,
-}
-
-impl FragmentHandler {
-    /// Handle first fragment.
-    ///
-    /// If all fragments have been received, the constructed message is received.
-    pub fn first_fragment(
-        &mut self,
-        message_type: I2npMessageType,
-        message_id: MessageId,
-        expiration: u32,
-        payload: Vec<u8>,
-    ) -> Option<Message> {
-        let message = self.messages.entry(message_id).or_default();
-
-        message.total_size += payload.len();
-        message.fragments.insert(0u8, payload.to_vec());
-        message.info = Some((message_type, message_id, expiration));
-
-        message
-            .is_ready()
-            .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
-            .flatten()
-    }
-
-    /// Handle follow-on fragment.
-    ///
-    /// If all fragments have been received, the constructed message is received.
-    pub fn follow_on_fragment(
-        &mut self,
-        message_id: MessageId,
-        sequence: u8,
-        last: bool,
-        payload: Vec<u8>,
-    ) -> Option<Message> {
-        let message = self.messages.entry(message_id).or_default();
-
-        message.total_size += payload.len();
-        message.fragments.insert(sequence, payload.to_vec());
-
-        if last {
-            // +1 one for the first fragment
-            message.num_fragments = Some(sequence as usize + 1usize);
-        }
-
-        message
-            .is_ready()
-            .then(|| self.messages.remove(&message_id).expect("message to exist").construct())
-            .flatten()
-    }
-}
 
 /// SSU2 active session context.
 pub struct Ssu2SessionContext {
@@ -247,10 +99,19 @@ pub struct Ssu2Session<R: Runtime> {
     /// Destination connection ID.
     dst_id: u64,
 
+    /// Duplicate message filter.
+    duplicate_filter: DuplicateFilter<R>,
+
+    /// Fragment handler.
+    fragment_handler: FragmentHandler<R>,
+
     /// Intro key of remote router.
     ///
     /// Used for encrypting the first part of the header.
     intro_key: [u8; 32],
+
+    /// Local ACK manager.
+    _local_ack: LocalAckManager,
 
     /// Next packet number.
     pkt_num: u32,
@@ -263,35 +124,19 @@ pub struct Ssu2Session<R: Runtime> {
     // TODO: `R::UdpSocket` should be clonable
     pkt_tx: Sender<Packet>,
 
-    /// Fragment handler.
-    fragment_handler: FragmentHandler,
-
     /// Key context for inbound packets.
     recv_key_ctx: KeyContext,
 
+    /// Remote ACK manager.
+    remote_ack: RemoteAckManager,
     /// ID of the remote router.
     router_id: RouterId,
 
     /// Key context for outbound packets.
     send_key_ctx: KeyContext,
 
-    /// Highest seen packet number.
-    //
-    // TODO: move to separate ack context
-    pkt_highest_seen: u32,
-    num_unacked: u8,
-
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
-
-    /// Duplicate message filter.
-    duplicate_filter: DuplicateFilter,
-
-    /// Duplicate filter decay timer.
-    duplicate_filter_timer: BoxFuture<'static, ()>,
-
-    /// Marker for `Runtime`.
-    _runtime: PhantomData<R>,
 }
 
 impl<R: Runtime> Ssu2Session<R> {
@@ -313,22 +158,20 @@ impl<R: Runtime> Ssu2Session<R> {
         Self {
             address: context.address,
             cmd_rx,
-            duplicate_filter: DuplicateFilter::default(),
-            duplicate_filter_timer: Box::pin(R::delay(DUPLICATE_FILTER_DECAY_INTERVAL)),
             cmd_tx,
             dst_id: context.dst_id,
-            fragment_handler: FragmentHandler::default(),
-            pkt_highest_seen: 0u32,
-            num_unacked: 0u8,
+            duplicate_filter: DuplicateFilter::new(),
+            fragment_handler: FragmentHandler::<R>::new(),
             intro_key: context.intro_key,
+            _local_ack: LocalAckManager::new(),
             pkt_num: 1u32, // TODO: may not be correct for outbound sessions
             pkt_rx: context.pkt_rx,
             pkt_tx,
             recv_key_ctx: context.recv_key_ctx,
+            remote_ack: RemoteAckManager::new(),
             router_id: context.router_id,
             send_key_ctx: context.send_key_ctx,
             subsystem_handle,
-            _runtime: Default::default(),
         }
     }
 
@@ -342,12 +185,50 @@ impl<R: Runtime> Ssu2Session<R> {
         pkt_num
     }
 
-    /// Handle received `pkt` for this session.
-    fn on_packet(&mut self, pkt: Packet) -> Result<(), Ssu2Error> {
-        let Packet { mut pkt, .. } = pkt;
+    /// Handle inbound `message`.
+    ///
+    /// If the message is expired or a duplicate, it's dropped. Otherwise it's
+    /// dispatched to the correct subsystem for further processing.
+    fn handle_message(&mut self, message: Message) {
+        if message.is_expired::<R>() {
+            tracing::trace!(
+                target: LOG_TARGET,
+                router_id = %self.router_id,
+                message_type = ?message.message_type,
+                message_id = ?message.message_id,
+                expiration = ?message.expiration,
+                "discarding expired message",
+            );
+            return;
+        }
 
-        // TODO: upate address if it has changed
-        // TODO: handle duplicate pkts correctly
+        if !self.duplicate_filter.insert(message.message_id) {
+            tracing::debug!(
+                target: LOG_TARGET,
+                router_id = %self.router_id,
+                message_id = ?message.message_id,
+                message_type = ?message.message_type,
+                "ignoring duplicat message",
+            );
+            return;
+        }
+
+        if let Err(error) = self.subsystem_handle.dispatch_messages(vec![message]) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                router_id = %self.router_id,
+                ?error,
+                "failed to dispatch messages to subsystems",
+            );
+        }
+    }
+
+    /// Handle ACKs.
+    fn handle_acks(&mut self, _ack_through: u32, _num_acks: u8, _ranges: Vec<(u8, u8)>) {}
+
+    /// Handle received `pkt` for this session.
+    fn handle_packet(&mut self, pkt: Packet) -> Result<(), Ssu2Error> {
+        let Packet { mut pkt, .. } = pkt;
 
         let iv2 = TryInto::<[u8; 12]>::try_into(&pkt[pkt.len() - 12..]).expect("to succeed");
         ChaCha::with_iv(self.recv_key_ctx.k_header_2, iv2)
@@ -358,12 +239,7 @@ impl<R: Runtime> Ssu2Session<R> {
                 *b ^= a;
             });
 
-        // match MessageType::try_from(pkt[12]) {
-        //     Ok(msg_type) => tracing::trace!("msg type = {msg_type:?}"),
-        //     Err(()) => {
-        //         tracing::error!("unknown message");
-        //     }
-        // }
+        // TODO: immediate ack
 
         let pkt_num = u32::from_be_bytes(TryInto::<[u8; 4]>::try_into(&pkt[8..12]).unwrap());
 
@@ -372,98 +248,93 @@ impl<R: Runtime> Ssu2Session<R> {
         ChaChaPoly::with_nonce(&self.recv_key_ctx.k_data, pkt_num as u64)
             .decrypt_with_ad(&pkt[..16], &mut payload)?;
 
-        let blocks = Block::parse(&payload).ok_or(Ssu2Error::Malformed)?;
+        for block in Block::parse(&payload).ok_or(Ssu2Error::Malformed)? {
+            match block {
+                Block::Termination {
+                    reason,
+                    num_valid_pkts,
+                } => {
+                    self.remote_ack.register_non_ack_eliciting_pkt(pkt_num);
 
-        // TODO: shut down the sesssion
-        // TODO: iterate only once?
-        if let Some(Block::Termination { reason, .. }) =
-            blocks.iter().find(|message| core::matches!(message, Block::Termination { .. }))
-        {
-            tracing::debug!(
-                target: LOG_TARGET,
-                router_id = %self.router_id,
-                ?reason,
-                "session terminated by remote router",
-            );
-            return Err(Ssu2Error::SessionTerminated(TerminationReason::ssu2(
-                *reason,
-            )));
-        }
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        router_id = %self.router_id,
+                        ?reason,
+                        ?num_valid_pkts,
+                        "session terminated by remote router",
+                    );
 
-        let messages = blocks
-            .into_iter()
-            .filter_map(|message| match message {
-                Block::I2Np { message } =>
-                    if message.is_expired::<R>() {
-                        tracing::trace!(
-                            target: LOG_TARGET,
-                            router_id = %self.router_id,
-                            message_type = ?message.message_type,
-                            message_id = ?message.message_id,
-                            expiration = ?message.expiration,
-                            "discarding expired message",
-                        );
-                        None
-                    } else {
-                        Some(message)
-                    },
-                Block::Padding { .. } => None,
+                    return Err(Ssu2Error::SessionTerminated(TerminationReason::ssu2(
+                        reason,
+                    )));
+                }
+
+                Block::I2Np { message } => {
+                    self.handle_message(message);
+                    self.remote_ack.register_pkt(pkt_num);
+                }
                 Block::FirstFragment {
                     message_type,
                     message_id,
                     expiration,
                     fragment,
-                } => self.fragment_handler.first_fragment(
-                    message_type,
-                    message_id,
-                    expiration,
-                    fragment,
-                ),
+                } => {
+                    self.remote_ack.register_pkt(pkt_num);
+
+                    if let Some(message) = self.fragment_handler.first_fragment(
+                        message_type,
+                        message_id,
+                        expiration,
+                        fragment,
+                    ) {
+                        self.handle_message(message);
+                    }
+                }
                 Block::FollowOnFragment {
                     last,
                     message_id,
                     fragment_num,
                     fragment,
-                } => self.fragment_handler.follow_on_fragment(
-                    message_id,
-                    fragment_num,
-                    last,
-                    fragment,
-                ),
-                Block::Ack { .. } => None,
-                message => {
+                } => {
+                    self.remote_ack.register_pkt(pkt_num);
+
+                    if let Some(message) = self.fragment_handler.follow_on_fragment(
+                        message_id,
+                        fragment_num,
+                        last,
+                        fragment,
+                    ) {
+                        self.handle_message(message);
+                    }
+                }
+                Block::Ack {
+                    ack_through,
+                    num_acks,
+                    ranges,
+                } => {
+                    self.remote_ack.register_non_ack_eliciting_pkt(pkt_num);
+                    self.handle_acks(ack_through, num_acks, ranges);
+                }
+                Block::Address { .. } | Block::DateTime { .. } | Block::Padding { .. } => {
+                    self.remote_ack.register_non_ack_eliciting_pkt(pkt_num);
+                }
+                block => {
                     tracing::debug!(
                         target: LOG_TARGET,
                         router_id = %self.router_id,
-                        ?message,
-                        "ignoring message",
+                        ?block,
+                        "ignoring block",
                     );
-                    None
+                    self.remote_ack.register_pkt(pkt_num);
                 }
-            })
-            .filter(|message| self.duplicate_filter.insert(message.message_id))
-            .collect::<Vec<_>>();
-
-        if let Err(error) = self.subsystem_handle.dispatch_messages(messages) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                router_id = %self.router_id,
-                ?error,
-                "failed to dispatch messages to subsystems",
-            );
+            }
         }
-
-        self.pkt_highest_seen = pkt_num;
-        self.num_unacked += 1;
-
-        // TODO: handle fragments
-        // TODO: start ack timer?
 
         Ok(())
     }
 
-    /// Handle outbound `message`.
-    fn on_send_message(&mut self, message: Vec<u8>) {
+    /// Send `message` to remote router.
+    fn send_message(&mut self, message: Vec<u8>) {
         tracing::trace!(
             target: LOG_TARGET,
             router_id = %self.router_id,
@@ -471,8 +342,10 @@ impl<R: Runtime> Ssu2Session<R> {
             "send i2np message",
         );
 
+        // TODO: this makes no sense, get unserialized message from subsystem
         let msg = Message::parse_short(&message).unwrap();
         let message_id = msg.message_id;
+        let (highest_seen, num_acks, ranges) = self.remote_ack.ack_info();
 
         if message.len() <= 1200 {
             let message = DataMessageBuilder::default()
@@ -480,11 +353,7 @@ impl<R: Runtime> Ssu2Session<R> {
                 .with_pkt_num(self.next_pkt_num())
                 .with_key_context(self.intro_key, &self.send_key_ctx)
                 .with_i2np(&message)
-                .with_ack(
-                    self.pkt_highest_seen,
-                    self.num_unacked.saturating_sub(1), // TODO: explain
-                    None,
-                )
+                .with_ack(highest_seen, num_acks, ranges)
                 .build();
 
             if let Err(error) = self.pkt_tx.try_send(Packet {
@@ -500,6 +369,7 @@ impl<R: Runtime> Ssu2Session<R> {
         } else {
             let mut fragments = msg.payload.chunks(1200).collect::<VecDeque<_>>();
             let num_fragments = fragments.len();
+            let (highest_seen, num_acks, ranges) = self.remote_ack.ack_info();
 
             let first_fragment = DataMessageBuilder::default()
                 .with_dst_id(self.dst_id)
@@ -511,11 +381,7 @@ impl<R: Runtime> Ssu2Session<R> {
                     msg.expiration.as_secs() as u32,
                     fragments.pop_front().expect("to exist"),
                 )
-                .with_ack(
-                    self.pkt_highest_seen,
-                    self.num_unacked.saturating_sub(1), // TODO: explain
-                    None,
-                )
+                .with_ack(highest_seen, num_acks, ranges.clone()) // TODO: overflow
                 .build();
 
             if let Err(error) = self.pkt_tx.try_send(Packet {
@@ -540,11 +406,7 @@ impl<R: Runtime> Ssu2Session<R> {
                         i == num_fragments - 2,
                         fragment,
                     )
-                    .with_ack(
-                        self.pkt_highest_seen,
-                        self.num_unacked.saturating_sub(1), // TODO: explain
-                        None,
-                    )
+                    .with_ack(highest_seen, num_acks, ranges.clone()) // TODO: overflow
                     .build()
                     .to_vec();
 
@@ -560,12 +422,10 @@ impl<R: Runtime> Ssu2Session<R> {
                 }
             });
         };
-
-        self.num_unacked = 0;
     }
 
     /// Run the event loop of an active SSU2 session.
-    pub async fn run(mut self) -> (RouterId, u64, TerminationReason) {
+    pub async fn run(mut self) -> TerminationContext {
         self.subsystem_handle
             .report_connection_established(self.router_id.clone(), self.cmd_tx.clone())
             .await;
@@ -577,7 +437,19 @@ impl<R: Runtime> Ssu2Session<R> {
         let reason = (&mut self).await;
 
         self.subsystem_handle.report_connection_closed(self.router_id.clone()).await;
-        (self.router_id, self.dst_id, reason)
+
+        TerminationContext {
+            address: self.address,
+            dst_id: self.dst_id,
+            intro_key: self.intro_key,
+            next_pkt_num: self.next_pkt_num(),
+            reason,
+            recv_key_ctx: self.recv_key_ctx,
+            router_id: self.router_id,
+            rx: self.pkt_rx,
+            send_key_ctx: self.send_key_ctx,
+            tx: self.pkt_tx,
+        }
     }
 }
 
@@ -589,7 +461,7 @@ impl<R: Runtime> Future for Ssu2Session<R> {
             match self.pkt_rx.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(TerminationReason::Unspecified),
-                Poll::Ready(Some(pkt)) => match self.on_packet(pkt) {
+                Poll::Ready(Some(pkt)) => match self.handle_packet(pkt) {
                     Ok(()) => {}
                     Err(Ssu2Error::Malformed) => {
                         tracing::warn!(
@@ -599,15 +471,17 @@ impl<R: Runtime> Future for Ssu2Session<R> {
                         debug_assert!(false);
                     }
                     Err(Ssu2Error::SessionTerminated(reason)) => return Poll::Ready(reason),
-                    Err(Ssu2Error::Chacha) => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            router_id = %self.router_id,
-                            "encryption/decryption failure, shutting down session",
-                        );
-                        return Poll::Ready(TerminationReason::AeadFailure);
-                    }
-                    Err(_) => {}
+                    Err(Ssu2Error::Chacha) => tracing::warn!(
+                        target: LOG_TARGET,
+                        router_id = %self.router_id,
+                        "encryption/decryption failure, shutting down session",
+                    ),
+                    Err(error) => tracing::debug!(
+                        target: LOG_TARGET,
+                        router_id = %self.router_id,
+                        ?error,
+                        "failed to process packet",
+                    ),
                 },
             }
         }
@@ -617,19 +491,16 @@ impl<R: Runtime> Future for Ssu2Session<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(TerminationReason::Unspecified),
                 Poll::Ready(Some(SubsystemCommand::SendMessage { message })) =>
-                    self.on_send_message(message),
+                    self.send_message(message),
                 Poll::Ready(Some(SubsystemCommand::Dummy)) => {}
             }
         }
 
-        futures::ready!(self.duplicate_filter_timer.poll_unpin(cx));
-
-        // create new timer and register it into the executor
-        {
-            self.duplicate_filter.decay();
-            self.duplicate_filter_timer = Box::pin(R::delay(DUPLICATE_FILTER_DECAY_INTERVAL));
-            let _ = self.duplicate_filter_timer.poll_unpin(cx);
-        }
+        // poll duplicate message filter and fragment handler
+        //
+        // the futures don't return anything but must be polled so they make progress
+        let _ = self.duplicate_filter.poll_unpin(cx);
+        let _ = self.fragment_handler.poll_unpin(cx);
 
         Poll::Pending
     }
