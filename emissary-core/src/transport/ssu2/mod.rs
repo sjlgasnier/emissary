@@ -130,6 +130,11 @@ impl<R: Runtime> Ssu2Transport<R> {
             return Ok((None, None));
         };
 
+        tracing::warn!(
+            target: LOG_TARGET,
+            "ssu2 support is experimental and not recommend for general use",
+        );
+
         let socket =
             R::UdpSocket::bind(format!("0.0.0.0:{}", config.port).parse().expect("to succeed"))
                 .await
