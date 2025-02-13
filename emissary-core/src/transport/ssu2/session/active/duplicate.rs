@@ -66,7 +66,6 @@ impl<R: Runtime> DuplicateFilter<R> {
     /// Returns `true` if `bytes` doesn't exist in the filter and `false` if it does.
     pub fn insert(&mut self, message_id: u32) -> bool {
         if self.current.contains(&message_id) || self.previous.contains(&message_id) {
-            tracing::error!("ignore dpulicate message");
             return false;
         }
 
