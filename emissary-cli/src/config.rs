@@ -166,7 +166,7 @@ struct EmissaryConfig {
     reseed: Option<ReseedConfig>,
     sam: Option<SamConfig>,
     ssu2: Option<Ssu2Config>,
-    tunnels: Vec<TunnelConfig>,
+    tunnels: Option<Vec<TunnelConfig>>,
 }
 
 /// Router configuration.
@@ -584,7 +584,7 @@ impl Config {
                 host: None,
             }),
             ssu2: None,
-            tunnels: Vec::new(),
+            tunnels: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -700,7 +700,7 @@ impl Config {
                         udp_port: 7655,
                         host: None,
                     }),
-                    tunnels: Vec::new(),
+                    tunnels: None,
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -761,7 +761,7 @@ impl Config {
             }),
             signing_key,
             static_key,
-            tunnels: config.tunnels,
+            tunnels: config.tunnels.unwrap_or(Vec::new()),
         })
     }
 
@@ -1088,7 +1088,7 @@ mod tests {
             reseed: None,
             sam: None,
             ssu2: None,
-            tunnels: Vec::new(),
+            tunnels: None,
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
