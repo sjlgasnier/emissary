@@ -18,15 +18,14 @@
 
 use crate::i2cp::message::{MessageType, I2CP_HEADER_SIZE};
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// Reply kind for host lookup.
 pub enum HostReplyKind {
     /// Lookup succeeded.
-    #[allow(unused)]
     Success {
         /// Serialized destination.
-        destination: BytesMut,
+        destination: Bytes,
     },
 
     /// Host lookup failed.

@@ -73,11 +73,11 @@ pub struct I2cpSession<R: Runtime> {
     /// Destination.
     destination: Destination<R>,
 
+    /// Pending host lookups.
+    host_lookups: R::JoinSet<Option<(SessionId, u32, Bytes)>>,
+
     /// Next message ID.
     next_message_id: u32,
-
-    /// Pending host lookups.
-    host_lookups: R::JoinSet<Option<(SessionId, u32, BytesMut)>>,
 
     /// Session options.
     #[allow(unused)]
@@ -85,6 +85,9 @@ pub struct I2cpSession<R: Runtime> {
 
     /// Pending outbound connections.
     pending_connections: HashMap<DestinationId, VecDeque<PendingMessage>>,
+
+    /// Pending lease set lookups.
+    pending_lookups: HashMap<DestinationId, (SessionId, u32)>,
 
     /// Session ID.
     session_id: u16,
@@ -144,6 +147,7 @@ impl<R: Runtime> I2cpSession<R> {
             next_message_id: 0u32,
             options,
             pending_connections: HashMap::new(),
+            pending_lookups: HashMap::new(),
             session_id,
             socket,
         }
@@ -220,13 +224,13 @@ impl<R: Runtime> I2cpSession<R> {
                 timeout,
                 kind,
             } => {
-                tracing::info!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     ?session_id,
                     ?request_id,
                     ?timeout,
                     ?kind,
-                    "host lookup, address book not implemented",
+                    "lookup host",
                 );
 
                 match (self.address_book.clone(), kind) {
@@ -237,7 +241,7 @@ impl<R: Runtime> I2cpSession<R> {
                             Some((
                                 session_id,
                                 request_id,
-                                BytesMut::from(&base64_decode(destination)?[..]),
+                                BytesMut::from(&base64_decode(destination)?[..]).freeze(),
                             ))
                         });
                     }
@@ -254,18 +258,40 @@ impl<R: Runtime> I2cpSession<R> {
                             HostReplyKind::Failure,
                         ));
                     }
-                    (Some(_), RequestKind::Hash { _hash }) => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            hash = ?_hash,
-                            "hash-based host lookup not supported",
-                        );
+                    (Some(_), RequestKind::Hash { hash }) => {
+                        let destination_id = DestinationId::from(hash);
 
-                        self.socket.send_message(HostReply::new(
-                            session_id.as_u16(),
-                            request_id,
-                            HostReplyKind::Failure,
-                        ));
+                        match self.destination.query_lease_set(&destination_id) {
+                            LeaseSetStatus::Found => {
+                                let destination = self
+                                    .destination
+                                    .lease_set(&destination_id)
+                                    .header
+                                    .destination
+                                    .serialized()
+                                    .clone();
+
+                                self.socket.send_message(HostReply::new(
+                                    session_id.as_u16(),
+                                    request_id,
+                                    HostReplyKind::Success { destination },
+                                ));
+                            }
+                            LeaseSetStatus::NotFound => {
+                                tracing::trace!(
+                                    target: LOG_TARGET,
+                                    %destination_id,
+                                    "lease set lookup started for hash-based host lookup",
+                                );
+                                self.pending_lookups
+                                    .insert(destination_id, (session_id, request_id));
+                            }
+                            LeaseSetStatus::Pending => tracing::warn!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                "hash-based host lookup is already pending",
+                            ),
+                        }
                     }
                 }
             }
@@ -421,27 +447,64 @@ impl<R: Runtime> Future for I2cpSession<R> {
                                 );
                             }
                         }),
-                        None => {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                %destination_id,
-                                "lease set query completed for a connection that doesn't exist",
-                            );
-                            debug_assert!(false);
-                        }
+                        None => match self.pending_lookups.remove(&destination_id) {
+                            Some((session_id, request_id)) => {
+                                let destination = self
+                                    .destination
+                                    .lease_set(&destination_id)
+                                    .header
+                                    .destination
+                                    .serialized()
+                                    .clone();
+
+                                self.socket.send_message(HostReply::new(
+                                    session_id.as_u16(),
+                                    request_id,
+                                    HostReplyKind::Success { destination },
+                                ));
+                            }
+                            None => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %destination_id,
+                                    "lease set query completed for a connection that doesn't exist",
+                                );
+                            }
+                        },
                     },
                 Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
                     destination_id,
                     error,
-                })) => {
-                    tracing::warn!(
+                })) => match self.pending_connections.remove(&destination_id) {
+                    Some(_) => tracing::warn!(
                         target: LOG_TARGET,
                         %destination_id,
                         ?error,
                         "lease set query failed",
-                    );
-                    let _ = self.pending_connections.remove(&destination_id);
-                }
+                    ),
+                    None => match self.pending_lookups.remove(&destination_id) {
+                        Some((session_id, request_id)) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                ?error,
+                                "lease set lookup failed for host-based lookup",
+                            );
+
+                            self.socket.send_message(HostReply::new(
+                                session_id.as_u16(),
+                                request_id,
+                                HostReplyKind::Failure,
+                            ));
+                        }
+                        None => tracing::warn!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            ?error,
+                            "unknown lease set lookup failed",
+                        ),
+                    },
+                },
                 Poll::Ready(Some(DestinationEvent::TunnelPoolShutDown)) => {
                     tracing::info!(
                         target: LOG_TARGET,
@@ -463,7 +526,7 @@ impl<R: Runtime> Future for I2cpSession<R> {
                         target: LOG_TARGET,
                         session_id = ?self.session_id,
                         destination_id = %destination_id,
-                        "session termianted with remote",
+                        "session terminated with remote",
                     );
 
                     // TODO: implement

@@ -114,7 +114,7 @@ pub struct Destination {
     /// Destinations' identity hash.
     identity_hash: Bytes,
 
-    /// Serialized destination, if any.
+    /// Serialized destination.
     serialized: Bytes,
 
     /// Destination's verifying key.
@@ -269,6 +269,11 @@ impl Destination {
     /// Get reference to `SigningPublicKey` of the [`Destination`].
     pub fn verifying_key(&self) -> Option<&SigningPublicKey> {
         self.verifying_key.as_ref()
+    }
+
+    /// Get reference to serialized [`Destination`].
+    pub fn serialized(&self) -> &Bytes {
+        &self.serialized
     }
 }
 
