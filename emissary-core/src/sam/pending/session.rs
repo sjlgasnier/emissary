@@ -20,7 +20,7 @@ use crate::{
     error::Error,
     netdb::NetDbHandle,
     primitives::{Lease, TunnelId},
-    runtime::Runtime,
+    runtime::{AddressBook, Runtime},
     sam::{
         parser::{DestinationContext, SamVersion, SessionKind},
         session::{SamSessionCommand, SamSessionCommandRecycle},
@@ -46,6 +46,9 @@ const LOG_TARGET: &str = "emissary::sam::pending::session";
 
 /// SAMv3 client session context.
 pub struct SamSessionContext<R: Runtime> {
+    /// Address book, if specified.
+    pub address_book: Option<Arc<dyn AddressBook>>,
+
     /// Active inbound tunnels and their leases.
     pub inbound: HashMap<TunnelId, Lease>,
 
@@ -84,6 +87,9 @@ pub struct SamSessionContext<R: Runtime> {
 enum PendingSessionState<R: Runtime> {
     /// Building tunnel pool.
     BuildingTunnelPool {
+        /// Address book.
+        address_book: Option<Arc<dyn AddressBook>>,
+
         /// SAMv3 socket associated with the session.
         socket: SamSocket<R>,
 
@@ -119,6 +125,9 @@ enum PendingSessionState<R: Runtime> {
 
     /// Building tunnels.
     BuildingTunnels {
+        /// Address book.
+        address_book: Option<Arc<dyn AddressBook>>,
+
         /// SAMv3 socket associated with the session.
         socket: SamSocket<R>,
 
@@ -183,9 +192,11 @@ impl<R: Runtime> PendingSamSession<R> {
         datagram_tx: Sender<(u16, Vec<u8>)>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
         netdb_handle: NetDbHandle,
+        address_book: Option<Arc<dyn AddressBook>>,
     ) -> Self {
         Self {
             state: PendingSessionState::BuildingTunnelPool {
+                address_book,
                 datagram_tx,
                 socket,
                 session_id,
@@ -208,6 +219,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
         loop {
             match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
                 PendingSessionState::BuildingTunnelPool {
+                    address_book,
                     socket,
                     session_id,
                     session_kind,
@@ -227,6 +239,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         );
 
                         self.state = PendingSessionState::BuildingTunnels {
+                            address_book,
                             socket,
                             session_id,
                             session_kind,
@@ -243,6 +256,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     }
                     Poll::Pending => {
                         self.state = PendingSessionState::BuildingTunnelPool {
+                            address_book,
                             socket,
                             session_id,
                             session_kind,
@@ -258,6 +272,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                     }
                 },
                 PendingSessionState::BuildingTunnels {
+                    address_book,
                     socket,
                     session_id,
                     session_kind,
@@ -273,6 +288,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                 } => match handle.poll_next_unpin(cx) {
                     Poll::Pending => {
                         self.state = PendingSessionState::BuildingTunnels {
+                            address_book,
                             socket,
                             session_id,
                             session_kind,
@@ -304,6 +320,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             || outbound.len() != handle.config().num_outbound
                         {
                             self.state = PendingSessionState::BuildingTunnels {
+                                address_book,
                                 socket,
                                 session_id,
                                 session_kind,
@@ -329,6 +346,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         );
 
                         return Poll::Ready(Ok(SamSessionContext {
+                            address_book,
                             inbound,
                             options,
                             destination,
@@ -357,6 +375,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                             || outbound.len() != handle.config().num_outbound
                         {
                             self.state = PendingSessionState::BuildingTunnels {
+                                address_book,
                                 socket,
                                 session_id,
                                 session_kind,
@@ -382,6 +401,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         );
 
                         return Poll::Ready(Ok(SamSessionContext {
+                            address_book,
                             inbound,
                             options,
                             destination,
@@ -405,6 +425,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         inbound.remove(&tunnel_id);
 
                         self.state = PendingSessionState::BuildingTunnels {
+                            address_book,
                             socket,
                             session_id,
                             session_kind,
@@ -429,6 +450,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         outbound.remove(&tunnel_id);
 
                         self.state = PendingSessionState::BuildingTunnels {
+                            address_book,
                             socket,
                             session_id,
                             session_kind,
@@ -452,6 +474,7 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         );
 
                         self.state = PendingSessionState::BuildingTunnels {
+                            address_book,
                             socket,
                             session_id,
                             session_kind,

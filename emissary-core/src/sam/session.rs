@@ -17,15 +17,15 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base64_encode, SigningPrivateKey, StaticPrivateKey},
+    crypto::{base32_decode, base64_encode, SigningPrivateKey, StaticPrivateKey},
     destination::{Destination, DestinationEvent, LeaseSetStatus},
     error::QueryError,
     i2cp::{I2cpPayload, I2cpPayloadBuilder},
     primitives::{Destination as Dest, DestinationId, LeaseSet2, LeaseSet2Header},
     protocol::Protocol,
-    runtime::Runtime,
+    runtime::{AddressBook, JoinSet, Runtime},
     sam::{
-        parser::{DestinationContext, SessionKind},
+        parser::{DestinationContext, SamCommand, SessionKind},
         pending::session::SamSessionContext,
         protocol::{
             datagram::DatagramManager,
@@ -45,7 +45,7 @@ use core::{
     fmt,
     future::Future,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -180,6 +180,9 @@ impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
 
 /// Active SAMv3 session.
 pub struct SamSession<R: Runtime> {
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
+
     /// I2P datagram manager.
     datagram_manager: DatagramManager<R>,
 
@@ -194,9 +197,18 @@ pub struct SamSession<R: Runtime> {
     /// Encryption key.
     encryption_key: StaticPrivateKey,
 
+    /// Pending host lookups
+    lookup_futures: R::JoinSet<(String, Option<String>)>,
+
     /// Session options.
     #[allow(unused)]
     options: HashMap<String, String>,
+
+    /// Pending host lookups.
+    ///
+    /// Pending `NAMING LOOKUP` queries for `.b32.i2p` addresses are stored here
+    /// while the corresponding lease set is being queried.
+    pending_host_lookups: HashMap<DestinationId, String>,
 
     /// Pending outbound streams.
     ///
@@ -227,12 +239,16 @@ pub struct SamSession<R: Runtime> {
 
     /// I2P virtual stream manager.
     stream_manager: StreamManager<R>,
+
+    /// Waker.
+    waker: Option<Waker>,
 }
 
 impl<R: Runtime> SamSession<R> {
     /// Create new [`SamSession`].
     pub fn new(context: SamSessionContext<R>) -> Self {
         let SamSessionContext {
+            address_book,
             destination,
             inbound,
             mut socket,
@@ -322,6 +338,7 @@ impl<R: Runtime> SamSession<R> {
         );
 
         Self {
+            address_book,
             datagram_manager: DatagramManager::new(
                 dest.clone(),
                 datagram_tx,
@@ -332,7 +349,9 @@ impl<R: Runtime> SamSession<R> {
             dest: dest.clone(),
             destination: session_destination,
             encryption_key: *encryption_key,
+            lookup_futures: R::join_set(),
             options,
+            pending_host_lookups: HashMap::new(),
             pending_outbound: HashMap::new(),
             receiver,
             session_id,
@@ -340,6 +359,7 @@ impl<R: Runtime> SamSession<R> {
             signing_key: *signing_key.clone(),
             socket: Some(socket),
             stream_manager: StreamManager::new(dest, *signing_key),
+            waker: None,
         }
     }
 
@@ -428,7 +448,7 @@ impl<R: Runtime> SamSession<R> {
 
             R::spawn(async move {
                 let _ = socket
-                    .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
+                    .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER\n".to_vec())
                     .await;
             });
             return;
@@ -654,7 +674,7 @@ impl<R: Runtime> SamSession<R> {
             Some(PendingSessionState::AwaitingLeaseSet { protocol }) => match protocol {
                 ProtocolKind::Stream {
                     socket, options, ..
-                } => self.create_outbound_stream(destination_id, socket, options),
+                } => self.create_outbound_stream(destination_id.clone(), socket, options),
                 ProtocolKind::Datagram {
                     destination,
                     datagrams,
@@ -687,15 +707,42 @@ impl<R: Runtime> SamSession<R> {
                 // the `SYN` packet was queued in `Destination` and was sent to remote destination
                 // when the lease set was received
             }
-            state => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id = ?self.session_id,
-                    %destination_id,
-                    ?state,
-                    "stream in invalid state for lease set query result",
+            None => tracing::debug!(
+                target: LOG_TARGET,
+                session_id = ?self.session_id,
+                %destination_id,
+                "lease set query succeeded but no stream is interested in the lease set",
+            ),
+        }
+
+        if let Some(name) = self.pending_host_lookups.remove(&destination_id) {
+            tracing::trace!(
+                target: LOG_TARGET,
+                session_id = ?self.session_id,
+                %destination_id,
+                ?name,
+                "lease set query succeeded for pending host lookup",
+            );
+
+            if let Some(socket) = &mut self.socket {
+                socket.send_message(
+                    format!(
+                        "NAMING REPLY RESULT=OK NAME={name} VALUE={}\n",
+                        base64_encode(
+                            self.destination
+                                .lease_set(&destination_id)
+                                .header
+                                .destination
+                                .serialized()
+                        ),
+                    )
+                    .as_bytes()
+                    .to_vec(),
                 );
-                debug_assert!(false);
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
             }
         }
     }
@@ -746,16 +793,33 @@ impl<R: Runtime> SamSession<R> {
                 );
                 self.stream_manager.remove_session(&destination_id);
             }
-            state => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id = ?self.session_id,
-                    %destination_id,
-                    ?state,
-                    ?error,
-                    "stream in invalid state for lease set query error",
+            None => tracing::debug!(
+                target: LOG_TARGET,
+                session_id = ?self.session_id,
+                %destination_id,
+                ?error,
+                "lease set query failure but no stream is interested in the lease set",
+            ),
+        }
+
+        if let Some(name) = self.pending_host_lookups.remove(&destination_id) {
+            tracing::debug!(
+                target: LOG_TARGET,
+                session_id = ?self.session_id,
+                %destination_id,
+                ?name,
+                ?error,
+                "lease set query failed for pending host lookup",
+            );
+
+            if let Some(socket) = &mut self.socket {
+                socket.send_message(
+                    format!("NAMING REPLY RESULT=KEY_NOT_FOUND NAME={name}\n").as_bytes().to_vec(),
                 );
-                debug_assert!(false);
+
+                if let Some(waker) = self.waker.take() {
+                    waker.wake_by_ref();
+                }
             }
         }
     }
@@ -805,15 +869,177 @@ impl<R: Runtime> SamSession<R> {
                 ),
             })
     }
+
+    /// Handle `NAMING LOOKUP` query from the client.
+    ///
+    /// The query can either be for `ME`, meaning the [`Destination`] of [`SamSession`] is returned,
+    /// a `.b32.i2p` which starts a lease set query for the destination. or a `.i2p` host name which
+    /// is looked up from an address book if it exists.
+    ///
+    /// For `.b32.i2p`/`.i2p`, naming reply is deferred until the query is finished.
+    fn on_naming_lookup(&mut self, name: String) {
+        if name.as_str() == "ME" {
+            tracing::debug!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                "naming lookup for self",
+            );
+
+            if let Some(socket) = &mut self.socket {
+                socket.send_message(
+                    format!(
+                        "NAMING REPLY RESULT=OK NAME=ME VALUE={}\n",
+                        base64_encode(self.dest.serialized())
+                    )
+                    .as_bytes()
+                    .to_vec(),
+                );
+            }
+
+            return;
+        }
+
+        // if the host name ends in `.b32.i2p`, validate the hostname and check if [`Destination`]
+        // already holds the host's lease set and if not, start a query
+        //
+        // once the query finishes, the naming reply is sent to client
+        if let Some(end) = name.find(".b32.i2p") {
+            tracing::debug!(
+                target: LOG_TARGET,
+                session_id = %self.session_id,
+                "naming lookup for .b32.i2p address",
+            );
+
+            let start = if name.starts_with("http://") {
+                7usize
+            } else if name.starts_with("https://") {
+                8usize
+            } else {
+                0usize
+            };
+
+            let message = match base32_decode(&name[start..end]) {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        ?name,
+                        "invalid .b32.i2p address",
+                    );
+
+                    Some(
+                        format!("NAMING REPLY RESULT=INVALID_KEY NAME={name}\n")
+                            .as_bytes()
+                            .to_vec(),
+                    )
+                }
+                Some(destination) => {
+                    let destination_id = DestinationId::from(destination);
+
+                    match self.destination.query_lease_set(&destination_id) {
+                        LeaseSetStatus::Found => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                session_id = %self.session_id,
+                                %destination_id,
+                                ?name,
+                                "lease set found for host",
+                            );
+
+                            Some(
+                                format!(
+                                    "NAMING REPLY RESULT=OK NAME={name} VALUE={}\n",
+                                    base64_encode(
+                                        self.destination
+                                            .lease_set(&destination_id)
+                                            .header
+                                            .destination
+                                            .serialized()
+                                    )
+                                )
+                                .as_bytes()
+                                .to_vec(),
+                            )
+                        }
+                        status => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                session_id = %self.session_id,
+                                %destination_id,
+                                ?name,
+                                ?status,
+                                "lease set not found for host, query started",
+                            );
+                            self.pending_host_lookups.insert(destination_id, name);
+
+                            None
+                        }
+                    }
+                }
+            };
+
+            if let (Some(socket), Some(message)) = (&mut self.socket, message) {
+                socket.send_message(message);
+            }
+
+            return;
+        }
+
+        let message = match name.find(".i2p") {
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    session_id = %self.session_id,
+                    ?name,
+                    "invalid host name",
+                );
+
+                Some(format!("NAMING REPLY RESULT=INVALID_KEY NAME={name}\n").as_bytes().to_vec())
+            }
+            Some(_) => match &self.address_book {
+                None => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        ?name,
+                        "address book doesn't exist",
+                    );
+
+                    Some(
+                        format!("NAMING REPLY RESULT=KEY_NOT_FOUND NAME={name}\n")
+                            .as_bytes()
+                            .to_vec(),
+                    )
+                }
+                Some(address_book) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?name,
+                        "lookup name from address book",
+                    );
+
+                    let future = address_book.resolve(name.clone());
+                    self.lookup_futures.push(async move { (name, future.await) });
+
+                    None
+                }
+            },
+        };
+
+        if let (Some(socket), Some(message)) = (&mut self.socket, message) {
+            socket.send_message(message);
+        }
+    }
 }
 
 impl<R: Runtime> Future for SamSession<R> {
     type Output = Arc<str>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(socket) = &mut self.socket {
-            loop {
-                match socket.poll_next_unpin(cx) {
+        loop {
+            let command = match &mut self.socket {
+                None => break,
+                Some(socket) => match socket.poll_next_unpin(cx) {
                     Poll::Pending => break,
                     Poll::Ready(None) => {
                         tracing::info!(
@@ -826,8 +1052,17 @@ impl<R: Runtime> Future for SamSession<R> {
                         self.socket = None;
                         break;
                     }
-                    Poll::Ready(Some(_command)) => {}
-                }
+                    Poll::Ready(Some(command)) => command,
+                },
+            };
+
+            match command {
+                SamCommand::NamingLookup { name } => self.on_naming_lookup(name),
+                command => tracing::warn!(
+                    target: LOG_TARGET,
+                    %command,
+                    "ignoring command for active session",
+                ),
             }
         }
 
@@ -978,6 +1213,50 @@ impl<R: Runtime> Future for SamSession<R> {
             }
         }
 
+        loop {
+            match self.lookup_futures.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
+                Poll::Ready(Some((name, result))) => {
+                    let message = match result {
+                        Some(destination) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                session_id = ?self.session_id,
+                                %name,
+                                "naming lookup succeeded",
+                            );
+
+                            format!("NAMING REPLY RESULT=OK NAME={name} VALUE={destination}\n")
+                                .as_bytes()
+                                .to_vec()
+                        }
+                        None => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                session_id = ?self.session_id,
+                                %name,
+                                "naming lookup failed",
+                            );
+
+                            format!("NAMING REPLY RESULT=KEY_NOT_FOUND NAME={name}\n")
+                                .as_bytes()
+                                .to_vec()
+                        }
+                    };
+
+                    if let Some(socket) = &mut self.socket {
+                        socket.send_message(message);
+
+                        if let Some(waker) = self.waker.take() {
+                            waker.wake_by_ref();
+                        }
+                    }
+                }
+            }
+        }
+
+        self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
 }

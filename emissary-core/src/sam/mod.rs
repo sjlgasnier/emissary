@@ -467,6 +467,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 this.datagram_tx.clone(),
                                 Box::pin(tunnel_pool_future),
                                 netdb_handle,
+                                this.address_book.clone(),
                             ),
                         );
                         this.active_destinations.insert(destination_id.clone());
