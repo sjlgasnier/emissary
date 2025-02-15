@@ -184,8 +184,6 @@ async fn main() -> anyhow::Result<()> {
             });
         }
 
-        tracing::error!(target: LOG_TARGET, "start clien tunnels = {client_tunnels:#?}");
-
         // start client tunnels
         for config in client_tunnels {
             tokio::spawn(Tunnel::start(config, address.port()));

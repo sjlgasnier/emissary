@@ -311,6 +311,14 @@ impl<R: Runtime> Destination<R> {
         LeaseSetStatus::NotFound
     }
 
+    /// Get reference to a [`LeaseSet2`] of the destination identified by `destination_id`.
+    ///
+    /// Caller must calle [`Destination::query_lease_set()`] and get a return value of
+    /// [`LeaseSetStatus::Found`] before calling this function.
+    pub fn lease_set(&self, destination_id: &DestinationId) -> &LeaseSet2 {
+        &self.remote_destinations.get(destination_id).expect("to exist").lease_set
+    }
+
     /// Send encrypted `message` to remote `destination`.
     ///
     /// Lease set for the remote destination must exist in [`Destination`], otherwise the call is

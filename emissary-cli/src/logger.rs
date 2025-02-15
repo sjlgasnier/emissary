@@ -19,7 +19,25 @@
 use tracing::Level;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr, sync::LazyLock};
+
+/// Logging presets.
+static PRESETS: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
+    HashMap::from_iter([
+        (
+            "i2cp",
+            "emissary::destination,emissary::i2cp=trace,emissary::tunnel::pool=off",
+        ),
+        (
+            "sam",
+            "emissary::sam,emissary::streaming,emissary::destination,yosemite=trace,emissary::tunnel::pool=off",
+        ),
+        (
+            "transit",
+            "emissary::tunnel::pool=off,emissary::tunnel::transit=trace,emissary::transport-manager=debug",
+        ),
+    ])
+});
 
 /// Parse a string of logging targets into [`Targets`].
 ///
@@ -32,7 +50,7 @@ pub(super) fn parse_log_targets(log: Option<String>) -> Targets {
         return targets;
     };
 
-    for target in log.split(',') {
+    for target in PRESETS.get(log.as_str()).unwrap_or(&log.as_str()).split(",") {
         let split = target.split('=').collect::<Vec<_>>();
         log_targets.push(split.first().expect("valid log target"));
 

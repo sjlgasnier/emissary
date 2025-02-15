@@ -191,8 +191,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
             target: LOG_TARGET,
             ?role,
             %tunnel_id,
-            %next_tunnel_id,
-            %next_message_id,
             %next_router,
             "variable tunnel build request",
         );
@@ -378,8 +376,6 @@ impl<R: Runtime> TransitTunnelManager<R> {
             target: LOG_TARGET,
             ?role,
             %tunnel_id,
-            %next_tunnel_id,
-            %next_message_id,
             %next_router,
             "short tunnel build request",
         );

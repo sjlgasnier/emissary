@@ -30,7 +30,7 @@ use nom::{
 };
 
 use alloc::vec::Vec;
-use core::time::Duration;
+use core::{fmt, time::Duration};
 
 pub use bandwidth::BandwidthLimits;
 pub use host_reply::{HostReply, HostReplyKind};
@@ -87,7 +87,6 @@ impl From<u16> for SessionId {
 }
 
 /// Request kind for host lookups.
-#[derive(Debug)]
 pub enum RequestKind {
     /// Host name.
     HostName {
@@ -98,8 +97,18 @@ pub enum RequestKind {
     /// Hash.
     Hash {
         /// SHA256 hash.
-        _hash: Vec<u8>,
+        hash: Vec<u8>,
     },
+}
+
+impl fmt::Debug for RequestKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HostName { host_name } =>
+                f.debug_struct("RequestKind::HostName").field("host_name", &host_name).finish(),
+            Self::Hash { .. } => f.debug_struct("RequestKind::Hash").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// I2CP message type.
@@ -498,7 +507,7 @@ impl Message {
 
         let kind = match kind {
             0 => RequestKind::Hash {
-                _hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
+                hash: take::<_, _, ()>(32usize)(rest).ok()?.1.to_vec(),
             },
             1 => RequestKind::HostName {
                 host_name: Str::parse_frame(rest).ok()?.1,
