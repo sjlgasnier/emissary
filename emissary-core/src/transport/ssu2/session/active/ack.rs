@@ -55,7 +55,7 @@ impl Deref for Packet {
 
 impl PartialOrd for Packet {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.deref().partial_cmp(other.deref())
+        Some(self.cmp(other))
     }
 }
 
@@ -70,10 +70,6 @@ impl Eq for Packet {}
 impl PartialEq for Packet {
     fn eq(&self, other: &Self) -> bool {
         self.deref().eq(other.deref())
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.deref().ne(other.deref())
     }
 }
 
@@ -150,7 +146,7 @@ impl RemoteAckManager {
         // check if there are any missing packets and if not, return early
         let mut iter = self.packets.iter();
 
-        if iter.find(|&pkt| core::matches!(pkt.0, Packet::Missing(_))).is_none() {
+        if !iter.any(|pkt| core::matches!(pkt.0, Packet::Missing(_))) {
             return (self.highest_seen, num_acks, None);
         }
 

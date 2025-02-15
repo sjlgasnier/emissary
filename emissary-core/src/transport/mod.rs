@@ -575,9 +575,9 @@ impl<R: Runtime> TransportManager<R> {
                     Ok(rx) => {
                         self.pending_queries.push(async move {
                             match rx.await {
-                                Err(_) => return (router_id, Err(QueryError::Timeout)),
-                                Ok(Err(error)) => return (router_id, Err(error)),
-                                Ok(Ok(lease_set)) => return (router_id, Ok(lease_set)),
+                                Err(_) => (router_id, Err(QueryError::Timeout)),
+                                Ok(Err(error)) => (router_id, Err(error)),
+                                Ok(Ok(lease_set)) => (router_id, Ok(lease_set)),
                             }
                         });
                     }

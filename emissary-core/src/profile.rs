@@ -527,7 +527,7 @@ impl<R: Runtime> ProfileStorage<R> {
             .into_iter()
             .map(|(router_id, profile)| {
                 (
-                    base64_encode(&router_id.to_vec()),
+                    base64_encode(router_id.to_vec()),
                     inner.remove(&router_id),
                     profile,
                 )

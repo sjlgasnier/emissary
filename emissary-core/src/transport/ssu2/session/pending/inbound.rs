@@ -602,11 +602,10 @@ impl<R: Runtime> Future for InboundSsu2Session<R> {
 
                 Poll::Pending
             }
-            PacketRetransmitterEvent::Timeout =>
-                return Poll::Ready(PendingSsu2SessionStatus::Timeout {
-                    connection_id: self.dst_id,
-                    router_id: None,
-                }),
+            PacketRetransmitterEvent::Timeout => Poll::Ready(PendingSsu2SessionStatus::Timeout {
+                connection_id: self.dst_id,
+                router_id: None,
+            }),
         }
     }
 }

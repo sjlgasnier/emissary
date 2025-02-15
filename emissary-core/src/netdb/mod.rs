@@ -430,14 +430,13 @@ impl<R: Runtime> NetDb<R> {
 
     // Handle connection failure to `router_id`.
     fn on_connection_failure(&mut self, router_id: RouterId) {
-        match self.routers.remove(&router_id) {
-            Some(RouterState::Dialing { pending_messages }) => tracing::trace!(
+        if let Some(RouterState::Dialing { pending_messages }) = self.routers.remove(&router_id) {
+            tracing::trace!(
                 target: LOG_TARGET,
                 %router_id,
                 num_pending_messages = ?pending_messages.len(),
                 "failed to establish connection",
-            ),
-            _ => {}
+            );
         }
     }
 

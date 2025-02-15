@@ -533,7 +533,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 );
 
                                 // attempt to resolve `host` into a `DestinationId`
-                                let address_book = Arc::clone(&address_book);
+                                let address_book = Arc::clone(address_book);
 
                                 this.host_lookups.push(async move {
                                     let destination = address_book.resolve(host).await?;

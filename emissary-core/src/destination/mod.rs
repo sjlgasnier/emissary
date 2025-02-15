@@ -353,7 +353,7 @@ impl<R: Runtime> Destination<R> {
             );
 
             context.pending_messages.push_back(message);
-            self.query_lease_set(&destination_id);
+            self.query_lease_set(destination_id);
 
             return Ok(());
         }
@@ -942,9 +942,8 @@ impl<R: Runtime> Stream for Destination<R> {
                         Some(context) => {
                             context.lease_set = lease_set;
 
-                            mem::replace(&mut context.pending_messages, VecDeque::new())
-                                .into_iter()
-                                .for_each(|message| {
+                            mem::take(&mut context.pending_messages).into_iter().for_each(
+                                |message| {
                                     if let Err(error) =
                                         self.send_message_inner(&destination_id, message)
                                     {
@@ -956,7 +955,8 @@ impl<R: Runtime> Stream for Destination<R> {
                                             "failed to send pending message",
                                         );
                                     }
-                                });
+                                },
+                            );
                         }
                         None => {
                             self.remote_destinations.insert(
