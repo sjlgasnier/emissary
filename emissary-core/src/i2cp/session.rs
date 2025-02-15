@@ -30,7 +30,6 @@ use crate::{
     },
     netdb::NetDbHandle,
     primitives::{Date, DestinationId, Str},
-    protocol::Protocol,
     runtime::{AddressBook, JoinSet, Runtime},
 };
 
@@ -324,82 +323,72 @@ impl<R: Runtime> I2cpSession<R> {
             } => {
                 let destination_id = destination.id();
 
-                match protocol {
-                    Protocol::Streaming =>
-                        match self.destination.query_lease_set(&destination_id) {
-                            LeaseSetStatus::Found => {
-                                tracing::trace!(
-                                    target: LOG_TARGET,
-                                    ?session_id,
-                                    %destination_id,
-                                    ?protocol,
-                                    "send message with expiration",
-                                );
+                match self.destination.query_lease_set(&destination_id) {
+                    LeaseSetStatus::Found => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?session_id,
+                            %destination_id,
+                            ?protocol,
+                            "send message with expiration",
+                        );
 
-                                if let Err(error) =
-                                    self.destination.send_message(&destination.id(), payload)
-                                {
-                                    tracing::error!(
-                                        target: LOG_TARGET,
-                                        session_id = ?self.session_id,
-                                        ?error,
-                                        "failed to encrypt message",
-                                    );
-                                }
-                            }
-                            LeaseSetStatus::NotFound => {
-                                tracing::debug!(
-                                    target: LOG_TARGET,
-                                    %destination_id,
-                                    "cannot send message, lease set doesn't exist",
-                                );
+                        if let Err(error) =
+                            self.destination.send_message(&destination.id(), payload)
+                        {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                session_id = ?self.session_id,
+                                ?error,
+                                "failed to encrypt message",
+                            );
+                        }
+                    }
+                    LeaseSetStatus::NotFound => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            "cannot send message, lease set doesn't exist",
+                        );
 
-                                // `Destination` has started a lease set query and will notify
-                                // `I2cpConnection` once the query has completed
-                                //
-                                // pending messages will be sent if the lease set is found
-                                self.pending_connections.insert(
-                                    destination_id,
-                                    VecDeque::from_iter([PendingMessage {
-                                        parameters: I2cpParameters {
-                                            dst_port,
-                                            protocol,
-                                            src_port,
-                                        },
-                                        payload,
-                                        session_id,
-                                    }]),
-                                );
-                            }
-                            LeaseSetStatus::Pending =>
-                                match self.pending_connections.get_mut(&destination_id) {
-                                    Some(messages) => messages.push_back(PendingMessage {
-                                        parameters: I2cpParameters {
-                                            dst_port,
-                                            protocol,
-                                            src_port,
-                                        },
-                                        payload,
-                                        session_id,
-                                    }),
-                                    None => {
-                                        tracing::warn!(
-                                            target: LOG_TARGET,
-                                            %destination_id,
-                                            "pending connection doesn't exist",
-                                        );
-                                        debug_assert!(false);
-                                    }
+                        // `Destination` has started a lease set query and will notify
+                        // `I2cpConnection` once the query has completed
+                        //
+                        // pending messages will be sent if the lease set is found
+                        self.pending_connections.insert(
+                            destination_id,
+                            VecDeque::from_iter([PendingMessage {
+                                parameters: I2cpParameters {
+                                    dst_port,
+                                    protocol,
+                                    src_port,
                                 },
+                                payload,
+                                session_id,
+                            }]),
+                        );
+                    }
+                    LeaseSetStatus::Pending =>
+                        match self.pending_connections.get_mut(&destination_id) {
+                            Some(messages) => messages.push_back(PendingMessage {
+                                parameters: I2cpParameters {
+                                    dst_port,
+                                    protocol,
+                                    src_port,
+                                },
+                                payload,
+                                session_id,
+                            }),
+                            None => {
+                                // TODO: fix this, could be pending lookup as well
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %destination_id,
+                                    "pending connection doesn't exist",
+                                );
+                                // debug_assert!(false);
+                            }
                         },
-                    protocol => tracing::warn!(
-                        target: LOG_TARGET,
-                        destination = %destination.id(),
-                        ?src_port,
-                        ?dst_port,
-                        ?protocol,
-                        "protocol not supported"
-                    ),
                 }
             }
             _ => {}
