@@ -42,7 +42,7 @@ use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{boxed::Box, collections::VecDeque, format, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, format, string::String, vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,

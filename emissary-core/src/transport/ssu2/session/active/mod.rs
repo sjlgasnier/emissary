@@ -44,7 +44,7 @@ use crate::{
 use futures::FutureExt;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use core::{
     future::Future,
     net::SocketAddr,

@@ -34,6 +34,7 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt};
 use thingbuf::mpsc::{Receiver, Sender};
 
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,

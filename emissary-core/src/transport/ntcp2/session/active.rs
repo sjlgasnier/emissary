@@ -274,6 +274,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     router_id = %this.router,
+                                    ?data_block,
                                     "failed to parse message(s)",
                                 );
                                 continue;

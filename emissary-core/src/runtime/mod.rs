@@ -21,7 +21,7 @@
 use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
     fmt,
     future::Future,

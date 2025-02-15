@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use alloc::collections::BTreeSet;
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 use core::{
     cmp::{min, Ordering, Reverse},
     ops::Deref,

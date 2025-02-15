@@ -37,7 +37,12 @@ use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, Stream};
 use rand_core::RngCore;
 
-use alloc::{string::ToString, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     net::SocketAddr,
     pin::Pin,

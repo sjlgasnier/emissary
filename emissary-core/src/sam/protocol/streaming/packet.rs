@@ -32,7 +32,11 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::{fmt, str};
 
 /// Minimum header size without NACKs or options data.

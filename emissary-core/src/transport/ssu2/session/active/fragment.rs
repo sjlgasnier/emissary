@@ -25,7 +25,7 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt};
 use hashbrown::HashMap;
 
-use alloc::collections::BTreeMap;
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
