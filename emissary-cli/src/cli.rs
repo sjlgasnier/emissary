@@ -129,6 +129,10 @@ pub struct Arguments {
     #[arg(long)]
     pub net_id: Option<u8>,
 
+    /// Overwrite configuration.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub overwrite_config: Option<bool>,
+
     /// Tunnel options.
     #[clap(flatten)]
     pub tunnel: TunnelOptions,

@@ -145,7 +145,7 @@ impl From<MetricsConfig> for emissary_core::MetricsConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(rename = "address-book")]
     address_book: Option<AddressBookConfig>,
@@ -262,10 +262,12 @@ impl From<Config> for emissary_core::Config {
     }
 }
 
-impl TryFrom<Option<PathBuf>> for Config {
-    type Error = Error;
-
-    fn try_from(path: Option<PathBuf>) -> Result<Self, Self::Error> {
+impl Config {
+    /// Attemp to parse configuration from `path` and merge config with `arguments`.
+    ///
+    /// If the configuratin file exists but it's invalid, exit early, unless `--overwrite-config`
+    /// has been passed in which case create new default configuration.
+    pub fn parse(path: Option<PathBuf>, arguments: &Arguments) -> Result<Self, Error> {
         let path = path
             .map_or_else(
                 || {
@@ -356,7 +358,18 @@ impl TryFrom<Option<PathBuf>> for Config {
         };
 
         // try to find `router.toml` and parse it into `EmissaryConfig`
-        let router_config = Self::load_router_config(path.clone()).ok();
+        //
+        // if the configuration is invalid (`Error::InvaliData`), and `overwrite_config` has been
+        // passed, create new default configuration
+        //
+        // if the option hasn't been passed, exit early and allow user to take a copy of their
+        // config before generating a new config
+        let router_config = match Self::load_router_config(path.clone()) {
+            Err(Error::InvalidData) if arguments.overwrite_config.unwrap_or(false) => None,
+            Err(Error::InvalidData) => return Err(Error::InvalidData),
+            Err(_) => None,
+            Ok(config) => Some(config),
+        };
         let router_info = Self::load_router_info(path.clone()).ok();
 
         let mut config = Config::new(
@@ -369,16 +382,15 @@ impl TryFrom<Option<PathBuf>> for Config {
             ssu2_intro_key,
             router_config,
             router_info,
-        )?;
+        )?
+        .merge(arguments);
 
         config.routers = Self::load_router_infos(&path);
         config.profiles = Self::load_router_profiles(&path);
 
         Ok(config)
     }
-}
 
-impl Config {
     /// Create static key.
     fn create_static_key(base_path: PathBuf) -> crate::Result<[u8; 32]> {
         let key = x25519_dalek::StaticSecret::random();
@@ -499,7 +511,7 @@ impl Config {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?error,
-                "failed to parser router config",
+                "failed to parse router config",
             );
 
             Error::InvalidData
@@ -557,10 +569,6 @@ impl Config {
                     "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
                 ),
             }),
-            allow_local: false,
-            caps: None,
-            exploratory: None,
-            floodfill: false,
             http_proxy: Some(HttpProxyConfig {
                 host: "127.0.0.1".to_string(),
                 port: 4444u16,
@@ -569,26 +577,21 @@ impl Config {
                 port: 7654,
                 host: None,
             }),
-            insecure_tunnels: false,
-            log: None,
             metrics: Some(MetricsConfig {
                 disable: false,
                 port: None,
             }),
-            net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
                 host: None,
                 publish: Some(false),
             }),
-            reseed: None,
             sam: Some(SamConfig {
                 tcp_port: 7656,
                 udp_port: 7655,
                 host: None,
             }),
-            ssu2: None,
-            tunnels: None,
+            ..Default::default()
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
@@ -679,35 +682,26 @@ impl Config {
                             "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
                         ),
                     }),
-                    allow_local: false,
-                    caps: None,
-                    exploratory: None,
-                    floodfill: false,
                     http_proxy: Some(HttpProxyConfig {
                         host: "127.0.0.1".to_string(),
                         port: 4444u16,
                     }),
                     i2cp: Some(I2cpConfig { port: 7654, host: None, }),
-                    insecure_tunnels: false,
-                    log: None,
                     metrics: Some(MetricsConfig {
                         disable: false,
                         port: None,
                     }),
-                    net_id: None,
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
                         host: None,
                         publish: Some(false),
                     }),
-                    ssu2: None,
-                    reseed: None,
                     sam: Some(SamConfig {
                         tcp_port: 7656,
                         udp_port: 7655,
                         host: None,
                     }),
-                    tunnels: None,
+                    ..Default::default()
                 };
 
                 let toml_config = toml::to_string(&config).expect("to succeed");
@@ -885,7 +879,7 @@ impl Config {
     }
 
     /// Attempt to merge `arguments` with [`Config`].
-    pub fn merge(mut self, arguments: &Arguments) -> Self {
+    fn merge(mut self, arguments: &Arguments) -> Self {
         if let Some(true) = arguments.floodfill {
             if !self.floodfill {
                 self.floodfill = true;
@@ -1000,14 +994,48 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::{MetricsOptions, ReseedOptions, TunnelOptions};
+
     use super::*;
     use std::fs::File;
     use tempfile::tempdir;
 
+    fn make_arguments() -> Arguments {
+        Arguments {
+            base_path: None,
+            log: None,
+            floodfill: None,
+            allow_local: None,
+            caps: None,
+            net_id: None,
+            overwrite_config: None,
+            tunnel: TunnelOptions {
+                exploratory_inbound_len: None,
+                exploratory_inbound_count: None,
+                exploratory_outbound_len: None,
+                exploratory_outbound_count: None,
+                insecure_tunnels: None,
+            },
+            reseed: ReseedOptions {
+                reseed_hosts: None,
+                disable_reseed: None,
+                force_reseed: None,
+            },
+            metrics: MetricsOptions {
+                metrics_server_port: None,
+                disable_metrics: None,
+            },
+            http_proxy: HttpProxyOptions {
+                http_proxy_port: None,
+                http_proxy_host: None,
+            },
+        }
+    }
+
     #[test]
     fn fresh_boot_directory_created() {
         let dir = tempdir().unwrap();
-        let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+        let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
 
         assert!(config.routers.is_empty());
         assert_eq!(config.static_key.len(), 32);
@@ -1038,11 +1066,11 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let (static_key, signing_key, ntcp2_config) = {
-            let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+            let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
             (config.static_key, config.signing_key, config.ntcp2_config)
         };
 
-        let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+        let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
         assert_eq!(config.static_key, static_key);
         assert_eq!(config.signing_key, signing_key);
         assert_eq!(
@@ -1069,7 +1097,7 @@ mod tests {
 
         // create default config, verify the default ntcp2 port is 8888
         let (ntcp2_key, ntcp2_iv) = {
-            let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+            let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
             let ntcp2_config = config.ntcp2_config.unwrap();
 
             assert_eq!(ntcp2_config.port, 8888u16);
@@ -1079,29 +1107,16 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
-            address_book: None,
-            allow_local: false,
-            caps: None,
-            exploratory: None,
-            floodfill: false,
-            http_proxy: None,
             i2cp: Some(I2cpConfig {
                 port: 0u16,
                 host: None,
             }),
-            insecure_tunnels: false,
-            log: None,
-            metrics: None,
-            net_id: None,
             ntcp2: Some(Ntcp2Config {
                 port: 1337u16,
                 host: None,
                 publish: None,
             }),
-            reseed: None,
-            sam: None,
-            ssu2: None,
-            tunnels: None,
+            ..Default::default()
         };
         let config = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
@@ -1110,11 +1125,41 @@ mod tests {
         // load the new config
         //
         // verify that ntcp2 key & iv are the same but port is new
-        let config = Config::try_from(Some(dir.path().to_owned())).unwrap();
+        let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
         let ntcp2_config = config.ntcp2_config.unwrap();
 
         assert_eq!(ntcp2_config.port, 1337u16);
         assert_eq!(ntcp2_config.key, ntcp2_key);
         assert_eq!(ntcp2_config.iv, ntcp2_iv);
+    }
+
+    #[test]
+    fn overwrite_config() {
+        let dir = tempdir().unwrap();
+
+        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
+        file.write_all("hello, world!".as_bytes()).unwrap();
+
+        let mut args = make_arguments();
+
+        // create default config, verify the default ntcp2 port is 8888
+        match Config::parse(Some(dir.path().to_owned()), &args) {
+            Err(Error::InvalidData) => {}
+            _ => panic!("invalid result"),
+        }
+
+        // allow emissary to overwrite config
+        args.overwrite_config = Some(true);
+
+        // verify default config is created
+        let config = Config::parse(Some(dir.path().to_owned()), &args).unwrap();
+
+        assert!(config.ntcp2_config.is_some());
+        assert!(config.sam_config.is_some());
+        assert!(config.address_book.is_some());
+        assert!(config.http_proxy.is_some());
+        assert!(!config.floodfill);
+        assert!(!config.insecure_tunnels);
+        assert!(!config.allow_local);
     }
 }

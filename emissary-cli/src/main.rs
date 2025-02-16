@@ -60,7 +60,15 @@ async fn main() -> anyhow::Result<()> {
     let handle = init_logger!(arguments.log.clone());
 
     // parse router config and merge it with cli options
-    let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
+    let mut config = Config::parse(arguments.base_path.clone(), &arguments).map_err(|error| {
+        tracing::warn!(
+            target: LOG_TARGET,
+            ?error,
+            "invalid router config, pass `--overwrite-config` to create new config",
+        );
+
+        error
+    })?;
     let storage = Storage::new(config.base_path.clone());
 
     // reinitialize the logger with any directives given in the configuration file
