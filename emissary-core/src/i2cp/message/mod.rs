@@ -34,14 +34,14 @@ use core::{fmt, time::Duration};
 
 pub use bandwidth::BandwidthLimits;
 pub use host_reply::{HostReply, HostReplyKind};
-pub use leaseset::RequestVariableLeaseSet;
+pub use lease_set::RequestVariableLeaseSet;
 pub use payload::MessagePayload;
 pub use session_status::{SessionStatus, SessionStatusKind};
 pub use set_date::SetDate;
 
 mod bandwidth;
 mod host_reply;
-mod leaseset;
+mod lease_set;
 mod payload;
 mod session_status;
 mod set_date;

@@ -76,8 +76,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "leaseset2"
-path = "fuzz_targets/leaseset2.rs"
+name = "lease_set"
+path = "fuzz_targets/lease_set.rs"
 test = false
 doc = false
 
