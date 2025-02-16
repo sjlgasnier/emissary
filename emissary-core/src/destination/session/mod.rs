@@ -2050,6 +2050,7 @@ mod tests {
                     destination: outbound_destination.clone(),
                     expires: (MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60))
                         .as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: MockRuntime::time_since_epoch().as_secs() as u32,
                 },
@@ -2280,6 +2281,7 @@ mod tests {
                     destination: outbound_destination.clone(),
                     expires: (MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60))
                         .as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: MockRuntime::time_since_epoch().as_secs() as u32,
                 },

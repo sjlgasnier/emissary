@@ -1459,6 +1459,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination: dest.clone(),
                             expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
@@ -1639,6 +1640,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination: dest.clone(),
                             expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
@@ -1819,6 +1821,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination: dest.clone(),
                             expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },

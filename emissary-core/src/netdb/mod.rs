@@ -2119,6 +2119,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         },
@@ -2240,6 +2241,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         },
@@ -2344,6 +2346,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: (Duration::from_secs(60)).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: (MockRuntime::time_since_epoch()
                                 - Duration::from_secs(5 * 60))
@@ -2450,6 +2453,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: Duration::from_secs(10).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
@@ -2485,6 +2489,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: Duration::from_secs(5).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
@@ -2520,6 +2525,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: (MockRuntime::time_since_epoch() - Duration::from_secs(60))
                                 .as_secs() as u32,
@@ -2964,6 +2970,7 @@ mod tests {
                     header: LeaseSet2Header {
                         destination,
                         expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                        is_unpublished: false,
                         offline_signature: None,
                         published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                     },
@@ -3494,6 +3501,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: Duration::from_secs(5).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: MockRuntime::time_since_epoch().as_secs() as u32,
                         },
@@ -3529,6 +3537,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: (MockRuntime::time_since_epoch() - Duration::from_secs(60))
                                 .as_secs() as u32,
@@ -4114,6 +4123,7 @@ mod tests {
                         header: LeaseSet2Header {
                             destination,
                             expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                            is_unpublished: false,
                             offline_signature: None,
                             published: (MockRuntime::time_since_epoch()).as_secs() as u32,
                         },

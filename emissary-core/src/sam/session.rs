@@ -201,7 +201,6 @@ pub struct SamSession<R: Runtime> {
     lookup_futures: R::JoinSet<(String, Option<String>)>,
 
     /// Session options.
-    #[allow(unused)]
     options: HashMap<String, String>,
 
     /// Pending host lookups.
@@ -287,11 +286,17 @@ impl<R: Runtime> SamSession<R> {
 
             // create leaseset for the destination and store it in `NetDb`
             let public_key = private_key.public();
+            let is_unpublished = options
+                .get("i2cp.dontPublishLeaseSet")
+                .map(|value| value.parse::<bool>().unwrap_or(false))
+                .unwrap_or(false);
+
             let local_leaseset = Bytes::from(
                 LeaseSet2 {
                     header: LeaseSet2Header {
                         destination: destination.clone(),
                         expires: Duration::from_secs(10 * 60).as_secs() as u32,
+                        is_unpublished,
                         offline_signature: None,
                         published: R::time_since_epoch().as_secs() as u32,
                     },
@@ -309,10 +314,7 @@ impl<R: Runtime> SamSession<R> {
                 tunnel_pool_handle,
                 outbound.into_iter().collect(),
                 inbound.into_values().collect(),
-                options
-                    .get("i2cp.dontPublishLeaseSet")
-                    .map(|value| value.parse::<bool>().unwrap_or(false))
-                    .unwrap_or(false),
+                is_unpublished,
             );
             session_destination
                 .publish_lease_set(Bytes::from(destination_id.to_vec()), local_leaseset.clone());
@@ -1188,6 +1190,11 @@ impl<R: Runtime> Future for SamSession<R> {
                         LeaseSet2 {
                             header: LeaseSet2Header {
                                 destination: self.dest.clone(),
+                                is_unpublished: self
+                                    .options
+                                    .get("i2cp.dontPublishLeaseSet")
+                                    .map(|value| value.parse::<bool>().unwrap_or(false))
+                                    .unwrap_or(false),
                                 expires: Duration::from_secs(10 * 60).as_secs() as u32,
                                 offline_signature: None,
                                 published: R::time_since_epoch().as_secs() as u32,

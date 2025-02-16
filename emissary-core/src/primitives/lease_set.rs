@@ -33,6 +33,11 @@ use nom::{
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{iter, time::Duration};
 
+/// [`LeaseSet2`] is unpublished.
+///
+/// <https://geti2p.net/spec/common-structures#leaseset2header>
+const UNPUBLISHED: u16 = 1u16 << 1;
+
 /// Header for [`LeaseSet2`].
 ///
 /// https://geti2p.net/spec/common-structures#leaseset2header
@@ -49,6 +54,9 @@ pub struct LeaseSet2Header {
 
     /// When [`LeaseSet2`] was published.
     pub published: u32,
+
+    /// Should the [`LeaseSet2`] stay unpublished.
+    pub is_unpublished: bool,
 }
 
 impl LeaseSet2Header {
@@ -68,6 +76,7 @@ impl LeaseSet2Header {
                 Self {
                     destination,
                     expires: published.saturating_add(expires as u32),
+                    is_unpublished: (flags >> 1) & 1 == 1,
                     offline_signature: None,
                     published,
                 },
@@ -90,6 +99,7 @@ impl LeaseSet2Header {
             Self {
                 destination,
                 expires: published.saturating_add(expires as u32),
+                is_unpublished: (flags >> 1) & 1 == 1,
                 offline_signature: Some(verifying_key),
                 published,
             },
@@ -109,7 +119,11 @@ impl LeaseSet2Header {
         out.put_slice(&self.destination.serialize());
         out.put_u32(self.published);
         out.put_u16(self.expires as u16);
-        out.put_u16(0u16); // flags
+        out.put_u16(if self.is_unpublished {
+            UNPUBLISHED
+        } else {
+            0u16
+        });
 
         out
     }
@@ -494,6 +508,7 @@ impl LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
                     expires: (published + Duration::from_secs(8 * 60)).as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: published.as_secs() as u32,
                 },
@@ -561,6 +576,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -577,6 +593,7 @@ mod tests {
         assert_eq!(leaseset.leases[0], lease1);
         assert_eq!(leaseset.leases[1], lease2);
         assert_eq!(leaseset.header.destination.id(), id);
+        assert!(!leaseset.header.is_unpublished);
     }
 
     #[test]
@@ -591,6 +608,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -647,6 +665,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -684,6 +703,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -780,6 +800,7 @@ mod tests {
             let lease_set = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
+                    is_unpublished: false,
                     expires: Duration::from_secs(60).as_secs() as u32,
                     offline_signature: None,
                     published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
@@ -795,6 +816,7 @@ mod tests {
                 lease_set.expires().as_secs(),
                 (now - Duration::from_secs(4 * 60)).as_secs()
             );
+            assert!(!lease_set.header.is_unpublished);
         }
 
         // all of the leases are expired
@@ -821,6 +843,7 @@ mod tests {
                 header: LeaseSet2Header {
                     destination,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: (now - Duration::from_secs(60)).as_secs() as u32,
                 },
@@ -835,6 +858,7 @@ mod tests {
                 lease_set.expires().as_secs(),
                 (now - Duration::from_secs(80)).as_secs()
             );
+            assert!(!lease_set.header.is_unpublished);
         }
 
         // non-expired leaset
@@ -859,6 +883,7 @@ mod tests {
                 header: LeaseSet2Header {
                     destination,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: (now).as_secs() as u32,
                 },
@@ -873,6 +898,7 @@ mod tests {
                 lease_set.expires().as_secs(),
                 (now + Duration::from_secs(60)).as_secs()
             );
+            assert!(!lease_set.header.is_unpublished);
         }
     }
 
@@ -922,6 +948,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -1031,5 +1058,72 @@ mod tests {
         ];
 
         let _ = LeaseSet2::parse(&input).unwrap();
+    }
+
+    #[test]
+    fn unpublished_lease_set() {
+        let sk = StaticPrivateKey::random(MockRuntime::rng());
+        let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(
+            SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap().public(),
+        );
+        let id = destination.id();
+
+        let (_router1, _tunnel1, _expires1, lease1) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let (_router2, _tunnel2, _expires2, lease2) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                expires: 2 * 1337,
+                is_unpublished: true,
+                offline_signature: None,
+                published: 1337,
+            },
+            public_keys: vec![sk.public()],
+            leases: vec![lease1.clone(), lease2.clone()],
+        }
+        .serialize(&sgk);
+
+        let leaseset = LeaseSet2::parse(&serialized).unwrap();
+
+        assert_eq!(leaseset.public_keys.len(), 1);
+        assert_eq!(leaseset.public_keys[0].to_vec(), sk.public().to_vec());
+        assert_eq!(leaseset.leases.len(), 2);
+        assert_eq!(leaseset.leases[0], lease1);
+        assert_eq!(leaseset.leases[1], lease2);
+        assert_eq!(leaseset.header.destination.id(), id);
+        assert!(leaseset.header.is_unpublished);
     }
 }
