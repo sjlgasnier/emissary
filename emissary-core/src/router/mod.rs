@@ -298,8 +298,9 @@ impl<R: Runtime> Router<R> {
         transport_manager_builder.register_netdb_handle(netdb_handle.clone());
 
         // initialize i2cp server if it was enabled
-        if let Some(I2cpConfig { port }) = i2cp_config {
+        if let Some(I2cpConfig { host, port }) = i2cp_config {
             let i2cp_server = I2cpServer::<R>::new(
+                host,
                 port,
                 netdb_handle.clone(),
                 tunnel_manager_handle.clone(),

@@ -94,6 +94,7 @@ struct Ssu2Config {
 #[derive(Debug, Serialize, Deserialize)]
 struct I2cpConfig {
     port: u16,
+    host: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -564,7 +565,10 @@ impl Config {
                 host: "127.0.0.1".to_string(),
                 port: 4444u16,
             }),
-            i2cp: Some(I2cpConfig { port: 7654 }),
+            i2cp: Some(I2cpConfig {
+                port: 7654,
+                host: None,
+            }),
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
@@ -611,7 +615,10 @@ impl Config {
                 host: "127.0.0.1".to_string(),
                 port: 4444u16,
             }),
-            i2cp_config: Some(emissary_core::I2cpConfig { port: 7654u16 }),
+            i2cp_config: Some(emissary_core::I2cpConfig {
+                port: 7654u16,
+                host: String::from("127.0.0.1"),
+            }),
             insecure_tunnels: false,
             log: None,
             metrics: Some(MetricsConfig {
@@ -680,7 +687,7 @@ impl Config {
                         host: "127.0.0.1".to_string(),
                         port: 4444u16,
                     }),
-                    i2cp: Some(I2cpConfig { port: 7654 }),
+                    i2cp: Some(I2cpConfig { port: 7654, host: None, }),
                     insecure_tunnels: false,
                     log: None,
                     metrics: Some(MetricsConfig {
@@ -728,7 +735,10 @@ impl Config {
             }),
             floodfill: config.floodfill,
             http_proxy: config.http_proxy,
-            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig { port: config.port }),
+            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig {
+                port: config.port,
+                host: config.host.unwrap_or(String::from("127.0.0.1")),
+            }),
             insecure_tunnels: config.insecure_tunnels,
             log: config.log,
             metrics: config.metrics,
@@ -1075,7 +1085,10 @@ mod tests {
             exploratory: None,
             floodfill: false,
             http_proxy: None,
-            i2cp: Some(I2cpConfig { port: 0u16 }),
+            i2cp: Some(I2cpConfig {
+                port: 0u16,
+                host: None,
+            }),
             insecure_tunnels: false,
             log: None,
             metrics: None,

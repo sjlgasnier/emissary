@@ -98,6 +98,9 @@ pub struct Ssu2Config {
 pub struct I2cpConfig {
     /// I2CP server listen port.
     pub port: u16,
+
+    /// Host where the I2CP server shoud be bound to.
+    pub host: String,
 }
 
 /// SAMv3 configuration.
@@ -109,7 +112,7 @@ pub struct SamConfig {
     /// SAMv3 UDP server listen port.
     pub udp_port: u16,
 
-    /// Host where the sockets shoud be bound to.
+    /// Host where the SAM server shoud be bound to.
     pub host: String,
 }
 

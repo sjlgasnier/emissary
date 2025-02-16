@@ -35,7 +35,7 @@ use crate::{
 
 use futures::StreamExt;
 
-use alloc::{sync::Arc, vec};
+use alloc::{string::String, sync::Arc, vec};
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -87,6 +87,7 @@ pub struct I2cpServer<R: Runtime> {
 impl<R: Runtime> I2cpServer<R> {
     /// Create new [`I2cpServer`].
     pub async fn new(
+        host: String,
         port: u16,
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
@@ -98,7 +99,7 @@ impl<R: Runtime> I2cpServer<R> {
             "starting i2cp server",
         );
 
-        let address = SocketAddr::new("127.0.0.1".parse::<IpAddr>().expect("valid address"), port);
+        let address = SocketAddr::new(host.parse::<IpAddr>().expect("valid address"), port);
         let listener = R::TcpListener::bind(address)
             .await
             .ok_or(Error::Connection(ConnectionError::BindFailure))?;
