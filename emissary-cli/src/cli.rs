@@ -48,6 +48,17 @@ pub struct TunnelOptions {
 }
 
 #[derive(Args)]
+pub struct TransitOptions {
+    /// Maximum number of transit tunnels.
+    #[arg(long, value_name = "MAX_TUNNELS")]
+    pub max_transit_tunnels: Option<usize>,
+
+    /// Disable transit tunnel manager.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_transit_tunnels: Option<bool>,
+}
+
+#[derive(Args)]
 pub struct ReseedOptions {
     /// Comma-separated list of reseed hosts
     ///
@@ -148,4 +159,8 @@ pub struct Arguments {
     /// HTTP proxy options.
     #[clap(flatten)]
     pub http_proxy: HttpProxyOptions,
+
+    /// Transit tunnel options.
+    #[clap(flatten)]
+    pub transit: TransitOptions,
 }

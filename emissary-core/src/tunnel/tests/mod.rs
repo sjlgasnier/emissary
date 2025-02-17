@@ -35,6 +35,7 @@ use crate::{
         routing_table::{RoutingKind, RoutingTable},
         transit::TransitTunnelManager,
     },
+    TransitConfig,
 };
 
 use bytes::Bytes;
@@ -138,6 +139,9 @@ impl TestTransitTunnelManager {
         Self {
             garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![], None)),
             manager: TransitTunnelManager::<MockRuntime>::new(
+                Some(TransitConfig {
+                    max_tunnels: Some(5000),
+                }),
                 RouterContext::new(
                     MockRuntime::register_metrics(vec![], None),
                     ProfileStorage::new(&[], &[]),

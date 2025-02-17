@@ -18,6 +18,7 @@
 
 use crate::{
     bloom::BloomFilter,
+    config::TransitConfig,
     error::Error,
     i2np::{tunnel::data::EncryptedTunnelData, Message, MessageType},
     primitives::RouterId,
@@ -138,6 +139,7 @@ impl<R: Runtime> TunnelManager<R> {
         router_ctx: RouterContext<R>,
         exploratory_config: TunnelPoolConfig,
         insecure_tunnels: bool,
+        transit_config: Option<TransitConfig>,
         transit_shutdown_handle: ShutdownHandle,
     ) -> (
         Self,
@@ -164,6 +166,7 @@ impl<R: Runtime> TunnelManager<R> {
         //
         // `TransitTunnelManager` communicates with `TunnelManager` via `RoutingTable`
         R::spawn(TransitTunnelManager::<R>::new(
+            transit_config,
             router_ctx.clone(),
             routing_table.clone(),
             transit_rx,

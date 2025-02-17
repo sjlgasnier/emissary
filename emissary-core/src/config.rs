@@ -126,6 +126,15 @@ pub struct MetricsConfig {
     pub metrics_server_port: Option<u16>,
 }
 
+/// Metrics configuration.
+#[derive(Default, Debug, Clone)]
+pub struct TransitConfig {
+    /// Maximum number of transit tunnels.
+    ///
+    /// If `None`, there are no limit on transit tunnels.
+    pub max_tunnels: Option<usize>,
+}
+
 /// Router configuration.
 #[derive(Default)]
 pub struct Config {
@@ -174,6 +183,11 @@ pub struct Config {
     ///
     /// `None` if SAMv3 is disabled.
     pub samv3_config: Option<SamConfig>,
+
+    /// Transit tunnel configuration.
+    ///
+    /// `None` if transit tunnels are disabled.
+    pub transit: Option<TransitConfig>,
 
     /// Router signing key.
     pub signing_key: Option<[u8; 32]>,

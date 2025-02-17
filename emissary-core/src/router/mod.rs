@@ -198,6 +198,7 @@ impl<R: Runtime> Router<R> {
                     disable_metrics,
                     metrics_server_port,
                 },
+            transit,
             ..
         } = config;
 
@@ -266,6 +267,7 @@ impl<R: Runtime> Router<R> {
                     router_ctx.clone(),
                     exploratory.into(),
                     insecure_tunnels,
+                    transit,
                     transit_shutdown_handle,
                 );
 

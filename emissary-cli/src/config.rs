@@ -130,6 +130,11 @@ pub struct TunnelConfig {
     pub destination_port: Option<u16>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransitConfig {
+    pub max_tunnels: Option<usize>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
     disable: bool,
@@ -167,6 +172,7 @@ struct EmissaryConfig {
     reseed: Option<ReseedConfig>,
     sam: Option<SamConfig>,
     ssu2: Option<Ssu2Config>,
+    transit: Option<TransitConfig>,
     tunnels: Option<Vec<TunnelConfig>>,
 }
 
@@ -235,6 +241,9 @@ pub struct Config {
     /// Static key.
     pub static_key: [u8; 32],
 
+    /// Transit tunnel config.
+    pub transit: Option<emissary_core::TransitConfig>,
+
     /// Tunnel config.
     pub tunnels: Vec<TunnelConfig>,
 }
@@ -258,6 +267,7 @@ impl From<Config> for emissary_core::Config {
             signing_key: Some(val.signing_key),
             ssu2: val.ssu2_config,
             static_key: Some(val.static_key),
+            transit: val.transit,
         }
     }
 }
@@ -591,6 +601,9 @@ impl Config {
                 udp_port: 7655,
                 host: None,
             }),
+            transit: Some(TransitConfig {
+                max_tunnels: Some(5000),
+            }),
             ..Default::default()
         };
         let config = toml::to_string(&config).expect("to succeed");
@@ -657,6 +670,9 @@ impl Config {
                 publish: false,
             }),
             static_key,
+            transit: Some(emissary_core::TransitConfig {
+                max_tunnels: Some(5000),
+            }),
             tunnels: Vec::new(),
         })
     }
@@ -700,6 +716,9 @@ impl Config {
                         tcp_port: 7656,
                         udp_port: 7655,
                         host: None,
+                    }),
+                    transit: Some(TransitConfig {
+                        max_tunnels: Some(5000),
                     }),
                     ..Default::default()
                 };
@@ -765,6 +784,9 @@ impl Config {
             }),
             signing_key,
             static_key,
+            transit: config.transit.map(|config| emissary_core::TransitConfig {
+                max_tunnels: config.max_tunnels,
+            }),
             tunnels: config.tunnels.unwrap_or(Vec::new()),
         })
     }
@@ -988,13 +1010,23 @@ impl Config {
             }),
         };
 
+        if let Some(max_tunnels) = arguments.transit.max_transit_tunnels {
+            self.transit = Some(emissary_core::TransitConfig {
+                max_tunnels: Some(max_tunnels),
+            });
+        }
+
+        if let Some(true) = arguments.transit.disable_transit_tunnels {
+            self.transit = None;
+        }
+
         self
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::{MetricsOptions, ReseedOptions, TunnelOptions};
+    use crate::cli::{MetricsOptions, ReseedOptions, TransitOptions, TunnelOptions};
 
     use super::*;
     use std::fs::File;
@@ -1028,6 +1060,10 @@ mod tests {
             http_proxy: HttpProxyOptions {
                 http_proxy_port: None,
                 http_proxy_host: None,
+            },
+            transit: TransitOptions {
+                max_transit_tunnels: None,
+                disable_transit_tunnels: None,
             },
         }
     }

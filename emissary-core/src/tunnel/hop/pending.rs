@@ -547,6 +547,7 @@ impl<T: Tunnel> PendingTunnel<T> {
 mod test {
     use super::*;
     use crate::{
+        config::TransitConfig,
         crypto::{EphemeralPublicKey, StaticPublicKey},
         i2np::{tunnel::gateway::TunnelGateway, MessageBuilder},
         primitives::MessageId,
@@ -653,6 +654,9 @@ mod test {
                         (
                             GarlicHandler::new(noise_context.clone(), handle.clone()),
                             TransitTunnelManager::new(
+                                Some(TransitConfig {
+                                    max_tunnels: Some(5000),
+                                }),
                                 RouterContext::new(
                                     handle.clone(),
                                     ProfileStorage::new(&[], &[]),
@@ -1058,6 +1062,9 @@ mod test {
             hops.push((router_hash, static_key.public()));
             ctxs.push(shutdown_ctx);
             transit_managers.push(TransitTunnelManager::new(
+                Some(TransitConfig {
+                    max_tunnels: Some(5000),
+                }),
                 RouterContext::new(
                     handle.clone(),
                     ProfileStorage::new(&[], &[]),
@@ -1311,6 +1318,9 @@ mod test {
                         (
                             GarlicHandler::new(noise_context.clone(), handle.clone()),
                             TransitTunnelManager::new(
+                                Some(TransitConfig {
+                                    max_tunnels: Some(5000),
+                                }),
                                 RouterContext::new(
                                     handle.clone(),
                                     ProfileStorage::new(&[], &[]),
