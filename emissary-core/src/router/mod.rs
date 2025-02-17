@@ -193,11 +193,7 @@ impl<R: Runtime> Router<R> {
             routers,
             profiles,
             allow_local,
-            metrics:
-                MetricsConfig {
-                    disable_metrics,
-                    metrics_server_port,
-                },
+            metrics,
             transit,
             ..
         } = config;
@@ -226,14 +222,14 @@ impl<R: Runtime> Router<R> {
         // if metrics are disabled, call `R::register_metrics()` with an empty vector which makes
         // the runtime not start the metrics server and return a handle which doesn't update any
         // metirics
-        let metrics_handle = match disable_metrics {
-            true => R::register_metrics(Vec::new(), None),
-            false => {
+        let metrics_handle = match metrics {
+            None => R::register_metrics(Vec::new(), None),
+            Some(MetricsConfig { port }) => {
                 let metrics = TransportManager::<R>::metrics(Vec::new());
                 let metrics = TunnelManager::<R>::metrics(metrics);
                 let metrics = NetDb::<R>::metrics(metrics);
 
-                R::register_metrics(metrics, metrics_server_port)
+                R::register_metrics(metrics, Some(port))
             }
         };
 

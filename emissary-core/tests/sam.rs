@@ -17,8 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use emissary_core::{
-    router::Router, runtime::AddressBook, Config, MetricsConfig, Ntcp2Config, SamConfig,
-    TransitConfig,
+    router::Router, runtime::AddressBook, Config, Ntcp2Config, SamConfig, TransitConfig,
 };
 use emissary_util::runtime::tokio::Runtime;
 use futures::StreamExt;
@@ -45,10 +44,7 @@ async fn make_router(
         floodfill,
         insecure_tunnels: true,
         allow_local: true,
-        metrics: MetricsConfig {
-            disable_metrics: true,
-            ..Default::default()
-        },
+        metrics: None,
         ntcp2: Some(Ntcp2Config {
             port: 0u16,
             iv: {
@@ -1396,10 +1392,7 @@ async fn host_lookup() {
         floodfill: false,
         insecure_tunnels: true,
         allow_local: true,
-        metrics: MetricsConfig {
-            disable_metrics: true,
-            ..Default::default()
-        },
+        metrics: None,
         ntcp2: Some(Ntcp2Config {
             port: 0u16,
             iv: {

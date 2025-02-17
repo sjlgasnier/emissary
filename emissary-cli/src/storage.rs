@@ -41,7 +41,7 @@ impl Storage {
             false => self.base_path.join(format!("netDb/r{dir}/routerInfo-{router_id}.dat")),
         };
 
-        let mut file = File::create(self.base_path.join(name))?;
+        let mut file = File::create(name)?;
         file.write_all(&router_info)?;
 
         Ok(())

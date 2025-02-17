@@ -71,6 +71,10 @@ pub struct ReseedOptions {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub disable_reseed: Option<bool>,
 
+    /// Reseed threshold.
+    #[arg(long, value_name = "RESEED_THRESHOLD")]
+    pub reseed_threshold: Option<usize>,
+
     /// Forcibly reseed the router even if there are enough routers
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub force_reseed: Option<bool>,

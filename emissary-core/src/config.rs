@@ -119,11 +119,8 @@ pub struct SamConfig {
 /// Metrics configuration.
 #[derive(Default, Debug, Clone)]
 pub struct MetricsConfig {
-    /// Disable metrics server.
-    pub disable_metrics: bool,
-
     /// Port where the metrics server should be bound to.
-    pub metrics_server_port: Option<u16>,
+    pub port: u16,
 }
 
 /// Metrics configuration.
@@ -159,7 +156,7 @@ pub struct Config {
     pub insecure_tunnels: bool,
 
     /// Metrics configuration.
-    pub metrics: MetricsConfig,
+    pub metrics: Option<MetricsConfig>,
 
     /// Network ID.
     pub net_id: Option<u8>,

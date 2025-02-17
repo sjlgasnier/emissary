@@ -106,8 +106,8 @@ pub struct SamConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReseedConfig {
-    pub disable: bool,
     pub hosts: Option<Vec<String>>,
+    pub reseed_threshold: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -137,17 +137,7 @@ pub struct TransitConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetricsConfig {
-    disable: bool,
-    port: Option<u16>,
-}
-
-impl From<MetricsConfig> for emissary_core::MetricsConfig {
-    fn from(value: MetricsConfig) -> Self {
-        emissary_core::MetricsConfig {
-            disable_metrics: value.disable,
-            metrics_server_port: value.port,
-        }
-    }
+    port: u16,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -209,7 +199,7 @@ pub struct Config {
     pub log: Option<String>,
 
     /// Metrics configuration.
-    pub metrics: Option<MetricsConfig>,
+    pub metrics: Option<emissary_core::MetricsConfig>,
 
     /// Network ID.
     pub net_id: Option<u8>,
@@ -221,7 +211,7 @@ pub struct Config {
     pub profiles: Vec<(String, emissary_core::Profile)>,
 
     /// Reseed config.
-    pub reseed: ReseedConfig,
+    pub reseed: Option<ReseedConfig>,
 
     /// Router info.
     pub router_info: Option<Vec<u8>>,
@@ -257,7 +247,7 @@ impl From<Config> for emissary_core::Config {
             floodfill: val.floodfill,
             i2cp_config: val.i2cp_config,
             insecure_tunnels: val.insecure_tunnels,
-            metrics: val.metrics.map(Into::into).unwrap_or_default(),
+            metrics: val.metrics,
             net_id: val.net_id,
             ntcp2: val.ntcp2_config,
             profiles: val.profiles,
@@ -587,9 +577,10 @@ impl Config {
                 port: 7654,
                 host: None,
             }),
-            metrics: Some(MetricsConfig {
-                disable: false,
-                port: None,
+            metrics: Some(MetricsConfig { port: 7788 }),
+            reseed: Some(ReseedConfig {
+                reseed_threshold: 25usize,
+                hosts: None,
             }),
             ntcp2: Some(Ntcp2Config {
                 port: 8888u16,
@@ -637,10 +628,7 @@ impl Config {
             }),
             insecure_tunnels: false,
             log: None,
-            metrics: Some(MetricsConfig {
-                disable: false,
-                port: None,
-            }),
+            metrics: Some(emissary_core::MetricsConfig { port: 7788 }),
             net_id: None,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
                 port: 8888u16,
@@ -650,10 +638,10 @@ impl Config {
                 publish: false,
             }),
             profiles: Vec::new(),
-            reseed: ReseedConfig {
+            reseed: Some(ReseedConfig {
+                reseed_threshold: 25usize,
                 hosts: None,
-                disable: false,
-            },
+            }),
             router_info: None,
             routers: Vec::new(),
             sam_config: Some(emissary_core::SamConfig {
@@ -704,8 +692,7 @@ impl Config {
                     }),
                     i2cp: Some(I2cpConfig { port: 7654, host: None, }),
                     metrics: Some(MetricsConfig {
-                        disable: false,
-                        port: None,
+                        port: 7788
                     }),
                     ntcp2: Some(Ntcp2Config {
                         port: 8888u16,
@@ -754,7 +741,9 @@ impl Config {
             }),
             insecure_tunnels: config.insecure_tunnels,
             log: config.log,
-            metrics: config.metrics,
+            metrics: config
+                .metrics
+                .map(|config| emissary_core::MetricsConfig { port: config.port }),
             net_id: config.net_id,
             ntcp2_config: config.ntcp2.map(|config| emissary_core::Ntcp2Config {
                 port: config.port,
@@ -771,10 +760,7 @@ impl Config {
                 intro_key: ssu2_intro_key,
             }),
             profiles: Vec::new(),
-            reseed: config.reseed.unwrap_or(ReseedConfig {
-                hosts: None,
-                disable: false,
-            }),
+            reseed: config.reseed,
             router_info,
             routers: Vec::new(),
             sam_config: config.sam.map(|config| emissary_core::SamConfig {
@@ -925,16 +911,9 @@ impl Config {
             arguments.metrics.metrics_server_port,
         ) {
             (Some(true), _) => {
-                self.metrics = Some(MetricsConfig {
-                    disable: true,
-                    port: None,
-                });
+                self.metrics = None;
             }
-            (Some(false), Some(port)) =>
-                self.metrics = Some(MetricsConfig {
-                    disable: false,
-                    port: Some(port),
-                }),
+            (Some(false), Some(port)) => self.metrics = Some(emissary_core::MetricsConfig { port }),
             _ => {}
         }
 
@@ -950,15 +929,36 @@ impl Config {
             self.log = Some(log.clone());
         }
 
-        if let Some(true) = arguments.reseed.disable_reseed {
-            self.reseed = ReseedConfig {
-                hosts: None,
-                disable: true,
-            };
+        if let Some(hosts) = &arguments.reseed.reseed_hosts {
+            match &mut self.reseed {
+                None => {
+                    self.reseed = Some(ReseedConfig {
+                        hosts: Some(hosts.clone()),
+                        reseed_threshold: 25usize,
+                    });
+                }
+                Some(config) => {
+                    config.hosts = Some(hosts.clone());
+                }
+            }
         }
 
-        if let Some(hosts) = &arguments.reseed.reseed_hosts {
-            self.reseed.hosts = Some(hosts.clone());
+        if let Some(threshold) = arguments.reseed.reseed_threshold {
+            match &mut self.reseed {
+                None => {
+                    self.reseed = Some(ReseedConfig {
+                        hosts: None,
+                        reseed_threshold: threshold,
+                    });
+                }
+                Some(config) => {
+                    config.reseed_threshold = threshold;
+                }
+            }
+        }
+
+        if let Some(true) = arguments.reseed.disable_reseed {
+            self.reseed = None;
         }
 
         match (&mut self.http_proxy, &arguments.http_proxy) {
@@ -1052,6 +1052,7 @@ mod tests {
                 reseed_hosts: None,
                 disable_reseed: None,
                 force_reseed: None,
+                reseed_threshold: None,
             },
             metrics: MetricsOptions {
                 metrics_server_port: None,

@@ -17,8 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    address_book::AddressBookManager, cli::Arguments, config::Config, error::Error,
-    proxy::http::HttpProxy, signal::SignalHandler, storage::Storage, tunnel::Tunnel,
+    address_book::AddressBookManager,
+    cli::Arguments,
+    config::{Config, ReseedConfig},
+    error::Error,
+    proxy::http::HttpProxy,
+    signal::SignalHandler,
+    storage::Storage,
+    tunnel::Tunnel,
 };
 
 use anyhow::anyhow;
@@ -44,9 +50,6 @@ mod tunnel;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
-
-/// Reseeding threshold.
-const RESEED_THRESHOLD: usize = 25usize;
 
 /// Result type for the crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -74,19 +77,24 @@ async fn main() -> anyhow::Result<()> {
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
 
-    // try to reseed the router if there aren't enough known routers
-    if (config.routers.len() < RESEED_THRESHOLD && !config.reseed.disable)
-        || arguments.reseed.force_reseed.unwrap_or(false)
-    {
+    // is the # of known routers less than reseed threshold or is reseed forced
+    let should_reseed = config.reseed.as_ref().map_or(
+        false,
+        |ReseedConfig {
+             reseed_threshold, ..
+         }| reseed_threshold > &config.routers.len(),
+    ) || arguments.reseed.force_reseed.unwrap_or(false);
+
+    if should_reseed {
         tracing::info!(
             target: LOG_TARGET,
             num_routers = ?config.routers.len(),
-            num_needed = ?RESEED_THRESHOLD,
             forced_reseed = ?arguments.reseed.force_reseed.unwrap_or(false),
             "reseed router"
         );
 
-        match Reseeder::reseed(config.reseed.hosts.clone()).await {
+        match Reseeder::reseed(config.reseed.as_ref().and_then(|config| config.hosts.clone())).await
+        {
             Ok(routers) => {
                 tracing::debug!(
                     target: LOG_TARGET,

@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use emissary_core::{router::Router, Config, MetricsConfig, Ntcp2Config, SamConfig, TransitConfig};
+use emissary_core::{router::Router, Config, Ntcp2Config, SamConfig, TransitConfig};
 use emissary_util::runtime::tokio::Runtime;
 use futures::StreamExt;
 use rand::{thread_rng, RngCore};
@@ -34,10 +34,7 @@ async fn make_router(
         floodfill,
         insecure_tunnels: true,
         allow_local: true,
-        metrics: MetricsConfig {
-            disable_metrics: true,
-            ..Default::default()
-        },
+        metrics: None,
         ntcp2: Some(Ntcp2Config {
             port: 0u16,
             iv: {
