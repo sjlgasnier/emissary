@@ -21,6 +21,7 @@ use crate::{
     cli::Arguments,
     config::{Config, ReseedConfig},
     error::Error,
+    port_mapper::PortMapper,
     proxy::http::HttpProxy,
     signal::SignalHandler,
     storage::Storage,
@@ -43,6 +44,7 @@ mod cli;
 mod config;
 mod error;
 mod logger;
+mod port_mapper;
 mod proxy;
 mod signal;
 mod storage;
@@ -143,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
     let path = config.base_path.clone();
     let http = config.http_proxy.take();
+    let port_forwarding = config.port_forwarding.take();
     let client_tunnels = mem::take(&mut config.tunnels);
 
     let (mut router, local_router_info, address_book_manager) = match config.address_book.take() {
@@ -206,11 +209,25 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // create port mapper from config and transport protocol info
+    //
+    // `PortMapper` can be polled for external address discoveries
+    let mut port_mapper = PortMapper::new(
+        port_forwarding,
+        router.protocol_address_info().ntcp2_port,
+        router.protocol_address_info().ssu2_port,
+    );
+
     loop {
         tokio::select! {
             _ = handler.next() => {
+                port_mapper.shutdown().await;
                 router.shutdown();
             }
+            address = port_mapper.next() => {
+                // the value must exist since the stream never terminates
+                router.add_external_address(address.expect("value"));
+            },
             event = router.next() => match event {
                 None => return Ok(()),
                 Some(RouterEvent::Shutdown) => {

@@ -44,7 +44,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -71,11 +71,17 @@ const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Protocol address information.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ProtocolAddressInfo {
+    /// NTCP2 port.
+    pub ntcp2_port: Option<u16>,
+
     /// Socket address of the SAMv3 TCP listener.
     pub sam_tcp: Option<SocketAddr>,
 
     /// Socket address of the SAMv3 UDP socket.
     pub sam_udp: Option<SocketAddr>,
+
+    /// SSU2 port.
+    pub ssu2_port: Option<u16>,
 }
 
 /// Events emitted by [`Router`].
@@ -333,10 +339,12 @@ impl<R: Runtime> Router<R> {
         }
 
         if let Some(context) = ntcp2_context {
+            address_info.ntcp2_port = Some(context.port());
             transport_manager_builder.register_ntcp2(context);
         }
 
         if let Some(context) = ssu2_context {
+            address_info.ssu2_port = Some(context.port());
             transport_manager_builder.register_ssu2(context);
         }
 
@@ -377,6 +385,17 @@ impl<R: Runtime> Router<R> {
     /// Get reference to [`ProtocolAddressInfo`].
     pub fn protocol_address_info(&self) -> &ProtocolAddressInfo {
         &self.address_info
+    }
+
+    /// Add external address for [`Router`].
+    ///
+    /// This address will be added to the [`RouterInfo`] that is published in `NetDb`. If the user
+    /// specified an address manually in the router configuration, `address` is ignored.
+    ///
+    /// If `address` differs from the address that was specified the router configuration,
+    /// a warning is logged.
+    pub fn add_external_address(&mut self, address: Ipv4Addr) {
+        self.transport_manager.add_external_address(address);
     }
 }
 

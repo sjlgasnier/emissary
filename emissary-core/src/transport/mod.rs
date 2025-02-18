@@ -37,6 +37,7 @@ use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,
+    net::Ipv4Addr,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -540,6 +541,11 @@ impl<R: Runtime> TransportManager<R> {
         let metrics = Ntcp2Transport::<R>::metrics(metrics);
 
         Ssu2Transport::<R>::metrics(metrics)
+    }
+
+    /// Add external address for the router.
+    pub fn add_external_address(&mut self, _address: Ipv4Addr) {
+        // TODO:
     }
 
     /// Attempt to dial `router_id`.

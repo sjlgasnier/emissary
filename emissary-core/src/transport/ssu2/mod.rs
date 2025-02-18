@@ -73,6 +73,13 @@ pub struct Ssu2Context<R: Runtime> {
     socket_address: SocketAddr,
 }
 
+impl<R: Runtime> Ssu2Context<R> {
+    /// Get the port where [`Ssu2Socket`] is bound to.
+    pub fn port(&self) -> u16 {
+        self.socket_address.port()
+    }
+}
+
 /// SSU2 transport.
 pub struct Ssu2Transport<R: Runtime> {
     /// SSU2 server socket.

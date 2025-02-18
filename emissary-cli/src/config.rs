@@ -140,6 +140,13 @@ pub struct MetricsConfig {
     port: u16,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PortForwardingConfig {
+    pub nat_pmp: bool,
+    pub upnp: bool,
+    pub name: String,
+}
+
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(rename = "address-book")]
@@ -159,6 +166,8 @@ struct EmissaryConfig {
     metrics: Option<MetricsConfig>,
     net_id: Option<u8>,
     ntcp2: Option<Ntcp2Config>,
+    #[serde(rename = "port-forwarding")]
+    port_forwarding: Option<PortForwardingConfig>,
     reseed: Option<ReseedConfig>,
     sam: Option<SamConfig>,
     ssu2: Option<Ssu2Config>,
@@ -206,6 +215,9 @@ pub struct Config {
 
     /// NTCP2 config.
     pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
+
+    /// Port forwarding config.
+    pub port_forwarding: Option<PortForwardingConfig>,
 
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
@@ -637,6 +649,11 @@ impl Config {
                 iv: ntcp2_iv,
                 publish: false,
             }),
+            port_forwarding: Some(PortForwardingConfig {
+                nat_pmp: true,
+                upnp: true,
+                name: String::from("emissary"),
+            }),
             profiles: Vec::new(),
             reseed: Some(ReseedConfig {
                 reseed_threshold: 25usize,
@@ -752,13 +769,7 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            ssu2_config: config.ssu2.map(|config| emissary_core::Ssu2Config {
-                port: config.port,
-                host: config.host,
-                publish: config.publish.unwrap_or(false),
-                static_key: ssu2_static_key,
-                intro_key: ssu2_intro_key,
-            }),
+            port_forwarding: config.port_forwarding,
             profiles: Vec::new(),
             reseed: config.reseed,
             router_info,
@@ -769,6 +780,13 @@ impl Config {
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
             signing_key,
+            ssu2_config: config.ssu2.map(|config| emissary_core::Ssu2Config {
+                port: config.port,
+                host: config.host,
+                publish: config.publish.unwrap_or(false),
+                static_key: ssu2_static_key,
+                intro_key: ssu2_intro_key,
+            }),
             static_key,
             transit: config.transit.map(|config| emissary_core::TransitConfig {
                 max_tunnels: config.max_tunnels,
@@ -1020,13 +1038,34 @@ impl Config {
             self.transit = None;
         }
 
+        if let Some(PortForwardingConfig {
+            nat_pmp,
+            upnp,
+            name,
+        }) = &mut self.port_forwarding
+        {
+            if let Some(true) = arguments.port_forwarding.disable_upnp {
+                *upnp = false;
+            }
+
+            if let Some(true) = arguments.port_forwarding.disable_nat_pmp {
+                *nat_pmp = false;
+            }
+
+            if let Some(ref description) = arguments.port_forwarding.upnp_name {
+                *name = description.clone();
+            }
+        }
+
         self
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::{MetricsOptions, ReseedOptions, TransitOptions, TunnelOptions};
+    use crate::cli::{
+        MetricsOptions, PortForwardingOptions, ReseedOptions, TransitOptions, TunnelOptions,
+    };
 
     use super::*;
     use std::fs::File;
@@ -1065,6 +1104,11 @@ mod tests {
             transit: TransitOptions {
                 max_transit_tunnels: None,
                 disable_transit_tunnels: None,
+            },
+            port_forwarding: PortForwardingOptions {
+                disable_upnp: None,
+                disable_nat_pmp: None,
+                upnp_name: None,
             },
         }
     }

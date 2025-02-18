@@ -18,8 +18,6 @@
 
 use clap::{Args, Parser};
 
-use std::path::PathBuf;
-
 #[derive(Args)]
 pub struct TunnelOptions {
     /// Length of an inbound exploratory tunnel
@@ -106,6 +104,21 @@ pub struct HttpProxyOptions {
     pub http_proxy_host: Option<String>,
 }
 
+#[derive(Args)]
+pub struct PortForwardingOptions {
+    /// Disable UPnP.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_upnp: Option<bool>,
+
+    /// Disable NAT-PMP.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_nat_pmp: Option<bool>,
+
+    /// Name for the UPnP client.
+    #[arg(long, value_name = "HOST")]
+    pub upnp_name: Option<String>,
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Arguments {
@@ -114,7 +127,7 @@ pub struct Arguments {
     /// Defaults to $HOME/.emissary/ and if it doesn't exist,
     /// new directory is created
     #[arg(short, long, value_name = "PATH")]
-    pub base_path: Option<PathBuf>,
+    pub base_path: Option<std::path::PathBuf>,
 
     /// Logging targets
     ///
@@ -167,4 +180,8 @@ pub struct Arguments {
     /// Transit tunnel options.
     #[clap(flatten)]
     pub transit: TransitOptions,
+
+    /// Port forwarding options.
+    #[clap(flatten)]
+    pub port_forwarding: PortForwardingOptions,
 }
