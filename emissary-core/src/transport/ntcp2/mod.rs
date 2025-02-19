@@ -68,6 +68,11 @@ impl<R: Runtime> Ntcp2Context<R> {
     pub fn port(&self) -> u16 {
         self.socket_address.port()
     }
+
+    /// Get copy of [`Ntcp2Config`].
+    pub fn config(&self) -> Ntcp2Config {
+        self.config.clone()
+    }
 }
 
 /// NTCP2 transport.
@@ -180,7 +185,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
                 host,
             ),
             (true, None) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     "ntcp2 requested to be published but no host provided",
                 );

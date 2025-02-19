@@ -78,6 +78,11 @@ impl<R: Runtime> Ssu2Context<R> {
     pub fn port(&self) -> u16 {
         self.socket_address.port()
     }
+
+    /// Get copy of [`Ssu2Config`].
+    pub fn config(&self) -> Ssu2Config {
+        self.config.clone()
+    }
 }
 
 /// SSU2 transport.
@@ -150,7 +155,7 @@ impl<R: Runtime> Ssu2Transport<R> {
         let socket_address = socket.local_address().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
-                "failed to get local address of the ntcp2 listener",
+                "failed to get local address of the ssu2 listener",
             );
 
             Error::Connection(ConnectionError::BindFailure)
@@ -164,9 +169,9 @@ impl<R: Runtime> Ssu2Transport<R> {
                 host,
             ),
             (true, None) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
-                    "ntcp2 requested to be published but no host provided",
+                    "ssu2 requested to be published but no host provided",
                 );
                 RouterAddress::new_unpublished_ssu2(
                     config.static_key,

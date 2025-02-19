@@ -523,6 +523,75 @@ impl RouterInfo {
             published: Date::new(R::rng().next_u64()),
         }
     }
+
+    pub fn from_keys_and_transports<R: crate::runtime::Runtime>(
+        static_key: Vec<u8>,
+        signing_key: Vec<u8>,
+        ntcp2: Option<crate::Ntcp2Config>,
+        ssu2: Option<crate::Ssu2Config>,
+    ) -> Self {
+        use rand_core::RngCore;
+
+        assert!(ntcp2.is_some() || ssu2.is_some());
+
+        let static_key = StaticPrivateKey::from_bytes(&static_key).unwrap();
+        let signing_key = SigningPrivateKey::from_bytes(&signing_key).unwrap();
+        let identity =
+            RouterIdentity::from_keys::<R>(&static_key, &signing_key).expect("to succeed");
+
+        let ntcp2 = match ntcp2 {
+            None => None,
+            Some(crate::Ntcp2Config {
+                port,
+                host,
+                publish,
+                key,
+                iv,
+            }) => match (publish, host) {
+                (true, Some(host)) => Some(RouterAddress::new_published_ntcp2(key, iv, port, host)),
+                (_, _) => Some(RouterAddress::new_unpublished_ntcp2(key, port)),
+            },
+        };
+        let ssu2 = match ssu2 {
+            None => None,
+            Some(crate::Ssu2Config {
+                port,
+                host,
+                publish,
+                static_key,
+                intro_key,
+            }) => match (publish, host) {
+                (true, Some(host)) => Some(RouterAddress::new_published_ssu2(
+                    static_key, intro_key, port, host,
+                )),
+                (_, _) => Some(RouterAddress::new_unpublished_ssu2(
+                    static_key, intro_key, port,
+                )),
+            },
+        };
+        let net_id = Mapping::new(Str::from("netId"), Str::from("2"));
+        let caps = Mapping::new(Str::from("caps"), Str::from("L"));
+        let router_version = Mapping::new(Str::from("router.version"), Str::from("0.9.62"));
+        let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
+        let mut addresses = HashMap::<TransportKind, RouterAddress>::new();
+
+        if let Some(ntcp2) = ntcp2 {
+            addresses.insert(TransportKind::Ntcp2, ntcp2);
+        }
+
+        if let Some(ssu2) = ssu2 {
+            addresses.insert(TransportKind::Ssu2, ssu2);
+        }
+
+        RouterInfo {
+            addresses,
+            capabilities: Capabilities::parse(&Str::from("L")).expect("to succeed"),
+            identity,
+            net_id: 2,
+            options,
+            published: Date::new(R::rng().next_u64()),
+        }
+    }
 }
 
 #[cfg(test)]

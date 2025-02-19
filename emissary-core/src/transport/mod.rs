@@ -19,13 +19,14 @@
 use crate::{
     error::{ChannelError, QueryError},
     netdb::NetDbHandle,
-    primitives::{Date, RouterId, RouterInfo},
+    primitives::{Date, RouterAddress, RouterId, RouterInfo, TransportKind},
     router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::{
         InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
     },
     transport::{metrics::*, ntcp2::Ntcp2Context, ssu2::Ssu2Context},
+    Ntcp2Config, Ssu2Config,
 };
 
 use bytes::Bytes;
@@ -401,8 +402,14 @@ pub struct TransportManagerBuilder<R: Runtime> {
     /// Handle to [`NetDb`].
     netdb_handle: Option<NetDbHandle>,
 
+    /// NTCP2 config.
+    ntcp2_config: Option<Ntcp2Config>,
+
     /// Router context.
     router_ctx: RouterContext<R>,
+
+    /// SSU2 config.
+    ssu2_config: Option<Ssu2Config>,
 
     /// Subsystem handle passed onto enabled transports.
     subsystem_handle: SubsystemHandle,
@@ -426,7 +433,9 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             cmd_tx,
             local_router_info,
             netdb_handle: None,
+            ntcp2_config: None,
             router_ctx,
+            ssu2_config: None,
             subsystem_handle: SubsystemHandle::new(),
             transports: Vec::with_capacity(2),
         }
@@ -455,6 +464,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
 
     /// Register NTCP2 as an active transport.
     pub fn register_ntcp2(&mut self, context: Ntcp2Context<R>) {
+        self.ntcp2_config = Some(context.config());
         self.transports.push(Box::new(Ntcp2Transport::new(
             context,
             self.allow_local,
@@ -465,6 +475,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
 
     /// Register SSU2 as an active transport.
     pub fn register_ssu2(&mut self, context: Ssu2Context<R>) {
+        self.ssu2_config = Some(context.config());
         self.transports.push(Box::new(Ssu2Transport::new(
             context,
             self.allow_local,
@@ -482,8 +493,10 @@ impl<R: Runtime> TransportManagerBuilder<R> {
     pub fn build(self) -> TransportManager<R> {
         TransportManager {
             cmd_rx: self.cmd_rx,
+            external_address: None,
             local_router_info: self.local_router_info,
             netdb_handle: self.netdb_handle.expect("to exist"),
+            ntcp2_config: self.ntcp2_config,
             pending_queries: R::join_set(),
             poll_index: 0usize,
             router_ctx: self.router_ctx,
@@ -491,6 +504,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             // in intervals of [`ROUTER_INFO_REPUBLISH_INTERVAL`]
             router_info_republish_timer: Box::pin(R::delay(Duration::from_secs(10))),
             routers: HashSet::new(),
+            ssu2_config: self.ssu2_config,
             subsystem_handle: self.subsystem_handle,
             transports: self.transports,
         }
@@ -506,11 +520,17 @@ pub struct TransportManager<R: Runtime> {
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
 
+    /// External address, if any.
+    external_address: Option<Ipv4Addr>,
+
     /// Local router info.
     local_router_info: RouterInfo,
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
+
+    /// NTCP2 config.
+    ntcp2_config: Option<Ntcp2Config>,
 
     /// Pending router info queries.
     pending_queries: R::JoinSet<(RouterId, Result<(), QueryError>)>,
@@ -526,6 +546,9 @@ pub struct TransportManager<R: Runtime> {
 
     /// Connected routers.
     routers: HashSet<RouterId>,
+
+    /// SSU2 config.
+    ssu2_config: Option<Ssu2Config>,
 
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
@@ -544,8 +567,91 @@ impl<R: Runtime> TransportManager<R> {
     }
 
     /// Add external address for the router.
-    pub fn add_external_address(&mut self, _address: Ipv4Addr) {
-        // TODO:
+    pub fn add_external_address(&mut self, address: Ipv4Addr) {
+        tracing::info!(
+            target: LOG_TARGET,
+            ?address,
+            "external address discovered",
+        );
+
+        match (self.external_address, address) {
+            (None, address) => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    ?address,
+                    "external address discovered, publishing new router info",
+                );
+
+                self.external_address = Some(address);
+            }
+            (Some(old_address), new_address) if old_address != new_address => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    ?old_address,
+                    ?new_address,
+                    "new external address discovered, publishing new router info",
+                );
+
+                self.external_address = Some(address);
+            }
+            _ => return,
+        };
+
+        match &self.ntcp2_config {
+            Some(Ntcp2Config {
+                port,
+                host,
+                publish: true,
+                key,
+                iv,
+            }) => match (host, address) {
+                (None, address) => {
+                    self.local_router_info.addresses.insert(
+                        TransportKind::Ntcp2,
+                        RouterAddress::new_published_ntcp2(*key, *iv, *port, address),
+                    );
+                }
+                (Some(published), address) if published == &address => {}
+                (Some(published), address) => tracing::warn!(
+                    target: LOG_TARGET,
+                    ?published,
+                    ?address,
+                    "external address doesn't match published address, router address not updated",
+                ),
+            },
+            _ => tracing::trace!(
+                target: LOG_TARGET,
+                "ntcp2 not active or unpublished, router address not updated",
+            ),
+        }
+
+        match &self.ssu2_config {
+            Some(Ssu2Config {
+                port,
+                host,
+                publish: true,
+                static_key,
+                intro_key,
+            }) => match (host, address) {
+                (None, address) => {
+                    self.local_router_info.addresses.insert(
+                        TransportKind::Ssu2,
+                        RouterAddress::new_published_ssu2(*static_key, *intro_key, *port, address),
+                    );
+                }
+                (Some(published), address) if published == &address => {}
+                (Some(published), address) => tracing::warn!(
+                    target: LOG_TARGET,
+                    ?published,
+                    ?address,
+                    "external address doesn't match published ssu2 address, router address not updated",
+                ),
+            },
+            _ => tracing::trace!(
+                target: LOG_TARGET,
+                "ssu2 not active or unpublished, router address not updated",
+            ),
+        }
     }
 
     /// Attempt to dial `router_id`.
@@ -734,5 +840,461 @@ impl<R: Runtime> Future for TransportManager<R> {
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::{SigningPrivateKey, StaticPrivateKey},
+        primitives::Str,
+        profile::ProfileStorage,
+        runtime::mock::MockRuntime,
+    };
+    use rand_core::RngCore;
+
+    fn make_transport_manager(
+        ntcp2: Option<Ntcp2Config>,
+        ssu2: Option<Ssu2Config>,
+    ) -> TransportManagerBuilder<MockRuntime> {
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info = RouterInfo::from_keys_and_transports::<MockRuntime>(
+                static_key_bytes,
+                signing_key_bytes,
+                ntcp2,
+                ssu2,
+            );
+
+            (static_key, signing_key, router_info)
+        };
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let (handle, _) = NetDbHandle::create();
+        let ctx = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            ProfileStorage::<MockRuntime>::new(&[], &[]),
+            router_info.identity.id(),
+            serialized.clone(),
+            static_key,
+            signing_key,
+            2u8,
+        );
+
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        builder.register_netdb_handle(handle);
+
+        builder
+    }
+
+    #[tokio::test]
+    async fn external_address_discovered_ntcp2() {
+        let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: Some("192.168.0.1".parse().unwrap()),
+            publish: true,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+        let mut builder = make_transport_manager(Some(context.config()), None);
+        builder.register_ntcp2(context);
+        let mut manager = builder.build();
+
+        // ensure ntcp2 is published
+        assert!(manager.ntcp2_config.is_some());
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("s"))
+            .is_some());
+
+        manager.add_external_address("192.168.0.1".parse().unwrap());
+
+        // verify that the address is still published and that host is the same
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("s"))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn external_address_discovered_ntcp2_unpublished() {
+        let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: None,
+            publish: false,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+
+        let mut builder = make_transport_manager(Some(context.config()), None);
+        builder.register_ntcp2(context);
+        let mut manager = builder.build();
+
+        // ensure ntcp2 is unpublished
+        assert!(manager.ntcp2_config.is_some());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("host"))
+            .is_none());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("i"))
+            .is_none());
+
+        manager.add_external_address("192.168.0.1".parse().unwrap());
+
+        // verify that the address is still unpublished
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("host"))
+            .is_none());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("i"))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn external_address_discovered_ssu2() {
+        let ssu2 = Ssu2Config {
+            port: 0,
+            host: Some("192.168.0.1".parse().unwrap()),
+            publish: true,
+            static_key: [0u8; 32],
+            intro_key: [1u8; 32],
+        };
+        let context =
+            Ssu2Transport::<MockRuntime>::initialize(Some(ssu2)).await.unwrap().0.unwrap();
+        let mut builder = make_transport_manager(None, Some(context.config()));
+        builder.register_ssu2(context);
+        let mut manager = builder.build();
+
+        // ensure ssu2 is published
+        assert!(manager.ssu2_config.is_some());
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+
+        manager.add_external_address("192.168.0.1".parse().unwrap());
+
+        // verify that the address is still published and that host is the same
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn external_address_discovered_ssu2_unpublished() {
+        let context = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
+            port: 0,
+            host: None,
+            publish: false,
+            static_key: [0u8; 32],
+            intro_key: [1u8; 32],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+
+        let mut builder = make_transport_manager(None, Some(context.config()));
+        builder.register_ssu2(context);
+        let mut manager = builder.build();
+
+        // ensure ssu2 is unpublished
+        assert!(manager.ssu2_config.is_some());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ssu2)
+            .unwrap()
+            .options
+            .get(&Str::from("host"))
+            .is_none());
+
+        manager.add_external_address("192.168.0.1".parse().unwrap());
+
+        // verify that the address is still unpublished
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ssu2)
+            .unwrap()
+            .options
+            .get(&Str::from("host"))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn new_external_address_discovered() {
+        let ssu2_context = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
+            port: 0,
+            host: None,
+            publish: true,
+            static_key: [0u8; 32],
+            intro_key: [1u8; 32],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+        let ntcp2_context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: None,
+            publish: true,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+
+        let mut builder =
+            make_transport_manager(Some(ntcp2_context.config()), Some(ssu2_context.config()));
+        builder.register_ssu2(ssu2_context);
+        builder.register_ntcp2(ntcp2_context);
+        let mut manager = builder.build();
+
+        // ensure ssu2 and ntcp2 is unpublished since no host was provided
+        assert!(manager.ssu2_config.is_some());
+        assert!(manager.ntcp2_config.is_some());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ssu2)
+            .unwrap()
+            .options
+            .get(&Str::from("host"))
+            .is_none());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("host"))
+            .is_none());
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("i"))
+            .is_none());
+
+        manager.add_external_address("192.168.0.1".parse().unwrap());
+
+        // verify that the address is still unpublished
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("s"))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn discovered_address_doesnt_match_published_address_ntcp2() {
+        let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: Some("192.168.0.1".parse().unwrap()),
+            publish: true,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+        let mut builder = make_transport_manager(Some(context.config()), None);
+        builder.register_ntcp2(context);
+        let mut manager = builder.build();
+
+        // ensure ntcp2 is published
+        assert!(manager.ntcp2_config.is_some());
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("s"))
+            .is_some());
+
+        manager.add_external_address("192.168.1.1".parse().unwrap());
+
+        // verify that the address is still published and that host is the same
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ntcp2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.0.1"))
+        );
+        assert!(manager
+            .local_router_info
+            .addresses
+            .get(&TransportKind::Ntcp2)
+            .unwrap()
+            .options
+            .get(&Str::from("s"))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn discovered_address_doesnt_match_published_address_ssu2() {
+        let context = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
+            port: 0,
+            host: Some("192.168.1.1".parse().unwrap()),
+            publish: true,
+            static_key: [0u8; 32],
+            intro_key: [1u8; 32],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+
+        let mut builder = make_transport_manager(None, Some(context.config()));
+        builder.register_ssu2(context);
+        let mut manager = builder.build();
+
+        // ensure ssu2 is unpublished
+        assert!(manager.ssu2_config.is_some());
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.1.1"))
+        );
+
+        manager.add_external_address("192.168.0.1".parse().unwrap());
+
+        // verify that the address is still unpublished
+        assert_eq!(
+            manager
+                .local_router_info
+                .addresses
+                .get(&TransportKind::Ssu2)
+                .unwrap()
+                .options
+                .get(&Str::from("host")),
+            Some(&Str::from("192.168.1.1"))
+        );
     }
 }
