@@ -375,10 +375,11 @@ mod tests {
                 TunnelBuildParameters, TunnelInfo,
             },
             noise::NoiseContext,
+            routing_table::RoutingKindRecycle,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::channel;
+    use thingbuf::mpsc::{channel, with_recycle};
 
     // outbound endpoint and the target router are the same router
     //
@@ -387,7 +388,7 @@ mod tests {
     async fn obep_routes_message_to_self() {
         let (_tx, rx) = channel(64);
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
 
@@ -502,7 +503,7 @@ mod tests {
     async fn expired_unfragmented_message() {
         let (_tx, rx) = channel(64);
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
 
@@ -611,7 +612,7 @@ mod tests {
     async fn expired_fragmented_message() {
         let (_tx, rx) = channel(64);
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
 

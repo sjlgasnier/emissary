@@ -31,14 +31,15 @@ use crate::{
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
         pool::{ClientSelector, ExploratorySelector, TunnelPool, TunnelPoolBuildParameters},
-        routing_table::{RoutingKind, RoutingTable},
+        routing_table::{RoutingKind, RoutingKindRecycle, RoutingTable},
         transit::TransitTunnelManager,
     },
 };
 
 use futures::{future::BoxFuture, FutureExt, StreamExt};
+use futures_channel::oneshot;
 use hashbrown::HashMap;
-use thingbuf::mpsc::{channel, Receiver, Sender};
+use thingbuf::mpsc::{channel, with_recycle, Receiver, Sender};
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
@@ -88,8 +89,8 @@ pub enum RouterState {
 
     /// Router is being dialed.
     Dialing {
-        /// Pending messages.
-        pending_messages: Vec<Vec<u8>>,
+        /// Pending messages and potentially feedback channels for confirmation of delivery.
+        pending_messages: Vec<(Vec<u8>, Option<oneshot::Sender<()>>)>,
     },
 }
 
@@ -111,7 +112,7 @@ pub struct TunnelManager<R: Runtime> {
     garlic: GarlicHandler<R>,
 
     /// RX channel for receiving messages from other tunnel-related subsystems.
-    message_rx: Receiver<RoutingKind>,
+    message_rx: Receiver<RoutingKind, RoutingKindRecycle>,
 
     /// TX channel for forwarding messages to [`NetDb`].
     netdb_tx: Sender<Message>,
@@ -154,7 +155,8 @@ impl<R: Runtime> TunnelManager<R> {
         );
 
         let (routing_table, message_rx, transit_rx) = {
-            let (message_tx, message_rx) = channel(DEFAULT_CHANNEL_SIZE);
+            let (message_tx, message_rx) =
+                with_recycle(DEFAULT_CHANNEL_SIZE, RoutingKindRecycle::default());
             let (transit_tx, transit_rx) = channel(DEFAULT_CHANNEL_SIZE);
             let routing_table =
                 RoutingTable::new(router_ctx.router_id().clone(), message_tx, transit_tx);
@@ -241,18 +243,28 @@ impl<R: Runtime> TunnelManager<R> {
     /// [`TransportService::send()`] returns an error if the channel is closed, meaning the
     /// the connection has been closed or if the channel is full at which point the message
     /// will just be dropped.
-    fn send_message(&mut self, router_id: &RouterId, message: Vec<u8>) {
+    ///
+    /// `feedback` is an optional TX channel given by the message sender and it's used to signal to
+    /// the message's sender whether the message was sent to remote router successfully.
+    fn send_message(
+        &mut self,
+        router_id: &RouterId,
+        message: Vec<u8>,
+        feedback_tx: Option<oneshot::Sender<()>>,
+    ) {
         match self.routers.get_mut(router_id) {
-            Some(RouterState::Connected) => {
-                if let Err(error) = self.service.send(router_id, message) {
-                    tracing::error!(
-                        target: LOG_TARGET,
-                        %router_id,
-                        ?error,
-                        "failed to send message to router",
-                    );
-                }
-            }
+            Some(RouterState::Connected) => match self.service.send(router_id, message) {
+                Ok(()) =>
+                    if let Some(tx) = feedback_tx {
+                        let _ = tx.send(());
+                    },
+                Err(error) => tracing::error!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    ?error,
+                    "failed to send message to router",
+                ),
+            },
             Some(RouterState::Dialing {
                 ref mut pending_messages,
             }) => {
@@ -261,7 +273,8 @@ impl<R: Runtime> TunnelManager<R> {
                     %router_id,
                     "router is being dialed, buffer message",
                 );
-                pending_messages.push(message);
+
+                pending_messages.push((message, feedback_tx));
             }
             None => match router_id == self.router_ctx.router_id() {
                 true => {
@@ -292,7 +305,7 @@ impl<R: Runtime> TunnelManager<R> {
                     self.routers.insert(
                         router_id.clone(),
                         RouterState::Dialing {
-                            pending_messages: vec![message],
+                            pending_messages: vec![(message, feedback_tx)],
                         },
                     );
                 }
@@ -313,14 +326,18 @@ impl<R: Runtime> TunnelManager<R> {
                     "router with pending messages connected",
                 );
 
-                for message in pending_messages {
-                    if let Err(error) = self.service.send(&router_id, message) {
-                        tracing::debug!(
+                for (message, feedback_tx) in pending_messages {
+                    match self.service.send(&router_id, message) {
+                        Ok(()) =>
+                            if let Some(tx) = feedback_tx {
+                                let _ = tx.send(());
+                            },
+                        Err(error) => tracing::debug!(
                             target: LOG_TARGET,
                             %router_id,
                             ?error,
                             "failed to send message to router",
-                        );
+                        ),
                     }
                 }
             }
@@ -393,7 +410,7 @@ impl<R: Runtime> TunnelManager<R> {
                         "garlic message for router delivery",
                     );
 
-                    self.send_message(&router, message);
+                    self.send_message(&router, message, None);
                 }
                 DeliveryInstructions::Tunnel {
                     router,
@@ -407,7 +424,7 @@ impl<R: Runtime> TunnelManager<R> {
                         "garlic message for tunnel delivery",
                     );
 
-                    self.send_message(&router, message);
+                    self.send_message(&router, message, None);
                 }
                 DeliveryInstructions::Destination => {
                     tracing::warn!(
@@ -514,7 +531,7 @@ impl<R: Runtime> Future for TunnelManager<R> {
             match event {
                 None => return Poll::Ready(()),
                 Some(RoutingKind::External { router_id, message }) =>
-                    self.send_message(&router_id, message),
+                    self.send_message(&router_id, message, None),
                 Some(RoutingKind::Internal { message }) =>
                     if let Err(error) = self.on_message(message) {
                         tracing::debug!(
@@ -523,6 +540,11 @@ impl<R: Runtime> Future for TunnelManager<R> {
                             "failed to handle internal tunnel message",
                         );
                     },
+                Some(RoutingKind::ExternalWithFeedback {
+                    router_id,
+                    message,
+                    tx,
+                }) => self.send_message(&router_id, message, Some(tx)),
             }
         }
 

@@ -25,14 +25,14 @@ use crate::{
     runtime::{mock::MockRuntime, Runtime},
     shutdown::ShutdownContext,
     tunnel::{
-        garlic::DeliveryInstructions,
+        garlic::{DeliveryInstructions, GarlicHandler},
         hop::{
             inbound::InboundTunnel, outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
             TunnelBuildParameters, TunnelInfo,
         },
         noise::NoiseContext,
         pool::TunnelPoolBuildParameters,
-        routing_table::{RoutingKind, RoutingTable},
+        routing_table::{RoutingKind, RoutingKindRecycle, RoutingTable},
         transit::TransitTunnelManager,
     },
     TransitConfig,
@@ -40,8 +40,9 @@ use crate::{
 
 use bytes::Bytes;
 use futures::FutureExt;
+use futures_channel::oneshot;
 use rand_core::RngCore;
-use thingbuf::mpsc::{channel, Receiver};
+use thingbuf::mpsc::{channel, with_recycle, Receiver};
 
 use core::{
     fmt,
@@ -49,8 +50,6 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-
-use super::garlic::GarlicHandler;
 
 /// Make new router.
 pub fn make_router(
@@ -97,7 +96,7 @@ pub struct TestTransitTunnelManager {
     manager: TransitTunnelManager<MockRuntime>,
 
     /// RX channel for receiving messages from local tunnels.
-    message_rx: Receiver<RoutingKind>,
+    message_rx: Receiver<RoutingKind, RoutingKindRecycle>,
 
     /// Static public key.
     public_key: StaticPublicKey,
@@ -131,7 +130,7 @@ impl TestTransitTunnelManager {
         let (router_hash, static_key, signing_key, noise, router_info) = make_router(fast);
         let public_key = static_key.public();
         let (transit_tx, transit_rx) = channel(64);
-        let (message_tx, message_rx) = channel(64);
+        let (message_tx, message_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
         let mut _shutdown_ctx = ShutdownContext::<MockRuntime>::new();
@@ -194,12 +193,12 @@ impl TestTransitTunnelManager {
     pub fn handle_short_tunnel_build(
         &mut self,
         message: Message,
-    ) -> crate::Result<(RouterId, Vec<u8>)> {
+    ) -> crate::Result<(RouterId, Vec<u8>, Option<oneshot::Sender<()>>)> {
         self.manager.handle_short_tunnel_build(message)
     }
 
     /// Get mutable reference to the message RX channel.
-    pub fn message_rx(&mut self) -> &mut Receiver<RoutingKind> {
+    pub fn message_rx(&mut self) -> &mut Receiver<RoutingKind, RoutingKindRecycle> {
         &mut self.message_rx
     }
 
@@ -265,7 +264,10 @@ pub fn build_outbound_tunnel(
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
         |acc, ((_, _), transit_manager)| {
-            let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+            let (_, message, tx) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+            if let Some(tx) = tx {
+                let _ = tx.send(());
+            }
             Message::parse_short(&message).unwrap()
         },
     );
@@ -337,7 +339,10 @@ pub fn build_inbound_tunnel(
     let message = hops.iter().zip(transit_managers.iter_mut()).fold(
         message,
         |acc, ((_, _), transit_manager)| {
-            let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+            let (_, message, tx) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+            if let Some(tx) = tx {
+                let _ = tx.send(());
+            }
             Message::parse_short(&message).unwrap()
         },
     );

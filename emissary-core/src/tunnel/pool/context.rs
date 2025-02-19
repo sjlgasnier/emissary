@@ -72,22 +72,25 @@ pub struct TunnelPoolContextHandle {
     event_tx: mpsc::Sender<TunnelPoolEvent>,
 
     /// TX channel for sending messages via one of the pool's outbound tunnels to remote routers.
-    tx: mpsc::Sender<TunnelMessage>,
+    tx: mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
 }
 
 impl TunnelPoolContextHandle {
-    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
-    pub fn send_to_router(
+    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway` and inform
+    /// the caller via `feedback` if dialing the router succeeded.
+    pub fn send_to_router_with_feedback(
         &self,
         gateway: TunnelId,
         router_id: RouterId,
         message: Vec<u8>,
+        feedback_tx: oneshot::Sender<()>,
     ) -> Result<(), ChannelError> {
         self.tx
             .try_send(TunnelMessage::RouterDelivery {
                 gateway,
                 router_id,
                 message,
+                feedback_tx: Some(feedback_tx),
             })
             .map_err(From::from)
     }
@@ -261,7 +264,19 @@ impl TunnelPoolContextHandle {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Default, Clone)]
+pub struct TunnelMessageRecycle(());
+
+impl thingbuf::Recycle<TunnelMessage> for TunnelMessageRecycle {
+    fn new_element(&self) -> TunnelMessage {
+        TunnelMessage::Dummy
+    }
+
+    fn recycle(&self, element: &mut TunnelMessage) {
+        *element = TunnelMessage::Dummy
+    }
+}
+
 pub enum TunnelMessage {
     /// I2NP message received into one of the pool's inbound tunnels
     ///
@@ -282,6 +297,9 @@ pub enum TunnelMessage {
 
         /// Serialize I2NP message.
         message: Vec<u8>,
+
+        /// Feedback channel to inform the caller whether the router was dialed successfully.
+        feedback_tx: Option<oneshot::Sender<()>>,
     },
 
     /// Send message to remote inbound tunnel via one of the outbound tunnels of the pool.
@@ -314,11 +332,11 @@ pub struct TunnelPoolContext {
     event_tx: mpsc::Sender<TunnelPoolEvent>,
 
     /// RX channel for receiving messages destined to remote routers.
-    rx: mpsc::Receiver<TunnelMessage>,
+    rx: mpsc::Receiver<TunnelMessage, TunnelMessageRecycle>,
 
     /// TX channel given to pool's inbound tunnels, allowing them to send received I2NP messages to
     /// [`TunnelPool`] for routing.
-    tx: mpsc::Sender<TunnelMessage>,
+    tx: mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
 }
 
 impl TunnelPoolContext {
@@ -449,7 +467,7 @@ impl TunnelPoolBuildParameters {
     /// Create new [`TunnelPoolBuildParameters`].
     pub fn new(config: TunnelPoolConfig) -> Self {
         let listeners = Arc::new(RwLock::new(MessageListeners::default()));
-        let (tx, rx) = mpsc::channel(TUNNEL_CHANNEL_SIZE);
+        let (tx, rx) = mpsc::with_recycle(TUNNEL_CHANNEL_SIZE, TunnelMessageRecycle::default());
         let (tunnel_pool_handle, event_tx, shutdown_rx) =
             TunnelPoolHandle::new(config.clone(), tx.clone());
 

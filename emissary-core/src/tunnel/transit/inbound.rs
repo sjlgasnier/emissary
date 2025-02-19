@@ -257,11 +257,12 @@ mod tests {
                 TunnelBuildParameters, TunnelInfo,
             },
             pool::TunnelPoolBuildParameters,
+            routing_table::RoutingKindRecycle,
             tests::make_router,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::channel;
+    use thingbuf::mpsc::{channel, with_recycle};
 
     #[tokio::test]
     async fn expired_tunnel_gateway_payload() {
@@ -275,7 +276,7 @@ mod tests {
             make_router(false);
 
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(ibep_router_info.identity.id(), manager_tx, transit_tx);
 
@@ -394,7 +395,7 @@ mod tests {
             make_router(false);
 
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(ibep_router_info.identity.id(), manager_tx, transit_tx);
 

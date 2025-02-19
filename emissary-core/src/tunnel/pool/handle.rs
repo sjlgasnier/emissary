@@ -20,7 +20,7 @@ use crate::{
     error::ChannelError,
     i2np::Message,
     primitives::{Lease, RouterId, TunnelId},
-    tunnel::pool::{TunnelMessage, TunnelPoolConfig},
+    tunnel::pool::{context::TunnelMessageRecycle, TunnelMessage, TunnelPoolConfig},
 };
 
 use futures::Stream;
@@ -147,7 +147,7 @@ pub trait TunnelSender: Clone {
 
 /// Tunnel message sender.
 #[derive(Clone)]
-struct TunnelMessageSender(mpsc::Sender<TunnelMessage>);
+struct TunnelMessageSender(mpsc::Sender<TunnelMessage, TunnelMessageRecycle>);
 
 impl TunnelSender for TunnelMessageSender {
     fn try_send_to_router(
@@ -161,6 +161,7 @@ impl TunnelSender for TunnelMessageSender {
                 gateway,
                 router_id,
                 message,
+                feedback_tx: None,
             })
             .map_err(From::from)
     }
@@ -192,6 +193,7 @@ impl TunnelSender for TunnelMessageSender {
                     gateway,
                     router_id,
                     message,
+                    feedback_tx: None,
                 })
                 .await
                 .map_err(|_| ChannelError::Closed)
@@ -239,7 +241,7 @@ impl TunnelPoolHandle {
     /// Create new [`TunnelPoolHandle`].
     pub(super) fn new(
         config: TunnelPoolConfig,
-        message_tx: mpsc::Sender<TunnelMessage>,
+        message_tx: mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
     ) -> (Self, mpsc::Sender<TunnelPoolEvent>, oneshot::Receiver<()>) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (event_tx, event_rx) = mpsc::channel(64);
@@ -277,13 +279,13 @@ impl TunnelPoolHandle {
     #[cfg(test)]
     pub fn create() -> (
         Self,
-        mpsc::Receiver<TunnelMessage>,
+        mpsc::Receiver<TunnelMessage, TunnelMessageRecycle>,
         mpsc::Sender<TunnelPoolEvent>,
         oneshot::Receiver<()>,
     ) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (event_tx, event_rx) = mpsc::channel(64);
-        let (message_tx, message_rx) = mpsc::channel(64);
+        let (message_tx, message_rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
 
         (
             Self {
@@ -304,13 +306,13 @@ impl TunnelPoolHandle {
         config: TunnelPoolConfig,
     ) -> (
         Self,
-        mpsc::Receiver<TunnelMessage>,
+        mpsc::Receiver<TunnelMessage, TunnelMessageRecycle>,
         mpsc::Sender<TunnelPoolEvent>,
         oneshot::Receiver<()>,
     ) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (event_tx, event_rx) = mpsc::channel(64);
-        let (message_tx, message_rx) = mpsc::channel(64);
+        let (message_tx, message_rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
 
         (
             Self {

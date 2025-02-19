@@ -560,13 +560,13 @@ mod test {
             hop::inbound::InboundTunnel,
             noise::NoiseContext,
             pool::TunnelPoolBuildParameters,
-            routing_table::RoutingTable,
+            routing_table::{RoutingKindRecycle, RoutingTable},
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::channel;
+    use thingbuf::mpsc::{channel, with_recycle};
 
     #[tokio::test]
     async fn create_outbound_tunnel() {
@@ -610,7 +610,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );
@@ -643,7 +643,7 @@ mod test {
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
                     let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
                     let routing_table =
@@ -719,7 +719,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );
@@ -973,7 +973,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );
@@ -1052,7 +1052,7 @@ mod test {
                 make_router(true);
 
             let (transit_tx, transit_rx) = channel(16);
-            let (manager_tx, _manager_rx) = channel(16);
+            let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
             let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
             let shutdown_handle = shutdown_ctx.handle();
 
@@ -1103,12 +1103,12 @@ mod test {
             .unwrap();
 
         let message = (0..transit_managers.len() - 1).fold(message, |message, i| {
-            let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
+            let (_, msg, _) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
 
             Message::parse_short(&msg).unwrap()
         });
 
-        let (_, msg) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
+        let (_, msg, _) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
 
         let Message {
             message_type,
@@ -1307,7 +1307,7 @@ mod test {
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
                     let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
                     let routing_table =
@@ -1383,7 +1383,7 @@ mod test {
         let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );

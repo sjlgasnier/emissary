@@ -40,8 +40,21 @@ use alloc::{sync::Arc, vec::Vec};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::routing-table";
 
+#[derive(Debug, Default, Clone)]
+pub(super) struct RoutingKindRecycle(());
+
+impl thingbuf::Recycle<RoutingKind> for RoutingKindRecycle {
+    fn new_element(&self) -> RoutingKind {
+        RoutingKind::default()
+    }
+
+    fn recycle(&self, element: &mut RoutingKind) {
+        *element = RoutingKind::default()
+    }
+}
+
 /// Routing kind.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum RoutingKind {
     /// Message needs to be send to an external router.
     External {
@@ -50,6 +63,19 @@ pub enum RoutingKind {
 
         /// Serialize I2NP essage.
         message: Vec<u8>,
+    },
+
+    /// Message needs to be sent to an external router and the sender must be informed
+    /// if the message was sent successfully.
+    ExternalWithFeedback {
+        /// Router ID.
+        router_id: RouterId,
+
+        /// Serialize I2NP essage.
+        message: Vec<u8>,
+
+        /// TX channel for informing the sender if the message was sent successfully.
+        tx: oneshot::Sender<()>,
     },
 
     /// Message needs to be routed internally either back to the tunnel subsystem or to [`NetDb`].
@@ -77,7 +103,7 @@ pub struct RoutingTable {
     /// TX channel for sending message routing instructions.
     ///
     /// See [`RoutingKind`] for more details.
-    manager: mpsc::Sender<RoutingKind>,
+    manager: mpsc::Sender<RoutingKind, RoutingKindRecycle>,
 
     /// Local router ID.
     router_hash: RouterId,
@@ -93,7 +119,7 @@ impl RoutingTable {
     /// Create new [`RoutingTable`].
     pub fn new(
         router_hash: RouterId,
-        manager: mpsc::Sender<RoutingKind>,
+        manager: mpsc::Sender<RoutingKind, RoutingKindRecycle>,
         transit: mpsc::Sender<Message>,
     ) -> Self {
         Self {
@@ -257,7 +283,7 @@ impl RoutingTable {
 
     /// Send `message` to router identified by `router_id`.
     ///
-    /// `router` could point to local router which causes `message` to be routed locally.
+    /// `router_id` could point to local router which causes `message` to be routed locally.
     //
     // TODO(optimization): take deserialized message and serialize it only if it's for remote
     pub fn send_message(&self, router_id: RouterId, message: Vec<u8>) -> Result<(), RoutingError> {
@@ -305,6 +331,69 @@ impl RoutingTable {
             ),
         }
     }
+
+    /// Send `message` to router identified by `router_id` and use a TX to inform the caller whether
+    /// the message was sent successfully.
+    ///
+    /// `router_id` could point to local router which causes `message` to be routed locally.
+    pub fn send_message_with_feedback(
+        &self,
+        router_id: RouterId,
+        message: Vec<u8>,
+        tx: oneshot::Sender<()>,
+    ) -> Result<(), RoutingError> {
+        match router_id == self.router_hash {
+            true => {
+                // parsing must succeed since this message was created by us
+                let message = Message::parse_short(&message).expect("valid message");
+
+                // internally routed messages are always delivered correctly
+                let _ = tx.send(());
+
+                match message.message_type {
+                    MessageType::TunnelData
+                    | MessageType::TunnelGateway
+                    | MessageType::ShortTunnelBuild
+                    | MessageType::VariableTunnelBuild => self.route_message(message),
+                    message_type => {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            ?message_type,
+                            "received non-tunnel message, route to `TunnelManager`",
+                        );
+
+                        self.manager.try_send(RoutingKind::Internal { message }).map_err(|error| {
+                            match error {
+                                TrySendError::Full(RoutingKind::Internal { message }) =>
+                                    RoutingError::ChannelFull(message),
+                                TrySendError::Closed(RoutingKind::Internal { message }) =>
+                                    RoutingError::ChannelClosed(message),
+                                _ => unreachable!(),
+                            }
+                        })
+                    }
+                }
+            }
+            false => self
+                .manager
+                .try_send(RoutingKind::ExternalWithFeedback {
+                    router_id,
+                    message,
+                    tx,
+                })
+                .map_err(|error| match error {
+                    TrySendError::Full(RoutingKind::ExternalWithFeedback { message, .. }) =>
+                        RoutingError::ChannelFull(
+                            Message::parse_short(&message).expect("valid message"),
+                        ),
+                    TrySendError::Closed(RoutingKind::ExternalWithFeedback { message, .. }) =>
+                        RoutingError::ChannelClosed(
+                            Message::parse_short(&message).expect("valid message"),
+                        ),
+                    _ => unreachable!(),
+                }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -314,13 +403,14 @@ mod tests {
         i2np::{tunnel::data::TunnelDataBuilder, MessageBuilder},
         runtime::{mock::MockRuntime, Runtime},
     };
+    use mpsc::with_recycle;
     use rand_core::RngCore;
     use thingbuf::mpsc::channel;
 
     #[test]
     fn tunnel_doesnt_exist() {
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -350,7 +440,7 @@ mod tests {
     #[test]
     fn tunnel_exists() {
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -382,7 +472,7 @@ mod tests {
     #[test]
     fn listener_doesnt_exist() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -404,7 +494,7 @@ mod tests {
     #[test]
     fn listener_exists() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -431,7 +521,7 @@ mod tests {
     #[should_panic]
     fn channel_closed() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -460,7 +550,7 @@ mod tests {
     #[test]
     fn channel_full() {
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -521,7 +611,7 @@ mod tests {
     #[test]
     fn send_message_to_remote() {
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -542,7 +632,7 @@ mod tests {
     #[test]
     fn route_message_locally() {
         let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -560,7 +650,7 @@ mod tests {
     #[test]
     fn tunnel_already_exists() {
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = channel(64);
+        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
             RoutingTable::new(RouterId::from(vec![1, 2, 3, 4]), manager_tx, transit_tx);
 
@@ -581,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn route_internal() {
         let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = channel(64);
+        let (manager_tx, manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
 
