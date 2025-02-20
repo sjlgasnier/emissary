@@ -275,8 +275,6 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
     type Item = TransportEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.waker = Some(cx.waker().clone());
-
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
@@ -300,8 +298,9 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         }
 
         if !self.pending_handshakes.is_empty() {
-            match futures::ready!(self.pending_handshakes.poll_next_unpin(cx)) {
-                Some(Ok(session)) => {
+            match self.pending_handshakes.poll_next_unpin(cx) {
+                Poll::Pending => {}
+                Poll::Ready(Some(Ok(session))) => {
                     tracing::debug!(
                         target: LOG_TARGET,
                         role = ?session.role(),
@@ -321,7 +320,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
                     return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
                 }
-                Some(Err((router_id, error))) => match router_id {
+                Poll::Ready(Some(Err((router_id, error)))) => match router_id {
                     Some(router_id) => {
                         tracing::trace!(
                             target: LOG_TARGET,
@@ -337,10 +336,11 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         "failed to accept inbound connection",
                     ),
                 },
-                None => return Poll::Ready(None),
+                Poll::Ready(None) => return Poll::Ready(None),
             }
         }
 
+        self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
 }
