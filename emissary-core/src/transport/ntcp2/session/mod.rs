@@ -168,7 +168,7 @@ impl<R: Runtime> SessionManager<R> {
         outbound_initial_state: Bytes,
         chaining_key: Bytes,
         allow_local: bool,
-        mut subsystem_handle: SubsystemHandle,
+        subsystem_handle: SubsystemHandle,
     ) -> crate::Result<Ntcp2Session<R>> {
         let router_id = router.identity.id();
 
@@ -220,7 +220,6 @@ impl<R: Runtime> SessionManager<R> {
                 %router_id,
                 "failed to dial router",
             );
-            subsystem_handle.report_connection_failure(router_id).await;
             return Err(Error::DialFailure);
         };
         let router_hash = router.identity.hash().to_vec();
@@ -277,11 +276,11 @@ impl<R: Runtime> SessionManager<R> {
         let outbound_initial_state = self.outbound_initial_state.clone();
         let chaining_key = self.chaining_key.clone();
         let allow_local = self.allow_local;
-        let subsystem_handle = self.subsystem_handle.clone();
+        let mut subsystem_handle = self.subsystem_handle.clone();
         let router_id = router.identity.id();
 
         async move {
-            Self::create_session_inner(
+            match Self::create_session_inner(
                 router,
                 net_id,
                 local_info,
@@ -289,10 +288,23 @@ impl<R: Runtime> SessionManager<R> {
                 outbound_initial_state,
                 chaining_key,
                 allow_local,
-                subsystem_handle,
+                subsystem_handle.clone(),
             )
             .await
-            .map_err(|error| (Some(router_id), error))
+            {
+                Ok(session) => Ok(session),
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        ?error,
+                        "failed to handshake with remote router",
+                    );
+                    let _ = subsystem_handle.report_connection_failure(router_id.clone()).await;
+
+                    Err((Some(router_id), error))
+                }
+            }
         }
     }
 
