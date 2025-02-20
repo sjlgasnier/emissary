@@ -726,7 +726,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                             self.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).increment(1);
                         }
                         false => {
-                            tracing::warn!(
+                            tracing::debug!(
                                 target: LOG_TARGET,
                                 %router_id,
                                 "router already connected, rejecting",
