@@ -223,12 +223,12 @@ impl Initiator {
         ))
     }
 
-    /// Register `SessionConfirmed` message from responder (Bob).
+    /// Register `SessionCreated` message from responder (Bob).
     ///
     /// Decrypt `Y` and perform KDF for messages 2 and 3 part 1
     ///
     /// [KDF part 2](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-2-and-message-3-part-1)
-    pub fn register_session_confirmed(&mut self, bytes: &[u8]) -> crate::Result<usize> {
+    pub fn register_session_created(&mut self, bytes: &[u8]) -> crate::Result<usize> {
         let InitiatorState::SessionRequested {
             mut state,
             iv,

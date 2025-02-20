@@ -210,6 +210,7 @@ impl<R: Runtime> SessionManager<R> {
 
         tracing::trace!(
             target: LOG_TARGET,
+            %router_id,
             ?socket_address,
             "start dialing remote peer",
         );
@@ -237,15 +238,27 @@ impl<R: Runtime> SessionManager<R> {
         )?;
         stream.write_all(&message).await?;
 
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            "`SessionRequest` sent, read `SessonCreated`",
+        );
+
         // read `SessionCreated` and decrypt & parse it to find padding length
         let mut reply = alloc::vec![0u8; 64];
-        stream.read_exact(&mut reply).await?;
+        stream.read_exact::<R>(&mut reply).await?;
 
-        let padding_len = initiator.register_session_confirmed(&reply)?;
+        let padding_len = initiator.register_session_created(&reply)?;
 
         // read padding and finalize session by sending `SessionConfirmed`
         let mut reply = alloc::vec![0u8; padding_len];
-        stream.read_exact(&mut reply).await?;
+        stream.read_exact::<R>(&mut reply).await?;
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            "padding for `SessionCreated` read, create and send `SessionConfirmed`",
+        );
 
         let (key_context, message) = initiator.finalize(&reply)?;
         stream.write_all(&message).await?;
@@ -327,7 +340,7 @@ impl<R: Runtime> SessionManager<R> {
 
         // read first part of `SessionRequest` which has fixed length
         let mut message = vec![0u8; 64];
-        stream.read_exact(&mut message).await?;
+        stream.read_exact::<R>(&mut message).await?;
 
         let (mut responder, padding_len) = Responder::new(
             &inbound_initial_state,
@@ -341,14 +354,14 @@ impl<R: Runtime> SessionManager<R> {
 
         // read padding and create session if the peer is accepted
         let mut padding = alloc::vec![0u8; padding_len];
-        stream.read_exact(&mut padding).await?;
+        stream.read_exact::<R>(&mut padding).await?;
 
         let (message, message_len) = responder.create_session::<R>(padding)?;
         stream.write_all(&message).await?;
 
         // read `SessionConfirmed` message and finalize session
         let mut message = alloc::vec![0u8; message_len];
-        stream.read_exact(&mut message).await?;
+        stream.read_exact::<R>(&mut message).await?;
 
         match responder.finalize(message) {
             Ok((key_context, router)) => {

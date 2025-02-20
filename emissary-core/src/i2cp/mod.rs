@@ -151,7 +151,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     self.pending_connections.push(async move {
                         let mut protocol_byte = vec![0u8; 1];
 
-                        stream.read_exact(&mut protocol_byte).await?;
+                        stream.read_exact::<R>(&mut protocol_byte).await?;
 
                         if protocol_byte[0] != I2CP_PROTOCOL_BYTE {
                             return Err(Error::I2cp(I2cpError::InvalidProtocolByte(
