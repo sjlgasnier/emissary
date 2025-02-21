@@ -119,20 +119,31 @@ impl AsyncWrite for TokioTcpStream {
 
 impl TcpStream for TokioTcpStream {
     async fn connect(address: SocketAddr) -> Option<Self> {
-        net::TcpStream::connect(address)
-            .await
-            .map_err(|error| {
+        match tokio::time::timeout(Duration::from_secs(10), net::TcpStream::connect(address)).await
+        {
+            Err(_) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?address,
+                    "timeout while dialing address",
+                );
+                None
+            }
+            Ok(Err(error)) => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?address,
                     error = ?error.kind(),
                     "failed to connect"
                 );
-            })
-            .ok()
-            .map(|stream| stream.set_nodelay(true).ok().map(|()| stream))
-            .flatten()
-            .map(Self::new)
+                None
+            }
+            Ok(Ok(stream)) => {
+                stream.set_nodelay(true).ok()?;
+
+                Some(Self::new(stream))
+            }
+        }
     }
 }
 
