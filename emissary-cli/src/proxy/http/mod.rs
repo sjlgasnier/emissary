@@ -29,7 +29,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinSet,
 };
-use yosemite::{style, Session, SessionOptions, Stream, StreamOptions};
+use yosemite::{style, Session, SessionOptions, StreamOptions};
 
 use std::{sync::LazyLock, time::Duration};
 
@@ -76,9 +76,6 @@ pub struct HttpProxy {
     /// Inbound requests.
     requests: JoinSet<Option<Request>>,
 
-    /// Outbound responses.
-    responses: JoinSet<anyhow::Result<()>>,
-
     /// SAMv3 streaming session for the HTTP proxy.
     session: Session<style::Stream>,
 }
@@ -105,7 +102,6 @@ impl HttpProxy {
         Ok(Self {
             listener: TcpListener::bind(format!("{}:{}", config.host, config.port)).await?,
             requests: JoinSet::new(),
-            responses: JoinSet::new(),
             session,
         })
     }
@@ -246,30 +242,56 @@ impl HttpProxy {
         }
     }
 
-    /// Send `request` to remote destination over `i2p_stream`, read the full HTTP response
-    /// and send it to the browser.
-    async fn send_response(
-        mut stream: TcpStream,
-        mut i2p_stream: Stream,
-        request: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        let mut buffer = vec![0u8; 2048];
+    /// Handle sanitized HTTP request.
+    ///
+    /// Attempt to connect to remote destination and if the connection succeeds, send the request to
+    /// them and read back response.
+    fn on_request(&mut self, request: Request) {
+        let Request {
+            mut stream,
+            host,
+            request,
+        } = request;
 
-        // write request and read from the stream until it is closed
-        i2p_stream.write_all(&request).await?;
+        let future = self.session.connect_detached_with_options(
+            &host,
+            StreamOptions {
+                dst_port: 80,
+                ..Default::default()
+            },
+        );
 
-        loop {
-            match i2p_stream.read(&mut buffer).await {
-                Ok(0) | Err(_) => {
-                    break;
+        tokio::spawn(async move {
+            match future.await {
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to connect to destination",
+                    );
+
+                    let response = ResponseBuilder::new(Status::BadGateway)
+                        .with_error(format!("Failed to establish connection to {host}"))
+                        .build();
+
+                    if let Err(error) = stream.write_all(&response.as_bytes()).await {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to send error response to client",
+                        );
+                    }
+
+                    Err(error)
                 }
-                Ok(nread) => {
-                    stream.write_all(&buffer[..nread]).await?;
-                }
-            };
-        }
+                Ok(mut i2p_stream) => {
+                    // write request and read from the stream until it is closed
+                    i2p_stream.write_all(&request).await?;
 
-        Ok(())
+                    tokio::io::copy(&mut i2p_stream, &mut stream).await.map_err(From::from)
+                }
+            }
+        });
     }
 
     /// Run event loop of [`HttpProxy`].
@@ -318,39 +340,13 @@ impl HttpProxy {
                     }
                 },
                 request = self.requests.join_next(), if !self.requests.is_empty() => match request {
-                    Some(Ok(Some(Request { mut stream, host, request }))) => match self.session.connect_with_options(
-                        &host, StreamOptions { dst_port: 80, ..Default::default() }).await
-                    {
-                        Ok(i2p_stream) => {
-                            self.responses.spawn(Self::send_response(stream, i2p_stream, request));
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "failed to connect to destination",
-                            );
-
-                            let response = ResponseBuilder::new(Status::BadGateway)
-                                .with_error(format!("Failed to establish connection to {host}"))
-                                .build();
-
-                            if let Err(error) = stream.write_all(&response.as_bytes()).await {
-                                tracing::debug!(
-                                    target: LOG_TARGET,
-                                    ?error,
-                                    "failed to send error response to client",
-                                );
-                            }
-                        }
-                    },
-                    Some(Ok(None)) => {},
+                    None | Some(Ok(None)) => {}
+                    Some(Ok(Some(request))) => self.on_request(request),
                     Some(Err(error)) => tracing::debug!(
                         target: LOG_TARGET,
                         ?error,
                         "failed to poll http request",
                     ),
-                    None => {}
                 }
             }
         }
