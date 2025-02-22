@@ -40,6 +40,7 @@ use alloc::boxed::Box;
 use core::{
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 /// Logging target for the file.
@@ -105,15 +106,28 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
         let profile = self.profile.clone();
 
         self.pending.push(async move {
-            if let Err(_) = dial_rx.await {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    direction = ?T::direction(),
-                    tunnel_id = %tunnel.tunnel_id(),
-                    "failed to dial next hop",
-                );
+            match select(dial_rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await {
+                Either::Left((Ok(_), _)) => {}
+                Either::Left((Err(_), _)) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        direction = ?T::direction(),
+                        tunnel_id = %tunnel.tunnel_id(),
+                        "failed to dial next hop",
+                    );
 
-                return (*tunnel.tunnel_id(), Err(Error::DialFailure));
+                    return (*tunnel.tunnel_id(), Err(Error::DialFailure));
+                }
+                Either::Right(_) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        direction = ?T::direction(),
+                        tunnel_id = %tunnel.tunnel_id(),
+                        "failed to receive dial result after 2 minutes",
+                    );
+                    debug_assert!(false);
+                    return (*tunnel.tunnel_id(), Err(Error::DialFailure));
+                }
             }
 
             match select(message_rx, Box::pin(R::delay(TUNNEL_BUILD_EXPIRATION))).await {

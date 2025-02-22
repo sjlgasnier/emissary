@@ -42,7 +42,10 @@ use crate::{
 };
 
 use bytes::{BufMut, BytesMut};
-use futures::{FutureExt, StreamExt};
+use futures::{
+    future::{select, Either},
+    FutureExt, StreamExt,
+};
 use futures_channel::oneshot;
 use thingbuf::mpsc::Receiver;
 
@@ -166,6 +169,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
         if self.shutdown_handle.is_shutting_down() {
             tracing::debug!(
                 target: LOG_TARGET,
+                num_tunnels = ?self.tunnels.len(),
                 "router is shutting down, cannot accept transit tunnel",
             );
             return false;
@@ -326,7 +330,19 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
                 match role {
                     HopRole::InboundGateway => self.tunnels.push(async move {
-                        let _ = rx.await.map_err(|_| tunnel_id)?;
+                        match select(rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await {
+                            Either::Left((Ok(_), _)) => {}
+                            Either::Left((Err(_), _)) => return Err(tunnel_id),
+                            Either::Right(_) => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %tunnel_id,
+                                    "failed to receive dial result after 2 minutes",
+                                );
+                                debug_assert!(false);
+                                return Err(tunnel_id);
+                            }
+                        }
 
                         Ok(InboundGateway::<R>::new(
                             tunnel_id,
@@ -340,7 +356,19 @@ impl<R: Runtime> TransitTunnelManager<R> {
                         .await)
                     }),
                     HopRole::Participant => self.tunnels.push(async move {
-                        let _ = rx.await.map_err(|_| tunnel_id)?;
+                        match select(rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await {
+                            Either::Left((Ok(_), _)) => {}
+                            Either::Left((Err(_), _)) => return Err(tunnel_id),
+                            Either::Right(_) => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %tunnel_id,
+                                    "failed to receive dial result after 2 minutes",
+                                );
+                                debug_assert!(false);
+                                return Err(tunnel_id);
+                            }
+                        }
 
                         Ok(Participant::<R>::new(
                             tunnel_id,
@@ -354,7 +382,19 @@ impl<R: Runtime> TransitTunnelManager<R> {
                         .await)
                     }),
                     HopRole::OutboundEndpoint => self.tunnels.push(async move {
-                        let _ = rx.await.map_err(|_| tunnel_id)?;
+                        match select(rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await {
+                            Either::Left((Ok(_), _)) => {}
+                            Either::Left((Err(_), _)) => return Err(tunnel_id),
+                            Either::Right(_) => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    %tunnel_id,
+                                    "failed to receive dial result after 2 minutes",
+                                );
+                                debug_assert!(false);
+                                return Err(tunnel_id);
+                            }
+                        }
 
                         Ok(OutboundEndpoint::<R>::new(
                             tunnel_id,
@@ -546,7 +586,20 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 match role {
                     HopRole::InboundGateway => {
                         self.tunnels.push(async move {
-                            let _ = rx.await.map_err(|_| tunnel_id)?;
+                            match select(rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await
+                            {
+                                Either::Left((Ok(_), _)) => {}
+                                Either::Left((Err(_), _)) => return Err(tunnel_id),
+                                Either::Right(_) => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        %tunnel_id,
+                                        "failed to receive dial result after 2 minutes",
+                                    );
+                                    debug_assert!(false);
+                                    return Err(tunnel_id);
+                                }
+                            }
 
                             Ok(InboundGateway::<R>::new(
                                 tunnel_id,
@@ -564,7 +617,20 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     }
                     HopRole::Participant => {
                         self.tunnels.push(async move {
-                            let _ = rx.await.map_err(|_| tunnel_id)?;
+                            match select(rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await
+                            {
+                                Either::Left((Ok(_), _)) => {}
+                                Either::Left((Err(_), _)) => return Err(tunnel_id),
+                                Either::Right(_) => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        %tunnel_id,
+                                        "failed to receive dial result after 2 minutes",
+                                    );
+                                    debug_assert!(false);
+                                    return Err(tunnel_id);
+                                }
+                            }
 
                             Ok(Participant::<R>::new(
                                 tunnel_id,
@@ -585,7 +651,20 @@ impl<R: Runtime> TransitTunnelManager<R> {
                         let garlic_tag = tunnel_keys.garlic_tag();
 
                         self.tunnels.push(async move {
-                            let _ = rx.await.map_err(|_| tunnel_id)?;
+                            match select(rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await
+                            {
+                                Either::Left((Ok(_), _)) => {}
+                                Either::Left((Err(_), _)) => return Err(tunnel_id),
+                                Either::Right(_) => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        %tunnel_id,
+                                        "failed to receive dial result after 2 minutes",
+                                    );
+                                    debug_assert!(false);
+                                    return Err(tunnel_id);
+                                }
+                            }
 
                             Ok(OutboundEndpoint::<R>::new(
                                 tunnel_id,
@@ -705,9 +784,11 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
                             tracing::error!(target: LOG_TARGET, ?error, "failed to send message");
                         },
                     Some(tx) =>
-                        if let Err(error) =
-                            self.routing_table.send_message_with_feedback(router, message, tx)
-                        {
+                        if let Err(error) = self.routing_table.send_message_with_feedback(
+                            router.clone(),
+                            message,
+                            tx,
+                        ) {
                             tracing::error!(target: LOG_TARGET, ?error, "failed to send message");
                         },
                 },
