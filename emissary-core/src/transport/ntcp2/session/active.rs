@@ -30,7 +30,7 @@ use crate::{
             message::MessageBlock,
             session::{KeyContext, Role},
         },
-        SubsystemHandle, TerminationReason,
+        Direction, SubsystemHandle, TerminationReason,
     },
 };
 
@@ -103,6 +103,9 @@ pub struct Ntcp2Session<R: Runtime> {
     /// TX channel for sending commands for this connection.
     cmd_tx: Sender<SubsystemCommand>,
 
+    /// Direction of the session.
+    direction: Direction,
+
     /// Read buffer.
     read_buffer: Vec<u8>,
 
@@ -145,6 +148,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         stream: R::TcpStream,
         key_context: KeyContext,
         subsystem_handle: SubsystemHandle,
+        direction: Direction,
     ) -> Self {
         let KeyContext {
             send_key,
@@ -157,6 +161,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         Self {
             cmd_rx,
             cmd_tx,
+            direction,
             read_buffer: vec![0u8; 0xffff],
             read_state: ReadState::ReadSize { offset: 0usize },
             recv_cipher: ChaChaPoly::new(&recv_key),
@@ -169,6 +174,11 @@ impl<R: Runtime> Ntcp2Session<R> {
             subsystem_handle,
             write_state: WriteState::GetMessage,
         }
+    }
+
+    /// Get [`Direction`] of the session.
+    pub fn direction(&self) -> Direction {
+        self.direction
     }
 
     /// Get role of the session.
@@ -285,7 +295,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 router_id = %this.router,
                                 ?size,
                                 num_messages = ?messages.len(),
-                                "read ntc2 frame",
+                                "read ntcp2 frame",
                             );
 
                             if let Some(MessageBlock::Termination { reason, .. }) =

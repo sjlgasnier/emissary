@@ -315,7 +315,7 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 match transport2.next().await.unwrap() {
-                    TransportEvent::ConnectionEstablished { router_id } =>
+                    TransportEvent::ConnectionEstablished { router_id, .. } =>
                         transport2.accept(&router_id),
                     _ => {}
                 }
@@ -325,7 +325,7 @@ mod tests {
         transport1.connect(router_info2);
         loop {
             match transport1.next().await.unwrap() {
-                TransportEvent::ConnectionEstablished { router_id } => {
+                TransportEvent::ConnectionEstablished { router_id, .. } => {
                     transport1.accept(&router_id);
                     break;
                 }

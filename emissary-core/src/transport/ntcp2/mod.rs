@@ -315,10 +315,14 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     // `TransportManager` will either accept or reject the session
                     let router_info = session.router();
                     let router_id = router_info.identity.id();
+                    let direction = session.direction();
 
                     self.pending_connections.insert(router_id.clone(), session);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
+                        direction,
+                        router_id,
+                    }));
                 }
                 Poll::Ready(Some(Err((router_id, error)))) => match router_id {
                     Some(router_id) => {

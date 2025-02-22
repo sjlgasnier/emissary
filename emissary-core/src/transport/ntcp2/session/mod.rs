@@ -39,7 +39,7 @@ use crate::{
     runtime::{Runtime, TcpStream},
     transport::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
-        SubsystemHandle,
+        Direction, SubsystemHandle,
     },
     util::{is_global, AsyncReadExt, AsyncWriteExt},
 };
@@ -269,6 +269,7 @@ impl<R: Runtime> SessionManager<R> {
             stream,
             key_context,
             subsystem_handle,
+            Direction::Outbound,
         ))
     }
 
@@ -385,6 +386,7 @@ impl<R: Runtime> SessionManager<R> {
                     stream,
                     key_context,
                     subsystem_handle,
+                    Direction::Inbound,
                 ))
             }
             Err(error) => {
