@@ -47,25 +47,29 @@ impl Tunnel {
         })
         .await?;
 
-        let mut i2p_stream = session
-            .connect_with_options(
-                &config.destination,
-                StreamOptions {
-                    dst_port: config.destination_port.unwrap_or(0),
-                    ..Default::default()
-                },
-            )
+        loop {
+            let Ok(mut i2p_stream) = session
+                .connect_with_options(
+                    &config.destination,
+                    StreamOptions {
+                        dst_port: config.destination_port.unwrap_or(0),
+                        ..Default::default()
+                    },
+                )
+                .await
+            else {
+                continue;
+            };
+
+            let listener = TcpListener::bind(format!(
+                "{}:{}",
+                config.address.clone().unwrap_or(String::from("127.0.0.1")),
+                config.port
+            ))
             .await?;
-        let listener = TcpListener::bind(format!(
-            "{}:{}",
-            config.address.unwrap_or(String::from("127.0.0.1")),
-            config.port
-        ))
-        .await?;
-        let (mut tcp_stream, _) = listener.accept().await?;
+            let (mut tcp_stream, _) = listener.accept().await?;
 
-        tokio::io::copy_bidirectional(&mut i2p_stream, &mut tcp_stream).await?;
-
-        Ok(())
+            let _ = tokio::io::copy_bidirectional(&mut i2p_stream, &mut tcp_stream).await;
+        }
     }
 }
