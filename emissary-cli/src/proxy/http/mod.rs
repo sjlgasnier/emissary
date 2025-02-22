@@ -51,7 +51,6 @@ static ILLEGAL: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "dnt",
         "x-forwarded",
         "proxy-",
-        "if-none-match",
     ])
 });
 
@@ -158,7 +157,7 @@ impl HttpProxy {
             "inbound request",
         );
 
-        Ok((host, {
+        Ok((host.clone(), {
             // serialize request into a byte vector
             let mut sanitized = Vec::new();
 
@@ -167,21 +166,48 @@ impl HttpProxy {
             sanitized.extend_from_slice(&"HTTP/1.1\r\n".as_bytes());
 
             for header in req.headers.into_iter() {
-                // if let (Some(name), value) = (name, value) {
                 if header.name.to_lowercase() == "user-agent" {
                     sanitized.extend_from_slice("User-Agent: MYOB/6.66 (AN/ON)\r\n".as_bytes());
                     continue;
                 }
 
-                if header.name.to_lowercase() == "accept-encoding" {
-                    sanitized.extend_from_slice("Accept-Encoding: ".as_bytes());
-                    sanitized.extend_from_slice(header.value);
-                    sanitized.extend_from_slice("\r\n".as_bytes());
+                if header.name.to_lowercase().starts_with("accept") {
+                    if header.name.to_lowercase() == "accept-encoding" {
+                        sanitized.extend_from_slice("Accept-Encoding: ".as_bytes());
+                        sanitized.extend_from_slice(header.value);
+                        sanitized.extend_from_slice("\r\n".as_bytes());
+                    }
                     continue;
                 }
 
                 if header.name.to_lowercase() == "connection" {
-                    sanitized.extend_from_slice("Connection: close\r\n".as_bytes());
+                    match std::str::from_utf8(&header.value) {
+                        Ok(value) if value.to_lowercase() == "upgrade" => {
+                            sanitized.extend_from_slice("Connection: upgrade\r\n".as_bytes());
+                        }
+                        _ => sanitized.extend_from_slice("Connection: close\r\n".as_bytes()),
+                    }
+
+                    continue;
+                }
+
+                if header.name.to_lowercase() == "referer" {
+                    let Ok(value) = std::str::from_utf8(&header.value) else {
+                        continue;
+                    };
+
+                    if value.contains(&host) {
+                        sanitized.extend_from_slice("Referer: ".as_bytes());
+                        sanitized.extend_from_slice(header.value);
+                        sanitized.extend_from_slice("\r\n".as_bytes());
+                    } else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            ?value,
+                            "skipping invalid `Referer`",
+                        )
+                    }
+
                     continue;
                 }
 
@@ -270,7 +296,7 @@ impl HttpProxy {
                         "failed to connect to destination",
                     );
 
-                    let response = ResponseBuilder::new(Status::BadGateway)
+                    let response = ResponseBuilder::new(Status::InternalServerError)
                         .with_error(format!("Failed to establish connection to {host}"))
                         .build();
 
