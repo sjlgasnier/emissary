@@ -188,7 +188,9 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     inbound: R::JoinSet<(TunnelId, TunnelId)>,
 
     /// Inbound tunnels.
-    inbound_tunnels: HashMap<TunnelId, RouterId>,
+    ///
+    /// Key is IBGW `TunnelId` and value is (IBEP `TunnelId`, IBGW `RouterId`) tuple.
+    inbound_tunnels: HashMap<TunnelId, (TunnelId, RouterId)>,
 
     /// Last time a tunnel test was performed.
     last_tunnel_test: R::Instant,
@@ -710,7 +712,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     (!self.expiring_inbound.contains(tunnel_id)).then_some((*tunnel_id, router))
                 }),
             )
-            .for_each(|(outbound, (inbound, router))| {
+            .for_each(|(outbound, (inbound, (_, router)))| {
                 // allocate new message id and an RX channel for receiving the tunnel test message
                 let (message_id, message_rx) = self.context.add_listener(&mut R::rng());
 
@@ -918,24 +920,28 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     // in order for the inbound tunnel to be usable, it's gateway information must
                     // be stored in selector/routing table, as opposed to the endpoint information,
                     // because the gateway is used to receive messages
-                    let (router_id, tunnel_id) = tunnel.gateway();
-                    self.selector.add_inbound_tunnel(tunnel_id, router_id.clone(), tunnel.hops());
-                    self.inbound_tunnels.insert(tunnel_id, router_id.clone());
-                    self.tunnel_timers.add_inbound_tunnel(tunnel_id);
+                    let (router_id, gateway_tunnel_id) = tunnel.gateway();
+                    self.selector.add_inbound_tunnel(
+                        gateway_tunnel_id,
+                        router_id.clone(),
+                        tunnel.hops(),
+                    );
+                    self.inbound_tunnels.insert(gateway_tunnel_id, (tunnel_id, router_id.clone()));
+                    self.tunnel_timers.add_inbound_tunnel(gateway_tunnel_id);
 
                     // inform the owner of the tunnel pool that a new inbound tunnel has been built
                     if let Err(error) = self.context.register_inbound_tunnel_built(
-                        tunnel_id,
+                        gateway_tunnel_id,
                         Lease {
                             router_id,
-                            tunnel_id,
+                            tunnel_id: gateway_tunnel_id,
                             expires: R::time_since_epoch() + TUNNEL_EXPIRATION,
                         },
                     ) {
                         tracing::warn!(
                             target: LOG_TARGET,
                             name = %self.config.name,
-                            %tunnel_id,
+                            %gateway_tunnel_id,
                             ?error,
                             "failed to register new inbound tunnel to owner",
                         );
@@ -1230,15 +1236,22 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         if let Some(rx) = &mut self.shutdown_rx {
             if rx.poll_unpin(cx).is_ready() {
                 tracing::info!(
-                    target: LOG_TARGET,
+                    target: "emissary::sam",
                     name = %self.config.name,
                     "tunnel pool shutting down",
                 );
-                let _ = self.context.register_tunnel_pool_shut_down();
 
-                self.inbound_tunnels.keys().chain(self.outbound.keys()).for_each(|tunnel_id| {
+                self.inbound_tunnels.values().for_each(|(tunnel_id, _)| {
                     self.routing_table.remove_tunnel(tunnel_id);
                 });
+
+                if let Err(error) = self.context.register_tunnel_pool_shut_down() {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to sent shutdown confirmation to tunnel pool owner",
+                    );
+                }
 
                 return Poll::Ready(());
             }
@@ -2966,5 +2979,144 @@ mod tests {
         // don't route the test message any further and verify the test timeouts
         assert!(tokio::time::timeout(Duration::from_secs(9), &mut tunnel_pool).await.is_err());
         assert_eq!(MockRuntime::get_counter_value(NUM_TEST_FAILURES), Some(1));
+    }
+
+    #[tokio::test]
+    async fn inbound_tunnels_removed_from_routing_table() {
+        crate::util::init_logger();
+
+        // create 10 routers and add them to local `ProfileStorage`
+        let mut routers = (0..10)
+            .map(|i| {
+                let transit = TestTransitTunnelManager::new(if i % 2 == 0 { true } else { false });
+                (transit.router(), transit)
+            })
+            .collect::<HashMap<_, _>>();
+        let profile_storage = ProfileStorage::<MockRuntime>::from_random(
+            routers.iter().map(|(_, transit)| transit.router_info()).collect(),
+        );
+
+        let pool_config = TunnelPoolConfig {
+            num_inbound: 1usize,
+            num_inbound_hops: 3usize,
+            num_outbound: 0usize,
+            num_outbound_hops: 0usize,
+            ..Default::default()
+        };
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
+        let handle = MockRuntime::register_metrics(Vec::new(), None);
+        let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
+        let (transit_tx, _transit_rx) = mpsc::channel(64);
+        let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
+        let parameters = TunnelPoolBuildParameters::new(pool_config);
+        let pool_handle = parameters.context_handle.clone();
+
+        let (mut tunnel_pool, mut handle) = TunnelPool::<MockRuntime, _>::new(
+            parameters,
+            ExploratorySelector::new(profile_storage.clone(), pool_handle, false),
+            routing_table.clone(),
+            RouterContext::new(
+                handle.clone(),
+                profile_storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+            ),
+        );
+
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
+        assert_eq!(tunnel_pool.pending_inbound.len(), 1);
+
+        // 1st outbound hop (ibgw)
+        let Ok(RoutingKind::ExternalWithFeedback {
+            router_id: router,
+            message,
+            tx,
+        }) = manager_rx.try_recv()
+        else {
+            panic!("invalid routing kind")
+        };
+        tx.send(()).unwrap();
+
+        let message = Message::parse_short(&message).unwrap();
+        assert_eq!(message.message_type, MessageType::Garlic);
+        let message = match routers
+            .get_mut(&router)
+            .unwrap()
+            .garlic()
+            .handle_message(message)
+            .unwrap()
+            .next()
+        {
+            Some(GarlicDeliveryInstructions::Local { message }) => message,
+            _ => panic!("invalid delivery instructions"),
+        };
+        let (router, message, tx) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+        if let Some(tx) = tx {
+            let _ = tx.send(());
+        }
+
+        // 2nd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (router, message, tx) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+        if let Some(tx) = tx {
+            let _ = tx.send(());
+        }
+
+        // 3rd outbound hop (participant)
+        let message = Message::parse_short(&message).unwrap();
+        let (_router, message, tx) =
+            routers.get_mut(&router).unwrap().handle_short_tunnel_build(message).unwrap();
+        if let Some(tx) = tx {
+            let _ = tx.send(());
+        }
+
+        // route tunnel build response to the tunnel build response listener
+        let message = Message::parse_short(&message).unwrap();
+        routing_table.route_message(message).unwrap();
+
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_err());
+        assert_eq!(tunnel_pool.inbound.len(), 1);
+        assert_eq!(tunnel_pool.pending_inbound.len(), 0);
+        assert_eq!(MockRuntime::get_gauge_value(NUM_INBOUND_TUNNELS), Some(1));
+
+        // verify the inbound tunnel exists in the routing table
+        let tunnel_id = tunnel_pool.inbound_tunnels.values().next().unwrap().0;
+
+        match routing_table.try_add_tunnel::<6>(tunnel_id) {
+            Err(RoutingError::TunnelExists(value)) => {
+                assert_eq!(value, tunnel_id);
+            }
+            _ => panic!("invalid status"),
+        }
+
+        // shut down the tunnel pool
+        handle.shutdown();
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut tunnel_pool).await.is_ok());
+
+        // try to add the tunnel again and ensure that it succeeds this time because the tunnel
+        // pool's tunnels were removed from tunnel pool when it shut down
+        match routing_table.try_add_tunnel::<6>(tunnel_id) {
+            Ok(_) => {}
+            _ => panic!("invalid status"),
+        }
     }
 }
