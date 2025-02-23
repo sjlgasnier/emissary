@@ -35,7 +35,7 @@ use emissary_core::{
     runtime::Runtime as _,
 };
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
-use futures::StreamExt;
+use futures::{channel::oneshot, StreamExt};
 
 use std::{fs::File, io::Write, mem};
 
@@ -176,13 +176,20 @@ async fn main() -> anyhow::Result<()> {
             // start event loop of address book manager if address book was enabled
             //
             // address book depends on the http proxy as it downloads hosts.txt from inside i2p
-            if let Some(address_book_manager) = address_book_manager {
-                tokio::spawn(address_book_manager.start(config.port, config.host.clone()));
-            }
+            //
+            // if address book is enabled, create oneshot channel pair, pass the receiver to address
+            // book and sender to http proxy and once the http proxy is ready (its tunnel pool has
+            // been built), it'll signal the address book that it can start download hosts file(s)
+            let http_proxy_ready_tx = address_book_manager.map(|address_book_manager| {
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(address_book_manager.run(config.port, config.host.clone(), rx));
+
+                tx
+            });
 
             // start event loop of http proxy
             tokio::spawn(async move {
-                match HttpProxy::new(config, address.port()).await {
+                match HttpProxy::new(config, address.port(), http_proxy_ready_tx).await {
                     Ok(proxy) => {
                         tokio::spawn(async move {
                             if let Err(error) = proxy.run().await {

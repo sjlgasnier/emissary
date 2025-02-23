@@ -19,30 +19,39 @@
 use crate::config::AddressBookConfig;
 
 use emissary_core::runtime::AddressBook;
+use futures::channel::oneshot;
 use reqwest::{
     header::{HeaderMap, HeaderValue, CONNECTION},
     Client, Proxy,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+};
 
 use std::{
-    future::Future,
-    path::{Path, PathBuf},
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
+    collections::HashMap, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration,
 };
 
 /// Logging target for the file
 const LOG_TARGET: &str = "emissary::address-book";
+
+/// Backoff if downloading the hosts file fails.
+const RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How many times each subscription is tried before giving up.
+const SUBSCRIPTION_NUM_RETRIES: usize = 5usize;
 
 /// Address book.
 pub struct AddressBookManager {
     /// Path to address book.
     address_book_path: &'static str,
 
-    /// URL which hosts.txt is downloaded from.
+    /// URL from which the primary `hosts.txt` is downloaded from.
     hosts_url: String,
+
+    /// Additional subscriptions.
+    subscriptions: Vec<String>,
 }
 
 impl AddressBookManager {
@@ -56,6 +65,7 @@ impl AddressBookManager {
                 .to_string()
                 .leak(),
             hosts_url: config.default,
+            subscriptions: config.subscriptions,
         }
     }
 
@@ -66,80 +76,174 @@ impl AddressBookManager {
         })
     }
 
-    /// Start event loop for [`AddressBookManager`].
-    pub async fn start(self, http_port: u16, http_host: String) {
-        if Path::new(self.address_book_path).exists() {
+    /// Attempt to download `hosts.txt` from `url`.
+    async fn download(client: &Client, url: &str) -> Option<String> {
+        let response = match client
+            .get(format!("{}", url))
+            .headers(HeaderMap::from_iter([(
+                CONNECTION,
+                HeaderValue::from_static("close"),
+            )]))
+            .send()
+            .await
+        {
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?url,
+                    ?error,
+                    "failed to fetch hosts.txt"
+                );
+                return None;
+            }
+            Ok(response) => response,
+        };
+
+        if !response.status().is_success() {
             tracing::debug!(
                 target: LOG_TARGET,
-                "address book exists, skipping download",
+                ?url,
+                status = ?response.status(),
+                "request to address book server failed",
             );
-            return;
+            return None;
+        }
+
+        match response.bytes().await {
+            Ok(response) => match std::str::from_utf8(&response) {
+                Ok(response) => Some(response.to_owned()),
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?url,
+                        ?error,
+                        "failed to convert `hosts.txt` to utf-8",
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?url,
+                    ?error,
+                    "failed to get response from address book server"
+                );
+                return None;
+            }
+        }
+    }
+
+    /// Parse `hosts` into (key, value) tuple and merge it with `addresses`.
+    ///
+    /// Addresses already present in `addresses` will be ignored.
+    async fn parse_and_merge(&self, addresses: &mut HashMap<String, String>, hosts: String) {
+        for line in hosts.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim().to_string();
+
+                if addresses.contains_key(&key) {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        %key,
+                        "skipping already-existing address",
+                    );
+                } else {
+                    addresses.insert(key.trim().to_string(), value.trim().to_string());
+                }
+            }
+        }
+
+        match File::create(&self.address_book_path).await {
+            Err(error) => tracing::error!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to open address book",
+            ),
+            Ok(mut file) => {
+                let address_book = addresses.iter().fold(Vec::new(), |mut out, (key, value)| {
+                    out.extend_from_slice(format!("{key}={value}\n").as_bytes());
+                    out
+                });
+
+                if let Err(error) = file.write_all(&address_book).await {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to write to address book",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Start event loop for [`AddressBookManager`].
+    ///
+    /// Before the address book subscription download starts, [`AddressBook`] waits on
+    /// `http_proxy_ready_rx` which the HTTP proxy sends a signal to once it's ready.
+    pub async fn run(
+        self,
+        http_port: u16,
+        http_host: String,
+        http_proxy_ready_rx: oneshot::Receiver<()>,
+    ) {
+        if let Err(error) = http_proxy_ready_rx.await {
+            tracing::error!(
+                target: LOG_TARGET,
+                ?error,
+                "http proxy failed to start, cannot start address book",
+            );
         }
 
         tracing::info!(
             target: LOG_TARGET,
             ?http_port,
             ?http_host,
-            hosts_url = ?self.hosts_url,
+            default = ?self.hosts_url,
+            subscriptions = ?self.subscriptions,
             "create address book",
         );
 
+        let client = Client::builder()
+            .proxy(Proxy::http(format!("http://{http_host}:{http_port}")).expect("to succeed"))
+            .http1_title_case_headers()
+            .build()
+            .expect("to succeed");
+
+        let mut addresses = HashMap::<String, String>::new();
+
         loop {
-            let client = Client::builder()
-                .proxy(Proxy::http(format!("http://{http_host}:{http_port}")).expect("to succeed"))
-                .build()
-                .expect("to succeed");
-
-            let response = match client
-                .get(format!("{}", self.hosts_url))
-                .headers(HeaderMap::from_iter([(
-                    CONNECTION,
-                    HeaderValue::from_static("close"),
-                )]))
-                .send()
-                .await
-            {
-                Err(error) => {
-                    tracing::debug!(
+            match Self::download(&client, &self.hosts_url).await {
+                Some(hosts) => {
+                    tracing::info!(
                         target: LOG_TARGET,
-                        server = ?self.hosts_url,
-                        ?error,
-                        "failed to fetch hosts.txt"
+                        url = %self.hosts_url,
+                        "hosts.txt downloaded",
                     );
-                    tokio::time::sleep(Duration::from_secs(15)).await;
-                    continue;
-                }
-                Ok(response) => response,
-            };
 
-            if !response.status().is_success() {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    server = ?self.hosts_url,
-                    status = ?response.status(),
-                    "request to address book server failed",
-                );
-                tokio::time::sleep(Duration::from_secs(15)).await;
-                continue;
+                    self.parse_and_merge(&mut addresses, hosts).await;
+                    break;
+                }
+                None => tokio::time::sleep(RETRY_BACKOFF).await,
             }
+        }
 
-            let response = match response.bytes().await {
-                Ok(response) => response,
-                Err(error) => {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        server = ?self.hosts_url,
-                        ?error,
-                        "failed to get response from address book server"
-                    );
-                    tokio::time::sleep(Duration::from_secs(15)).await;
-                    continue;
+        for subscription in &self.subscriptions {
+            for _ in 0..SUBSCRIPTION_NUM_RETRIES {
+                match Self::download(&client, &subscription).await {
+                    Some(hosts) => {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            url = subscription,
+                            "hosts.txt downloaded",
+                        );
+
+                        self.parse_and_merge(&mut addresses, hosts).await;
+                        break;
+                    }
+                    None => tokio::time::sleep(RETRY_BACKOFF).await,
                 }
-            };
-
-            let mut file = tokio::fs::File::create(self.address_book_path).await.unwrap();
-            file.write_all(&response).await.unwrap();
-            break;
+            }
         }
     }
 }

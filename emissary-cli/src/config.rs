@@ -119,6 +119,7 @@ pub struct HttpProxyConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddressBookConfig {
     pub default: String,
+    pub subscriptions: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -578,8 +579,12 @@ impl Config {
         let config = EmissaryConfig {
             address_book: Some(AddressBookConfig {
                 default: String::from(
-                    "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
                 ),
+                subscriptions: vec![
+                      String::from("http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt"),
+                      String::from("http://identiguy.i2p/hosts.txt"),
+                ],
             }),
             http_proxy: Some(HttpProxyConfig {
                 host: "127.0.0.1".to_string(),
@@ -622,8 +627,12 @@ impl Config {
         Ok(Self {
             address_book: Some(AddressBookConfig {
                 default: String::from(
-                    "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
                 ),
+                subscriptions: vec![
+                      String::from("http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt"),
+                      String::from("http://identiguy.i2p/hosts.txt"),
+                ],
             }),
             allow_local: false,
             base_path,
@@ -700,8 +709,12 @@ impl Config {
                 let config = EmissaryConfig {
                     address_book: Some(AddressBookConfig {
                         default: String::from(
-                            "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
+                            "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt"
                         ),
+                        subscriptions: vec![
+                              String::from("http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt"),
+                              String::from("http://identiguy.i2p/hosts.txt"),
+                        ],
                     }),
                     http_proxy: Some(HttpProxyConfig {
                         host: "127.0.0.1".to_string(),
@@ -736,11 +749,7 @@ impl Config {
         };
 
         Ok(Self {
-            address_book: Some(AddressBookConfig {
-                default: String::from(
-                    "http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt",
-                ),
-            }),
+            address_book: config.address_book,
             allow_local: config.allow_local,
             base_path,
             caps: config.caps,

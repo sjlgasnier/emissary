@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+use futures::channel::oneshot;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -81,7 +82,14 @@ pub struct HttpProxy {
 
 impl HttpProxy {
     /// Create new [`HttpProxy`].
-    pub async fn new(config: HttpProxyConfig, samv3_tcp_port: u16) -> crate::Result<Self> {
+    ///
+    /// `http_proxy_ready_tx` is used to notify [`AddressBook`] once the HTTP proxy is ready
+    /// so it can download the hosts file(s).
+    pub async fn new(
+        config: HttpProxyConfig,
+        samv3_tcp_port: u16,
+        http_proxy_ready_tx: Option<oneshot::Sender<()>>,
+    ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
             host = %config.host,
@@ -97,9 +105,20 @@ impl HttpProxy {
             ..Default::default()
         })
         .await?;
+        let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
+
+        if let Some(tx) = http_proxy_ready_tx {
+            if let Err(error) = tx.send(()) {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to notify that http proxy is ready",
+                );
+            }
+        }
 
         Ok(Self {
-            listener: TcpListener::bind(format!("{}:{}", config.host, config.port)).await?,
+            listener,
             requests: JoinSet::new(),
             session,
         })
