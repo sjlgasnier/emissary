@@ -511,7 +511,8 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             netdb_handle: self.netdb_handle.expect("to exist"),
             ntcp2_config: self.ntcp2_config,
             pending_connections: HashSet::new(),
-            pending_queries: R::join_set(),
+            pending_queries: HashSet::new(),
+            pending_query_futures: R::join_set(),
             poll_index: 0usize,
             router_ctx: self.router_ctx,
             // publish the router info 10 seconds after booting, otherwise republish it periodically
@@ -549,8 +550,11 @@ pub struct TransportManager<R: Runtime> {
     /// Pending outbound connections.
     pending_connections: HashSet<RouterId>,
 
+    /// Pending queries.
+    pending_queries: HashSet<RouterId>,
+
     /// Pending router info queries.
-    pending_queries: R::JoinSet<(RouterId, Result<(), QueryError>)>,
+    pending_query_futures: R::JoinSet<(RouterId, Result<(), QueryError>)>,
 
     /// Poll index for transports.
     poll_index: usize,
@@ -678,6 +682,24 @@ impl<R: Runtime> TransportManager<R> {
     fn on_dial_router(&mut self, router_id: RouterId) {
         match self.router_ctx.profile_storage().get(&router_id) {
             Some(router_info) => {
+                // even though `TransportService` prevents dialing the same router from the same
+                // subsystem twice, the notion of a "pending router", i.e., it being dialed, is not
+                // shared between the subsystems
+                //
+                // this means that it's possible for `TransportManager` to receive two dial requests
+                // for the same router, with the second request arriving while the first one is
+                // still pending
+                //
+                // ensure that the router is not being dialed before dialing them
+                if !self.pending_connections.insert(router_id.clone()) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "router is already being dialed",
+                    );
+                    return;
+                }
+
                 tracing::trace!(
                     target: LOG_TARGET,
                     %router_id,
@@ -685,7 +707,6 @@ impl<R: Runtime> TransportManager<R> {
                 );
 
                 // TODO: compare transport costs
-                self.pending_connections.insert(router_id);
                 self.transports[0].connect(router_info);
             }
             None => {
@@ -694,6 +715,15 @@ impl<R: Runtime> TransportManager<R> {
                     %router_id,
                     "router info not found, send router info query to netdb",
                 );
+
+                if self.pending_queries.contains(&router_id) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "router info is already being queried",
+                    );
+                    return;
+                }
 
                 match self.netdb_handle.query_router_info(router_id.clone()) {
                     Err(error) => tracing::warn!(
@@ -704,7 +734,8 @@ impl<R: Runtime> TransportManager<R> {
                     ),
                     Ok(rx) => {
                         self.pending_connections.insert(router_id.clone());
-                        self.pending_queries.push(async move {
+                        self.pending_queries.insert(router_id.clone());
+                        self.pending_query_futures.push(async move {
                             match rx.await {
                                 Err(_) => (router_id, Err(QueryError::Timeout)),
                                 Ok(Err(error)) => (router_id, Err(error)),
@@ -826,7 +857,7 @@ impl<R: Runtime> Future for TransportManager<R> {
         }
 
         loop {
-            match self.pending_queries.poll_next_unpin(cx) {
+            match self.pending_query_futures.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some((router_id, Ok(())))) => {
@@ -836,6 +867,8 @@ impl<R: Runtime> Future for TransportManager<R> {
                         "router info query succeeded, dial pending router",
                     );
 
+                    self.pending_queries.remove(&router_id);
+                    self.pending_connections.remove(&router_id);
                     self.on_dial_router(router_id);
                 }
                 Poll::Ready(Some((router_id, Err(error)))) => {
@@ -845,10 +878,11 @@ impl<R: Runtime> Future for TransportManager<R> {
                         ?error,
                         "router info query failed",
                     );
+                    self.pending_connections.remove(&router_id);
+                    self.pending_queries.remove(&router_id);
 
                     // report connection failure to subsystems
                     let mut handle = self.subsystem_handle.clone();
-                    self.pending_connections.remove(&router_id);
 
                     R::spawn(async move {
                         handle.report_connection_failure(router_id).await;
