@@ -73,7 +73,7 @@ pub struct I2cpSession<R: Runtime> {
     destination: Destination<R>,
 
     /// Pending host lookups.
-    host_lookups: R::JoinSet<Option<(SessionId, u32, Bytes)>>,
+    host_lookups: R::JoinSet<(SessionId, u32, Option<Bytes>)>,
 
     /// Next message ID.
     next_message_id: u32,
@@ -235,13 +235,17 @@ impl<R: Runtime> I2cpSession<R> {
                 match (self.address_book.clone(), kind) {
                     (Some(address_book), RequestKind::HostName { host_name }) => {
                         self.host_lookups.push(async move {
-                            let destination = address_book.resolve(host_name.to_string()).await?;
+                            let destination = address_book
+                                .resolve(host_name.to_string())
+                                .await
+                                .and_then(|destination| base64_decode(destination));
 
-                            Some((
+                            (
                                 session_id,
                                 request_id,
-                                BytesMut::from(&base64_decode(destination)?[..]).freeze(),
-                            ))
+                                destination
+                                    .map(|destination| BytesMut::from(&destination[..]).freeze()),
+                            )
                         });
                     }
                     (None, kind) => {
@@ -527,12 +531,20 @@ impl<R: Runtime> Future for I2cpSession<R> {
             match self.host_lookups.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                // TODO: better error reporting
-                Poll::Ready(Some(None)) => tracing::debug!(
-                    target: LOG_TARGET,
-                    "failed to resolve host",
-                ),
-                Poll::Ready(Some(Some((session_id, request_id, destination)))) => {
+                Poll::Ready(Some((session_id, request_id, None))) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        ?request_id,
+                        "host lookup failed",
+                    );
+                    self.socket.send_message(HostReply::new(
+                        session_id.as_u16(),
+                        request_id,
+                        HostReplyKind::Failure,
+                    ));
+                }
+                Poll::Ready(Some((session_id, request_id, Some(destination)))) => {
                     self.socket.send_message(HostReply::new(
                         session_id.as_u16(),
                         request_id,
