@@ -220,6 +220,21 @@ impl Lease {
     }
 }
 
+#[cfg(test)]
+impl Lease {
+    /// Create random [`Lease`].
+    pub fn random() -> Self {
+        Self {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("to succeed")
+                + Duration::from_secs(10 * 60),
+        }
+    }
+}
+
 /// LeaseSet2
 ///
 /// Parse lease set is guaranteed to contain at least one lease.

@@ -1211,6 +1211,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "outbound tunnel is about to expire",
                     );
                     self.expiring_outbound.insert(tunnel_id);
+
+                    if let Err(error) = self.context.register_expiring_outbound_tunnel(tunnel_id) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register expiring outbound tunnel to owner",
+                        );
+                    }
                 }
                 Some(TunnelTimerEvent::Rebuild {
                     kind: TunnelKind::Inbound { tunnel_id },
@@ -1222,6 +1232,16 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         "inbound tunnel is about to expire",
                     );
                     self.expiring_inbound.insert(tunnel_id);
+
+                    if let Err(error) = self.context.register_expiring_inbound_tunnel(tunnel_id) {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %tunnel_id,
+                            ?error,
+                            "failed to register expiring inbound tunnel to owner",
+                        );
+                    }
                 }
             }
         }

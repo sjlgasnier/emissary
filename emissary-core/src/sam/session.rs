@@ -154,7 +154,10 @@ impl<R: Runtime> fmt::Debug for ProtocolKind<R> {
 /// State of a pending outbound session.
 enum PendingSessionState<R: Runtime> {
     /// Awaiting lease set query result.
-    AwaitingLeaseSet { protocol: ProtocolKind<R> },
+    AwaitingLeaseSet {
+        /// Protocol kind.
+        protocol: ProtocolKind<R>,
+    },
 
     /// Awaiting session to be created
     AwaitingSession {

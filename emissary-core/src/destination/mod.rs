@@ -18,7 +18,10 @@
 
 use crate::{
     crypto::{base32_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPrivateKey},
-    destination::session::{SessionManager, SessionManagerEvent},
+    destination::{
+        lease_set::LeaseSetManager,
+        session::{SessionManager, SessionManagerEvent},
+    },
     error::{Error, QueryError},
     i2np::{
         database::{
@@ -35,22 +38,24 @@ use crate::{
     },
     netdb::NetDbHandle,
     primitives::{DestinationId, Lease, LeaseSet2, MessageId, RouterId, TunnelId},
-    runtime::{Instant, JoinSet, Runtime},
+    runtime::{JoinSet, Runtime},
     tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     mem,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
 };
+
+mod lease_set;
 
 pub mod session;
 
@@ -60,12 +65,6 @@ const LOG_TARGET: &str = "emissary::destination";
 /// How long should [`Destination`] wait before attempting to recontact [`NetDb`]
 /// after the previous call was rejected.
 const NETDB_BACKOFF_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Local lease set expiration timeout.
-const LEASE_SET_EXPIRATION: Duration = Duration::from_secs(9 * 60);
-
-/// Local lease set expiration timeout.
-const LEASE_SET_MAX_AGE: Duration = Duration::from_secs(2 * 60);
 
 /// Number of retries before lease set query is aborted.
 ///
@@ -157,9 +156,8 @@ pub struct Destination<R: Runtime> {
     #[allow(unused)]
     lease_set: Bytes,
 
-    /// Timer which expires when a new lease set needs to be published
-    /// or an old lease set publish should be reattempted.
-    lease_set_publish_timer: LeaseSetPublishTimer,
+    /// Local lease set manager.
+    lease_set_manager: LeaseSetManager<R>,
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
@@ -170,9 +168,8 @@ pub struct Destination<R: Runtime> {
     /// Active outbound tunnels.
     outbound_tunnels: Vec<TunnelId>,
 
-    /// Inbound tunnels waiting to be published to `NetDb`.
-    pending_inbound: Vec<(Lease, R::Instant)>,
-
+    // /// Inbound tunnels waiting to be published to `NetDb`.
+    // pending_inbound: Vec<(Lease, R::Instant)>,
     /// Pending lease set queries:
     pending_queries: HashSet<DestinationId>,
 
@@ -217,17 +214,12 @@ impl<R: Runtime> Destination<R> {
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
-            inbound_tunnels,
+            inbound_tunnels: inbound_tunnels.clone(),
             lease_set: lease_set.clone(),
-            lease_set_publish_timer: if unpublished {
-                LeaseSetPublishTimer::Inactive
-            } else {
-                LeaseSetPublishTimer::new::<R>()
-            },
+            lease_set_manager: LeaseSetManager::new(inbound_tunnels),
             netdb_handle,
             noise: NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
             outbound_tunnels,
-            pending_inbound: Vec::new(),
             pending_queries: HashSet::new(),
             pending_storage_verifications: HashMap::new(),
             query_futures: R::join_set(),
@@ -843,29 +835,9 @@ impl<R: Runtime> Stream for Destination<R> {
                         ?tunnel_id,
                         "inbound tunnel built",
                     );
+
                     self.inbound_tunnels.push(lease.clone());
-                    self.pending_inbound.push((lease, R::now()));
-
-                    // return event before the publish timer expires if there are enough leases
-                    if self
-                        .pending_inbound
-                        .iter()
-                        .filter(|(_, created)| created.elapsed() < LEASE_SET_MAX_AGE)
-                        .count()
-                        == self.tunnel_pool_handle.config().num_inbound
-                    {
-                        // reset timer so it doesn't fire when the client is creating the lease set
-                        self.lease_set_publish_timer.deactivate();
-
-                        let leases = mem::take(&mut self.pending_inbound)
-                            .into_iter()
-                            .filter_map(|(lease, created)| {
-                                (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
-                            })
-                            .collect::<Vec<_>>();
-
-                        return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
-                    }
+                    self.lease_set_manager.register_inbound_tunnel(lease);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
                     self.outbound_tunnels.push(tunnel_id);
@@ -875,7 +847,10 @@ impl<R: Runtime> Stream for Destination<R> {
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
                     self.inbound_tunnels.retain(|lease| lease.tunnel_id != tunnel_id);
+                    self.lease_set_manager.register_expired_inbound_tunnel(tunnel_id);
                 }
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpiring { .. })) => {}
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpiring { .. })) => {}
                 Poll::Ready(Some(TunnelPoolEvent::Message { message })) =>
                     match self.decrypt_message(message) {
                         Err(error) => tracing::warn!(
@@ -974,114 +949,13 @@ impl<R: Runtime> Stream for Destination<R> {
             },
         }
 
-        match self.lease_set_publish_timer.poll_next_unpin(cx) {
+        match self.lease_set_manager.poll_unpin(cx) {
             Poll::Pending => {}
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew)) => {
-                let leases = mem::take(&mut self.pending_inbound)
-                    .into_iter()
-                    .filter_map(|(lease, created)| {
-                        (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
-                    })
-                    .collect::<Vec<_>>();
-
-                return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
-            }
-            Poll::Ready(Some(LeaseSetPublishTimerEvent::Republish { key, lease_set })) => {
-                self.publish_lease_set(key, lease_set);
-            }
+            Poll::Ready(leases) =>
+                return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases })),
         }
 
         self.waker = Some(cx.waker().clone());
-        Poll::Pending
-    }
-}
-
-/// Events emitted by [`LeaseSetPublishTimer`].
-enum LeaseSetPublishTimerEvent {
-    /// Create new lease set.
-    CreateNew,
-
-    /// Attempt to republish old lease set.
-    Republish {
-        /// Key.
-        key: Bytes,
-        /// Lease set.
-        lease_set: Bytes,
-    },
-}
-
-/// Lease set publish timer.
-enum LeaseSetPublishTimer {
-    /// TImer is inactive.
-    Inactive,
-
-    /// Create new lease set.
-    CreateNew {
-        /// Timer.
-        timer: BoxFuture<'static, ()>,
-    },
-
-    /// Attempt to retry publishing an old lease set.
-    #[allow(unused)]
-    Republish {
-        // Timer.
-        timer: BoxFuture<'static, ()>,
-
-        /// Key.
-        key: Bytes,
-
-        /// Lease set.
-        lease_set: Bytes,
-    },
-}
-
-impl LeaseSetPublishTimer {
-    /// Create new [`LeaseSetPublishTimer`].
-    fn new<R: Runtime>() -> Self {
-        Self::CreateNew {
-            timer: Box::pin(R::delay(LEASE_SET_EXPIRATION)),
-        }
-    }
-
-    /// Set timer as inactive.
-    fn deactivate(&mut self) {
-        *self = Self::Inactive;
-    }
-}
-
-impl Stream for LeaseSetPublishTimer {
-    type Item = LeaseSetPublishTimerEvent;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut this = Pin::into_inner(self);
-
-        match &mut this {
-            LeaseSetPublishTimer::Inactive => {}
-            LeaseSetPublishTimer::CreateNew { ref mut timer } => {
-                if timer.poll_unpin(cx).is_ready() {
-                    *this = LeaseSetPublishTimer::Inactive;
-                    return Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew));
-                }
-            }
-            LeaseSetPublishTimer::Republish {
-                timer,
-                key,
-                lease_set,
-            } =>
-                if timer.poll_unpin(cx).is_ready() {
-                    let key = key.clone();
-                    let lease_set = lease_set.clone();
-
-                    *this = LeaseSetPublishTimer::Inactive;
-
-                    return Poll::Ready(Some(LeaseSetPublishTimerEvent::Republish {
-                        key,
-                        lease_set,
-                    }));
-                },
-        }
-
         Poll::Pending
     }
 }
@@ -1324,19 +1198,13 @@ mod tests {
             .unwrap();
 
         // verify event is emitted even though the timer is still active
-        assert!(std::matches!(
-            destination.lease_set_publish_timer,
-            LeaseSetPublishTimer::CreateNew { .. }
-        ));
-        futures::future::poll_fn(|cx| {
-            match destination.lease_set_publish_timer.poll_next_unpin(cx) {
-                Poll::Pending => Poll::Ready(()),
-                _ => panic!("timer is ready"),
-            }
+        futures::future::poll_fn(|cx| match destination.lease_set_manager.poll_unpin(cx) {
+            Poll::Pending => Poll::Ready(()),
+            _ => panic!("timer is ready"),
         })
         .await;
 
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+        match tokio::time::timeout(Duration::from_secs(15), destination.next())
             .await
             .expect("no timeout")
             .expect("to succeed")
@@ -1364,11 +1232,6 @@ mod tests {
             false,
         );
 
-        // set lease set timer to a more sensible value
-        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
-            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
-        };
-
         // issue events for two new inbound tunnels
         for _ in 0..2 {
             tp_tx
@@ -1388,7 +1251,7 @@ mod tests {
         assert!(destination.next().now_or_never().is_none());
 
         // verify that that an event is emitted after the timer expires
-        match tokio::time::timeout(Duration::from_secs(15), destination.next())
+        match tokio::time::timeout(Duration::from_secs(20), destination.next())
             .await
             .expect("no timeout")
             .expect("to succeed")
@@ -1420,11 +1283,6 @@ mod tests {
             false,
         );
 
-        // set lease set timer to a more sensible value
-        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
-            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
-        };
-
         // add one outbound tunnel
         tp_tx
             .send(TunnelPoolEvent::OutboundTunnelBuilt {
@@ -1448,7 +1306,7 @@ mod tests {
                 .unwrap();
         }
 
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+        match tokio::time::timeout(Duration::from_secs(20), destination.next())
             .await
             .expect("no timeout")
             .expect("to succeed")
@@ -1601,11 +1459,6 @@ mod tests {
             false,
         );
 
-        // set lease set timer to a more sensible value
-        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
-            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
-        };
-
         // add one outbound tunnel
         tp_tx
             .send(TunnelPoolEvent::OutboundTunnelBuilt {
@@ -1629,7 +1482,7 @@ mod tests {
                 .unwrap();
         }
 
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+        match tokio::time::timeout(Duration::from_secs(20), destination.next())
             .await
             .expect("no timeout")
             .expect("to succeed")
@@ -1780,11 +1633,6 @@ mod tests {
             true,
         );
 
-        assert!(std::matches!(
-            destination.lease_set_publish_timer,
-            LeaseSetPublishTimer::Inactive
-        ));
-
         // add one outbound tunnel
         tp_tx
             .send(TunnelPoolEvent::OutboundTunnelBuilt {
@@ -1810,7 +1658,7 @@ mod tests {
 
         assert!(destination.pending_storage_verifications.is_empty());
 
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
+        match tokio::time::timeout(Duration::from_secs(20), destination.next())
             .await
             .expect("no timeout")
             .expect("to succeed")

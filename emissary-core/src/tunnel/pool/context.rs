@@ -424,6 +424,30 @@ impl TunnelPoolContext {
             .try_send(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })
             .map_err(From::from)
     }
+
+    /// Inform the tunnel pool creator that an inbound tunnel is about to expire.
+    ///
+    /// `tunnel_id` refers to the IBGW of the newly built tunnel.
+    pub fn register_expiring_inbound_tunnel(
+        &self,
+        tunnel_id: TunnelId,
+    ) -> Result<(), ChannelError> {
+        self.event_tx
+            .try_send(TunnelPoolEvent::InboundTunnelExpiring { tunnel_id })
+            .map_err(From::from)
+    }
+
+    /// Inform the tunnel pool creator that an outbound tunnel is about to expire.
+    ///
+    /// `tunnel_id` refers to the OBGW of the newly built tunnel.
+    pub fn register_expiring_outbound_tunnel(
+        &self,
+        tunnel_id: TunnelId,
+    ) -> Result<(), ChannelError> {
+        self.event_tx
+            .try_send(TunnelPoolEvent::OutboundTunnelExpiring { tunnel_id })
+            .map_err(From::from)
+    }
 }
 
 impl Stream for TunnelPoolContext {

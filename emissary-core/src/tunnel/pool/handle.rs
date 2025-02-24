@@ -68,6 +68,20 @@ pub enum TunnelPoolEvent {
         tunnel_id: TunnelId,
     },
 
+    /// Inbound tunnel is about to expire.
+    #[allow(unused)]
+    InboundTunnelExpiring {
+        /// Tunnel ID.
+        tunnel_id: TunnelId,
+    },
+
+    /// Outbound tunnel is about to expire.
+    #[allow(unused)]
+    OutboundTunnelExpiring {
+        /// Tunnel ID.
+        tunnel_id: TunnelId,
+    },
+
     /// Message received into one of the inbound tunnels.
     Message {
         /// Received I2NP message.
@@ -87,6 +101,10 @@ impl fmt::Display for TunnelPoolEvent {
             Self::InboundTunnelExpired { .. } => write!(f, "TunnelPoolEvent::InboundTunnelExpired"),
             Self::OutboundTunnelExpired { .. } =>
                 write!(f, "TunnelPoolEvent::OutboundTunnelExpired"),
+            Self::InboundTunnelExpiring { .. } =>
+                write!(f, "TunnelPoolEvent::InboundTunnelExpiring"),
+            Self::OutboundTunnelExpiring { .. } =>
+                write!(f, "TunnelPoolEvent::OutboundTunnelExpiring"),
             Self::Message { .. } => write!(f, "TunnelPoolEvent::Message"),
             Self::Dummy => write!(f, "TunnelPoolEvent::Dummy"),
         }
