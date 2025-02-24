@@ -167,14 +167,11 @@ pub struct SamServer<R: Runtime> {
     datagram_writer_state: DatagramWriterState,
 
     /// Pending host lookups.
-    host_lookups: R::JoinSet<
-        Option<(
-            Arc<str>,
-            SamSocket<R>,
-            DestinationId,
-            HashMap<String, String>,
-        )>,
-    >,
+    host_lookups: R::JoinSet<(
+        Arc<str>,
+        SamSocket<R>,
+        Option<(DestinationId, HashMap<String, String>)>,
+    )>,
 
     /// TCP listener.
     listener: R::TcpListener,
@@ -536,11 +533,14 @@ impl<R: Runtime> Future for SamServer<R> {
                                 let address_book = Arc::clone(address_book);
 
                                 this.host_lookups.push(async move {
-                                    let destination = address_book.resolve(host).await?;
-                                    let destination = base64_decode(destination)?;
-                                    let destination = Destination::parse(&destination)?;
+                                    let result = address_book
+                                        .resolve(host)
+                                        .await
+                                        .and_then(|destination| base64_decode(destination))
+                                        .and_then(|destination| Destination::parse(&destination))
+                                        .map(|destination| (destination.id(), options));
 
-                                    Some((session_id, socket, destination.id(), options))
+                                    (session_id, socket, result)
                                 });
                             }
                         },
@@ -654,12 +654,22 @@ impl<R: Runtime> Future for SamServer<R> {
             match this.host_lookups.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                // TODO: better error reporting
-                Poll::Ready(Some(None)) => tracing::debug!(
-                    target: LOG_TARGET,
-                    "failed to resolve host",
-                ),
-                Poll::Ready(Some(Some((session_id, socket, destination_id, options)))) =>
+                Poll::Ready(Some((session_id, mut socket, None))) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        "failed to resolve host",
+                    );
+
+                    R::spawn(async move {
+                        let _ = socket
+                            .send_message_blocking(
+                                format!("STREAM STATUS RESULT=I2P_ERROR\n").as_bytes().to_vec(),
+                            )
+                            .await;
+                    });
+                }
+                Poll::Ready(Some((session_id, socket, Some((destination_id, options))))) =>
                     if let Err(error) = this.active_sessions.send_command(
                         &session_id,
                         SamSessionCommand::Connect {
