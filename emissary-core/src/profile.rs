@@ -81,6 +81,15 @@ pub struct Profile {
     /// Number of dial failures.
     pub num_dial_failures: usize,
 
+    /// How many [`DatabaseSearchReply`]s have been received.
+    pub num_lookup_failures: usize,
+
+    /// How many [`DatabaseLookup`]s have gone unaswered.
+    pub num_lookup_no_responses: usize,
+
+    /// How many [`DatabaseStore`]s have been received.
+    pub num_lookup_successes: usize,
+
     /// Number of rejected tunnels.
     pub num_rejected: usize,
 
@@ -107,6 +116,9 @@ impl Profile {
             num_accepted: 0usize,
             num_connection: 0usize,
             num_dial_failures: 0usize,
+            num_lookup_failures: 0usize,
+            num_lookup_no_responses: 0usize,
+            num_lookup_successes: 0usize,
             num_rejected: 0usize,
             num_selected: 0usize,
             num_test_failures: 0usize,
@@ -152,6 +164,13 @@ impl Profile {
             || self.is_always_declining()
             || self.has_low_participation_rate()
     }
+
+    /// Calculate floodfill score from the profile.
+    pub fn floodfill_score(&self) -> isize {
+        self.num_lookup_failures as isize
+            + (self.num_lookup_no_responses as isize * -5isize)
+            + (self.num_lookup_successes as isize * 10isize)
+    }
 }
 
 /// Router info/profile reader.
@@ -160,13 +179,18 @@ pub struct Reader<'a> {
     router_infos: RwLockReadGuard<'a, HashMap<RouterId, RouterInfo>>,
 
     /// Read access to profiles.
-    _profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
+    profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
 }
 
 impl<'a> Reader<'a> {
     /// Get reference to [`RouterInfo`].
     pub fn router_info(&self, router_id: &RouterId) -> Option<&RouterInfo> {
         self.router_infos.get(router_id)
+    }
+
+    /// Get reference to [`Profile`]
+    pub fn profile(&self, router_id: &RouterId) -> Option<&Profile> {
+        self.profiles.get(router_id)
     }
 }
 
@@ -379,7 +403,7 @@ impl<R: Runtime> ProfileStorage<R> {
     pub fn reader(&self) -> Reader {
         Reader {
             router_infos: self.routers.read(),
-            _profiles: self.profiles.read(),
+            profiles: self.profiles.read(),
         }
     }
 
@@ -518,6 +542,33 @@ impl<R: Runtime> ProfileStorage<R> {
         }
     }
 
+    /// Record a non-respone to a lease set/router info query.
+    pub fn database_lookup_no_response(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        if let Some(profile) = inner.get_mut(router_id) {
+            profile.num_lookup_no_responses += 1;
+        }
+    }
+
+    /// Record non-respones to a lease set/router info query.
+    pub fn database_lookup_success(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        if let Some(profile) = inner.get_mut(router_id) {
+            profile.num_lookup_successes += 1;
+        }
+    }
+
+    /// Record non-respones to a lease set/router
+    pub fn database_lookup_failure(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        if let Some(profile) = inner.get_mut(router_id) {
+            profile.num_lookup_failures += 1;
+        }
+    }
+
     /// Get backup of [`ProfileStorage`].
     pub fn backup(&self) -> Vec<(String, Option<Vec<u8>>, Profile)> {
         let profiles = self.profiles.read().clone();
@@ -628,6 +679,9 @@ mod tests {
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
+                        num_lookup_failures: i + 1,
+                        num_lookup_no_responses: i + 1,
+                        num_lookup_successes: i + 1,
                         num_rejected: i + 1,
                         num_selected: i + 1,
                         num_test_failures: i + 1,
@@ -678,6 +732,9 @@ mod tests {
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
+                        num_lookup_failures: i + 1,
+                        num_lookup_no_responses: i + 1,
+                        num_lookup_successes: i + 1,
                         num_rejected: i + 1,
                         num_selected: i + 1,
                         num_test_failures: i + 1,
@@ -706,7 +763,7 @@ mod tests {
 
         let reader = profiles.reader();
         assert_eq!(
-            reader._profiles.get(&router_id).unwrap().num_connection,
+            reader.profiles.get(&router_id).unwrap().num_connection,
             1usize
         );
     }

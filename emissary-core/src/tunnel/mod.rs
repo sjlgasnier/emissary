@@ -556,7 +556,7 @@ impl<R: Runtime> Future for TunnelManager<R> {
                 Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router })) =>
                     self.on_connection_closed(&router),
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
-                    messages.into_iter().for_each(|message| {
+                    messages.into_iter().for_each(|(_, message)| {
                         if let Err(error) = self.on_message(message) {
                             tracing::debug!(
                                 target: LOG_TARGET,

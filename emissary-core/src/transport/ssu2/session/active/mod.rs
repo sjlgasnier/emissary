@@ -213,7 +213,9 @@ impl<R: Runtime> Ssu2Session<R> {
             return;
         }
 
-        if let Err(error) = self.subsystem_handle.dispatch_messages(vec![message]) {
+        if let Err(error) =
+            self.subsystem_handle.dispatch_messages(self.router_id.clone(), vec![message])
+        {
             tracing::warn!(
                 target: LOG_TARGET,
                 router_id = %self.router_id,

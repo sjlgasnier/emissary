@@ -321,7 +321,8 @@ impl<R: Runtime> NetDb<R> {
                     .get_router_ids(Bucket::Any, |_, info, _| !info.is_floodfill())
                     .into_iter()
                     .collect::<HashSet<_>>(),
-                router_ctx.metrics_handle().clone(),
+                router_ctx.clone(),
+                false,
             )
         });
 
@@ -344,7 +345,8 @@ impl<R: Runtime> NetDb<R> {
                 floodfill_dht: Dht::new(
                     router_ctx.router_id().clone(),
                     floodfills.clone(),
-                    router_ctx.metrics_handle().clone(),
+                    router_ctx.clone(),
+                    true,
                 ),
                 handle_rx,
                 inbound_tunnels: TunnelSelector::new(),
@@ -1046,7 +1048,11 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Handle `DatabaaseStore` message.
-    fn on_database_store(&mut self, message: Message) -> crate::Result<()> {
+    fn on_database_store(
+        &mut self,
+        message: Message,
+        sender: Option<RouterId>,
+    ) -> crate::Result<()> {
         let DatabaseStore {
             key,
             payload,
@@ -1118,6 +1124,14 @@ impl<R: Runtime> NetDb<R> {
                     }
                     self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
 
+                    // if the router info was received directly from the floodfill, i.e., not
+                    // through tunnel, adjust the floodfill score
+                    //
+                    // this makes it less likely to be evicted from the dht
+                    if let Some(router_id) = sender {
+                        self.floodfill_dht.register_lookup_success(&router_id);
+                    }
+
                     // store both the new router info and its serialized form to profile storage
                     //
                     // the latter is used when a backup of profile storage is made to disk
@@ -1162,6 +1176,14 @@ impl<R: Runtime> NetDb<R> {
                     }
                     self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
 
+                    // if the router info was received directly from the floodfill, i.e., not
+                    // through tunnel, adjust the floodfill score
+                    //
+                    // this makes it less likely to be evicted from the dht
+                    if let Some(router_id) = sender {
+                        self.floodfill_dht.register_lookup_success(&router_id);
+                    }
+
                     // store both the new router info and its serialized form to profile storage
                     //
                     // the latter is used when a backup of profile storage is made to disk
@@ -1197,6 +1219,14 @@ impl<R: Runtime> NetDb<R> {
                     let raw_router_info =
                         DatabaseStore::<R>::extract_raw_router_info(&message.payload);
                     let router_id = router_info.identity.id();
+
+                    // if the router info was received directly from the floodfill, i.e., not
+                    // through tunnel, adjust the floodfill score
+                    //
+                    // this makes it less likely to be evicted from the dht
+                    if let Some(router_id) = sender {
+                        self.floodfill_dht.register_lookup_success(&router_id);
+                    }
 
                     if self
                         .router_ctx
@@ -1259,7 +1289,17 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Handle `DatabaseSearchReply` message.
-    fn on_database_search_reply(&mut self, message: Message) -> crate::Result<()> {
+    fn on_database_search_reply(
+        &mut self,
+        message: Message,
+        sender: Option<RouterId>,
+    ) -> crate::Result<()> {
+        // if the value was received directly from the floodfill, i.e., not
+        // through tunnel, adjust the floodfill score
+        if let Some(router_id) = sender {
+            self.floodfill_dht.register_lookup_failure(&router_id);
+        }
+
         let DatabaseSearchReply {
             key,
             mut routers,
@@ -1485,11 +1525,13 @@ impl<R: Runtime> NetDb<R> {
     }
 
     /// Handle I2NP message.
-    fn on_message(&mut self, message: Message) -> crate::Result<()> {
+    ///
+    /// `sender` is the [`RouterId`] if the message was received directly from the sender.
+    fn on_message(&mut self, message: Message, sender: Option<RouterId>) -> crate::Result<()> {
         self.router_ctx.metrics_handle().counter(NUM_NETDB_MESSAGES).increment(1);
 
         match message.message_type {
-            MessageType::DatabaseStore => return self.on_database_store(message),
+            MessageType::DatabaseStore => return self.on_database_store(message, sender),
             MessageType::DatabaseLookup if self.floodfill => {
                 self.router_ctx.metrics_handle().counter(NUM_QUERIES).increment(1);
 
@@ -1521,7 +1563,8 @@ impl<R: Runtime> NetDb<R> {
                 target: LOG_TARGET,
                 "ignoring database lookup, not a floodfill",
             ),
-            MessageType::DatabaseSearchReply => return self.on_database_search_reply(message),
+            MessageType::DatabaseSearchReply =>
+                return self.on_database_search_reply(message, sender),
             MessageType::DeliveryStatus => {}
             message_type => tracing::warn!(
                 target: LOG_TARGET,
@@ -1912,8 +1955,8 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(SubsystemEvent::I2Np { messages })) =>
-                    messages.into_iter().for_each(|message| {
-                        if let Err(error) = self.on_message(message) {
+                    messages.into_iter().for_each(|(router_id, message)| {
+                        if let Err(error) = self.on_message(message, Some(router_id)) {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 ?error,
@@ -1936,7 +1979,7 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(message)) =>
-                    if let Err(error) = self.on_message(message) {
+                    if let Err(error) = self.on_message(message, None) {
                         tracing::debug!(
                             target: LOG_TARGET,
                             ?error,
@@ -1964,7 +2007,7 @@ impl<R: Runtime> Future for NetDb<R> {
                     self.inbound_tunnels.remove_tunnel(|lease| lease.tunnel_id != tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::Message { message })) => {
-                    let _ = self.on_message(message);
+                    let _ = self.on_message(message, None);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::TunnelPoolShutDown)) => return Poll::Ready(()),
                 Poll::Ready(Some(_)) => {}
@@ -1996,12 +2039,16 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Ready(Some(key)) =>
                     if let Some(kind) = self.active.remove(&key) {
                         match kind {
-                            QueryKind::Leaseset { tx, .. } => {
+                            QueryKind::Leaseset { tx, queried, .. } => {
                                 tracing::debug!(
                                     target: LOG_TARGET,
                                     key = %base32_encode(&key),
                                     "leaseset query timed out",
                                 );
+
+                                queried.into_iter().for_each(|router_id| {
+                                    self.floodfill_dht.register_lookup_timeout(&router_id);
+                                });
 
                                 if let Some(tx) = tx {
                                     let _ = tx.send(Err(QueryError::Timeout));
@@ -2031,8 +2078,6 @@ impl<R: Runtime> Future for NetDb<R> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
     use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
@@ -2045,6 +2090,7 @@ mod tests {
         transport::ProtocolCommand,
         tunnel::TunnelMessage,
     };
+    use std::collections::VecDeque;
     use thingbuf::mpsc::channel;
 
     #[tokio::test]
@@ -2142,11 +2188,14 @@ mod tests {
 
         assert!(netdb.lease_sets.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert_eq!(netdb.lease_sets.len(), 1);
         match rx.try_recv().unwrap() {
@@ -2263,11 +2312,14 @@ mod tests {
 
         assert!(netdb.lease_sets.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert!(netdb.lease_sets.is_empty());
         assert!(rx.try_recv().is_err());
@@ -2370,11 +2422,14 @@ mod tests {
 
         assert!(netdb.lease_sets.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert!(netdb.lease_sets.is_empty());
         assert!(rx.try_recv().is_err());
@@ -2556,11 +2611,14 @@ mod tests {
 
             assert!(netdb.lease_sets.is_empty());
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
@@ -2604,11 +2662,14 @@ mod tests {
 
             assert_eq!(netdb.lease_sets.len(), 1);
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
@@ -2651,11 +2712,14 @@ mod tests {
 
             assert_eq!(netdb.lease_sets.len(), 2);
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 3);
             assert_eq!(netdb.routers.len(), 6);
@@ -2777,11 +2841,14 @@ mod tests {
 
         assert!(netdb.router_infos.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert_eq!(netdb.router_infos.len(), 1);
         match rx.try_recv().unwrap() {
@@ -2890,11 +2957,14 @@ mod tests {
 
         assert!(netdb.router_infos.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert!(netdb.router_infos.is_empty());
         assert!(rx.try_recv().is_err());
@@ -2997,11 +3067,14 @@ mod tests {
             .build();
 
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseLookup,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseLookup,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
 
         match tm_rx.try_recv().unwrap() {
@@ -3088,11 +3161,14 @@ mod tests {
             .build();
 
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseLookup,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseLookup,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
 
         match tm_rx.try_recv().unwrap() {
@@ -3218,11 +3294,14 @@ mod tests {
             .build();
 
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseLookup,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseLookup,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
 
         assert!(tm_rx.try_recv().is_err());
@@ -3311,11 +3390,14 @@ mod tests {
             .build();
 
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseLookup,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseLookup,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
 
         assert!(tm_rx.try_recv().is_err());
@@ -3568,11 +3650,14 @@ mod tests {
 
             assert!(netdb.lease_sets.is_empty());
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
@@ -3616,11 +3701,14 @@ mod tests {
 
             assert_eq!(netdb.lease_sets.len(), 1);
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.lease_sets.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
@@ -3830,11 +3918,14 @@ mod tests {
 
             assert!(netdb.lease_sets.is_empty());
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 1);
             assert_eq!(netdb.routers.len(), 4);
@@ -3877,11 +3968,14 @@ mod tests {
 
             assert_eq!(netdb.router_infos.len(), 1);
             assert!(netdb
-                .on_message(Message {
-                    payload: message.to_vec(),
-                    message_type: MessageType::DatabaseStore,
-                    ..Default::default()
-                })
+                .on_message(
+                    Message {
+                        payload: message.to_vec(),
+                        message_type: MessageType::DatabaseStore,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_ok());
             assert_eq!(netdb.router_infos.len(), 2);
             assert_eq!(netdb.routers.len(), 5);
@@ -4040,11 +4134,14 @@ mod tests {
 
         assert!(netdb.router_infos.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert!(netdb.router_infos.is_empty());
         assert!(rx.try_recv().is_err());
@@ -4140,11 +4237,14 @@ mod tests {
 
         assert!(netdb.lease_sets.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert_eq!(netdb.lease_sets.len(), 1);
         assert!(rx.try_recv().is_err());
@@ -4237,11 +4337,14 @@ mod tests {
 
         assert!(netdb.router_infos.is_empty());
         assert!(netdb
-            .on_message(Message {
-                payload: message.to_vec(),
-                message_type: MessageType::DatabaseStore,
-                ..Default::default()
-            })
+            .on_message(
+                Message {
+                    payload: message.to_vec(),
+                    message_type: MessageType::DatabaseStore,
+                    ..Default::default()
+                },
+                None
+            )
             .is_ok());
         assert_eq!(netdb.router_infos.len(), 1);
         assert!(rx.try_recv().is_err());
@@ -4315,19 +4418,22 @@ mod tests {
 
         // create database store message and give it netdb
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseStore,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseStoreBuilder::new(
-                    key.clone(),
-                    DatabaseStoreKind::LeaseSet2 {
-                        lease_set: Bytes::from(lease_set.serialize(&signing_key)),
-                    },
-                )
-                .build()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseStore,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseStoreBuilder::new(
+                        key.clone(),
+                        DatabaseStoreKind::LeaseSet2 {
+                            lease_set: Bytes::from(lease_set.serialize(&signing_key)),
+                        },
+                    )
+                    .build()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
 
         assert!(netdb.active.is_empty());
@@ -4408,18 +4514,21 @@ mod tests {
         let closest = (0..3).map(|_| RouterId::random()).collect::<HashSet<_>>();
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: closest.clone().into_iter().collect::<Vec<_>>(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: closest.clone().into_iter().collect::<Vec<_>>(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4440,19 +4549,22 @@ mod tests {
 
         // create database store message and give it netdb
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseStore,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseStoreBuilder::new(
-                    key.clone(),
-                    DatabaseStoreKind::LeaseSet2 {
-                        lease_set: Bytes::from(lease_set.serialize(&signing_key)),
-                    },
-                )
-                .build()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseStore,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseStoreBuilder::new(
+                        key.clone(),
+                        DatabaseStoreKind::LeaseSet2 {
+                            lease_set: Bytes::from(lease_set.serialize(&signing_key)),
+                        },
+                    )
+                    .build()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
 
         assert!(res_rx.try_recv().unwrap().unwrap().is_ok());
@@ -4540,18 +4652,21 @@ mod tests {
         let mut closest = (0..3).map(|_| RouterId::random()).collect::<HashSet<_>>();
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: closest.clone().into_iter().collect::<Vec<_>>(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: closest.clone().into_iter().collect::<Vec<_>>(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4572,25 +4687,28 @@ mod tests {
 
         // create second database search reply indicating the lease set was not found
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: (0..3)
-                        .map(|_| {
-                            let router_id = RouterId::random();
-                            closest.insert(router_id.clone());
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: (0..3)
+                            .map(|_| {
+                                let router_id = RouterId::random();
+                                closest.insert(router_id.clone());
 
-                            router_id
-                        })
-                        .collect::<Vec<_>>(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+                                router_id
+                            })
+                            .collect::<Vec<_>>(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4611,19 +4729,22 @@ mod tests {
 
         // create database store message and give it netdb
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseStore,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseStoreBuilder::new(
-                    key.clone(),
-                    DatabaseStoreKind::LeaseSet2 {
-                        lease_set: Bytes::from(lease_set.serialize(&signing_key)),
-                    },
-                )
-                .build()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseStore,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseStoreBuilder::new(
+                        key.clone(),
+                        DatabaseStoreKind::LeaseSet2 {
+                            lease_set: Bytes::from(lease_set.serialize(&signing_key)),
+                        },
+                    )
+                    .build()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
 
         assert!(res_rx.try_recv().unwrap().unwrap().is_ok());
@@ -4711,18 +4832,21 @@ mod tests {
         let mut closest = (0..3).map(|_| RouterId::random()).collect::<HashSet<_>>();
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: closest.clone().into_iter().collect::<Vec<_>>(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: closest.clone().into_iter().collect::<Vec<_>>(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4744,25 +4868,28 @@ mod tests {
 
         // create second database search reply indicating the lease set was not found
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: (0..3)
-                        .map(|_| {
-                            let router_id = RouterId::random();
-                            closest.insert(router_id.clone());
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: (0..3)
+                            .map(|_| {
+                                let router_id = RouterId::random();
+                                closest.insert(router_id.clone());
 
-                            router_id
-                        })
-                        .collect::<Vec<_>>(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+                                router_id
+                            })
+                            .collect::<Vec<_>>(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4783,25 +4910,28 @@ mod tests {
         );
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: (0..3)
-                        .map(|_| {
-                            let router_id = RouterId::random();
-                            closest.insert(router_id.clone());
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: (0..3)
+                            .map(|_| {
+                                let router_id = RouterId::random();
+                                closest.insert(router_id.clone());
 
-                            router_id
-                        })
-                        .collect::<Vec<_>>(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+                                router_id
+                            })
+                            .collect::<Vec<_>>(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
 
         assert!(res_rx.try_recv().unwrap().is_none());
@@ -4887,18 +5017,21 @@ mod tests {
         }));
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: Vec::new(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: Vec::new(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4913,18 +5046,21 @@ mod tests {
 
         // create second database search reply indicating the lease set was not found
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: Vec::new(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: Vec::new(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -4938,18 +5074,21 @@ mod tests {
         assert_eq!(netdb.active.len(), 1);
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: Vec::new(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: Vec::new(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
 
         assert!(res_rx.try_recv().unwrap().unwrap().is_err());
@@ -5106,18 +5245,21 @@ mod tests {
         let closest = (0..3).map(|_| RouterId::random()).collect::<Vec<_>>();
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: closest.clone(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: closest.clone(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -5139,18 +5281,21 @@ mod tests {
 
         // create second database search reply indicating the lease set was not found
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: closest.clone(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: closest.clone(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
         match netdb.active.get(&key) {
             Some(QueryKind::Leaseset { num_floodfills, .. }) => {
@@ -5171,18 +5316,21 @@ mod tests {
         );
 
         netdb
-            .on_message(Message {
-                message_type: MessageType::DatabaseSearchReply,
-                message_id: MockRuntime::rng().next_u32(),
-                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                payload: DatabaseSearchReply {
-                    from: floodfills.pop_front().unwrap().to_vec(),
-                    key: key.clone(),
-                    routers: closest.clone(),
-                }
-                .serialize()
-                .to_vec(),
-            })
+            .on_message(
+                Message {
+                    message_type: MessageType::DatabaseSearchReply,
+                    message_id: MockRuntime::rng().next_u32(),
+                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                    payload: DatabaseSearchReply {
+                        from: floodfills.pop_front().unwrap().to_vec(),
+                        key: key.clone(),
+                        routers: closest.clone(),
+                    }
+                    .serialize()
+                    .to_vec(),
+                },
+                None,
+            )
             .unwrap();
 
         assert!(res_rx.try_recv().unwrap().is_none());

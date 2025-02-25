@@ -24,51 +24,20 @@
 use crate::{
     netdb::types::{FloodFill, Key},
     primitives::RouterId,
-    runtime::{Instant, Runtime},
 };
 
 use alloc::vec::Vec;
-use core::time::Duration;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb::k-bucket";
 
-/// Eviction threshold.
-const EVICTION_THRESHOLD: Duration = Duration::from_secs(10 * 60);
-
-/// K-bucket entry.
-#[derive(Debug, PartialEq, Eq)]
-pub enum KBucketEntry<'a, R: Runtime> {
-    /// Entry points to local node.
-    LocalNode,
-
-    /// Occupied entry to a connected node.
-    Occupied(&'a mut FloodFill<R>),
-
-    /// Vacant entry.
-    Vacant(&'a mut FloodFill<R>),
-
-    /// Entry not found and any present entry cannot be replaced.
-    NoSlot,
-}
-
-impl<'a, R: Runtime> KBucketEntry<'a, R> {
-    /// Insert new entry into the entry if possible.
-    pub fn insert(&'a mut self, new: FloodFill<R>) {
-        if let KBucketEntry::Vacant(old) = self {
-            old.key = Key::from(new.key.into_preimage());
-            old.last_update = R::now();
-        }
-    }
-}
-
 /// Kademlia k-bucket.
-pub struct KBucket<R: Runtime> {
+pub struct KBucket {
     /// Floodfill routers of the bucket.
-    floodfills: Vec<FloodFill<R>>,
+    floodfills: Vec<FloodFill>,
 }
 
-impl<R: Runtime> KBucket<R> {
+impl KBucket {
     /// Create new [`KBucket`].
     pub fn new() -> Self {
         Self {
@@ -76,35 +45,61 @@ impl<R: Runtime> KBucket<R> {
         }
     }
 
-    /// Get entry into the bucket.
-    pub fn entry(&mut self, key: Key<RouterId>) -> KBucketEntry<'_, R> {
-        for i in 0..self.floodfills.len() {
-            if self.floodfills[i].key == key {
-                return KBucketEntry::Occupied(&mut self.floodfills[i]);
-            }
+    /// Try to insert `key` into [`KBucket`].
+    ///
+    /// Returns `true` if `key` already exists or if it was successfully inserted into [`KBucket`].
+    /// If the k-bucket is full, its searched for the lowest performing floodfill and if their score
+    /// is below the insertion threshold (0), the floodfill is evicted and `key` is inserted in
+    /// their place.
+    ///
+    /// Returns `false` if `key` could not be inserted into [`KBucket`].
+    pub fn try_insert(&mut self, key: Key<RouterId>) -> bool {
+        if self.floodfills.iter().any(|floodfill| floodfill.key == key) {
+            return true;
         }
 
         if self.floodfills.len() < 20 {
             self.floodfills.push(FloodFill::new(key.preimage().clone()));
-
-            let len = self.floodfills.len() - 1;
-            return KBucketEntry::Vacant(&mut self.floodfills[len]);
+            return true;
         }
 
-        for i in 0..self.floodfills.len() {
-            if self.floodfills[i].last_update.elapsed() > EVICTION_THRESHOLD {
-                tracing::debug!(
+        if let Some(floodfill) = self.floodfills.iter_mut().min() {
+            if floodfill.score < 0 {
+                tracing::trace!(
                     target: LOG_TARGET,
-                    router_id = %self.floodfills[i].key.preimage(),
-                    index = ?i,
-                    "evicting floodfill router from k-bucket"
+                    old_floodfill = %floodfill.key.preimage(),
+                    score = %floodfill.score,
+                    new_floodfill = %key.preimage(),
+                    "evicting floodfill",
                 );
 
-                return KBucketEntry::Vacant(&mut self.floodfills[i]);
+                floodfill.key = key;
+                floodfill.score = 0;
+
+                return true;
             }
         }
 
-        KBucketEntry::NoSlot
+        false
+    }
+
+    /// Adjust score of a floodfill.
+    pub fn adjust_score(&mut self, key: Key<RouterId>, adjustment: isize) {
+        match self.floodfills.iter_mut().find(|floodfill| floodfill.key == key) {
+            Some(floodfill) => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    score = %(floodfill.score + adjustment),
+                    "router score adjusted",
+                );
+                floodfill.score += adjustment;
+            }
+            None => tracing::debug!(
+                target: LOG_TARGET,
+                router_id = %key.preimage(),
+                "cannot adjust score, router doesn't exist in the k-bucket",
+            ),
+        }
     }
 
     /// Get iterator over the k-bucket, sorting the k-bucket entries in increasing order
@@ -120,11 +115,10 @@ impl<R: Runtime> KBucket<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::mock::MockRuntime;
 
     #[test]
     fn closest_iter() {
-        let mut bucket = KBucket::<MockRuntime>::new();
+        let mut bucket = KBucket::new();
 
         // add some random nodes to the bucket
         let _ = (0..10)
@@ -150,13 +144,13 @@ mod tests {
     }
 
     #[test]
-    fn old_floodfill_router_evicted() {
-        let mut bucket = KBucket::<MockRuntime>::new();
+    fn floodfill_with_low_score_evicted() {
+        let mut bucket = KBucket::new();
 
-        let _ = (0..20)
+        let floodfills = (0..20)
             .map(|_| {
                 let peer = RouterId::random();
-                bucket.floodfills.push(FloodFill::new(RouterId::random()));
+                bucket.floodfills.push(FloodFill::new(peer.clone()));
 
                 peer
             })
@@ -165,20 +159,19 @@ mod tests {
         // try to add new floodfill router to k-bucket
         let router_id = RouterId::random();
         let key = Key::from(router_id.clone());
-        assert_eq!(bucket.entry(key.clone()), KBucketEntry::NoSlot);
+        assert!(!bucket.try_insert(key.clone()));
 
-        // expire one floodfill router
-        bucket.floodfills[2].last_update =
-            MockRuntime::now().subtract(Duration::from_secs(20 * 60));
+        // decrease the score of one of the floodfills
+        bucket.adjust_score(Key::from(floodfills[0].clone()), -10);
 
-        // verify new peer is added
-        let mut slot = bucket.entry(key.clone());
-        assert!(std::matches!(slot, KBucketEntry::Vacant(_)));
+        // try to insert the router again and verify it succeeds
+        assert!(bucket.try_insert(key));
 
-        slot.insert(FloodFill::new(router_id));
-        assert!(std::matches!(
-            bucket.entry(key.clone()),
-            KBucketEntry::Occupied(_)
-        ));
+        // ensure the first floodfill is no longer found and that all scores are equal
+        assert!(!bucket
+            .floodfills
+            .iter()
+            .any(|floodfill| floodfill.key == Key::from(floodfills[0].clone())));
+        assert!(bucket.floodfills.iter().all(|floodfill| floodfill.score == 0));
     }
 }

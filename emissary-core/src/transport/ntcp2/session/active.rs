@@ -342,7 +342,10 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 })
                                 .collect::<Vec<_>>();
 
-                            if let Err(error) = this.subsystem_handle.dispatch_messages(messages) {
+                            if let Err(error) = this
+                                .subsystem_handle
+                                .dispatch_messages(this.router.clone(), messages)
+                            {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     router_id = %this.router,

@@ -906,7 +906,7 @@ mod tests {
             match local_rx.recv().await {
                 Some(InnerSubsystemEvent::I2Np { mut messages }) => {
                     assert_eq!(messages.len(), 1);
-                    let message = messages.pop().unwrap();
+                    let (_, message) = messages.pop().unwrap();
 
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
                     assert_eq!(message.message_id, 1337u32);
@@ -957,7 +957,7 @@ mod tests {
             match local_rx.recv().await {
                 Some(InnerSubsystemEvent::I2Np { mut messages }) => {
                     assert_eq!(messages.len(), 1);
-                    let message = messages.pop().unwrap();
+                    let (_, message) = messages.pop().unwrap();
 
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
                     assert_eq!(message.message_id, 1339u32);

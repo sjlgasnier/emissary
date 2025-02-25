@@ -21,7 +21,7 @@
 
 //! Kademlia types.
 
-use crate::{primitives::RouterId, runtime::Runtime};
+use crate::primitives::RouterId;
 
 use sha2::digest::generic_array::{typenum::U32, GenericArray};
 use uint::construct_uint;
@@ -70,11 +70,6 @@ impl<T: Clone> Key<T> {
     /// Get preimage of the key.
     pub fn preimage(&self) -> &T {
         &self.preimage
-    }
-
-    /// Convert [`Key`] into its preimage.
-    pub fn into_preimage(self) -> T {
-        self.preimage
     }
 
     /// Computes the distance of the keys according to the XOR metric.
@@ -175,28 +170,40 @@ impl Distance {
 
 /// Kademlia peer.
 #[derive(Debug, Clone)]
-pub struct FloodFill<R: Runtime> {
+pub struct FloodFill {
     /// Router key.
     pub(super) key: Key<RouterId>,
 
-    /// When was the floodfill last updated.
-    pub(super) last_update: R::Instant,
+    /// Score of the floodfill.
+    pub(super) score: isize,
 }
 
-impl<R: Runtime> FloodFill<R> {
+impl FloodFill {
     /// Create new [`FloodFill`].
     pub fn new(router_id: RouterId) -> Self {
         Self {
             key: Key::from(router_id),
-            last_update: R::now(),
+            score: 0isize,
         }
     }
 }
 
-impl<R: Runtime> PartialEq for FloodFill<R> {
+impl PartialEq for FloodFill {
     fn eq(&self, other: &Self) -> bool {
         self.key.eq(&other.key)
     }
 }
 
-impl<R: Runtime> Eq for FloodFill<R> {}
+impl Eq for FloodFill {}
+
+impl Ord for FloodFill {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.score.cmp(&other.score)
+    }
+}
+
+impl PartialOrd for FloodFill {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.score.partial_cmp(&other.score)
+    }
+}
