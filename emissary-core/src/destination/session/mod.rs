@@ -63,7 +63,7 @@ mod context;
 mod inbound;
 mod outbound;
 mod session;
-mod tagset;
+mod tag_set;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::destination::session";

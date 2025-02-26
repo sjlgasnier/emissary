@@ -22,7 +22,7 @@ use crate::{
         context::KeyContext,
         inbound::InboundSession,
         outbound::OutboundSession,
-        tagset::{TagSet, TagSetEntry},
+        tag_set::{TagSet, TagSetEntry},
         LOG_TARGET, NUM_TAGS_TO_GENERATE,
     },
     error::SessionError,
