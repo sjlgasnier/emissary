@@ -950,6 +950,8 @@ impl<R: Runtime> Stream<R> {
             if self.window_size > 1 {
                 self.window_size -= 1;
             }
+        } else {
+            self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
         }
     }
 
