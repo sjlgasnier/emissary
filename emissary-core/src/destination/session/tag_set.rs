@@ -362,7 +362,7 @@ impl TagSet {
         {
             self.key_context = KeyContext::new(self.key_context.next_root_key.clone(), tag_set_key);
 
-            // tag set id is calculated as `1 + send key id receive key id`
+            // tag set id is calculated as `1 + send key id + receive key id`
             //
             // https://geti2p.net/spec/ecies#key-and-tag-set-ids
             self.tag_set_id = 1u16 + send_key_id + recv_key_id;
@@ -569,6 +569,7 @@ impl TagSet {
                 KeyState::Active {
                     recv_key_id,
                     private_key,
+                    send_key_id,
                     ..
                 },
                 NextKeyKind::ForwardKey {
@@ -576,7 +577,7 @@ impl TagSet {
                     public_key: Some(remote_public_key),
                     reverse_key_requested: false,
                 },
-            ) => {
+            ) if send_key_id < *key_id => {
                 if key_id > &MAX_KEY_ID {
                     tracing::error!(
                         target: LOG_TARGET,
@@ -663,29 +664,45 @@ impl TagSet {
                 Ok(None)
             }
             (
-                state @ KeyState::Active {
+                KeyState::Active {
                     send_key_id,
                     recv_key_id,
-                    ..
+                    public_key,
+                    private_key,
                 },
                 NextKeyKind::ForwardKey {
                     key_id,
-                    public_key,
+                    public_key: remote_public_key,
                     reverse_key_requested,
                 },
             ) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     ?send_key_id,
                     ?recv_key_id,
                     ?key_id,
-                    has_public_key = ?public_key.is_some(),
+                    remote_public_key = ?remote_public_key.is_some(),
                     ?reverse_key_requested,
                     "received unexpected `ForwardKey`, possibly duplicate",
                 );
-                self.key_state = state;
 
-                Ok(None)
+                let next_key = if *reverse_key_requested {
+                    NextKeyKind::ReverseKey {
+                        key_id: *key_id,
+                        public_key: Some(private_key.public()),
+                    }
+                } else {
+                    NextKeyBuilder::reverse(*key_id).build()
+                };
+
+                self.key_state = KeyState::Active {
+                    send_key_id,
+                    recv_key_id,
+                    private_key,
+                    public_key,
+                };
+
+                Ok(Some(next_key))
             }
             (state, kind) => {
                 tracing::warn!(
@@ -1050,18 +1067,106 @@ mod tests {
             kind => panic!("invalid next key kind: {kind:?}"),
         }
 
-        let send_key_kind = send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+        let prev_pubkey =
+            match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+                NextKeyKind::ReverseKey {
+                    key_id: 0u16,
+                    public_key: Some(pubkey),
+                } => {
+                    assert!(recv_tag_set
+                        .handle_next_key::<MockRuntime>(&NextKeyKind::ReverseKey {
+                            key_id: 0u16,
+                            public_key: Some(pubkey.clone())
+                        })
+                        .expect("to succeed")
+                        .is_none());
 
-        match &send_key_kind {
+                    pubkey.clone()
+                }
+                kind => panic!("invalid next key kind: {kind:?}"),
+            };
+
+        let prev_pubkey =
+            match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+                NextKeyKind::ReverseKey {
+                    key_id: 0u16,
+                    public_key: Some(pubkey),
+                } => {
+                    assert_eq!(
+                        AsRef::<[u8]>::as_ref(pubkey),
+                        AsRef::<[u8]>::as_ref(&prev_pubkey)
+                    );
+                    pubkey.clone()
+                }
+                kind => panic!("invalid next key kind: {kind:?}"),
+            };
+
+        match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
             NextKeyKind::ReverseKey {
                 key_id: 0u16,
+                public_key: Some(pubkey),
+            } => {
+                assert_eq!(
+                    AsRef::<[u8]>::as_ref(pubkey),
+                    AsRef::<[u8]>::as_ref(&prev_pubkey)
+                );
+            }
+            kind => panic!("invalid next key kind: {kind:?}"),
+        }
+
+        // generate tags until the first dh ratchet can be done
+        let kind = loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            if let Some(kind) = recv_tag_set.try_generate_next_key::<MockRuntime>().unwrap() {
+                break kind;
+            }
+        };
+
+        match &kind {
+            NextKeyKind::ForwardKey {
+                key_id: 1u16,
                 public_key: Some(_),
+                reverse_key_requested: false,
             } => {}
             kind => panic!("invalid next key kind: {kind:?}"),
         }
 
-        // handle `NextKey` block with `ReverseKey` twice
-        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
-        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+        match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+            NextKeyKind::ReverseKey {
+                key_id: 1u16,
+                public_key: None,
+            } => {
+                assert!(recv_tag_set
+                    .handle_next_key::<MockRuntime>(&NextKeyKind::ReverseKey {
+                        key_id: 1u16,
+                        public_key: None,
+                    })
+                    .expect("to succeed")
+                    .is_none());
+            }
+            kind => panic!("invalid next key kind: {kind:?}"),
+        }
+
+        match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+            NextKeyKind::ReverseKey {
+                key_id: 1u16,
+                public_key: None,
+            } => {}
+            kind => panic!("invalid next key kind: {kind:?}"),
+        }
+
+        match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+            NextKeyKind::ReverseKey {
+                key_id: 1u16,
+                public_key: None,
+            } => {}
+            kind => panic!("invalid next key kind: {kind:?}"),
+        }
+
+        // generate some tags to ensure all is ok
+        for _ in 0..10 {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+        }
     }
 }
