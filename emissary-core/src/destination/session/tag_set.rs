@@ -104,18 +104,6 @@ enum KeyState {
     Poisoned,
 }
 
-impl KeyState {
-    /// Is the [`KeyState`] pending?
-    ///
-    /// If the key state is pending, no `NextKey` requests can be made.
-    fn is_pending(&self) -> bool {
-        core::matches!(
-            self,
-            KeyState::AwaitingReverseKey { .. } | KeyState::AwaitingReverseKeyConfirmation { .. }
-        )
-    }
-}
-
 impl fmt::Debug for KeyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -389,7 +377,7 @@ impl TagSet {
         &mut self,
     ) -> Result<Option<NextKeyKind>, SessionError> {
         // more tags can be generated from the current dh ratchet
-        if self.tag_index as usize <= SESSION_DH_RATCHET_THRESHOLD || self.key_state.is_pending() {
+        if self.tag_index as usize <= SESSION_DH_RATCHET_THRESHOLD {
             return Ok(None);
         }
 
@@ -474,6 +462,51 @@ impl TagSet {
                         ))
                     }
                 }
+            }
+            KeyState::AwaitingReverseKeyConfirmation {
+                send_key_id,
+                public_key,
+                recv_key_id,
+                private_key,
+            } => {
+                let next_key_block = NextKeyBuilder::forward(send_key_id)
+                    .with_public_key(private_key.public())
+                    .build();
+
+                self.key_state = KeyState::AwaitingReverseKeyConfirmation {
+                    send_key_id,
+                    recv_key_id,
+                    private_key,
+                    public_key,
+                };
+
+                Ok(Some(next_key_block))
+            }
+            KeyState::AwaitingReverseKey {
+                send_key_id,
+                recv_key_id,
+                private_key,
+            } => {
+                // for the first `NextKey` block (send and recv ids are 0) both our public
+                // and a request for reverse key is sent
+                //
+                // otherwise only a request for reverse key is sent
+                let next_key_block = if send_key_id == 0 && recv_key_id == 0 {
+                    NextKeyBuilder::forward(0u16)
+                        .with_public_key(private_key.public())
+                        .with_request_reverse_key(true)
+                        .build()
+                } else {
+                    NextKeyBuilder::forward(recv_key_id).with_request_reverse_key(true).build()
+                };
+
+                self.key_state = KeyState::AwaitingReverseKey {
+                    send_key_id,
+                    recv_key_id,
+                    private_key,
+                };
+
+                Ok(Some(next_key_block))
             }
             state => {
                 tracing::warn!(
@@ -607,6 +640,7 @@ impl TagSet {
             (
                 KeyState::Active {
                     send_key_id,
+                    recv_key_id,
                     public_key: remote_public_key,
                     ..
                 },
@@ -615,7 +649,7 @@ impl TagSet {
                     public_key: None,
                     reverse_key_requested: true,
                 },
-            ) => {
+            ) if recv_key_id < *key_id => {
                 if key_id > &MAX_KEY_ID {
                     tracing::error!(
                         target: LOG_TARGET,
@@ -652,7 +686,7 @@ impl TagSet {
                 },
                 NextKeyKind::ReverseKey { key_id, .. },
             ) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     ?send_key_id,
                     ?recv_key_id,
@@ -1008,17 +1042,43 @@ mod tests {
 
     #[test]
     fn duplicate_reverse_key() {
+        crate::util::init_logger();
+
         let mut send_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
         let mut recv_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
 
         // generate tags until the first dh ratchet can be done
-        let kind = loop {
+        loop {
             assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
 
-            if let Some(kind) = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap() {
-                break kind;
+            if send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().is_some() {
+                break;
             }
-        };
+        }
+
+        // ensure that `send_tag_set` keeps generating `ForwardKey`
+        for _ in 0..3 {
+            let kind = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 0u16,
+                    public_key: Some(_),
+                    reverse_key_requested: true,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            match recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+                NextKeyKind::ReverseKey {
+                    key_id: 0u16,
+                    public_key: Some(_),
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+        }
+
+        let kind = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().unwrap();
 
         match &kind {
             NextKeyKind::ForwardKey {
@@ -1031,17 +1091,113 @@ mod tests {
 
         let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
 
+        // handle `NextKey` block with `ReverseKey` twice
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+
+        // generate tags until the second dh ratchet can be done
+        loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            if send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().is_some() {
+                break;
+            }
+        }
+
+        // ensure that `send_tag_set` keeps generating `ForwardKey`
+        for _ in 0..3 {
+            let kind = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 1u16,
+                    public_key: Some(_),
+                    reverse_key_requested: false,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            match recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+                NextKeyKind::ReverseKey {
+                    key_id: 1u16,
+                    public_key: None,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+        }
+
+        let kind = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().unwrap();
+
         match &kind {
-            NextKeyKind::ReverseKey {
-                key_id: 0u16,
+            NextKeyKind::ForwardKey {
+                key_id: 1u16,
                 public_key: Some(_),
+                reverse_key_requested: false,
             } => {}
             kind => panic!("invalid next key kind: {kind:?}"),
         }
 
+        let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+
         // handle `NextKey` block with `ReverseKey` twice
         assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
         assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+
+        // generate tags until the third dh ratchet can be done
+        loop {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+
+            if send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().is_some() {
+                break;
+            }
+        }
+
+        // ensure that `send_tag_set` keeps generating `ForwardKey`
+        for _ in 0..3 {
+            let kind = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().unwrap();
+
+            match &kind {
+                NextKeyKind::ForwardKey {
+                    key_id: 1u16,
+                    public_key: None,
+                    reverse_key_requested: true,
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+
+            match recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
+                NextKeyKind::ReverseKey {
+                    key_id: 1u16,
+                    public_key: Some(_),
+                } => {}
+                kind => panic!("invalid next key kind: {kind:?}"),
+            }
+        }
+
+        let kind = send_tag_set.try_generate_next_key::<MockRuntime>().unwrap().unwrap();
+
+        match &kind {
+            NextKeyKind::ForwardKey {
+                key_id: 1u16,
+                public_key: None,
+                reverse_key_requested: true,
+            } => {}
+            kind => panic!("invalid next key kind: {kind:?}"),
+        }
+
+        let kind = recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap();
+
+        // handle `NextKey` block with `ReverseKey` twice
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+        assert!(send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().is_none());
+
+        // generate some tags with the new tagset
+        for _ in 0..100 {
+            assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
+        }
     }
 
     #[test]

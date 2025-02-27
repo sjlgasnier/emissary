@@ -536,7 +536,7 @@ impl<R: Runtime> SessionManager<R> {
             None => {
                 tracing::trace!(
                     target: LOG_TARGET,
-                    id = %self.destination_id,
+                    local = %self.destination_id,
                     ?garlic_tag,
                     "session key not found, assume new session",
                 );

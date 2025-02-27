@@ -913,7 +913,7 @@ impl<R: Runtime> Session<R> {
         // forward keys are handled by the receive tag set and reverse keys by the send tag set
         message.blocks.iter().try_for_each(|block| match block {
             GarlicMessageBlock::NextKey { kind } => {
-                tracing::trace!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
@@ -1003,7 +1003,7 @@ impl<R: Runtime> Session<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
-                    "send forward key",
+                    "send forward `NextKey` block",
                 );
 
                 message_builder.with_next_key(kind)
