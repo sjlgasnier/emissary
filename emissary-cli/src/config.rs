@@ -529,7 +529,7 @@ impl Config {
         toml::from_str::<EmissaryConfig>(&contents).map_err(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
-                ?error,
+                %error,
                 "failed to parse router config",
             );
 
