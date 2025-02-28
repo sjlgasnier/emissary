@@ -31,7 +31,7 @@
 //! and responder can be found from `initiator.rs` and `responder.rs`.
 
 use crate::{
-    crypto::{sha256::Sha256, siphash::SipHash, StaticPrivateKey},
+    crypto::{noise::NoiseContext, sha256::Sha256, siphash::SipHash, StaticPrivateKey},
     error::Error,
     primitives::{RouterId, RouterInfo, TransportKind},
     profile::ProfileStorage,
@@ -102,10 +102,10 @@ pub struct SessionManager<R: Runtime> {
     allow_local: bool,
 
     /// Chaining key.
-    chaining_key: Bytes,
+    chaining_key: [u8; 32],
 
     /// State that is common for all inbound connections.
-    inbound_initial_state: Bytes,
+    inbound_initial_state: [u8; 32],
 
     /// Local NTCP2 IV.
     local_iv: [u8; 16],
@@ -114,7 +114,7 @@ pub struct SessionManager<R: Runtime> {
     local_key: StaticPrivateKey,
 
     /// State that is common for all outbound connections.
-    outbound_initial_state: Bytes,
+    outbound_initial_state: [u8; 32],
 
     /// Router context.
     router_ctx: RouterContext<R>,
@@ -139,21 +139,21 @@ impl<R: Runtime> SessionManager<R> {
         allow_local: bool,
     ) -> Self {
         let local_key = StaticPrivateKey::from(local_key);
-        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
+        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize_new();
         let chaining_key = state.clone();
-        let outbound_initial_state = Sha256::new().update(&state).finalize();
+        let outbound_initial_state = Sha256::new().update(&state).finalize_new();
         let inbound_initial_state = Sha256::new()
             .update(&outbound_initial_state)
             .update(local_key.public().to_vec())
-            .finalize();
+            .finalize_new();
 
         Self {
             allow_local,
-            chaining_key: Bytes::from(chaining_key),
-            inbound_initial_state: Bytes::from(inbound_initial_state),
+            chaining_key,
+            inbound_initial_state,
             local_iv,
             local_key,
-            outbound_initial_state: Bytes::from(outbound_initial_state),
+            outbound_initial_state,
             router_ctx,
             subsystem_handle,
         }
@@ -165,8 +165,7 @@ impl<R: Runtime> SessionManager<R> {
         net_id: u8,
         local_info: Bytes,
         local_key: StaticPrivateKey,
-        outbound_initial_state: Bytes,
-        chaining_key: Bytes,
+        noise_ctx: NoiseContext,
         allow_local: bool,
         subsystem_handle: SubsystemHandle,
     ) -> crate::Result<Ntcp2Session<R>> {
@@ -227,8 +226,7 @@ impl<R: Runtime> SessionManager<R> {
 
         // create `SessionRequest` message and send it remote peer
         let (mut initiator, message) = Initiator::new::<R>(
-            &outbound_initial_state,
-            &chaining_key,
+            noise_ctx,
             local_info,
             local_key,
             &remote_key,
@@ -299,8 +297,7 @@ impl<R: Runtime> SessionManager<R> {
                 net_id,
                 local_info,
                 local_key,
-                outbound_initial_state,
-                chaining_key,
+                NoiseContext::new(chaining_key, outbound_initial_state),
                 allow_local,
                 subsystem_handle.clone(),
             )
@@ -327,8 +324,7 @@ impl<R: Runtime> SessionManager<R> {
         mut stream: R::TcpStream,
         net_id: u8,
         local_router_hash: Vec<u8>,
-        inbound_initial_state: Bytes,
-        chaining_key: Bytes,
+        noise_ctx: NoiseContext,
         subsystem_handle: SubsystemHandle,
         local_key: StaticPrivateKey,
         iv: [u8; 16],
@@ -344,8 +340,7 @@ impl<R: Runtime> SessionManager<R> {
         stream.read_exact::<R>(&mut message).await?;
 
         let (mut responder, padding_len) = Responder::new(
-            &inbound_initial_state,
-            &chaining_key,
+            noise_ctx,
             local_router_hash,
             local_key.clone(),
             iv,
@@ -421,8 +416,7 @@ impl<R: Runtime> SessionManager<R> {
                 stream,
                 net_id,
                 local_router_hash,
-                inbound_initial_state,
-                chaining_key,
+                NoiseContext::new(chaining_key, inbound_initial_state),
                 subsystem_handle,
                 local_key,
                 iv,
