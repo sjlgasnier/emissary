@@ -21,8 +21,13 @@ use crate::config::TunnelConfig;
 use tokio::net::TcpListener;
 use yosemite::{style, Session, SessionOptions, StreamOptions};
 
+use std::time::Duration;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::client-tunnel";
+
+/// Retry timeout.
+const RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Client tunnel.
 pub struct Tunnel;
@@ -58,6 +63,7 @@ impl Tunnel {
                 )
                 .await
             else {
+                tokio::time::sleep(RETRY_TIMEOUT).await;
                 continue;
             };
 
