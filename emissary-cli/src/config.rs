@@ -587,10 +587,7 @@ impl Config {
                 default: String::from(
                     "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
                 ),
-                subscriptions: vec![
-                      String::from("http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt"),
-                      String::from("http://identiguy.i2p/hosts.txt"),
-                ],
+                subscriptions: vec![],
             }),
             http_proxy: Some(HttpProxyConfig {
                 host: "127.0.0.1".to_string(),
@@ -635,10 +632,7 @@ impl Config {
                 default: String::from(
                     "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
                 ),
-                subscriptions: vec![
-                      String::from("http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt"),
-                      String::from("http://identiguy.i2p/hosts.txt"),
-                ],
+                subscriptions: vec![],
             }),
             allow_local: false,
             base_path,
@@ -717,10 +711,7 @@ impl Config {
                         default: String::from(
                             "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt"
                         ),
-                        subscriptions: vec![
-                              String::from("http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt"),
-                              String::from("http://identiguy.i2p/hosts.txt"),
-                        ],
+                        subscriptions: vec![],
                     }),
                     http_proxy: Some(HttpProxyConfig {
                         host: "127.0.0.1".to_string(),
