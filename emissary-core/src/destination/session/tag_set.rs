@@ -520,6 +520,53 @@ impl TagSet {
         }
     }
 
+    /// Can `TagSet` ratchet using `kind`.
+    ///
+    /// See [`TagSet::handle_next_key()`] for more documentation on the combinations
+    /// of `NextKeyKind` and `KeyState`.
+    pub fn can_ratchet(&self, kind: &NextKeyKind) -> bool {
+        match (&self.key_state, kind) {
+            (
+                KeyState::Uninitialized,
+                NextKeyKind::ForwardKey {
+                    key_id: 0u16,
+                    public_key: Some(_),
+                    reverse_key_requested: true,
+                },
+            ) => true,
+            (
+                KeyState::AwaitingReverseKey { .. },
+                NextKeyKind::ReverseKey {
+                    public_key: Some(_),
+                    ..
+                },
+            ) => true,
+            (
+                KeyState::AwaitingReverseKeyConfirmation { .. },
+                NextKeyKind::ReverseKey {
+                    public_key: None, ..
+                },
+            ) => true,
+            (
+                KeyState::Active { send_key_id, .. },
+                NextKeyKind::ForwardKey {
+                    key_id,
+                    public_key: Some(_),
+                    reverse_key_requested: false,
+                },
+            ) if send_key_id < key_id => key_id <= &MAX_KEY_ID,
+            (
+                KeyState::Active { recv_key_id, .. },
+                NextKeyKind::ForwardKey {
+                    key_id,
+                    public_key: None,
+                    reverse_key_requested: true,
+                },
+            ) if recv_key_id < key_id => key_id <= &MAX_KEY_ID,
+            _ => false,
+        }
+    }
+
     /// Handle `NextKey` block received from remote peer.
     pub fn handle_next_key<R: Runtime>(
         &mut self,
@@ -1042,8 +1089,6 @@ mod tests {
 
     #[test]
     fn duplicate_reverse_key() {
-        crate::util::init_logger();
-
         let mut send_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
         let mut recv_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
 
