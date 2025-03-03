@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{base64_encode, SigningPrivateKey},
+    destination::{routing_path::RoutingPathHandle, DeliveryStyle},
     error::StreamingError,
     i2cp::I2cpPayload,
     primitives::{Destination, DestinationId},
@@ -116,8 +117,8 @@ pub enum StreamManagerEvent {
 
     /// Send packet.
     SendPacket {
-        /// ID of remote destination.
-        destination_id: DestinationId,
+        /// Delivery style.
+        delivery_style: DeliveryStyle,
 
         /// Destination port.
         dst_port: u16,
@@ -219,6 +220,9 @@ struct PendingOutboundStream<R: Runtime> {
     /// Serialised `SYN` packet.
     packet: Vec<u8>,
 
+    /// Routing path handle.
+    routing_path_handle: RoutingPathHandle<R>,
+
     /// Has the stream configured to be silent.
     silent: bool,
 
@@ -249,13 +253,13 @@ pub struct StreamManager<R: Runtime> {
     listener: StreamListener<R>,
 
     /// RX channel for receiving [`Packet`]s from active streams.
-    outbound_rx: Receiver<(DestinationId, Vec<u8>, u16, u16)>,
+    outbound_rx: Receiver<(DeliveryStyle, Vec<u8>, u16, u16)>,
 
     /// Timers for outbound streams.
     outbound_timers: R::JoinSet<u32>,
 
     /// TX channel given to active streams they use for sending messages to the network.
-    outbound_tx: Sender<(DestinationId, Vec<u8>, u16, u16)>,
+    outbound_tx: Sender<(DeliveryStyle, Vec<u8>, u16, u16)>,
 
     /// Pending events.
     pending_events: VecDeque<StreamManagerEvent>,
@@ -405,6 +409,7 @@ impl<R: Runtime> StreamManager<R> {
             socket,
             dst_port,
             src_port,
+            routing_path_handle,
             ..
         }) = self.pending_outbound.remove(&send_stream_id)
         {
@@ -417,9 +422,10 @@ impl<R: Runtime> StreamManager<R> {
             );
 
             self.spawn_stream(
-                SocketKind::Accept {
-                    socket: socket.into_inner(),
+                SocketKind::Connect {
+                    routing_path_handle,
                     silent,
+                    socket: socket.into_inner(),
                 },
                 recv_stream_id,
                 destination_id.clone(),
@@ -492,8 +498,14 @@ impl<R: Runtime> StreamManager<R> {
                     payload.to_vec(),
                     &self.signing_key,
                 );
-                let _ =
-                    self.outbound_tx.try_send((destination_id.clone(), packet, dst_port, src_port));
+                let _ = self.outbound_tx.try_send((
+                    DeliveryStyle::Unspecified {
+                        destination_id: destination_id.clone(),
+                    },
+                    packet,
+                    dst_port,
+                    src_port,
+                ));
 
                 self.pending_inbound.insert(recv_stream_id, pending);
                 self.destination_streams
@@ -562,12 +574,12 @@ impl<R: Runtime> StreamManager<R> {
         match &socket {
             SocketKind::Connect { .. } =>
                 self.pending_events.push_back(StreamManagerEvent::StreamOpened {
-                    destination_id,
+                    destination_id: destination_id.clone(),
                     direction: Direction::Outbound,
                 }),
             SocketKind::Accept { .. } | SocketKind::Forwarded { .. } =>
                 self.pending_events.push_back(StreamManagerEvent::StreamOpened {
-                    destination_id,
+                    destination_id: destination_id.clone(),
                     direction: Direction::Inbound,
                 }),
         }
@@ -582,15 +594,60 @@ impl<R: Runtime> StreamManager<R> {
         // the forwarded listener before the stream can be started and if the listener is not
         // active, the stream is closed immediately
         match socket {
-            SocketKind::Accept { socket, .. } | SocketKind::Connect { socket, .. } =>
-                self.streams.push(Stream::<R>::new(
-                    socket,
-                    initial_message,
-                    context,
-                    StreamConfig::default(),
-                    stream_kind,
-                )),
-            SocketKind::Forwarded { future, .. } => self.streams.push(async move {
+            SocketKind::Connect {
+                socket,
+                routing_path_handle,
+                ..
+            } => self.streams.push(Stream::<R>::new(
+                socket,
+                initial_message,
+                context,
+                StreamConfig::default(),
+                stream_kind,
+                routing_path_handle,
+            )),
+            SocketKind::Accept {
+                pending_routing_path_handle,
+                socket,
+                ..
+            } => {
+                self.streams.push(async move {
+                    let Some(routing_path_handle) =
+                        pending_routing_path_handle.bind::<R>(destination_id).await
+                    else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "failed to bind routing path handle, cannot accept inbound stream",
+                        );
+                        return context.recv_stream_id;
+                    };
+
+                    Stream::<R>::new(
+                        socket,
+                        initial_message,
+                        context,
+                        StreamConfig::default(),
+                        stream_kind,
+                        routing_path_handle,
+                    )
+                    .await
+                });
+            }
+            SocketKind::Forwarded {
+                future,
+                pending_routing_path_handle,
+                ..
+            } => self.streams.push(async move {
+                let Some(routing_path_handle) =
+                    pending_routing_path_handle.bind::<R>(destination_id).await
+                else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "failed to bind routing path handle, cannot accept inbound stream",
+                    );
+                    return context.recv_stream_id;
+                };
+
                 let Some(stream) = future.await else {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -605,6 +662,7 @@ impl<R: Runtime> StreamManager<R> {
                     context,
                     StreamConfig::default(),
                     stream_kind,
+                    routing_path_handle,
                 )
                 .await
             }),
@@ -734,7 +792,9 @@ impl<R: Runtime> StreamManager<R> {
                 PendingStreamResult::DoNothing => {}
                 PendingStreamResult::Send { packet } => {
                     let _ = self.outbound_tx.try_send((
-                        stream.destination_id.clone(),
+                        DeliveryStyle::Unspecified {
+                            destination_id: stream.destination_id.clone(),
+                        },
                         packet,
                         dst_port,
                         src_port,
@@ -748,7 +808,9 @@ impl<R: Runtime> StreamManager<R> {
                         "send packet and destroy pending stream",
                     );
                     let _ = self.outbound_tx.try_send((
-                        stream.destination_id.clone(),
+                        DeliveryStyle::Unspecified {
+                            destination_id: stream.destination_id.clone(),
+                        },
                         pkt,
                         dst_port,
                         src_port,
@@ -829,9 +891,10 @@ impl<R: Runtime> StreamManager<R> {
     pub fn create_stream(
         &mut self,
         destination_id: DestinationId,
+        mut routing_path_handle: RoutingPathHandle<R>,
         socket: SamSocket<R>,
         options: HashMap<String, String>,
-    ) -> (u32, BytesMut, u16, u16) {
+    ) -> (u32, BytesMut, DeliveryStyle, u16, u16) {
         let silent = options
             .get("SILENT")
             .map_or(false, |value| value.parse::<bool>().unwrap_or(false));
@@ -873,6 +936,13 @@ impl<R: Runtime> StreamManager<R> {
             "open stream",
         );
 
+        let delivery_style = match routing_path_handle.routing_path() {
+            None => DeliveryStyle::Unspecified {
+                destination_id: destination_id.clone(),
+            },
+            Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+        };
+
         // create pending stream and start timer for retrying `SYN` if the remote doesn't respond to
         // the first packet
         //
@@ -884,6 +954,7 @@ impl<R: Runtime> StreamManager<R> {
                 dst_port,
                 num_sent: 1usize,
                 packet: packet.clone().to_vec(),
+                routing_path_handle,
                 silent,
                 socket,
                 src_port,
@@ -898,7 +969,7 @@ impl<R: Runtime> StreamManager<R> {
             recv_stream_id
         });
 
-        (recv_stream_id, packet, src_port, dst_port)
+        (recv_stream_id, packet, delivery_style, src_port, dst_port)
     }
 
     /// Remove all streaming context associated with `destination_id`.
@@ -992,9 +1063,9 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
         match self.outbound_rx.poll_recv(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((destination_id, packet, src_port, dst_port))) =>
+            Poll::Ready(Some((delivery_style, packet, src_port, dst_port))) =>
                 return Poll::Ready(Some(StreamManagerEvent::SendPacket {
-                    destination_id,
+                    delivery_style,
                     dst_port,
                     packet,
                     src_port,
@@ -1060,9 +1131,29 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         ref mut num_sent,
                         dst_port,
                         src_port,
+                        routing_path_handle,
                         ..
                     }) = self.pending_outbound.get_mut(&stream_id)
                     else {
+                        continue;
+                    };
+
+                    // poll routing path to get any tunnel updates
+                    let _ = routing_path_handle.poll_unpin(cx);
+
+                    let Some(routing_path) = routing_path_handle.recreate_routing_path() else {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            %num_sent,
+                            "unable to resend `SYN`, no routing path available",
+                        );
+
+                        self.outbound_timers.push(async move {
+                            R::delay(SYN_RETRY_TIMEOUT).await;
+                            stream_id
+                        });
+
                         continue;
                     };
 
@@ -1071,7 +1162,6 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                     if *num_sent < MAX_SYN_RETRIES {
                         let dst_port = *dst_port;
                         let src_port = *src_port;
-                        let destination_id = destination_id.clone();
                         let packet = packet.clone();
                         *num_sent += 1;
 
@@ -1091,7 +1181,7 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         });
 
                         return Poll::Ready(Some(StreamManagerEvent::SendPacket {
-                            destination_id,
+                            delivery_style: DeliveryStyle::ViaRoute { routing_path },
                             dst_port,
                             packet,
                             src_port,
@@ -1162,7 +1252,8 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
 mod tests {
     use super::*;
     use crate::{
-        primitives::Destination,
+        destination::routing_path::{PendingRoutingPathHandle, RoutingPathManager},
+        primitives::{Destination, Lease, TunnelId},
         protocol::Protocol,
         runtime::{
             mock::{MockRuntime, MockTcpStream},
@@ -1212,7 +1303,8 @@ mod tests {
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             })
             .is_ok());
     }
@@ -1358,7 +1450,8 @@ mod tests {
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             })
             .is_ok());
         assert!(manager.pending_inbound.is_empty());
@@ -1375,7 +1468,7 @@ mod tests {
             .unwrap()
         {
             StreamManagerEvent::SendPacket {
-                destination_id: remote,
+                delivery_style,
                 packet,
                 ..
             } => {
@@ -1386,7 +1479,7 @@ mod tests {
                     ..
                 } = Packet::parse(&packet).unwrap();
 
-                assert_eq!(remote, remote_destination_id);
+                assert_eq!(delivery_style.destination_id(), &remote_destination_id);
                 assert_eq!(send_stream_id, 1337u32);
                 assert_ne!(recv_stream_id, 0u32);
                 assert!(flags.synchronize());
@@ -1435,7 +1528,8 @@ mod tests {
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             })
             .is_ok());
         assert!(!manager.pending_inbound.is_empty());
@@ -1447,7 +1541,7 @@ mod tests {
             .unwrap()
         {
             StreamManagerEvent::SendPacket {
-                destination_id: remote,
+                delivery_style,
                 packet,
                 ..
             } => {
@@ -1458,7 +1552,7 @@ mod tests {
                     ..
                 } = Packet::parse(&packet).unwrap();
 
-                assert_eq!(remote, remote_destination_id);
+                assert_eq!(delivery_style.destination_id(), &remote_destination_id);
                 assert_eq!(send_stream_id, 1337u32);
                 assert_ne!(recv_stream_id, 0u32);
                 assert!(flags.synchronize());
@@ -1509,7 +1603,8 @@ mod tests {
             .register_listener(ListenerKind::Persistent {
                 socket,
                 port,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             })
             .is_ok());
         assert!(!manager.pending_inbound.is_empty());
@@ -1521,7 +1616,7 @@ mod tests {
             .unwrap()
         {
             StreamManagerEvent::SendPacket {
-                destination_id: remote,
+                delivery_style,
                 packet,
                 ..
             } => {
@@ -1532,7 +1627,7 @@ mod tests {
                     ..
                 } = Packet::parse(&packet).unwrap();
 
-                assert_eq!(remote, remote_destination_id);
+                assert_eq!(delivery_style.destination_id(), &remote_destination_id);
                 assert_eq!(send_stream_id, 1337u32);
                 assert_ne!(recv_stream_id, 0u32);
                 assert!(flags.synchronize());
@@ -1584,7 +1679,7 @@ mod tests {
             .unwrap()
         {
             StreamManagerEvent::SendPacket {
-                destination_id: remote,
+                delivery_style,
                 packet,
                 ..
             } => {
@@ -1595,7 +1690,7 @@ mod tests {
                     ..
                 } = Packet::parse(&packet).unwrap();
 
-                assert_eq!(remote, remote_destination_id);
+                assert_eq!(delivery_style.destination_id(), &remote_destination_id);
                 assert_eq!(send_stream_id, 1337u32);
                 assert_ne!(recv_stream_id, 0u32);
                 assert!(flags.synchronize());
@@ -1638,7 +1733,7 @@ mod tests {
                     .unwrap()
                 {
                     StreamManagerEvent::SendPacket {
-                        destination_id: remote,
+                        delivery_style,
                         packet,
                         ..
                     } => {
@@ -1649,7 +1744,7 @@ mod tests {
                             ..
                         } = Packet::parse(&packet).unwrap();
 
-                        assert_eq!(remote, remote_destination_id);
+                        assert_eq!(delivery_style.destination_id(), &remote_destination_id);
                         assert_eq!(send_stream_id, 1337u32);
                         assert_ne!(recv_stream_id, 0u32);
                         assert_eq!(ack_through, i as u32 + 1u32);
@@ -1669,10 +1764,24 @@ mod tests {
         let (mut stream, _) = stream1.unwrap();
         let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
 
+        let outbound = TunnelId::random();
+        let inbound = Lease::random();
+        let mut path_manager =
+            RoutingPathManager::<MockRuntime>::new(destination_id.clone(), vec![outbound]);
+        path_manager.register_inbound_tunnel(&destination_id, vec![inbound]);
+        let pending_handle = path_manager.pending_handle();
+
+        tokio::spawn(async move {
+            loop {
+                let _ = (&mut path_manager).await;
+            }
+        });
+
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: pending_handle,
             })
             .is_ok());
         assert!(manager.pending_inbound.is_empty());
@@ -1703,19 +1812,51 @@ mod tests {
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
+        let outbound1 = TunnelId::random();
+        let inbound1 = Lease::random();
+        let mut path_manager1 = RoutingPathManager::<MockRuntime>::new(
+            manager1.destination_id.clone(),
+            vec![outbound1],
+        );
+        let pending_handle = path_manager1.pending_handle();
+        path_manager1.register_inbound_tunnel(&manager2.destination_id, vec![inbound1]);
+
+        let outbound2 = TunnelId::random();
+        let inbound2 = Lease::random();
+        let mut path_manager2 = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![outbound2],
+        );
+        path_manager2.register_inbound_tunnel(&manager1.destination_id, vec![inbound2]);
+        let handle = path_manager2.handle(manager1.destination_id.clone());
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut path_manager1 => {}
+                    _ = &mut path_manager2 => {}
+                }
+            }
+        });
+
         // register listener for `manager1`
         let (socket, _) = socket_factory.socket().await;
         assert!(manager1
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: pending_handle,
             })
             .is_ok());
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let (_stream_id, packet, _, _) =
-            manager2.create_stream(manager1.destination_id.clone(), socket, HashMap::new());
+        let (_stream_id, packet, _, _, _) = manager2.create_stream(
+            manager1.destination_id.clone(),
+            handle,
+            socket,
+            HashMap::new(),
+        );
 
         assert!(manager1
             .on_packet(I2cpPayload {
@@ -1738,10 +1879,10 @@ mod tests {
                 .unwrap()
             {
                 StreamManagerEvent::SendPacket {
-                    destination_id,
+                    delivery_style,
                     packet,
                     ..
-                } => (destination_id, packet),
+                } => (delivery_style.destination_id().clone(), packet),
                 _ => panic!("invalid event"),
             };
 
@@ -1774,7 +1915,6 @@ mod tests {
     #[tokio::test]
     async fn outbound_stream_rejected() {
         let socket_factory = SocketFactory::new().await;
-
         let remote = DestinationId::random();
 
         let mut manager2 = {
@@ -1783,9 +1923,20 @@ mod tests {
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
+        let mut path_manager = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![TunnelId::random()],
+        );
+        path_manager.register_inbound_tunnel(&remote, vec![Lease::random()]);
+
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let _ = manager2.create_stream(remote.clone(), socket, HashMap::new());
+        let _ = manager2.create_stream(
+            remote.clone(),
+            path_manager.handle(remote.clone()),
+            socket,
+            HashMap::new(),
+        );
 
         // verify the syn packet is sent twice more
         for _ in 0..2 {
@@ -1795,10 +1946,10 @@ mod tests {
                 .expect("to succeed")
             {
                 StreamManagerEvent::SendPacket {
-                    destination_id,
+                    delivery_style,
                     packet,
                     ..
-                } if destination_id == remote => {
+                } if delivery_style.destination_id() == &remote => {
                     assert!(Packet::parse(&packet).unwrap().flags.synchronize());
                 }
                 _ => panic!("invalid event"),
@@ -1835,26 +1986,40 @@ mod tests {
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
-        // register listener for `manager1`
-        let (socket, mut client_socket) = socket_factory.socket().await;
-        assert!(manager
-            .register_listener(ListenerKind::Ephemeral {
-                socket,
-                silent: true
-            })
-            .is_ok());
-
         let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination)
+            .with_from_included(destination.clone())
             .with_signature()
             .with_payload(b"hello, world")
             .build_and_sign(&signing_key)
             .to_vec();
+
+        let outbound1 = TunnelId::random();
+        let inbound1 = Lease::random();
+        let mut path_manager1 =
+            RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound1]);
+        let pending_handle = path_manager1.pending_handle();
+        path_manager1.register_inbound_tunnel(&destination.id(), vec![inbound1]);
+
+        tokio::spawn(async move {
+            loop {
+                let _ = (&mut path_manager1).await;
+            }
+        });
+
+        // register listener for `manager1`
+        let (socket, mut client_socket) = socket_factory.socket().await;
+        assert!(manager
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true,
+                pending_routing_path_handle: pending_handle,
+            })
+            .is_ok());
 
         // handle syn packet and spawn manager in the background
         assert!(manager
@@ -1890,15 +2055,6 @@ mod tests {
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
-        // register listener for `manager1`
-        let (socket, client_socket) = socket_factory.socket().await;
-        assert!(manager
-            .register_listener(ListenerKind::Ephemeral {
-                socket,
-                silent: false
-            })
-            .is_ok());
-
         let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
         let destination_id = base64_encode(destination.id().to_vec());
@@ -1906,11 +2062,34 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination)
+            .with_from_included(destination.clone())
             .with_signature()
             .with_payload(b"hello, world\n")
             .build_and_sign(&signing_key)
             .to_vec();
+
+        let outbound1 = TunnelId::random();
+        let inbound1 = Lease::random();
+        let mut path_manager1 =
+            RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound1]);
+        let pending_handle = path_manager1.pending_handle();
+        path_manager1.register_inbound_tunnel(&destination.id(), vec![inbound1]);
+
+        tokio::spawn(async move {
+            loop {
+                let _ = (&mut path_manager1).await;
+            }
+        });
+
+        // register listener for `manager1`
+        let (socket, client_socket) = socket_factory.socket().await;
+        assert!(manager
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: false,
+                pending_routing_path_handle: pending_handle,
+            })
+            .is_ok());
 
         // handle syn packet and spawn manager in the background
         assert!(manager
@@ -1959,7 +2138,7 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination)
+            .with_from_included(destination.clone())
             .with_signature()
             .with_payload(b"hello, world\n")
             .build_and_sign(&signing_key)
@@ -1976,12 +2155,26 @@ mod tests {
             .is_ok());
         assert!(!manager.pending_inbound.is_empty());
 
+        let outbound = TunnelId::random();
+        let inbound = Lease::random();
+        let mut path_manager =
+            RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound]);
+        path_manager.register_inbound_tunnel(&destination.id(), vec![inbound]);
+        let pending_handle = path_manager.pending_handle();
+
+        tokio::spawn(async move {
+            loop {
+                let _ = (&mut path_manager).await;
+            }
+        });
+
         // register listener for `manager1`
         let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: pending_handle,
             })
             .is_ok());
 
@@ -2021,7 +2214,7 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination)
+            .with_from_included(destination.clone())
             .with_signature()
             .with_payload(b"hello, world\n")
             .build_and_sign(&signing_key)
@@ -2038,12 +2231,26 @@ mod tests {
             .is_ok());
         assert!(!manager.pending_inbound.is_empty());
 
+        let outbound = TunnelId::random();
+        let inbound = Lease::random();
+        let mut path_manager =
+            RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound]);
+        path_manager.register_inbound_tunnel(&destination.id(), vec![inbound]);
+        let pending_handle = path_manager.pending_handle();
+
+        tokio::spawn(async move {
+            loop {
+                let _ = (&mut path_manager).await;
+            }
+        });
+
         // register listener for `manager1`
         let (socket, client_socket) = socket_factory.socket().await;
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: pending_handle,
             })
             .is_ok());
 
@@ -2074,19 +2281,51 @@ mod tests {
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
+        let outbound1 = TunnelId::random();
+        let inbound1 = Lease::random();
+        let mut path_manager1 = RoutingPathManager::<MockRuntime>::new(
+            manager1.destination_id.clone(),
+            vec![outbound1],
+        );
+        let pending_handle = path_manager1.pending_handle();
+        path_manager1.register_inbound_tunnel(&manager2.destination_id, vec![inbound1]);
+
+        let outbound2 = TunnelId::random();
+        let inbound2 = Lease::random();
+        let mut path_manager2 = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![outbound2],
+        );
+        path_manager2.register_inbound_tunnel(&manager1.destination_id, vec![inbound2]);
+        let handle = path_manager2.handle(manager1.destination_id.clone());
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut path_manager1 => {}
+                    _ = &mut path_manager2 => {}
+                }
+            }
+        });
+
         // register listener for `manager1`
         let (socket, mut listener_stream) = socket_factory.socket().await;
         assert!(manager1
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: pending_handle,
             })
             .is_ok());
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let (_stream_id, packet, _, _) =
-            manager2.create_stream(manager1.destination_id.clone(), socket, HashMap::new());
+        let (_stream_id, packet, _, _, _) = manager2.create_stream(
+            manager1.destination_id.clone(),
+            handle,
+            socket,
+            HashMap::new(),
+        );
 
         assert!(manager1
             .on_packet(I2cpPayload {
@@ -2109,10 +2348,10 @@ mod tests {
                 .unwrap()
             {
                 StreamManagerEvent::SendPacket {
-                    destination_id,
+                    delivery_style,
                     packet,
                     ..
-                } => (destination_id, packet),
+                } => (delivery_style.destination_id().clone(), packet),
                 _ => panic!("invalid event"),
             };
 
@@ -2456,14 +2695,26 @@ mod tests {
         assert!(manager1
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             })
             .is_ok());
 
+        let mut path_manager = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![TunnelId::random()],
+        );
+        path_manager
+            .register_inbound_tunnel(&manager1.destination_id.clone(), vec![Lease::random()]);
+
         // create new oubound stream to `manager1`
         let (socket, _client_stream) = socket_factory.socket().await;
-        let (stream_id, _packet, _, _) =
-            manager2.create_stream(manager1.destination_id.clone(), socket, HashMap::new());
+        let (stream_id, _packet, _, _, _) = manager2.create_stream(
+            manager1.destination_id.clone(),
+            path_manager.handle(manager1.destination_id.clone()),
+            socket,
+            HashMap::new(),
+        );
 
         // verify there's one outbound timer active
         assert_eq!(manager2.outbound_timers.len(), 1);
@@ -2503,19 +2754,48 @@ mod tests {
             StreamManager::<MockRuntime>::new(destination, signing_key)
         };
 
+        let outbound1 = TunnelId::random();
+        let inbound1 = Lease::random();
+        let mut path_manager1 = RoutingPathManager::<MockRuntime>::new(
+            manager1.destination_id.clone(),
+            vec![outbound1],
+        );
+        let pending_handle = path_manager1.pending_handle();
+        path_manager1.register_inbound_tunnel(&manager2.destination_id, vec![inbound1]);
+
+        let outbound2 = TunnelId::random();
+        let inbound2 = Lease::random();
+        let mut path_manager2 = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![outbound2],
+        );
+        path_manager2.register_inbound_tunnel(&manager1.destination_id, vec![inbound2]);
+        let handle = path_manager2.handle(manager1.destination_id.clone());
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut path_manager1 => {}
+                    _ = &mut path_manager2 => {}
+                }
+            }
+        });
+
         // register listener for `manager1`
         let (socket, _) = socket_factory.socket().await;
         assert!(manager1
             .register_listener(ListenerKind::Ephemeral {
                 socket,
-                silent: true
+                silent: true,
+                pending_routing_path_handle: pending_handle,
             })
             .is_ok());
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
-        let (_stream_id, packet, src_port, dst_port) = manager2.create_stream(
+        let (_stream_id, packet, _, src_port, dst_port) = manager2.create_stream(
             manager1.destination_id.clone(),
+            handle,
             socket,
             HashMap::from_iter([
                 (String::from("FROM_PORT"), String::from("1337")),
@@ -2546,10 +2826,10 @@ mod tests {
                 .unwrap()
             {
                 StreamManagerEvent::SendPacket {
-                    destination_id,
+                    delivery_style,
                     packet,
                     ..
-                } => (destination_id, packet),
+                } => (delivery_style.destination_id().clone(), packet),
                 _ => panic!("invalid event"),
             };
 
@@ -2577,5 +2857,96 @@ mod tests {
         reader.read_line(&mut response).await.unwrap();
 
         assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
+    }
+
+    #[tokio::test]
+    async fn syn_resend_with_different_routing_path() {
+        let socket_factory = SocketFactory::new().await;
+        let remote = DestinationId::random();
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut outbound = (0..3).map(|_| TunnelId::random()).collect::<HashSet<_>>();
+        let mut inbound = (0..3)
+            .map(|_| {
+                let lease = Lease::random();
+
+                (lease.tunnel_id, lease)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut path_manager = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            outbound.iter().cloned().collect(),
+        );
+        path_manager.register_inbound_tunnel(&remote, inbound.values().cloned().collect());
+
+        // create new oubound stream to `manager1`
+        let (socket, _client_stream) = socket_factory.socket().await;
+        let (_, _, delivery_style, _, _) = manager2.create_stream(
+            remote.clone(),
+            path_manager.handle(remote.clone()),
+            socket,
+            HashMap::new(),
+        );
+
+        match delivery_style {
+            DeliveryStyle::ViaRoute { routing_path } => {
+                assert!(outbound.remove(&routing_path.outbound));
+                assert!(inbound.remove(&routing_path.inbound).is_some());
+            }
+            _ => panic!("invalid delivery style"),
+        }
+
+        // verify the syn packet is sent twice more
+        match tokio::time::timeout(Duration::from_secs(15), manager2.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            StreamManagerEvent::SendPacket {
+                delivery_style,
+                packet,
+                ..
+            } if delivery_style.destination_id() == &remote => {
+                assert!(Packet::parse(&packet).unwrap().flags.synchronize());
+
+                match delivery_style {
+                    DeliveryStyle::ViaRoute { routing_path } => {
+                        assert!(outbound.remove(&routing_path.outbound));
+                        assert!(inbound.remove(&routing_path.inbound).is_some());
+                    }
+                    _ => panic!("invalid delivery style"),
+                }
+            }
+            _ => panic!("invalid event"),
+        }
+
+        match tokio::time::timeout(Duration::from_secs(15), manager2.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            StreamManagerEvent::SendPacket {
+                delivery_style,
+                packet,
+                ..
+            } if delivery_style.destination_id() == &remote => {
+                assert!(Packet::parse(&packet).unwrap().flags.synchronize());
+
+                match delivery_style {
+                    DeliveryStyle::ViaRoute { routing_path } => {
+                        assert!(outbound.remove(&routing_path.outbound));
+                        assert!(inbound.remove(&routing_path.inbound).is_some());
+                    }
+                    _ => panic!("invalid delivery style"),
+                }
+            }
+            _ => panic!("invalid event"),
+        }
     }
 }

@@ -1115,6 +1115,68 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             .histogram(NUM_FRAGMENTS)
                             .record(count as f64);
                     }
+                    TunnelMessage::TunnelDeliveryViaRoute {
+                        ibgw_router_id,
+                        ibgw_tunnel_id,
+                        obgw_tunnel_id,
+                        message,
+                    } => {
+                        let (outbound_gateway, tunnel) = match self.outbound.get(&obgw_tunnel_id) {
+                            Some(tunnel) => (obgw_tunnel_id, tunnel),
+                            None => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?obgw_tunnel_id,
+                                    "outbound tunnel specified by routing path doesn't exist",
+                                );
+                                debug_assert!(false);
+
+                                let Some((outbound_gateway, tunnel)) = self.outbound.iter().next()
+                                else {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        name = %self.config.name,
+                                        "failed to send tunnel message, no outbound tunnel available",
+                                    );
+                                    continue;
+                                };
+
+                                (*outbound_gateway, tunnel)
+                            }
+                        };
+
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            name = %self.config.name,
+                            %outbound_gateway,
+                            "send tunnel message to remote destination",
+                        );
+
+                        let (router_id, messages) =
+                            tunnel.send_to_tunnel(ibgw_router_id.clone(), ibgw_tunnel_id, message);
+
+                        let count = messages.into_iter().fold(0usize, |count, message| {
+                            if let Err(error) =
+                                self.routing_table.send_message(router_id.clone(), message)
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    name = %self.config.name,
+                                    %ibgw_router_id,
+                                    %ibgw_tunnel_id,
+                                    %obgw_tunnel_id,
+                                    ?error,
+                                    "failed to send tunnel message to router",
+                                );
+                            }
+
+                            count + 1
+                        });
+                        self.router_ctx
+                            .metrics_handle()
+                            .histogram(NUM_FRAGMENTS)
+                            .record(count as f64);
+                    }
                     TunnelMessage::Inbound { message } => tracing::warn!(
                         target: LOG_TARGET,
                         name = %self.config.name,
@@ -1635,8 +1697,6 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_exploratory_build_request_expires() {
-        crate::util::init_logger();
-
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
             .map(|i| {
@@ -2366,8 +2426,6 @@ mod tests {
 
     #[tokio::test]
     async fn exploratory_outbound_build_reply_received_late() {
-        crate::util::init_logger();
-
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
             .map(|i| {
@@ -3003,8 +3061,6 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_tunnels_removed_from_routing_table() {
-        crate::util::init_logger();
-
         // create 10 routers and add them to local `ProfileStorage`
         let mut routers = (0..10)
             .map(|i| {

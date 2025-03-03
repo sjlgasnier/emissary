@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::base64_decode,
-    destination::{Destination, DestinationEvent, LeaseSetStatus},
+    destination::{DeliveryStyle, Destination, DestinationEvent, LeaseSetStatus},
     i2cp::{
         message::{
             BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload, RequestKind,
@@ -337,9 +337,12 @@ impl<R: Runtime> I2cpSession<R> {
                             "send message with expiration",
                         );
 
-                        if let Err(error) =
-                            self.destination.send_message(&destination.id(), payload)
-                        {
+                        if let Err(error) = self.destination.send_message(
+                            DeliveryStyle::Unspecified {
+                                destination_id: destination.id(),
+                            },
+                            payload,
+                        ) {
                             tracing::error!(
                                 target: LOG_TARGET,
                                 session_id = ?self.session_id,
@@ -429,9 +432,12 @@ impl<R: Runtime> Future for I2cpSession<R> {
                 Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id })) =>
                     match self.pending_connections.remove(&destination_id) {
                         Some(messages) => messages.into_iter().for_each(|message| {
-                            if let Err(error) =
-                                self.destination.send_message(&destination_id, message.payload)
-                            {
+                            if let Err(error) = self.destination.send_message(
+                                DeliveryStyle::Unspecified {
+                                    destination_id: destination_id.clone(),
+                                },
+                                message.payload,
+                            ) {
                                 tracing::error!(
                                     target: LOG_TARGET,
                                     session_id = ?self.session_id,

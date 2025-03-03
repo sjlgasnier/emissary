@@ -41,7 +41,7 @@ const UNPUBLISHED: u16 = 1u16 << 1;
 /// Header for [`LeaseSet2`].
 ///
 /// https://geti2p.net/spec/common-structures#leaseset2header
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LeaseSet2Header {
     /// Destination for [`LeaseSet2`].
     pub destination: Destination,

@@ -140,6 +140,18 @@ pub trait TunnelSender: Clone {
         message: Vec<u8>,
     ) -> Result<(), ChannelError>;
 
+    /// Send `message` via `obgw_tunnel_id` to remote tunnel identified by
+    /// (`ibgw_router_id`, `ibgw_tunnel_id`) tuple.
+    ///
+    /// Return an error if the channel is busy/closed.
+    fn try_send_to_tunnel_via_route(
+        &self,
+        ibgw_router_id: RouterId,
+        ibgw_tunnel_id: TunnelId,
+        obgw_tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError>;
+
     /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
     ///
     /// Blocks until the message is sent and returns an error if the channel is closed.
@@ -194,6 +206,23 @@ impl TunnelSender for TunnelMessageSender {
             .try_send(TunnelMessage::TunnelDelivery {
                 gateway,
                 tunnel_id,
+                message,
+            })
+            .map_err(From::from)
+    }
+
+    fn try_send_to_tunnel_via_route(
+        &self,
+        ibgw_router_id: RouterId,
+        ibgw_tunnel_id: TunnelId,
+        obgw_tunnel_id: TunnelId,
+        message: Vec<u8>,
+    ) -> Result<(), ChannelError> {
+        self.0
+            .try_send(TunnelMessage::TunnelDeliveryViaRoute {
+                ibgw_router_id,
+                ibgw_tunnel_id,
+                obgw_tunnel_id,
                 message,
             })
             .map_err(From::from)

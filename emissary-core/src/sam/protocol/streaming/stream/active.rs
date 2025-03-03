@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::SigningPrivateKey,
+    destination::{routing_path::RoutingPathHandle, DeliveryStyle},
     error::StreamingError,
     primitives::{Destination, DestinationId},
     runtime::{AsyncRead, AsyncWrite, Instant, Runtime},
@@ -258,7 +259,7 @@ pub struct StreamContext {
     pub cmd_rx: Receiver<StreamEvent>,
 
     /// TX channel for sending [`Packet`]s to the network.
-    pub event_tx: Sender<(DestinationId, Vec<u8>, u16, u16)>,
+    pub event_tx: Sender<(DeliveryStyle, Vec<u8>, u16, u16)>,
 
     /// ID of the local destination.
     pub local: DestinationId,
@@ -496,7 +497,7 @@ pub struct Stream<R: Runtime> {
     dst_port: u16,
 
     /// TX channel for sending [`Packet`]s to the network.
-    event_tx: Sender<(DestinationId, Vec<u8>, u16, u16)>,
+    event_tx: Sender<(DeliveryStyle, Vec<u8>, u16, u16)>,
 
     /// Inbound context for packets received from the network.
     inbound_context: InboundContext<R>,
@@ -521,6 +522,10 @@ pub struct Stream<R: Runtime> {
 
     /// ID of the remote destination.
     remote: DestinationId,
+
+    /// Routing path handle.
+    #[allow(unused)]
+    routing_path_handle: RoutingPathHandle<R>,
 
     /// RTO.
     rto: Rto,
@@ -561,6 +566,7 @@ impl<R: Runtime> Stream<R> {
         context: StreamContext,
         _: StreamConfig,
         state: StreamKind,
+        mut routing_path_handle: RoutingPathHandle<R>,
     ) -> Self {
         let StreamContext {
             local,
@@ -584,7 +590,19 @@ impl<R: Runtime> Stream<R> {
                     .build_and_sign(&signing_key);
 
                 // TODO: correct?
-                event_tx.try_send((remote.clone(), packet.to_vec(), 0u16, 0u16)).unwrap();
+                event_tx
+                    .try_send((
+                        match routing_path_handle.routing_path() {
+                            None => DeliveryStyle::Unspecified {
+                                destination_id: remote.clone(),
+                            },
+                            Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+                        },
+                        packet.to_vec(),
+                        0u16,
+                        0u16,
+                    ))
+                    .unwrap();
 
                 (
                     send_stream_id,
@@ -665,6 +683,7 @@ impl<R: Runtime> Stream<R> {
             read_state: SocketState::ReadMessage,
             recv_stream_id,
             remote,
+            routing_path_handle,
             rto: Rto::new(),
             rto_timer: None,
             rtt: Rtt::new(),
@@ -697,6 +716,7 @@ impl<R: Runtime> Stream<R> {
             seq = ?(self.next_seq_nro - 1),
             rtt = ?*self.rtt,
             rto = ?*self.rto,
+            wnd = ?self.window_size,
             "handle acks",
         );
 
@@ -767,7 +787,12 @@ impl<R: Runtime> Stream<R> {
 
             self.event_tx
                 .try_send((
-                    self.remote.clone(),
+                    match self.routing_path_handle.routing_path() {
+                        None => DeliveryStyle::Unspecified {
+                            destination_id: self.remote.clone(),
+                        },
+                        Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+                    },
                     packet.to_vec(),
                     self.src_port,
                     self.dst_port,
@@ -885,7 +910,12 @@ impl<R: Runtime> Stream<R> {
                 self.pending.insert(seq_nro, packet);
             } else {
                 match self.event_tx.try_send((
-                    self.remote.clone(),
+                    match self.routing_path_handle.routing_path() {
+                        None => DeliveryStyle::Unspecified {
+                            destination_id: self.remote.clone(),
+                        },
+                        Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+                    },
                     packet.packet.clone(),
                     self.src_port,
                     self.dst_port,
@@ -912,10 +942,47 @@ impl<R: Runtime> Stream<R> {
             return;
         }
 
-        let num_resent = self.unacked.values_mut().fold(0usize, |count, packet| {
-            if packet.sent.elapsed() < *self.rto {
-                return count;
+        // TODO: check if there are any packets to send
+        // TODO: if so, switch routing path
+
+        let expired = self
+            .unacked
+            .values_mut()
+            .take_while(|packet| packet.sent.elapsed() > *self.rto)
+            .collect::<Vec<_>>();
+
+        // no expired packetes
+        if expired.is_empty() {
+            self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
+            return;
+        }
+
+        // reset routing path as there has been packet loss
+        let routing_path = match self.routing_path_handle.recreate_routing_path() {
+            Some(routing_path) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    inbound = ?routing_path.inbound,
+                    outbound = ?routing_path.outbound,
+                );
+                self.rto = Rto::new();
+                self.rtt = Rtt::new();
+
+                routing_path
             }
+            None => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    "no routing path, cannot resend packets",
+                );
+                self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
+                return;
+            }
+        };
+
+        for packet in expired {
             packet.sent = R::now();
 
             tracing::trace!(
@@ -927,7 +994,9 @@ impl<R: Runtime> Stream<R> {
             );
 
             if let Err(error) = self.event_tx.try_send((
-                self.remote.clone(),
+                DeliveryStyle::ViaRoute {
+                    routing_path: routing_path.clone(),
+                },
                 packet.packet.clone(),
                 self.src_port,
                 self.dst_port,
@@ -940,19 +1009,57 @@ impl<R: Runtime> Stream<R> {
                     "failed to send packet",
                 );
             }
-
-            count + 1
-        });
-
-        if num_resent > 0 {
-            self.rto_timer = Some(Box::pin(R::delay(self.rto.exponential_backoff())));
-
-            if self.window_size > 1 {
-                self.window_size -= 1;
-            }
-        } else {
-            self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
         }
+
+        // let num_expired = self.unacked.values_mut().reduce(|packet| {
+        // })
+
+        // let num_resent = self.unacked.values_mut().fold(0usize, |count, packet| {
+        //     if packet.sent.elapsed() < *self.rto {
+        //         return count;
+        //     }
+        //     packet.sent = R::now();
+
+        //     tracing::trace!(
+        //         target: LOG_TARGET,
+        //         local = %self.local,
+        //         remote = %self.remote,
+        //         seq_nro = ?packet.seq_nro,
+        //         "resend packet"
+        //     );
+
+        //     if let Err(error) = self.event_tx.try_send((
+        //         match self.routing_path_handle.routing_path() {
+        //             None => DeliveryStyle::Unspecified {
+        //                 destination_id: self.remote.clone(),
+        //             },
+        //             Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+        //         },
+        //         packet.packet.clone(),
+        //         self.src_port,
+        //         self.dst_port,
+        //     )) {
+        //         tracing::warn!(
+        //             target: LOG_TARGET,
+        //             local = %self.local,
+        //             remote = %self.remote,
+        //             ?error,
+        //             "failed to send packet",
+        //         );
+        //     }
+
+        //     count + 1
+        // });
+
+        // if num_resent > 0 {
+        self.rto_timer = Some(Box::pin(R::delay(self.rto.exponential_backoff())));
+
+        if self.window_size > 1 {
+            self.window_size -= 1;
+        }
+        // } else {
+        //     self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
+        // }
     }
 
     /// Client has closed down the socket.
@@ -1006,7 +1113,12 @@ impl<R: Runtime> Stream<R> {
             );
         } else {
             match self.event_tx.try_send((
-                self.remote.clone(),
+                match self.routing_path_handle.routing_path() {
+                    None => DeliveryStyle::Unspecified {
+                        destination_id: self.remote.clone(),
+                    },
+                    Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+                },
                 packet.clone(),
                 self.src_port,
                 self.dst_port,
@@ -1045,6 +1157,17 @@ impl<R: Runtime> Future for Stream<R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = Pin::into_inner(self);
+
+        // poll routing path handle to get tunnel updates
+        if this.routing_path_handle.poll_unpin(cx).is_ready() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                local = %this.local,
+                remote = %this.remote,
+                "routing path handle exited",
+            );
+            return Poll::Ready(this.recv_stream_id);
+        }
 
         loop {
             match mem::replace(&mut this.write_state, WriteState::Poisoned) {
@@ -1190,7 +1313,12 @@ impl<R: Runtime> Future for Stream<R> {
                             let mut packet = this.pending.remove(&seq_nro).expect("to exist");
 
                             match this.event_tx.try_send((
-                                this.remote.clone(),
+                                match this.routing_path_handle.routing_path() {
+                                    None => DeliveryStyle::Unspecified {
+                                        destination_id: this.remote.clone(),
+                                    },
+                                    Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+                                },
                                 packet.packet.clone(),
                                 this.src_port,
                                 this.dst_port,
@@ -1278,7 +1406,12 @@ impl<R: Runtime> Future for Stream<R> {
             .to_vec();
 
             if let Err(error) = this.event_tx.try_send((
-                this.remote.clone(),
+                match this.routing_path_handle.routing_path() {
+                    None => DeliveryStyle::Unspecified {
+                        destination_id: this.remote.clone(),
+                    },
+                    Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
+                },
                 packet.to_vec(),
                 this.src_port,
                 this.dst_port,
@@ -1304,9 +1437,13 @@ impl<R: Runtime> Future for Stream<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{
-        mock::{MockRuntime, MockTcpStream},
-        TcpStream,
+    use crate::{
+        destination::routing_path::RoutingPathManager,
+        primitives::{Lease, TunnelId},
+        runtime::{
+            mock::{MockRuntime, MockTcpStream},
+            TcpStream,
+        },
     };
     use rand::{
         distributions::{Alphanumeric, DistString},
@@ -1318,8 +1455,10 @@ mod tests {
 
     struct StreamBuilder {
         cmd_tx: Sender<StreamEvent>,
-        event_rx: Receiver<(DestinationId, Vec<u8>, u16, u16)>,
+        event_rx: Receiver<(DeliveryStyle, Vec<u8>, u16, u16)>,
         stream: tokio::net::TcpStream,
+        _outbound: TunnelId,
+        _inbound: Lease,
     }
 
     impl StreamBuilder {
@@ -1337,6 +1476,20 @@ mod tests {
             let (event_tx, event_rx) = channel(64);
             let (cmd_tx, cmd_rx) = channel(64);
 
+            let remote = DestinationId::random();
+            let outbound = TunnelId::random();
+            let inbound = Lease::random();
+            let mut path_manager =
+                RoutingPathManager::<MockRuntime>::new(destination_id.clone(), vec![outbound]);
+            path_manager.register_inbound_tunnel(&remote, vec![inbound.clone()]);
+            let handle = path_manager.handle(remote.clone());
+
+            tokio::spawn(async move {
+                loop {
+                    let _ = (&mut path_manager).await;
+                }
+            });
+
             (
                 Stream::new(
                     stream2.unwrap(),
@@ -1352,11 +1505,14 @@ mod tests {
                     },
                     Default::default(),
                     StreamKind::Inbound { payload: vec![] },
+                    handle,
                 ),
                 Self {
                     cmd_tx,
                     event_rx,
                     stream,
+                    _outbound: outbound,
+                    _inbound: inbound,
                 },
             )
         }
@@ -1370,6 +1526,7 @@ mod tests {
                 cmd_tx,
                 stream: client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1478,6 +1635,7 @@ mod tests {
                 cmd_tx,
                 stream: client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1731,6 +1889,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -1893,6 +2052,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2011,6 +2171,7 @@ mod tests {
                 cmd_tx,
                 event_rx,
                 stream: _stream,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2058,6 +2219,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2124,6 +2286,7 @@ mod tests {
                 stream: mut client,
                 event_rx,
                 cmd_tx: _cmd_tx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2193,6 +2356,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2296,6 +2460,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2424,6 +2589,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2635,6 +2801,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2688,6 +2855,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2893,6 +3061,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -2980,6 +3149,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 
@@ -3075,6 +3245,7 @@ mod tests {
                 cmd_tx,
                 stream: mut client,
                 event_rx,
+                ..
             },
         ) = StreamBuilder::build_stream().await;
 

@@ -1650,8 +1650,6 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_connection_rejected_while_netdb_lookup_pending() {
-        crate::util::init_logger();
-
         let (static_key, signing_key, router_info) = {
             let mut static_key_bytes = vec![0u8; 32];
             let mut signing_key_bytes = vec![0u8; 32];

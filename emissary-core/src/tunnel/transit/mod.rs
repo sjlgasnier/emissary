@@ -1568,8 +1568,6 @@ mod tests {
 
     #[tokio::test]
     async fn maximum_transit_tunnels() {
-        crate::util::init_logger();
-
         let handle = MockRuntime::register_metrics(vec![], None);
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();

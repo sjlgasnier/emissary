@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::{base32_decode, base64_encode, SigningPrivateKey, StaticPrivateKey},
-    destination::{Destination, DestinationEvent, LeaseSetStatus},
+    destination::{DeliveryStyle, Destination, DestinationEvent, LeaseSetStatus},
     error::QueryError,
     i2cp::{I2cpPayload, I2cpPayloadBuilder},
     primitives::{Destination as Dest, DestinationId, LeaseSet2, LeaseSet2Header},
@@ -378,8 +378,10 @@ impl<R: Runtime> SamSession<R> {
         socket: SamSocket<R>,
         options: HashMap<String, String>,
     ) {
-        let (stream_id, packet, src_port, dst_port) =
-            self.stream_manager.create_stream(destination_id.clone(), socket, options);
+        let handle = self.destination.routing_path_handle(destination_id.clone());
+        let (stream_id, packet, delivery_style, src_port, dst_port) = self
+            .stream_manager
+            .create_stream(destination_id.clone(), handle, socket, options);
 
         tracing::trace!(
             target: LOG_TARGET,
@@ -414,7 +416,7 @@ impl<R: Runtime> SamSession<R> {
             return;
         };
 
-        if let Err(error) = self.destination.send_message(&destination_id, message) {
+        if let Err(error) = self.destination.send_message(delivery_style, message) {
             tracing::error!(
                 target: LOG_TARGET,
                 session_id = ?self.session_id,
@@ -521,6 +523,7 @@ impl<R: Runtime> SamSession<R> {
         };
 
         if let Err(error) = self.stream_manager.register_listener(ListenerKind::Ephemeral {
+            pending_routing_path_handle: self.destination.pending_routing_path_handle(),
             socket,
             silent: options
                 .get("SILENT")
@@ -558,6 +561,7 @@ impl<R: Runtime> SamSession<R> {
         };
 
         if let Err(error) = self.stream_manager.register_listener(ListenerKind::Persistent {
+            pending_routing_path_handle: self.destination.pending_routing_path_handle(),
             socket,
             port,
             silent: options
@@ -604,7 +608,10 @@ impl<R: Runtime> SamSession<R> {
                     .with_protocol(self.session_kind.into())
                     .build()
                 {
-                    if let Err(error) = self.destination.send_message(&destination_id, message) {
+                    if let Err(error) = self
+                        .destination
+                        .send_message(DeliveryStyle::Unspecified { destination_id }, message)
+                    {
                         tracing::warn!(
                             target: LOG_TARGET,
                             session_id = %self.session_id,
@@ -690,8 +697,12 @@ impl<R: Runtime> SamSession<R> {
                         .with_protocol(self.session_kind.into())
                         .build()
                     {
-                        if let Err(error) = self.destination.send_message(&destination_id, message)
-                        {
+                        if let Err(error) = self.destination.send_message(
+                            DeliveryStyle::Unspecified {
+                                destination_id: destination_id.clone(),
+                            },
+                            message,
+                        ) {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 session_id = %self.session_id,
@@ -1100,8 +1111,8 @@ impl<R: Runtime> Future for SamSession<R> {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(Arc::clone(&self.session_id)),
                 Poll::Ready(Some(StreamManagerEvent::SendPacket {
+                    delivery_style,
                     dst_port,
-                    destination_id,
                     packet,
                     src_port,
                 })) => {
@@ -1119,7 +1130,7 @@ impl<R: Runtime> Future for SamSession<R> {
                         continue;
                     };
 
-                    if let Err(error) = self.destination.send_message(&destination_id, message) {
+                    if let Err(error) = self.destination.send_message(delivery_style, message) {
                         tracing::warn!(
                             target: LOG_TARGET,
                             session_id = ?self.session_id,

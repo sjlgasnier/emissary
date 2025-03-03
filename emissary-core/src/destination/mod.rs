@@ -20,6 +20,9 @@ use crate::{
     crypto::{base32_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPrivateKey},
     destination::{
         lease_set::LeaseSetManager,
+        routing_path::{
+            PendingRoutingPathHandle, RoutingPath, RoutingPathHandle, RoutingPathManager,
+        },
         session::{SessionManager, SessionManagerEvent},
     },
     error::{Error, QueryError},
@@ -43,7 +46,7 @@ use crate::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
@@ -57,6 +60,7 @@ use core::{
 
 mod lease_set;
 
+pub mod routing_path;
 pub mod session;
 
 /// Logging target for the file.
@@ -71,6 +75,39 @@ const NETDB_BACKOFF_TIMEOUT: Duration = Duration::from_secs(5);
 /// This is the number retries made when trying to contact [`NetDb`] for a lease set query
 /// in case the channel used by [`NetDbHandle`] is clogged.
 const NUM_QUERY_RETRIES: usize = 3usize;
+
+/// Stale lease set prune interval.
+const LEASE_SET_PRUNE_INTERVAL: Duration = Duration::from_secs(2 * 60);
+
+/// How the message should be delivered to remote destination.
+#[derive(Default, Clone)]
+pub enum DeliveryStyle {
+    /// Deliver the message to remote using the explicitly specified routing path.
+    ViaRoute {
+        /// Routing path.
+        routing_path: RoutingPath,
+    },
+
+    /// Deliver the message to remote via any available route.
+    Unspecified {
+        /// ID of the remote destination.
+        destination_id: DestinationId,
+    },
+
+    #[default]
+    Dummy,
+}
+
+impl DeliveryStyle {
+    /// Get reference to [`DestinationId`].
+    pub fn destination_id(&self) -> &DestinationId {
+        match self {
+            Self::ViaRoute { routing_path } => &routing_path.destination_id,
+            Self::Unspecified { destination_id } => &destination_id,
+            Self::Dummy => unreachable!(),
+        }
+    }
+}
 
 /// Events emitted by [`Destination`].
 #[derive(Debug)]
@@ -142,6 +179,15 @@ pub struct DestinationContext {
     /// Outbound messages are put on hold if remote lease set has expired
     /// and a new lease set is being queried.
     pending_messages: VecDeque<Vec<u8>>,
+
+    /// Expiring lease sets.
+    ///
+    /// Some routing paths may still use these lease sets if they haven't expired and since the
+    /// `RoutingPath` doesn't hold the `RouterId` of the lease set, these lease sets are stored
+    /// separately.
+    ///
+    /// The stale lease sets are periodically pruned at an interval of `LEASE_SET_PRUNE_INTERVAL`.
+    expiring_leases: HashMap<TunnelId, Lease>,
 }
 
 /// Client destination.
@@ -158,6 +204,9 @@ pub struct Destination<R: Runtime> {
 
     /// Local lease set manager.
     lease_set_manager: LeaseSetManager<R>,
+
+    /// Timer for periodic pruning of stale lease sets.
+    lease_set_prune_timer: BoxFuture<'static, ()>,
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
@@ -183,6 +232,9 @@ pub struct Destination<R: Runtime> {
 
     /// Known remote destinations.
     remote_destinations: HashMap<DestinationId, DestinationContext>,
+
+    /// Routing path manager.
+    routing_path_manager: RoutingPathManager<R>,
 
     /// Session manager.
     session_manager: SessionManager<R>,
@@ -217,13 +269,15 @@ impl<R: Runtime> Destination<R> {
             inbound_tunnels: inbound_tunnels.clone(),
             lease_set: lease_set.clone(),
             lease_set_manager: LeaseSetManager::new(inbound_tunnels),
+            lease_set_prune_timer: Box::pin(R::delay(LEASE_SET_PRUNE_INTERVAL)),
             netdb_handle,
             noise: NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
-            outbound_tunnels,
+            outbound_tunnels: outbound_tunnels.clone(),
             pending_queries: HashSet::new(),
             pending_storage_verifications: HashMap::new(),
             query_futures: R::join_set(),
             remote_destinations: HashMap::new(),
+            routing_path_manager: RoutingPathManager::new(destination_id.clone(), outbound_tunnels),
             session_manager: SessionManager::new(destination_id, private_key, lease_set),
             tunnel_pool_handle,
             unpublished,
@@ -321,14 +375,15 @@ impl<R: Runtime> Destination<R> {
     /// outbound tunnels of [`Destination`].
     fn send_message_inner(
         &mut self,
-        destination_id: &DestinationId,
+        delivery_style: DeliveryStyle,
         message: Vec<u8>,
     ) -> crate::Result<()> {
-        let Some(context) = self.remote_destinations.get_mut(destination_id) else {
+        let Some(context) = self.remote_destinations.get_mut(delivery_style.destination_id())
+        else {
             tracing::warn!(
                 target: LOG_TARGET,
                 local = %self.destination_id,
-                remote = %destination_id,
+                remote = %delivery_style.destination_id(),
                 "`Destination::encrypt()` called but lease set is missing",
             );
             debug_assert!(false);
@@ -340,12 +395,12 @@ impl<R: Runtime> Destination<R> {
             tracing::debug!(
                 target: LOG_TARGET,
                 local = %self.destination_id,
-                remote = %destination_id,
+                remote = %delivery_style.destination_id(),
                 "postpone outbound message, remote lease set is expired"
             );
 
             context.pending_messages.push_back(message);
-            self.query_lease_set(destination_id);
+            self.query_lease_set(delivery_style.destination_id());
 
             return Ok(());
         }
@@ -359,21 +414,86 @@ impl<R: Runtime> Destination<R> {
             .with_payload(&message)
             .build();
 
-        // select random tunnel for delivery
-        let random_lease = R::rng().next_u32() as usize % context.lease_set.leases.len();
+        match delivery_style {
+            DeliveryStyle::ViaRoute {
+                routing_path:
+                    RoutingPath {
+                        destination_id,
+                        inbound,
+                        outbound,
+                    },
+            } => match context.lease_set.leases.iter().find(|lease| lease.tunnel_id == inbound) {
+                Some(Lease { router_id, .. }) => {
+                    if let Err(error) = self
+                        .tunnel_pool_handle
+                        .sender()
+                        .try_send_to_tunnel_via_route(router_id.clone(), inbound, outbound, message)
+                    {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            remote = %destination_id,
+                            %inbound,
+                            %router_id,
+                            %outbound,
+                            ?error,
+                            "failed to send message to tunnel via routing path",
+                        );
+                    }
+                }
+                None => match context.expiring_leases.get(&inbound) {
+                    Some(Lease { router_id, .. }) => {
+                        if let Err(error) =
+                            self.tunnel_pool_handle.sender().try_send_to_tunnel_via_route(
+                                router_id.clone(),
+                                inbound,
+                                outbound,
+                                message,
+                            )
+                        {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                remote = %destination_id,
+                                %inbound,
+                                %router_id,
+                                %outbound,
+                                ?error,
+                                "failed to send message to tunnel via routing path",
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            %inbound,
+                            %outbound,
+                            "lease set for selected ibgw doesn't exist",
+                        );
+                        debug_assert!(false);
+                    }
+                },
+            },
+            DeliveryStyle::Unspecified { destination_id } => {
+                // select random tunnel for delivery
+                let random_lease = R::rng().next_u32() as usize % context.lease_set.leases.len();
 
-        if let Err(error) = self.tunnel_pool_handle.sender().try_send_to_tunnel(
-            context.lease_set.leases[random_lease].router_id.clone(),
-            context.lease_set.leases[random_lease].tunnel_id,
-            message,
-        ) {
-            tracing::debug!(
-                target: LOG_TARGET,
-                local = %self.destination_id,
-                remote = %destination_id,
-                ?error,
-                "failed to send message to tunnel",
-            );
+                if let Err(error) = self.tunnel_pool_handle.sender().try_send_to_tunnel(
+                    context.lease_set.leases[random_lease].router_id.clone(),
+                    context.lease_set.leases[random_lease].tunnel_id,
+                    message,
+                ) {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        remote = %destination_id,
+                        ?error,
+                        "failed to send message to tunnel",
+                    );
+                }
+            }
+            DeliveryStyle::Dummy => unreachable!(),
         }
 
         Ok(())
@@ -384,11 +504,11 @@ impl<R: Runtime> Destination<R> {
     /// Session manager is expected to have public key of the remote destination.
     pub fn send_message(
         &mut self,
-        destination_id: &DestinationId,
+        delivery_style: DeliveryStyle,
         message: Vec<u8>,
     ) -> crate::Result<()> {
-        match self.session_manager.encrypt(destination_id, message) {
-            Ok(message) => self.send_message_inner(destination_id, message),
+        match self.session_manager.encrypt(delivery_style.destination_id(), message) {
+            Ok(message) => self.send_message_inner(delivery_style, message),
             Err(error) => Err(Error::Session(error)),
         }
     }
@@ -553,9 +673,17 @@ impl<R: Runtime> Destination<R> {
                                 "store lease set for remote destination",
                             );
 
+                            self.routing_path_manager
+                                .register_inbound_tunnel(&destination_id, lease_set.leases.clone());
+
                             match self.remote_destinations.get_mut(&destination_id) {
                                 Some(context) => {
-                                    context.lease_set = lease_set;
+                                    mem::replace(&mut context.lease_set, lease_set)
+                                        .leases
+                                        .into_iter()
+                                        .for_each(|lease| {
+                                            context.expiring_leases.insert(lease.tunnel_id, lease);
+                                        });
                                 }
                                 None => {
                                     self.remote_destinations.insert(
@@ -563,6 +691,7 @@ impl<R: Runtime> Destination<R> {
                                         DestinationContext {
                                             lease_set,
                                             pending_messages: VecDeque::new(),
+                                            expiring_leases: HashMap::new(),
                                         },
                                     );
                                 }
@@ -813,6 +942,16 @@ impl<R: Runtime> Destination<R> {
     pub fn shutdown(&mut self) {
         self.tunnel_pool_handle.shutdown();
     }
+
+    /// Get [`RoutingPathHandle`].
+    pub fn routing_path_handle(&mut self, destination_id: DestinationId) -> RoutingPathHandle<R> {
+        self.routing_path_manager.handle(destination_id)
+    }
+
+    /// Get [`PendingRoutingPathHandle`].
+    pub fn pending_routing_path_handle(&self) -> PendingRoutingPathHandle {
+        self.routing_path_manager.pending_handle()
+    }
 }
 
 impl<R: Runtime> Stream for Destination<R> {
@@ -837,20 +976,24 @@ impl<R: Runtime> Stream for Destination<R> {
                     );
 
                     self.inbound_tunnels.push(lease.clone());
-                    self.lease_set_manager.register_inbound_tunnel(lease);
+                    self.lease_set_manager.register_inbound_tunnel(lease.clone());
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
                     self.outbound_tunnels.push(tunnel_id);
+                    self.routing_path_manager.register_outbound_tunnel_built(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
                     self.outbound_tunnels.retain(|tunnel| tunnel != &tunnel_id);
+                    self.routing_path_manager.register_outbound_tunnel_expired(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
                     self.inbound_tunnels.retain(|lease| lease.tunnel_id != tunnel_id);
                     self.lease_set_manager.register_expired_inbound_tunnel(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpiring { .. })) => {}
-                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpiring { .. })) => {}
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpiring { tunnel_id })) => {
+                    self.routing_path_manager.register_outbound_tunnel_expiring(tunnel_id);
+                }
                 Poll::Ready(Some(TunnelPoolEvent::Message { message })) =>
                     match self.decrypt_message(message) {
                         Err(error) => tracing::warn!(
@@ -879,7 +1022,9 @@ impl<R: Runtime> Stream for Destination<R> {
                     destination_id,
                     message,
                 })) =>
-                    if let Err(error) = self.send_message_inner(&destination_id, message) {
+                    if let Err(error) = self
+                        .send_message_inner(DeliveryStyle::Unspecified { destination_id }, message)
+                    {
                         tracing::warn!(
                             target: LOG_TARGET,
                             local = %self.destination_id,
@@ -907,6 +1052,8 @@ impl<R: Runtime> Stream for Destination<R> {
                         destination_id.clone(),
                         lease_set.public_keys[0].clone(),
                     );
+                    self.routing_path_manager
+                        .register_inbound_tunnel(&destination_id, lease_set.leases.clone());
 
                     // add new lease set for destination or create new destination of it didn't
                     // exist
@@ -919,9 +1066,12 @@ impl<R: Runtime> Stream for Destination<R> {
 
                             mem::take(&mut context.pending_messages).into_iter().for_each(
                                 |message| {
-                                    if let Err(error) =
-                                        self.send_message_inner(&destination_id, message)
-                                    {
+                                    if let Err(error) = self.send_message_inner(
+                                        DeliveryStyle::Unspecified {
+                                            destination_id: destination_id.clone(),
+                                        },
+                                        message,
+                                    ) {
                                         tracing::debug!(
                                             target: LOG_TARGET,
                                             local = %self.destination_id,
@@ -939,6 +1089,7 @@ impl<R: Runtime> Stream for Destination<R> {
                                 DestinationContext {
                                     lease_set,
                                     pending_messages: VecDeque::new(),
+                                    expiring_leases: HashMap::new(),
                                 },
                             );
                         }
@@ -949,10 +1100,33 @@ impl<R: Runtime> Stream for Destination<R> {
             },
         }
 
+        if self.routing_path_manager.poll_unpin(cx).is_ready() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "routing path manager exited",
+            );
+        }
+
         match self.lease_set_manager.poll_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(leases) =>
                 return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases })),
+        }
+
+        if self.lease_set_prune_timer.poll_unpin(cx).is_ready() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "pruning stale lease sets",
+            );
+
+            let now = R::time_since_epoch();
+            self.remote_destinations.iter_mut().for_each(|(_, context)| {
+                context.expiring_leases.retain(|_, lease| lease.expires > now);
+            });
+
+            self.lease_set_prune_timer = Box::pin(R::delay(LEASE_SET_PRUNE_INTERVAL));
+            let _ = self.lease_set_prune_timer.poll_unpin(cx);
         }
 
         self.waker = Some(cx.waker().clone());
@@ -965,7 +1139,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::SigningPrivateKey,
-        i2np::database::lookup::DatabaseLookup,
+        i2np::{database::lookup::DatabaseLookup, garlic::GarlicClove},
         netdb::NetDbAction,
         primitives::{Destination as Dest, LeaseSet2Header, RouterId, TunnelId},
         runtime::{mock::MockRuntime, Runtime},
@@ -999,6 +1173,7 @@ mod tests {
             DestinationContext {
                 lease_set,
                 pending_messages: VecDeque::new(),
+                expiring_leases: HashMap::new(),
             },
         );
 
@@ -1031,6 +1206,7 @@ mod tests {
             DestinationContext {
                 lease_set,
                 pending_messages: VecDeque::new(),
+                expiring_leases: HashMap::new(),
             },
         );
 
@@ -1163,7 +1339,14 @@ mod tests {
             false,
         );
 
-        destination.send_message(&DestinationId::random(), vec![1, 2, 3, 4]).unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: DestinationId::random(),
+                },
+                vec![1, 2, 3, 4],
+            )
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1716,6 +1899,7 @@ mod tests {
             DestinationContext {
                 lease_set: expired_lease_set,
                 pending_messages: VecDeque::new(),
+                expiring_leases: HashMap::new(),
             },
         );
 
@@ -1724,9 +1908,30 @@ mod tests {
             .add_remote_destination(remote.clone(), lease_set.public_keys[0].clone());
 
         // send three messages and verify they're all queried
-        destination.send_message(&remote, vec![1, 1, 1, 1]).unwrap();
-        destination.send_message(&remote, vec![2, 2, 2, 2]).unwrap();
-        destination.send_message(&remote, vec![3, 3, 3, 3]).unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: remote.clone(),
+                },
+                vec![1, 1, 1, 1],
+            )
+            .unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: remote.clone(),
+                },
+                vec![2, 2, 2, 2],
+            )
+            .unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: remote.clone(),
+                },
+                vec![3, 3, 3, 3],
+            )
+            .unwrap();
 
         assert!(destination.pending_queries.contains(&remote));
         assert_eq!(destination.query_futures.len(), 1);
@@ -1767,6 +1972,239 @@ mod tests {
                 TunnelMessage::TunnelDelivery { .. } => {}
                 _ => panic!("invalid tunnel message type"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn new_lease_set_received() {
+        let (netdb_handle, _rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let private_key = StaticPrivateKey::random(MockRuntime::rng());
+        let destination_id = DestinationId::random();
+        let public_key = private_key.public();
+        let mut destination = Destination::<MockRuntime>::new(
+            destination_id.clone(),
+            private_key,
+            Bytes::new(),
+            netdb_handle,
+            tp_handle,
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+
+        // create remote destination and two leases for it
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
+        let dest = Dest::new::<MockRuntime>(signing_key.public());
+        let remote_dest_id = dest.id();
+        let expiring_inbound1 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let expiring_inbound2 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let lease_set = Bytes::from(
+            LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination: dest.clone(),
+                    expires: Duration::from_secs(10).as_secs() as u32,
+                    is_unpublished: false,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
+                },
+                public_keys: vec![encryption_key.public()],
+                leases: vec![expiring_inbound1.clone(), expiring_inbound2.clone()],
+            }
+            .serialize(&signing_key),
+        );
+
+        // create session manager and an NS message
+        let mut session_manager = SessionManager::<MockRuntime>::new(
+            remote_dest_id.clone(),
+            encryption_key.clone(),
+            lease_set,
+        );
+        session_manager.add_remote_destination(destination_id.clone(), public_key);
+        let payload = session_manager.encrypt(&destination_id, vec![1, 3, 3, 7]).unwrap();
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload,
+        };
+
+        // verify that the remote destination isn't known to `destination`
+        assert!(destination.remote_destinations.get(&remote_dest_id).is_none());
+
+        // decrypt NS
+        let messages = destination.decrypt_message(message).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![1, 3, 3, 7]);
+
+        match destination.remote_destinations.get(&remote_dest_id) {
+            Some(context) => {
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == expiring_inbound1.tunnel_id
+                        && lease.router_id == expiring_inbound1.router_id)
+                    .is_some());
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == expiring_inbound2.tunnel_id
+                        && lease.router_id == expiring_inbound2.router_id)
+                    .is_some());
+                assert!(context.expiring_leases.is_empty())
+            }
+            None => panic!("expected to find context"),
+        }
+
+        // send NSR
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: destination
+                .session_manager
+                .encrypt(&remote_dest_id, vec![1, 3, 3, 8])
+                .unwrap(),
+        };
+
+        let Some(GarlicClove { message_body, .. }) = session_manager
+            .decrypt(message)
+            .unwrap()
+            .find(|message| message.message_type == MessageType::Data)
+        else {
+            panic!("data message not found");
+        };
+        assert_eq!(message_body, vec![0, 0, 0, 4, 1, 3, 3, 8]);
+
+        // send ES which starts a new session
+        let payload = session_manager.encrypt(&destination_id, vec![1, 3, 3, 9]).unwrap();
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload,
+        };
+
+        // decrypt NS
+        let messages = destination.decrypt_message(message).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![1, 3, 3, 9]);
+
+        // create new lease set for `session_manager`
+        let new_inbound1 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let new_inbound2 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let new_lease_set = Bytes::from(
+            LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination: dest.clone(),
+                    expires: Duration::from_secs(10).as_secs() as u32,
+                    is_unpublished: false,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
+                },
+                public_keys: vec![encryption_key.public()],
+                leases: vec![new_inbound1.clone(), new_inbound2.clone()],
+            }
+            .serialize(&signing_key),
+        );
+        session_manager.set_local_leaseset(new_lease_set);
+
+        // send ES with a bundled lease set
+        let payload = session_manager.encrypt(&destination_id, vec![1, 3, 4, 0]).unwrap();
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload,
+        };
+
+        // decrypt NS
+        let messages = destination.decrypt_message(message).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![1, 3, 4, 0]);
+
+        // verify that the old lease set is now `expiring_leases`
+        match destination.remote_destinations.get(&remote_dest_id) {
+            Some(context) => {
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound1.tunnel_id
+                        && lease.router_id == new_inbound1.router_id)
+                    .is_some());
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound2.tunnel_id
+                        && lease.router_id == new_inbound2.router_id)
+                    .is_some());
+
+                match context.expiring_leases.get(&expiring_inbound1.tunnel_id) {
+                    Some(lease) => {
+                        assert_eq!(lease.router_id, expiring_inbound1.router_id);
+                        assert_eq!(lease.expires.as_secs(), expiring_inbound1.expires.as_secs());
+                    }
+                    None => panic!("expected lease set to be found"),
+                }
+
+                match context.expiring_leases.get(&expiring_inbound2.tunnel_id) {
+                    Some(lease) => {
+                        assert_eq!(lease.router_id, expiring_inbound2.router_id);
+                        assert_eq!(lease.expires.as_secs(), expiring_inbound2.expires.as_secs());
+                    }
+                    None => panic!("expected lease set to be found"),
+                }
+            }
+            None => panic!("expected to find context"),
+        }
+
+        // set the lease set prune interval to a shorter timeout and poll `destination` until the
+        // timer expires
+        destination.lease_set_prune_timer = Box::pin(MockRuntime::delay(Duration::from_secs(11)));
+
+        assert!(tokio::time::timeout(Duration::from_secs(15), destination.next()).await.is_err());
+
+        // verify the old lease set has been pruned
+        match destination.remote_destinations.get(&remote_dest_id) {
+            Some(context) => {
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound1.tunnel_id
+                        && lease.router_id == new_inbound1.router_id)
+                    .is_some());
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound2.tunnel_id
+                        && lease.router_id == new_inbound2.router_id)
+                    .is_some());
+                assert!(context.expiring_leases.is_empty());
+            }
+            None => panic!("expected to find context"),
         }
     }
 }

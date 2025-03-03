@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    destination::routing_path::{PendingRoutingPathHandle, RoutingPathHandle},
     error::StreamingError,
     primitives::DestinationId,
     runtime::{JoinSet, Runtime, TcpStream},
@@ -50,23 +51,33 @@ pub enum StreamListenerEvent {
 pub enum ListenerKind<R: Runtime> {
     /// Listener used to accept one inbound virtual stream (`STREAM ACCEPT`).
     Ephemeral {
-        /// SAMv3 socket used to communicate with the client.
-        socket: SamSocket<R>,
+        /// Pending routing path handle.
+        ///
+        /// Bound to a `DestinationId` once an inbound connection has been estasblished.
+        pending_routing_path_handle: PendingRoutingPathHandle,
 
         /// Has the stream configured to be silent.
         silent: bool,
+
+        /// SAMv3 socket used to communicate with the client.
+        socket: SamSocket<R>,
     },
 
     /// Listener used to accept all inbound virtual stream (`STREAM FORWARD`).
     Persistent {
-        /// SAMv3 socket used the client used to send the `STREAM FORWARD` command.
-        socket: SamSocket<R>,
+        /// Pending routing path handle.
+        ///
+        /// Bound to a `DestinationId` once an inbound connection has been estasblished.
+        pending_routing_path_handle: PendingRoutingPathHandle,
 
         /// Port which the persistent TCP listener is listening on.
         port: u16,
 
         /// Has the stream configured to be silent.
         silent: bool,
+
+        /// SAMv3 socket used the client used to send the `STREAM FORWARD` command.
+        socket: SamSocket<R>,
     },
 }
 
@@ -86,17 +97,22 @@ impl<R: Runtime> fmt::Debug for ListenerKind<R> {
 /// Socket kind for a SAMV3 socket.
 pub enum SocketKind<R: Runtime> {
     /// Direct connection opened with `STREAM CONNECT`.
-    #[allow(unused)]
     Connect {
         /// Underlying TCP stream of the SAMv3 socket.
         socket: R::TcpStream,
 
         /// Has the stream configured to be silent.
         silent: bool,
+
+        /// Routing path handle.
+        routing_path_handle: RoutingPathHandle<R>,
     },
 
     /// Direct connection opened with `STREAM ACCEPT`.
     Accept {
+        /// Pending routing path handle.
+        pending_routing_path_handle: PendingRoutingPathHandle,
+
         /// Underlying TCP stream of the SAMv3 socket.
         socket: R::TcpStream,
 
@@ -108,6 +124,9 @@ pub enum SocketKind<R: Runtime> {
     ///
     /// Returns a future which attempts to open a TCP stream to the listener.
     Forwarded {
+        /// Pending routing path handle.
+        pending_routing_path_handle: PendingRoutingPathHandle,
+
         /// Future which attempts to open a new connection to the TCP listener.
         future: BoxFuture<'static, Option<R::TcpStream>>,
 
@@ -134,8 +153,8 @@ enum PendingListenerKind {
 impl fmt::Debug for PendingListenerKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Ephemeral => f.debug_struct("PendingListenerKind::Ephemeral").finish(),
-            Self::Persistent { port, silent } => f
+            Self::Ephemeral { .. } => f.debug_struct("PendingListenerKind::Ephemeral").finish(),
+            Self::Persistent { port, silent, .. } => f
                 .debug_struct("PendingListenerKind::Persistent")
                 .field("port", &port)
                 .field("silent", &silent)
@@ -175,20 +194,23 @@ enum ListenerState<R: Runtime> {
         /// Ephemeral sockest and their silence configuration.
         ///
         /// Each ephemeral socket is able to accept one stream.
-        sockets: VecDeque<(SamSocket<R>, bool)>,
+        sockets: VecDeque<(SamSocket<R>, bool, PendingRoutingPathHandle)>,
     },
 
     /// Listener is configured to be persistent.
     Persistent {
-        /// Socket that was used to send the `STREAM FORWARD` command.
-        #[allow(unused)]
-        socket: SamSocket<R>,
+        /// Pending routing path handle.
+        pending_routing_path_handle: PendingRoutingPathHandle,
 
         /// Port of the active TCP listener.
         port: u16,
 
         /// Have the inbound streams been configured to be silent.
         silent: bool,
+
+        /// Socket that was used to send the `STREAM FORWARD` command.
+        #[allow(unused)]
+        socket: SamSocket<R>,
     },
 
     /// Listener state has been poisoned.
@@ -220,7 +242,7 @@ pub struct StreamListener<R: Runtime> {
     destination_id: DestinationId,
 
     /// Pending sockets.
-    pending_sockets: R::JoinSet<crate::Result<SamSocket<R>>>,
+    pending_sockets: R::JoinSet<crate::Result<(SamSocket<R>, PendingRoutingPathHandle)>>,
 
     /// Listener state.
     state: ListenerState<R>,
@@ -252,22 +274,30 @@ impl<R: Runtime> StreamListener<R> {
         match &mut self.state {
             ListenerState::Ephemeral { ref mut sockets } => {
                 // socket must exist since state is `Ephemeral` and not `Uninitialized`
-                let (socket, silent) = sockets.pop_front().expect("to exist");
+                let (socket, silent, pending_routing_path_handle) =
+                    sockets.pop_front().expect("to exist");
 
                 if sockets.is_empty() {
                     self.state = ListenerState::Uninitialized;
                 }
 
                 Some(SocketKind::Accept {
-                    socket: socket.into_inner(),
+                    pending_routing_path_handle,
                     silent,
+                    socket: socket.into_inner(),
                 })
             }
-            ListenerState::Persistent { port, silent, .. } => {
+            ListenerState::Persistent {
+                port,
+                silent,
+                pending_routing_path_handle,
+                ..
+            } => {
                 let port = *port;
                 let silent = *silent;
 
                 Some(SocketKind::Forwarded {
+                    pending_routing_path_handle: pending_routing_path_handle.clone(),
                     silent,
                     future: Box::pin(async move {
                         R::TcpStream::connect(SocketAddr::new(
@@ -304,7 +334,7 @@ impl<R: Runtime> StreamListener<R> {
                 ListenerState::Ephemeral { .. }
                 | ListenerState::Uninitialized { .. }
                 | ListenerState::Initializing {
-                    kind: PendingListenerKind::Ephemeral,
+                    kind: PendingListenerKind::Ephemeral { .. },
                 },
                 kind @ ListenerKind::Ephemeral { .. },
             ) => Some(kind),
@@ -384,45 +414,21 @@ impl<R: Runtime> StreamListener<R> {
         // `Initializing` state which indicates that at least one socket is being initialized for
         // accepting a new connection
         match (&mut self.state, kind) {
-            (ListenerState::Uninitialized, ListenerKind::Ephemeral { mut socket, silent }) =>
-                match silent {
-                    true => {
-                        self.state = ListenerState::Ephemeral {
-                            sockets: VecDeque::from_iter([(socket, silent)]),
-                        };
-
-                        Ok(true)
-                    }
-                    false => {
-                        self.state = ListenerState::Initializing {
-                            kind: PendingListenerKind::Ephemeral,
-                        };
-
-                        self.pending_sockets.push(async move {
-                            socket
-                                .send_message_blocking(
-                                    "STREAM STATUS RESULT=OK\n".as_bytes().to_vec(),
-                                )
-                                .await
-                                .map(|()| socket)
-                        });
-
-                        if let Some(waker) = self.waker.take() {
-                            waker.wake_by_ref();
-                        }
-
-                        Ok(false)
-                    }
-                },
             (
-                ListenerState::Initializing {
-                    kind: PendingListenerKind::Ephemeral,
+                ListenerState::Uninitialized,
+                ListenerKind::Ephemeral {
+                    mut socket,
+                    silent,
+                    pending_routing_path_handle,
                 },
-                ListenerKind::Ephemeral { mut socket, silent },
             ) => match silent {
                 true => {
                     self.state = ListenerState::Ephemeral {
-                        sockets: VecDeque::from_iter([(socket, silent)]),
+                        sockets: VecDeque::from_iter([(
+                            socket,
+                            silent,
+                            pending_routing_path_handle,
+                        )]),
                     };
 
                     Ok(true)
@@ -436,7 +442,47 @@ impl<R: Runtime> StreamListener<R> {
                         socket
                             .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
                             .await
-                            .map(|()| socket)
+                            .map(|()| (socket, pending_routing_path_handle))
+                    });
+
+                    if let Some(waker) = self.waker.take() {
+                        waker.wake_by_ref();
+                    }
+
+                    Ok(false)
+                }
+            },
+            (
+                ListenerState::Initializing {
+                    kind: PendingListenerKind::Ephemeral,
+                },
+                ListenerKind::Ephemeral {
+                    mut socket,
+                    silent,
+                    pending_routing_path_handle,
+                },
+            ) => match silent {
+                true => {
+                    self.state = ListenerState::Ephemeral {
+                        sockets: VecDeque::from_iter([(
+                            socket,
+                            silent,
+                            pending_routing_path_handle,
+                        )]),
+                    };
+
+                    Ok(true)
+                }
+                false => {
+                    self.state = ListenerState::Initializing {
+                        kind: PendingListenerKind::Ephemeral,
+                    };
+
+                    self.pending_sockets.push(async move {
+                        socket
+                            .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
+                            .await
+                            .map(|()| (socket, pending_routing_path_handle))
                     });
 
                     if let Some(waker) = self.waker.take() {
@@ -448,10 +494,14 @@ impl<R: Runtime> StreamListener<R> {
             },
             (
                 ListenerState::Ephemeral { ref mut sockets },
-                ListenerKind::Ephemeral { mut socket, silent },
+                ListenerKind::Ephemeral {
+                    mut socket,
+                    silent,
+                    pending_routing_path_handle,
+                },
             ) => match silent {
                 true => {
-                    sockets.push_back((socket, silent));
+                    sockets.push_back((socket, silent, pending_routing_path_handle));
                     Ok(true)
                 }
                 false => {
@@ -459,7 +509,7 @@ impl<R: Runtime> StreamListener<R> {
                         socket
                             .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
                             .await
-                            .map(|()| socket)
+                            .map(|()| (socket, pending_routing_path_handle))
                     });
 
                     if let Some(waker) = self.waker.take() {
@@ -475,6 +525,7 @@ impl<R: Runtime> StreamListener<R> {
                     mut socket,
                     port,
                     silent,
+                    pending_routing_path_handle,
                 },
             ) => {
                 self.state = ListenerState::Initializing {
@@ -492,7 +543,7 @@ impl<R: Runtime> StreamListener<R> {
                     socket
                         .send_message_blocking("STREAM STATUS RESULT=OK\n".as_bytes().to_vec())
                         .await
-                        .map(|()| socket)
+                        .map(|()| (socket, pending_routing_path_handle))
                 });
 
                 if let Some(waker) = self.waker.take() {
@@ -520,23 +571,31 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
                     ?error,
                     "failed to send status message",
                 ),
-                Poll::Ready(Some(Ok(socket))) => {
+                Poll::Ready(Some(Ok((socket, pending_routing_path_handle)))) => {
                     match mem::replace(&mut self.state, ListenerState::Poisoned) {
                         ListenerState::Uninitialized { .. } => {
                             // connection wasn't configured to be silent because
                             // a status message was sent to the client
                             self.state = ListenerState::Ephemeral {
-                                sockets: VecDeque::from_iter([(socket, false)]),
+                                sockets: VecDeque::from_iter([(
+                                    socket,
+                                    false,
+                                    pending_routing_path_handle,
+                                )]),
                             };
                         }
                         ListenerState::Ephemeral { mut sockets } => {
-                            sockets.push_back((socket, false));
+                            sockets.push_back((socket, false, pending_routing_path_handle));
                             self.state = ListenerState::Ephemeral { sockets };
                         }
                         ListenerState::Initializing { kind } => match kind {
                             PendingListenerKind::Ephemeral => {
                                 self.state = ListenerState::Ephemeral {
-                                    sockets: VecDeque::from_iter([(socket, false)]),
+                                    sockets: VecDeque::from_iter([(
+                                        socket,
+                                        false,
+                                        pending_routing_path_handle,
+                                    )]),
                                 };
                             }
                             PendingListenerKind::Persistent { port, silent } => {
@@ -544,6 +603,7 @@ impl<R: Runtime> futures::Stream for StreamListener<R> {
                                     socket,
                                     port,
                                     silent,
+                                    pending_routing_path_handle,
                                 };
                             }
                         },
@@ -590,6 +650,7 @@ mod tests {
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -598,7 +659,8 @@ mod tests {
             listener.register_listener(ListenerKind::Persistent {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 port: 1337,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Err(StreamingError::ListenerMismatch)
         );
@@ -616,7 +678,8 @@ mod tests {
             listener.register_listener(ListenerKind::Persistent {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 port: 1337,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -624,7 +687,8 @@ mod tests {
         assert_eq!(
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(NoopTcpStream::new()),
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Err(StreamingError::ListenerMismatch)
         );
@@ -642,6 +706,7 @@ mod tests {
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -656,7 +721,8 @@ mod tests {
         assert_eq!(
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(NoopTcpStream::new()),
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -681,6 +747,7 @@ mod tests {
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(true)
         );
@@ -693,7 +760,8 @@ mod tests {
         assert_eq!(
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(NoopTcpStream::new()),
-                silent: true
+                silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(true)
         );
@@ -716,7 +784,8 @@ mod tests {
             listener.register_listener(ListenerKind::Persistent {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 port: 1337,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -725,7 +794,8 @@ mod tests {
             listener.register_listener(ListenerKind::Persistent {
                 socket: SamSocket::new(NoopTcpStream::new()),
                 port: 1338,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Err(StreamingError::ListenerMismatch)
         );
@@ -747,7 +817,8 @@ mod tests {
             listener.register_listener(ListenerKind::Persistent {
                 socket: SamSocket::new(stream2.unwrap()),
                 port: 1337,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -793,7 +864,8 @@ mod tests {
         assert_eq!(
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(eph1.unwrap()),
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -810,6 +882,7 @@ mod tests {
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(eph2.unwrap()),
                 silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(true)
         );
@@ -847,7 +920,8 @@ mod tests {
         assert_eq!(
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(eph1.unwrap()),
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );
@@ -864,6 +938,7 @@ mod tests {
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(eph2.unwrap()),
                 silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(true)
         );
@@ -907,7 +982,8 @@ mod tests {
         assert_eq!(
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(eph1.unwrap()),
-                silent: true
+                silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(true)
         );
@@ -921,6 +997,7 @@ mod tests {
             listener.register_listener(ListenerKind::Ephemeral {
                 socket: SamSocket::new(eph2.unwrap()),
                 silent: true,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(true)
         );
@@ -959,7 +1036,8 @@ mod tests {
             listener.register_listener(ListenerKind::Persistent {
                 socket: SamSocket::new(stream2.unwrap()),
                 port: 1337,
-                silent: false
+                silent: false,
+                pending_routing_path_handle: PendingRoutingPathHandle::create(),
             }),
             Ok(false)
         );

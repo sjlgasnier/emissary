@@ -1605,8 +1605,6 @@ impl<R: Runtime> NetDb<R> {
                 key = ?base32_encode(&key),
                 "cannot send lease set query, no inbound tunnel available",
             );
-            debug_assert!(false);
-
             return Err(QueryError::NoTunnel);
         };
 
@@ -1616,8 +1614,6 @@ impl<R: Runtime> NetDb<R> {
                 key = ?base32_encode(&key),
                 "cannot send lease set query, no outbound tunnel available",
             );
-            debug_assert!(false);
-
             return Err(QueryError::NoTunnel);
         };
 

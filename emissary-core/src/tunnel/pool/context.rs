@@ -314,6 +314,21 @@ pub enum TunnelMessage {
         message: Vec<u8>,
     },
 
+    /// Send message to remote inbound tunnel via specific OBGW.
+    TunnelDeliveryViaRoute {
+        /// ID of the IBGW router.
+        ibgw_router_id: RouterId,
+
+        /// ID of the IBGW this message should be delivered to.
+        ibgw_tunnel_id: TunnelId,
+
+        /// ID of OBGW this message should be sent through.
+        obgw_tunnel_id: TunnelId,
+
+        /// Serialize I2NP message.
+        message: Vec<u8>,
+    },
+
     Dummy,
 }
 
