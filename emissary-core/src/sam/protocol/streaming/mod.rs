@@ -360,45 +360,37 @@ impl<R: Runtime> StreamManager<R> {
             // otherwise use the verifying key specified in the destination
             let verifying_key = match flags.offline_signature() {
                 None => destination.verifying_key(),
-                Some(key) => Some(key),
+                Some(key) => key,
             };
 
-            match verifying_key {
-                None => {
-                    // TODO: verify dsa signature
-                }
-                Some(verifying_key) => {
-                    // signature field is the last field of options, meaning it starts at
-                    // `original.len() - payload.len() - verifying_key.signature_len()`
-                    //
-                    // in order to verify the signature, the calculated signature must be filled
-                    // with zeros
-                    let mut original = packet.to_vec();
+            // signature field is the last field of options, meaning it starts at
+            // `original.len() - payload.len() - verifying_key.signature_len()`
+            //
+            // in order to verify the signature, the calculated signature must be filled
+            // with zeros
+            let mut original = packet.to_vec();
 
-                    if original.len() < payload.len() + verifying_key.signature_len() {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            "cannot verify signature, packet is too short",
-                        );
-                        return Err(StreamingError::Malformed);
-                    }
-
-                    let signature_start =
-                        original.len() - payload.len() - verifying_key.signature_len();
-                    original[signature_start..signature_start + verifying_key.signature_len()]
-                        .copy_from_slice(&vec![0u8; verifying_key.signature_len()]);
-
-                    verifying_key.verify(&original, signature).map_err(|error| {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            ?error,
-                            "failed to verify packet signature"
-                        );
-
-                        StreamingError::InvalidSignature
-                    })?;
-                }
+            if original.len() < payload.len() + verifying_key.signature_len() {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "cannot verify signature, packet is too short",
+                );
+                return Err(StreamingError::Malformed);
             }
+
+            let signature_start = original.len() - payload.len() - verifying_key.signature_len();
+            original[signature_start..signature_start + verifying_key.signature_len()]
+                .copy_from_slice(&vec![0u8; verifying_key.signature_len()]);
+
+            verifying_key.verify(&original, signature).map_err(|error| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to verify packet signature"
+                );
+
+                StreamingError::InvalidSignature
+            })?;
         }
 
         // if this is a syn-ack for an outbound stream, initialize state

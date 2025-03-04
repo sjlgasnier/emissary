@@ -83,16 +83,9 @@ impl LeaseSet2Header {
             ));
         }
 
-        let Some(verifying_key) = destination.verifying_key() else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "no verifying key specified, cannot verify offline signature",
-            );
-            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
-        };
-
         // parse and verify offline signature and get key for verifying the lease set's signature
-        let (rest, verifying_key) = OfflineSignature::parse_frame(rest, verifying_key)?;
+        let (rest, verifying_key) =
+            OfflineSignature::parse_frame(rest, destination.verifying_key())?;
 
         Ok((
             rest,
@@ -347,58 +340,41 @@ impl LeaseSet2 {
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         }
 
-        let rest = match header.destination.verifying_key() {
+        // verify signature
+        //
+        // TODO: optimize?
+        let (rest, signature) = take(header.destination.verifying_key().signature_len())(rest)?;
+
+        let mut bytes = BytesMut::with_capacity(input.len());
+        bytes.put_u8(3u8);
+        bytes.put_slice(
+            &input[..input.len() - rest.len() - header.destination.verifying_key().signature_len()],
+        );
+
+        match &header.offline_signature {
             None => {
-                // TODO: DSA?
-                let (rest, _signature) = take(40usize)(rest)?;
+                header.destination.verifying_key().verify(&bytes, signature).map_err(|error| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "invalid signature for lease set",
+                    );
 
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    id = %header.destination.id(),
-                    "no signing key in destination, cannot verify signature",
-                );
-
-                rest
-                // return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                    Err::Error(make_error(input, ErrorKind::Fail))
+                })?;
             }
             Some(verifying_key) => {
-                // verify signature
-                //
-                // TODO: optimize?
-                let (rest, signature) = take(verifying_key.signature_len())(rest)?;
+                verifying_key.verify(&bytes, signature).map_err(|error| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "invalid signature for lease set with offline key",
+                    );
 
-                let mut bytes = BytesMut::with_capacity(input.len());
-                bytes.put_u8(3u8);
-                bytes.put_slice(&input[..input.len() - rest.len() - verifying_key.signature_len()]);
-
-                match &header.offline_signature {
-                    None => {
-                        verifying_key.verify(&bytes, signature).map_err(|error| {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "invalid signature for lease set",
-                            );
-
-                            Err::Error(make_error(input, ErrorKind::Fail))
-                        })?;
-                    }
-                    Some(verifying_key) => {
-                        verifying_key.verify(&bytes, signature).map_err(|error| {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "invalid signature for lease set with offline key",
-                            );
-
-                            Err::Error(make_error(input, ErrorKind::Fail))
-                        })?;
-                    }
-                }
-
-                rest
+                    Err::Error(make_error(input, ErrorKind::Fail))
+                })?;
             }
-        };
+        }
 
         Ok((
             rest,
@@ -1140,5 +1116,43 @@ mod tests {
         assert_eq!(leaseset.leases[1], lease2);
         assert_eq!(leaseset.header.destination.id(), id);
         assert!(leaseset.header.is_unpublished);
+    }
+
+    #[test]
+    fn lease_set_dsa_sha1() {
+        let input = vec![
+            18, 16, 215, 62, 194, 45, 30, 46, 195, 127, 31, 63, 255, 72, 135, 63, 57, 35, 136, 173,
+            121, 235, 204, 42, 18, 39, 192, 69, 58, 254, 158, 2, 51, 159, 5, 90, 6, 103, 132, 157,
+            33, 215, 124, 185, 0, 251, 177, 127, 54, 186, 176, 247, 156, 144, 46, 86, 105, 141,
+            174, 141, 212, 60, 144, 54, 210, 87, 63, 31, 131, 111, 118, 169, 94, 226, 176, 178,
+            228, 205, 72, 104, 25, 153, 237, 164, 20, 117, 207, 135, 179, 194, 177, 252, 192, 71,
+            12, 103, 225, 221, 190, 55, 30, 249, 87, 128, 82, 10, 4, 43, 210, 4, 99, 13, 175, 203,
+            252, 153, 173, 196, 244, 84, 165, 149, 246, 55, 32, 111, 15, 76, 57, 49, 38, 131, 255,
+            219, 120, 70, 224, 145, 67, 104, 21, 14, 149, 20, 13, 196, 225, 218, 57, 38, 217, 181,
+            254, 71, 219, 209, 32, 120, 66, 100, 182, 172, 31, 16, 209, 238, 178, 66, 247, 237,
+            252, 184, 203, 16, 235, 44, 29, 226, 233, 80, 65, 130, 44, 210, 64, 117, 176, 74, 31,
+            117, 117, 50, 167, 42, 169, 133, 5, 61, 196, 140, 115, 237, 172, 224, 204, 162, 105,
+            253, 209, 231, 38, 146, 122, 74, 150, 135, 237, 74, 195, 55, 230, 31, 58, 64, 47, 24,
+            80, 91, 147, 217, 62, 187, 115, 70, 151, 158, 245, 99, 109, 57, 117, 1, 127, 151, 117,
+            199, 189, 82, 159, 232, 212, 189, 252, 155, 237, 86, 29, 9, 137, 188, 16, 218, 162,
+            213, 63, 45, 216, 253, 59, 85, 137, 247, 239, 166, 233, 205, 24, 234, 223, 157, 90,
+            211, 231, 237, 92, 222, 85, 141, 31, 31, 32, 77, 169, 88, 221, 31, 175, 83, 154, 195,
+            119, 192, 115, 220, 8, 77, 51, 162, 150, 146, 214, 106, 240, 184, 135, 30, 18, 84, 196,
+            137, 30, 109, 118, 108, 137, 223, 159, 218, 15, 208, 129, 20, 114, 195, 17, 187, 146,
+            194, 37, 42, 192, 140, 18, 125, 59, 233, 253, 55, 47, 234, 22, 36, 137, 107, 2, 14, 76,
+            117, 7, 126, 170, 88, 53, 6, 205, 72, 134, 180, 124, 97, 63, 35, 53, 138, 215, 213,
+            177, 157, 150, 99, 235, 36, 58, 98, 0, 0, 0, 103, 195, 21, 13, 2, 87, 0, 0, 0, 0, 1, 0,
+            4, 0, 32, 20, 91, 61, 174, 160, 33, 209, 163, 0, 150, 8, 154, 29, 232, 174, 235, 192,
+            96, 123, 3, 213, 16, 79, 84, 246, 158, 47, 220, 205, 31, 196, 47, 2, 46, 219, 116, 45,
+            193, 31, 34, 103, 83, 102, 5, 254, 119, 73, 16, 178, 45, 213, 8, 127, 24, 7, 25, 87,
+            97, 6, 81, 159, 52, 5, 111, 111, 249, 172, 240, 204, 103, 195, 23, 100, 189, 90, 21,
+            96, 216, 171, 118, 150, 8, 39, 190, 58, 100, 216, 116, 180, 166, 184, 249, 155, 7, 131,
+            54, 78, 57, 235, 80, 246, 138, 58, 94, 188, 12, 33, 155, 125, 103, 195, 21, 171, 110,
+            233, 119, 62, 189, 223, 229, 10, 12, 49, 4, 85, 149, 49, 0, 43, 186, 186, 233, 216, 12,
+            17, 20, 213, 252, 108, 42, 129, 123, 41, 151, 182, 156, 111, 238, 193, 184, 219, 35,
+            94,
+        ];
+
+        let _ = LeaseSet2::parse(&input).unwrap();
     }
 }

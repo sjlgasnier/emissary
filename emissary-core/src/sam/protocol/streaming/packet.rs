@@ -167,21 +167,12 @@ impl<'a> Flags<'a> {
                     debug_assert!(false);
                     return Err(Err::Error(make_error(options, ErrorKind::Fail)));
                 }
-                Some(destination) => match destination.verifying_key() {
-                    None => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            "dsa-sha1 offline keys not supported",
-                        );
-                        return Err(Err::Error(make_error(options, ErrorKind::Fail)));
-                    }
-                    Some(verifying_key) => {
-                        let (rest, verifying_key) =
-                            OfflineSignature::parse_frame(rest, verifying_key)?;
+                Some(destination) => {
+                    let (rest, verifying_key) =
+                        OfflineSignature::parse_frame(rest, destination.verifying_key())?;
 
-                        (rest, Some(verifying_key))
-                    }
-                },
+                    (rest, Some(verifying_key))
+                }
             },
             false => (rest, None),
         };
@@ -194,14 +185,8 @@ impl<'a> Flags<'a> {
 
                     (rest, Some(rest))
                 }
-                Some(destination) => match destination.verifying_key() {
-                    None => {
-                        let (rest, signature) = take(DSA_SIGNATURE_LEN)(rest)?;
-                        (rest, Some(signature))
-                    }
-                    Some(verifying_key) => take(verifying_key.signature_len())(rest)
-                        .map(|(rest, signature)| (rest, Some(signature)))?,
-                },
+                Some(destination) => take(destination.verifying_key().signature_len())(rest)
+                    .map(|(rest, signature)| (rest, Some(signature)))?,
             },
             false => (rest, None),
         };
@@ -860,10 +845,7 @@ mod tests {
 
         let dest = flags.from_included().as_ref().unwrap();
 
-        assert_eq!(
-            dest.verifying_key().unwrap().as_ref(),
-            signing_key.public().as_ref()
-        );
+        assert_eq!(dest.verifying_key().as_ref(), signing_key.public().as_ref());
         assert_eq!(dest.id(), destination.id());
     }
 
@@ -924,10 +906,7 @@ mod tests {
 
         let dest = flags.from_included().as_ref().unwrap();
 
-        assert_eq!(
-            dest.verifying_key().unwrap().as_ref(),
-            signing_key.public().as_ref()
-        );
+        assert_eq!(dest.verifying_key().as_ref(), signing_key.public().as_ref());
         assert_eq!(dest.id(), destination.id());
     }
 
@@ -976,7 +955,7 @@ mod tests {
         // verify signature
         {
             let destination = packet.flags.from_included().clone().unwrap();
-            let verifying_key = destination.verifying_key().clone().unwrap();
+            let verifying_key = destination.verifying_key().clone();
             let signature = packet.flags.signature().clone().unwrap();
             let signature_offset = serialized.len() - SIGNATURE_LEN - packet.payload.len();
 

@@ -118,7 +118,7 @@ pub struct Destination {
     serialized: Bytes,
 
     /// Destination's verifying key.
-    verifying_key: Option<SigningPublicKey>,
+    verifying_key: SigningPublicKey,
 }
 
 impl Destination {
@@ -150,7 +150,7 @@ impl Destination {
             destination_id: DestinationId::from(identity_hash.clone()),
             identity_hash: Bytes::from(identity_hash),
             serialized,
-            verifying_key: Some(verifying_key),
+            verifying_key,
         }
     }
 
@@ -175,7 +175,12 @@ impl Destination {
         let (rest, certificate_len) = be_u16(rest)?;
 
         let (rest, verifying_key, destination_len) = match (certificate_kind, certificate_len) {
-            (NULL_CERTIFICATE, _) => (rest, None, DESTINATION_WITH_NULL_CERT_LEN),
+            (NULL_CERTIFICATE, _) => (
+                rest,
+                SigningPublicKey::dsa_sha1(&initial_bytes[384 - 128..384])
+                    .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?,
+                DESTINATION_WITH_NULL_CERT_LEN,
+            ),
             (KEY_CERTIFICATE, KEY_CERTIFICATE_LEN) => {
                 let (rest, signing_key_kind) = be_u16(rest)?;
                 let (rest, _public_key_type) = be_u16(rest)?;
@@ -183,7 +188,7 @@ impl Destination {
                 match signing_key_kind {
                     KEY_KIND_EDDSA_SHA512_ED25519 => (
                         rest,
-                        Some({
+                        {
                             // call must succeed as the slice into `initial_bytes`
                             // and `public_key` are the same size
                             let public_key = TryInto::<[u8; 32]>::try_into(
@@ -193,15 +198,13 @@ impl Destination {
 
                             SigningPublicKey::from_bytes(&public_key)
                                 .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?
-                        }),
+                        },
                         DESTINATION_WITH_KEY_CERT_LEN,
                     ),
                     KEY_KIND_ECDSA_SHA256_P256 => (
                         rest,
-                        Some(
-                            SigningPublicKey::p256(&initial_bytes[384 - 64..384])
-                                .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?,
-                        ),
+                        SigningPublicKey::p256(&initial_bytes[384 - 64..384])
+                            .ok_or_else(|| Err::Error(make_error(input, ErrorKind::Fail)))?,
                         DESTINATION_WITH_KEY_CERT_LEN,
                     ),
                     key_kind => {
@@ -251,7 +254,10 @@ impl Destination {
 
     /// Get serialized length of [`Destination`].
     pub fn serialized_len(&self) -> usize {
-        let certificate_payload_len = self.verifying_key.as_ref().map_or(0usize, |_| 4usize);
+        let certificate_payload_len = match self.verifying_key {
+            SigningPublicKey::DsaSha1(_) => 0usize,
+            _ => 4usize,
+        };
 
         32usize // all zeros public key
             .saturating_add(320usize) // padding
@@ -267,8 +273,8 @@ impl Destination {
     }
 
     /// Get reference to `SigningPublicKey` of the [`Destination`].
-    pub fn verifying_key(&self) -> Option<&SigningPublicKey> {
-        self.verifying_key.as_ref()
+    pub fn verifying_key(&self) -> &SigningPublicKey {
+        &self.verifying_key
     }
 
     /// Get reference to serialized [`Destination`].
@@ -292,8 +298,8 @@ mod tests {
 
         assert_eq!(parsed.destination_id, destination.destination_id);
         assert_eq!(
-            parsed.verifying_key.unwrap().as_ref(),
-            destination.verifying_key.unwrap().as_ref()
+            parsed.verifying_key.as_ref(),
+            destination.verifying_key.as_ref()
         );
     }
 
