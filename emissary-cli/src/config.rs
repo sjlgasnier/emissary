@@ -124,8 +124,8 @@ pub struct HttpProxyConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddressBookConfig {
-    pub default: String,
-    pub subscriptions: Vec<String>,
+    pub default: Option<String>,
+    pub subscriptions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -584,10 +584,10 @@ impl Config {
 
         let config = EmissaryConfig {
             address_book: Some(AddressBookConfig {
-                default: String::from(
+                default: Some(String::from(
                     "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                ),
-                subscriptions: vec![],
+                )),
+                subscriptions: None,
             }),
             http_proxy: Some(HttpProxyConfig {
                 host: "127.0.0.1".to_string(),
@@ -629,10 +629,10 @@ impl Config {
 
         Ok(Self {
             address_book: Some(AddressBookConfig {
-                default: String::from(
+                default: Some(String::from(
                     "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                ),
-                subscriptions: vec![],
+                )),
+                subscriptions: None,
             }),
             allow_local: false,
             base_path,
@@ -708,10 +708,10 @@ impl Config {
             None => {
                 let config = EmissaryConfig {
                     address_book: Some(AddressBookConfig {
-                        default: String::from(
-                            "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt"
-                        ),
-                        subscriptions: vec![],
+                        default: Some(String::from(
+                            "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
+                        )),
+                        subscriptions: None,
                     }),
                     http_proxy: Some(HttpProxyConfig {
                         host: "127.0.0.1".to_string(),

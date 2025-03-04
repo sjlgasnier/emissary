@@ -108,13 +108,7 @@ impl HttpProxy {
         let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
 
         if let Some(tx) = http_proxy_ready_tx {
-            if let Err(error) = tx.send(()) {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to notify that http proxy is ready",
-                );
-            }
+            let _ = tx.send(());
         }
 
         Ok(Self {

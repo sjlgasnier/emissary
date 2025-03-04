@@ -48,7 +48,7 @@ pub struct AddressBookManager {
     address_book_path: &'static str,
 
     /// URL from which the primary `hosts.txt` is downloaded from.
-    hosts_url: String,
+    hosts_url: Option<String>,
 
     /// Additional subscriptions.
     subscriptions: Vec<String>,
@@ -65,7 +65,9 @@ impl AddressBookManager {
                 .to_string()
                 .leak(),
             hosts_url: config.default,
-            subscriptions: config.subscriptions,
+            subscriptions: config
+                .subscriptions
+                .map_or_else(|| Vec::new(), |subscriptions| subscriptions),
         }
     }
 
@@ -192,6 +194,14 @@ impl AddressBookManager {
         http_host: String,
         http_proxy_ready_rx: oneshot::Receiver<()>,
     ) {
+        let Some(hosts_url) = &self.hosts_url else {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "address book download disabled",
+            );
+            return;
+        };
+
         if let Err(error) = http_proxy_ready_rx.await {
             tracing::error!(
                 target: LOG_TARGET,
@@ -204,7 +214,7 @@ impl AddressBookManager {
             target: LOG_TARGET,
             ?http_port,
             ?http_host,
-            default = ?self.hosts_url,
+            ?hosts_url,
             subscriptions = ?self.subscriptions,
             "create address book",
         );
@@ -218,11 +228,11 @@ impl AddressBookManager {
         let mut addresses = HashMap::<String, String>::new();
 
         loop {
-            match Self::download(&client, &self.hosts_url).await {
+            match Self::download(&client, &hosts_url).await {
                 Some(hosts) => {
                     tracing::info!(
                         target: LOG_TARGET,
-                        url = %self.hosts_url,
+                        url = %hosts_url,
                         "hosts.txt downloaded",
                     );
 
@@ -292,8 +302,8 @@ mod tests {
         let address_book = AddressBookManager::new(
             dir.into_path(),
             AddressBookConfig {
-                default: String::from("url"),
-                subscriptions: Vec::new(),
+                default: Some(String::from("url")),
+                subscriptions: None,
             },
         );
 
