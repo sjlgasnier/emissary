@@ -19,7 +19,7 @@
 use crate::{
     error::{ChannelError, QueryError},
     netdb::NetDbHandle,
-    primitives::{Date, RouterAddress, RouterId, RouterInfo, TransportKind},
+    primitives::{Date, RouterAddress, RouterId, RouterInfo, Str, TransportKind},
     router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::{
@@ -519,6 +519,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             // in intervals of [`ROUTER_INFO_REPUBLISH_INTERVAL`]
             router_info_republish_timer: Box::pin(R::delay(Duration::from_secs(10))),
             routers: HashSet::new(),
+            shutting_down: false,
             ssu2_config: self.ssu2_config,
             subsystem_handle: self.subsystem_handle,
             transports: self.transports,
@@ -549,6 +550,9 @@ pub struct TransportManager<R: Runtime> {
 
     /// Pending outbound connections.
     pending_connections: HashSet<RouterId>,
+
+    /// Is the router shutting down.
+    shutting_down: bool,
 
     /// Pending queries.
     pending_queries: HashSet<RouterId>,
@@ -585,6 +589,13 @@ impl<R: Runtime> TransportManager<R> {
         let metrics = Ntcp2Transport::<R>::metrics(metrics);
 
         Ssu2Transport::<R>::metrics(metrics)
+    }
+
+    /// Mark the router as shutting down.
+    ///
+    /// This causes the next publish router info to have `G` capabilities.
+    pub fn shutdown(&mut self) {
+        self.shutting_down = true;
     }
 
     /// Add external address for the router.
@@ -908,6 +919,12 @@ impl<R: Runtime> Future for TransportManager<R> {
         if self.router_info_republish_timer.poll_unpin(cx).is_ready() {
             // reset publish time and serialize our new router info
             self.local_router_info.published = Date::new(R::time_since_epoch().as_millis() as u64);
+
+            // publish `G`, i.e., rejecting all tunnels if the router is shutting down
+            if self.shutting_down {
+                self.local_router_info.options.insert(Str::from("caps"), Str::from("GR"));
+            }
+
             let serialized =
                 Bytes::from(self.local_router_info.serialize(self.router_ctx.signing_key()));
 
@@ -932,7 +949,7 @@ mod tests {
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
         netdb::NetDbAction,
-        primitives::Str,
+        primitives::{Capabilities, Str},
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
     };
@@ -1787,5 +1804,73 @@ mod tests {
             }
             _ => panic!("invalid command"),
         }
+    }
+
+    #[tokio::test]
+    async fn router_shutting_down() {
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (handle, _netdb_rx) = NetDbHandle::create();
+        let ctx = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage.clone(),
+            router_info.identity.id(),
+            serialized.clone(),
+            static_key,
+            signing_key,
+            2u8,
+        );
+        let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: Some("192.168.0.1".parse().unwrap()),
+            publish: true,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let _handle = builder.register_subsystem(SubsystemKind::NetDb);
+        builder.register_netdb_handle(handle);
+        builder.register_ntcp2(context);
+
+        let mut manager = builder.build();
+
+        assert!(Capabilities::parse(
+            &manager.local_router_info.options.get(&Str::from("caps")).unwrap()
+        )
+        .unwrap()
+        .is_usable());
+
+        // shutdown the manager, set RI republish timeout smaller and wait for RI to be published
+        manager.shutdown();
+        manager.router_info_republish_timer = Box::pin(MockRuntime::delay(Duration::from_secs(1)));
+
+        assert!(tokio::time::timeout(Duration::from_secs(3), &mut manager).await.is_err());
+
+        // verify that the local router is no longer considered usable due to the `G` flag
+        assert!(!Capabilities::parse(
+            &manager.local_router_info.options.get(&Str::from("caps")).unwrap()
+        )
+        .unwrap()
+        .is_usable());
     }
 }

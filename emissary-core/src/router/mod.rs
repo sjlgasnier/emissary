@@ -373,7 +373,9 @@ impl<R: Runtime> Router<R> {
                 target: LOG_TARGET,
                 "starting graceful shutdown",
             );
+
             self.shutdown_context.shutdown();
+            self.transport_manager.shutdown();
         } else {
             tracing::info!(
                 target: LOG_TARGET,
