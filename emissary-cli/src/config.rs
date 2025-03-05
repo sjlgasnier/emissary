@@ -27,6 +27,7 @@ use rand::{rngs::OsRng, thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Write},
     net::Ipv4Addr,
@@ -745,6 +746,30 @@ impl Config {
             }
         };
 
+        if let Some(tunnels) = &config.tunnels {
+            // ensure each client tunnel has a unique name
+            if tunnels.iter().map(|config| &config.name).collect::<HashSet<_>>().len()
+                != tunnels.len()
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "all client tunnels must have a unique name",
+                );
+                return Err(Error::InvalidData);
+            }
+
+            // ensure each client tunnel has a unique port
+            if tunnels.iter().map(|config| config.port).collect::<HashSet<_>>().len()
+                != tunnels.len()
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "all client tunnels must have a unique port",
+                );
+                return Err(Error::InvalidData);
+            }
+        }
+
         Ok(Self {
             address_book: config.address_book,
             allow_local: config.allow_local,
@@ -1253,5 +1278,75 @@ mod tests {
         assert!(!config.floodfill);
         assert!(!config.insecure_tunnels);
         assert!(!config.allow_local);
+    }
+
+    #[test]
+    fn client_tunnels_with_same_names() {
+        let dir = tempdir().unwrap();
+
+        // create new ntcp2 config where the port is different
+        let config = EmissaryConfig {
+            tunnels: Some(vec![
+                TunnelConfig {
+                    name: "tunnel".to_string(),
+                    address: None,
+                    port: 1337,
+                    destination: "hello".to_string(),
+                    destination_port: None,
+                },
+                TunnelConfig {
+                    name: "tunnel".to_string(),
+                    address: None,
+                    port: 1338,
+                    destination: "hello".to_string(),
+                    destination_port: None,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let config = toml::to_string(&config).expect("to succeed");
+        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
+        file.write_all(config.as_bytes()).unwrap();
+
+        match Config::parse(Some(dir.path().to_owned()), &make_arguments()) {
+            Err(Error::InvalidData) => {}
+            _ => panic!("invalid result"),
+        }
+    }
+
+    #[test]
+    fn client_tunnels_with_same_ports() {
+        let dir = tempdir().unwrap();
+
+        // create new ntcp2 config where the port is different
+        let config = EmissaryConfig {
+            tunnels: Some(vec![
+                TunnelConfig {
+                    name: "tunnel1".to_string(),
+                    address: None,
+                    port: 1337,
+                    destination: "hello".to_string(),
+                    destination_port: None,
+                },
+                TunnelConfig {
+                    name: "tunnel2".to_string(),
+                    address: None,
+                    port: 1337,
+                    destination: "hello".to_string(),
+                    destination_port: None,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let config = toml::to_string(&config).expect("to succeed");
+        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
+        file.write_all(config.as_bytes()).unwrap();
+
+        match Config::parse(Some(dir.path().to_owned()), &make_arguments()) {
+            Err(Error::InvalidData) => {}
+            _ => panic!("invalid result"),
+        }
     }
 }
