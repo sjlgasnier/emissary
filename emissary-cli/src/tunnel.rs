@@ -18,10 +18,10 @@
 
 use crate::config::TunnelConfig;
 
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, task::JoinSet};
 use yosemite::{style, Session, SessionOptions, StreamOptions};
 
-use std::time::Duration;
+use std::{future::Future, sync::Arc, time::Duration};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::client-tunnel";
@@ -29,53 +29,145 @@ const LOG_TARGET: &str = "emissary::client-tunnel";
 /// Retry timeout.
 const RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Client tunnel.
-pub struct Tunnel;
+/// Client tunnel manager.
+pub struct ClientTunnelManager {
+    /// Tunnel futures.
+    futures: JoinSet<Arc<TunnelConfig>>,
 
-impl Tunnel {
+    /// SAMv3 server port of the router.
+    sam_tcp_port: u16,
+
+    /// Client tunnel configurations.
+    tunnels: Vec<Arc<TunnelConfig>>,
+}
+
+impl ClientTunnelManager {
     /// Create new [`Tunnel`].
-    pub async fn start(config: TunnelConfig, samv3_tcp_port: u16) -> crate::Result<()> {
-        tracing::info!(
-            target: LOG_TARGET,
-            name = %config.name,
-            address = ?config.address,
-            port = %config.port,
-            destination = %config.destination,
-            "starting client tunnel",
-        );
+    pub fn new(tunnels: Vec<TunnelConfig>, sam_tcp_port: u16) -> Self {
+        Self {
+            futures: JoinSet::new(),
+            sam_tcp_port,
+            tunnels: tunnels.into_iter().map(|tunnel| Arc::from(tunnel)).collect(),
+        }
+    }
 
-        let mut session = Session::<style::Stream>::new(SessionOptions {
-            publish: false,
-            samv3_tcp_port,
-            nickname: config.name,
-            ..Default::default()
-        })
+    /// Run the event loop of a client tunnel.
+    async fn tunnel_event_loop(
+        future: impl Future<Output = yosemite::Result<yosemite::Stream>>,
+        tunnel: &Arc<TunnelConfig>,
+    ) -> crate::Result<()> {
+        let mut i2p_stream = future.await?;
+        let listener = TcpListener::bind(format!(
+            "{}:{}",
+            tunnel.address.clone().unwrap_or(String::from("127.0.0.1")),
+            tunnel.port
+        ))
         .await?;
 
-        loop {
-            let Ok(mut i2p_stream) = session
-                .connect_with_options(
-                    &config.destination,
-                    StreamOptions {
-                        dst_port: config.destination_port.unwrap_or(0),
-                        ..Default::default()
-                    },
-                )
-                .await
-            else {
-                tokio::time::sleep(RETRY_TIMEOUT).await;
-                continue;
-            };
+        let (mut tcp_stream, _) = listener.accept().await?;
 
-            let listener = TcpListener::bind(format!(
-                "{}:{}",
-                config.address.clone().unwrap_or(String::from("127.0.0.1")),
-                config.port
-            ))
-            .await?;
-            let (mut tcp_stream, _) = listener.accept().await?;
+        tokio::io::copy_bidirectional(&mut i2p_stream, &mut tcp_stream).await?;
 
-            let _ = tokio::io::copy_bidirectional(&mut i2p_stream, &mut tcp_stream).await;
+        Ok(())
+    }
+
+    /// Run the event loop of [`ClientTunnelManger`].
+    ///
+    /// If there are no client tunnels congigured, [`ClientTunnelManager`] exits immediately.
+    pub async fn run(mut self) {
+        if self.tunnels.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            target: LOG_TARGET,
+            num_tunnels = ?self.tunnels.len(),
+            "starting client tunnel manager",
+        );
+
+        let mut session = match Session::<style::Stream>::new(SessionOptions {
+            publish: false,
+            samv3_tcp_port: self.sam_tcp_port,
+            nickname: "i2p-tunnel".to_string(),
+            ..Default::default()
+        })
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "failed to start client tunnel manager",
+                );
+                return;
+            }
+        };
+
+        for tunnel in self.tunnels.iter().cloned() {
+            let future = session.connect_detached_with_options(
+                &tunnel.destination,
+                StreamOptions {
+                    dst_port: tunnel.destination_port.unwrap_or(0),
+                    ..Default::default()
+                },
+            );
+
+            self.futures.spawn(async move {
+                match Self::tunnel_event_loop(future, &tunnel).await {
+                    Ok(()) => tunnel,
+                    Err(error) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            name = %tunnel.name,
+                            ?error,
+                            "client tunnel exited with error",
+                        );
+
+                        tokio::time::sleep(RETRY_TIMEOUT).await;
+                        tunnel
+                    }
+                }
+            });
+        }
+
+        while let Some(result) = self.futures.join_next().await {
+            match result {
+                Err(error) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "client tunnel panicked, unable to restart",
+                    );
+                    debug_assert!(false);
+                }
+                Ok(tunnel) => {
+                    let future = session.connect_detached_with_options(
+                        &tunnel.destination,
+                        StreamOptions {
+                            dst_port: tunnel.destination_port.unwrap_or(0),
+                            ..Default::default()
+                        },
+                    );
+
+                    self.futures.spawn(async move {
+                        match Self::tunnel_event_loop(future, &tunnel).await {
+                            Ok(()) => tunnel,
+                            Err(error) => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    name = %tunnel.name,
+                                    ?error,
+                                    "client tunnel exited with error",
+                                );
+
+                                tokio::time::sleep(RETRY_TIMEOUT).await;
+                                tunnel
+                            }
+                        }
+                    });
+                }
+            }
         }
     }
 }
