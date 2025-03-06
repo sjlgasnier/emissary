@@ -71,6 +71,7 @@ impl RouterInfo {
         ssu2: Option<RouterAddress>,
         static_key: &StaticPrivateKey,
         signing_key: &SigningPrivateKey,
+        transit_tunnels_disabled: bool,
     ) -> Self {
         let Config {
             caps, router_info, ..
@@ -95,11 +96,14 @@ impl RouterInfo {
                 .map_or_else(|| Str::from("2"), |value| Str::from(value.to_string())),
         );
 
-        let caps = match caps {
-            Some(caps) => Str::from(caps.clone()),
-            None => match config.floodfill {
-                true => Str::from("Xf"),
-                false => Str::from("L"),
+        let caps = match transit_tunnels_disabled {
+            true => Str::from("G"),
+            false => match caps {
+                Some(caps) => Str::from(caps.clone()),
+                None => match config.floodfill {
+                    true => Str::from("Xf"),
+                    false => Str::from("L"),
+                },
             },
         };
 

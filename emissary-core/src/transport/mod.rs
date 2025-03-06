@@ -427,6 +427,9 @@ pub struct TransportManagerBuilder<R: Runtime> {
     /// Subsystem handle passed onto enabled transports.
     subsystem_handle: SubsystemHandle,
 
+    /// Are transit tunnels disabled.
+    transit_tunnels_disabled: bool,
+
     /// Enabled transports.
     transports: Vec<Box<dyn Transport<Item = TransportEvent>>>,
 }
@@ -450,6 +453,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             router_ctx,
             ssu2_config: None,
             subsystem_handle: SubsystemHandle::new(),
+            transit_tunnels_disabled: false,
             transports: Vec::with_capacity(2),
         }
     }
@@ -502,6 +506,12 @@ impl<R: Runtime> TransportManagerBuilder<R> {
         self.netdb_handle = Some(netdb_handle);
     }
 
+    /// Specify whether transit tunnels are disabled or not.
+    pub fn with_transit_tunnels_disabled(&mut self, transit_tunnels_disabled: bool) -> &mut Self {
+        self.transit_tunnels_disabled = transit_tunnels_disabled;
+        self
+    }
+
     /// Build into [`TransportManager`].
     pub fn build(self) -> TransportManager<R> {
         TransportManager {
@@ -522,6 +532,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             shutting_down: false,
             ssu2_config: self.ssu2_config,
             subsystem_handle: self.subsystem_handle,
+            transit_tunnels_disabled: self.transit_tunnels_disabled,
             transports: self.transports,
         }
     }
@@ -551,9 +562,6 @@ pub struct TransportManager<R: Runtime> {
     /// Pending outbound connections.
     pending_connections: HashSet<RouterId>,
 
-    /// Is the router shutting down.
-    shutting_down: bool,
-
     /// Pending queries.
     pending_queries: HashSet<RouterId>,
 
@@ -572,11 +580,17 @@ pub struct TransportManager<R: Runtime> {
     /// Connected routers.
     routers: HashSet<RouterId>,
 
+    /// Is the router shutting down.
+    shutting_down: bool,
+
     /// SSU2 config.
     ssu2_config: Option<Ssu2Config>,
 
     /// Subsystem handle.
     subsystem_handle: SubsystemHandle,
+
+    /// Are transit tunnels disabled.
+    transit_tunnels_disabled: bool,
 
     /// Enabled transports.
     transports: Vec<Box<dyn Transport<Item = TransportEvent>>>,
@@ -921,7 +935,15 @@ impl<R: Runtime> Future for TransportManager<R> {
             self.local_router_info.published = Date::new(R::time_since_epoch().as_millis() as u64);
 
             // publish `G`, i.e., rejecting all tunnels if the router is shutting down
-            if self.shutting_down {
+            // or if transit tunnels have been disabled
+            if self.shutting_down || self.transit_tunnels_disabled {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    shutting_down = ?self.shutting_down,
+                    transit_tunnels_disabled = ?self.transit_tunnels_disabled,
+                    "publishing router info with `G`",
+                );
+
                 self.local_router_info.options.insert(Str::from("caps"), Str::from("GR"));
             }
 
@@ -1862,6 +1884,66 @@ mod tests {
 
         // shutdown the manager, set RI republish timeout smaller and wait for RI to be published
         manager.shutdown();
+        manager.router_info_republish_timer = Box::pin(MockRuntime::delay(Duration::from_secs(1)));
+
+        assert!(tokio::time::timeout(Duration::from_secs(3), &mut manager).await.is_err());
+
+        // verify that the local router is no longer considered usable due to the `G` flag
+        assert!(!Capabilities::parse(
+            &manager.local_router_info.options.get(&Str::from("caps")).unwrap()
+        )
+        .unwrap()
+        .is_usable());
+    }
+
+    #[tokio::test]
+    async fn transit_tunnels_disabled() {
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (handle, _netdb_rx) = NetDbHandle::create();
+        let ctx = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage.clone(),
+            router_info.identity.id(),
+            serialized.clone(),
+            static_key,
+            signing_key,
+            2u8,
+        );
+        let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: Some("192.168.0.1".parse().unwrap()),
+            publish: true,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let _handle = builder.register_subsystem(SubsystemKind::NetDb);
+        builder.register_netdb_handle(handle);
+        builder.register_ntcp2(context);
+        builder.with_transit_tunnels_disabled(true);
+
+        let mut manager = builder.build();
         manager.router_info_republish_timer = Box::pin(MockRuntime::delay(Duration::from_secs(1)));
 
         assert!(tokio::time::timeout(Duration::from_secs(3), &mut manager).await.is_err());

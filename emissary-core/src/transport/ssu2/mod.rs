@@ -261,6 +261,7 @@ mod tests {
             address1,
             &static1,
             &signing1,
+            false,
         );
         let router_info2 = RouterInfo::new::<MockRuntime>(
             &Default::default(),
@@ -268,6 +269,7 @@ mod tests {
             address2,
             &static2,
             &signing2,
+            false,
         );
         let (handle1, _event_rx1) = {
             let (tx, rx) = channel(64);

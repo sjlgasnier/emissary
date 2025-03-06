@@ -188,6 +188,7 @@ impl<R: Runtime> Router<R> {
             ssu2_address,
             &local_static_key,
             &local_signing_key,
+            config.transit.is_none(),
         );
         let Config {
             i2cp_config,
@@ -256,6 +257,11 @@ impl<R: Runtime> Router<R> {
         // note: order of initialization is important
         let mut transport_manager_builder =
             TransportManagerBuilder::new(router_ctx.clone(), local_router_info, allow_local);
+
+        // specify if transit tunnels are disabled
+        //
+        // if they are, the router will always publish an RI with `G` flag
+        transport_manager_builder.with_transit_tunnels_disabled(transit.is_none());
 
         // initialize and start tunnel manager
         //
