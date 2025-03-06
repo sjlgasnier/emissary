@@ -420,7 +420,7 @@ impl<'a> Packet<'a> {
         let (rest, seq_nro) = be_u32(rest)?;
         let (rest, _) = take(4usize)(rest)?;
         let (rest, nack_count) = be_u8(rest)?;
-        let (rest, _nacks) = take(4 * nack_count + 1)(rest)?;
+        let (rest, _nacks) = take(4 * nack_count as usize + 1)(rest)?;
         let (rest, flags) = be_u16(rest)?;
 
         Ok((
@@ -1042,5 +1042,22 @@ mod tests {
             .with_from_included(destination.clone())
             .with_payload(&payload)
             .build();
+    }
+
+    #[test]
+    fn maximum_nacks() {
+        let nacks = (0..u8::MAX).map(|i| i as u32).collect::<Vec<_>>();
+        let serialized = PacketBuilder::new(13371338)
+            .with_send_stream_id(13351336)
+            .with_seq_nro(1337)
+            .with_nacks(nacks)
+            .with_synchronize()
+            .with_reset()
+            .build();
+
+        let info = Packet::peek(&serialized).unwrap();
+
+        assert!(info.synchronize());
+        assert!(info.reset());
     }
 }
