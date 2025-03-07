@@ -676,7 +676,7 @@ impl TagSet {
                     recv_key_id,
                 );
 
-                Ok(Some(NextKeyBuilder::reverse(*key_id).build()))
+                Ok(Some(NextKeyBuilder::reverse(recv_key_id).build()))
             }
             // active key state and remote destination has requested a dh ratchet
             //
@@ -773,7 +773,7 @@ impl TagSet {
                         public_key: Some(private_key.public()),
                     }
                 } else {
-                    NextKeyBuilder::reverse(*key_id).build()
+                    NextKeyBuilder::reverse(recv_key_id).build()
                 };
 
                 self.key_state = KeyState::Active {
@@ -817,6 +817,15 @@ mod tests {
         let mut send_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
         let mut recv_tag_set = TagSet::new([1u8; 32], [2u8; 32]);
 
+        assert_eq!(send_tag_set.tag_index, 0);
+        assert_eq!(recv_tag_set.tag_index, 0);
+        assert_eq!(send_tag_set.tag_set_id, 0);
+        assert_eq!(recv_tag_set.tag_set_id, 0);
+        assert_eq!(send_tag_set.recv_key_id, None);
+        assert_eq!(recv_tag_set.recv_key_id, None);
+        assert_eq!(send_tag_set.send_key_id, None);
+        assert_eq!(recv_tag_set.send_key_id, None);
+
         // generate tags until the first dh ratchet can be done
         loop {
             assert_eq!(send_tag_set.next_entry(), recv_tag_set.next_entry());
@@ -854,6 +863,8 @@ mod tests {
         // * tag set id 1
         // * tag index is 0
         // * tag sets have each other's public keys stored
+        //
+        // send and receive key ids are 0
         assert_eq!(send_tag_set.tag_index, 0);
         assert_eq!(recv_tag_set.tag_index, 0);
         assert_eq!(send_tag_set.tag_set_id, 1);
@@ -905,7 +916,7 @@ mod tests {
 
             match &kind {
                 NextKeyKind::ReverseKey {
-                    key_id: 1u16,
+                    key_id: 0u16,
                     public_key: None,
                 } => {}
                 kind => panic!("invalid next key kind: {kind:?}"),
@@ -1041,7 +1052,7 @@ mod tests {
 
             match &kind {
                 NextKeyKind::ReverseKey {
-                    key_id: 2u16,
+                    key_id: 1u16,
                     public_key: None,
                 } => {}
                 kind => panic!("invalid next key kind: {kind:?}"),
@@ -1165,7 +1176,7 @@ mod tests {
 
             match recv_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
                 NextKeyKind::ReverseKey {
-                    key_id: 1u16,
+                    key_id: 0u16,
                     public_key: None,
                 } => {}
                 kind => panic!("invalid next key kind: {kind:?}"),
@@ -1335,12 +1346,12 @@ mod tests {
 
         match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
             NextKeyKind::ReverseKey {
-                key_id: 1u16,
+                key_id: 0u16,
                 public_key: None,
             } => {
                 assert!(recv_tag_set
                     .handle_next_key::<MockRuntime>(&NextKeyKind::ReverseKey {
-                        key_id: 1u16,
+                        key_id: 0u16,
                         public_key: None,
                     })
                     .expect("to succeed")
@@ -1351,7 +1362,7 @@ mod tests {
 
         match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
             NextKeyKind::ReverseKey {
-                key_id: 1u16,
+                key_id: 0u16,
                 public_key: None,
             } => {}
             kind => panic!("invalid next key kind: {kind:?}"),
@@ -1359,7 +1370,7 @@ mod tests {
 
         match &send_tag_set.handle_next_key::<MockRuntime>(&kind).unwrap().unwrap() {
             NextKeyKind::ReverseKey {
-                key_id: 1u16,
+                key_id: 0u16,
                 public_key: None,
             } => {}
             kind => panic!("invalid next key kind: {kind:?}"),
