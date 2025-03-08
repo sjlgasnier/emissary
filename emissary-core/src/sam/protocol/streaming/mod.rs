@@ -340,6 +340,8 @@ impl<R: Runtime> StreamManager<R> {
         let signature = flags.signature().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
+                ?recv_stream_id,
+                ?send_stream_id,
                 "signature missing from syn packet",
             );
 
@@ -348,10 +350,13 @@ impl<R: Runtime> StreamManager<R> {
         let destination = flags.from_included().as_ref().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
+                ?recv_stream_id,
+                ?send_stream_id,
                 "destination missing from syn packet",
             );
             StreamingError::DestinationMissing
         })?;
+        let destination_id = destination.id();
 
         {
             // if the packet included an offline signature, use the verifying key specified in the
@@ -373,6 +378,10 @@ impl<R: Runtime> StreamManager<R> {
             if original.len() < payload.len() + verifying_key.signature_len() {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    local = %self.destination_id,
+                    remote = %destination_id,
+                    ?recv_stream_id,
+                    ?send_stream_id,
                     "cannot verify signature, packet is too short",
                 );
                 return Err(StreamingError::Malformed);
@@ -385,6 +394,10 @@ impl<R: Runtime> StreamManager<R> {
             verifying_key.verify(&original, signature).map_err(|error| {
                 tracing::warn!(
                     target: LOG_TARGET,
+                    local = %self.destination_id,
+                    remote = %destination_id,
+                    ?recv_stream_id,
+                    ?send_stream_id,
                     ?error,
                     "failed to verify packet signature"
                 );
@@ -408,6 +421,7 @@ impl<R: Runtime> StreamManager<R> {
             tracing::trace!(
                 target: LOG_TARGET,
                 local = %self.destination_id,
+                remote = %destination_id,
                 ?recv_stream_id,
                 ?send_stream_id,
                 "outbound stream accepted",
@@ -435,12 +449,16 @@ impl<R: Runtime> StreamManager<R> {
         if nacks.len() != 8 {
             tracing::debug!(
                 target: LOG_TARGET,
+                local = %self.destination_id,
+                remote = %destination_id,
+                ?recv_stream_id,
+                ?send_stream_id,
                 "destination id for replay protection not set",
             );
             return Err(StreamingError::ReplayProtectionCheckFailed);
         }
 
-        let destination_id = nacks
+        let constructed_destination_id = nacks
             .into_iter()
             .fold(BytesMut::with_capacity(32), |mut acc, x| {
                 acc.put_slice(&x.to_be_bytes());
@@ -449,13 +467,16 @@ impl<R: Runtime> StreamManager<R> {
             .freeze()
             .to_vec();
 
-        if destination_id != self.destination_id.to_vec() {
+        if constructed_destination_id != self.destination_id.to_vec() {
             return Err(StreamingError::ReplayProtectionCheckFailed);
         }
 
         tracing::info!(
             target: LOG_TARGET,
             local = %self.destination_id,
+            remote = %destination_id,
+            ?recv_stream_id,
+            ?send_stream_id,
             payload_len = ?payload.len(),
             "inbound stream accepted",
         );
@@ -476,7 +497,9 @@ impl<R: Runtime> StreamManager<R> {
                 tracing::info!(
                     target: LOG_TARGET,
                     local = %self.destination_id,
+                    remote = %destination_id,
                     ?recv_stream_id,
+                    ?send_stream_id,
                     "inbound stream but no available listeners",
                 );
 
