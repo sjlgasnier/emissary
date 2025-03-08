@@ -258,7 +258,7 @@ impl<R: Runtime> TunnelManager<R> {
                     if let Some(tx) = feedback_tx {
                         let _ = tx.send(());
                     },
-                Err(error) => tracing::error!(
+                Err((error, _)) => tracing::error!(
                     target: LOG_TARGET,
                     %router_id,
                     ?error,

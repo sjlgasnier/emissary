@@ -403,7 +403,7 @@ impl<R: Runtime> NetDb<R> {
                 };
 
                 if let Some(message) = message {
-                    if let Err(error) = self.service.send(&router_id, message) {
+                    if let Err((error, _)) = self.service.send(&router_id, message) {
                         tracing::debug!(
                             target: LOG_TARGET,
                             %router_id,
@@ -465,7 +465,8 @@ impl<R: Runtime> NetDb<R> {
                 pending_messages.push(message.clone());
             }
             Some(RouterState::Connected) => {
-                if let Err(error) = self.service.send(router_id, message.clone().into_inner()) {
+                if let Err((error, _)) = self.service.send(router_id, message.clone().into_inner())
+                {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
@@ -869,7 +870,7 @@ impl<R: Runtime> NetDb<R> {
                     .with_payload(&message)
                     .build();
 
-                if let Err(error) = self.service.send(&router_id, message) {
+                if let Err((error, _)) = self.service.send(&router_id, message) {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
@@ -972,7 +973,7 @@ impl<R: Runtime> NetDb<R> {
                     .with_payload(&message)
                     .build();
 
-                if let Err(error) = self.service.send(&router_id, message) {
+                if let Err((error, _)) = self.service.send(&router_id, message) {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
