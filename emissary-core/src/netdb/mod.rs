@@ -498,7 +498,7 @@ impl<R: Runtime> NetDb<R> {
         }
 
         if &router_id == self.router_ctx.router_id() {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 "local router id, ignoring router info store",
             );
@@ -1059,7 +1059,7 @@ impl<R: Runtime> NetDb<R> {
             reply,
             ..
         } = DatabaseStore::<R>::parse(&message.payload).ok_or_else(|| {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 "malformed database store received",
             );

@@ -801,7 +801,7 @@ impl<R: Runtime> Stream<R> {
         }
 
         if flags.reset() {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,

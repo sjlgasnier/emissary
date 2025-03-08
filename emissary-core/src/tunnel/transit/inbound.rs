@@ -215,6 +215,7 @@ impl<R: Runtime> Future for InboundGateway<R> {
                                     )
                                 }
                             }),
+                            Err(Error::Expired) => {}
                             Err(error) => tracing::warn!(
                                 target: LOG_TARGET,
                                 tunnel_id = %self.tunnel_id,
