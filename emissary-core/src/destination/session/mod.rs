@@ -72,7 +72,7 @@ const LOG_TARGET: &str = "emissary::destination::session";
 const NUM_TAGS_TO_GENERATE: usize = 128;
 
 /// Number of tag set entries consumed per key before a DH ratchet is performed.
-const SESSION_DH_RATCHET_THRESHOLD: usize = 32768usize;
+const SESSION_DH_RATCHET_THRESHOLD: usize = 20_000usize;
 
 /// How long is upper-layer protocol data awaited before a [`DatabaseStore`] message is sent to
 /// remote to update remote destination's `NetDb` with our new lease set.
