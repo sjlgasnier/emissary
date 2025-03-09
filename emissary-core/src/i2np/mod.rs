@@ -146,7 +146,11 @@ impl MessageType {
             25 => Some(Self::ShortTunnelBuild),
             26 => Some(Self::OutboundTunnelBuildReply),
             msg_type => {
-                tracing::warn!(?msg_type, "invalid message id");
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?msg_type,
+                    "invalid message id",
+                );
                 None
             }
         }
