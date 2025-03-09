@@ -569,7 +569,7 @@ impl<R: Runtime> StreamManager<R> {
             SocketKind::Accept { silent, .. } | SocketKind::Forwarded { silent, .. } if !silent =>
                 Some(format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes()),
             SocketKind::Connect { silent, .. } if !silent =>
-                Some(b"STREAM STATUS RESULT=OK".to_vec()),
+                Some(b"STREAM STATUS RESULT=OK\n".to_vec()),
             _ => None,
         };
 
