@@ -439,6 +439,7 @@ impl<R: Runtime> StreamManager<R> {
                     dst_port,
                     send_stream_id,
                     src_port,
+                    payload: payload.to_vec(),
                 },
             );
 

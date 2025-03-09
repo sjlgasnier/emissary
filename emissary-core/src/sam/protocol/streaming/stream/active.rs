@@ -242,6 +242,9 @@ pub enum StreamKind {
         /// Destination port.
         dst_port: u16,
 
+        /// Payload received in `SYN`.
+        payload: Vec<u8>,
+
         /// Selected send stream ID.
         send_stream_id: u32,
 
@@ -658,11 +661,20 @@ impl<R: Runtime> Stream<R> {
             }
             StreamKind::Outbound {
                 dst_port,
+                payload,
                 send_stream_id,
                 src_port,
             } => (
                 send_stream_id,
-                initial_message.is_some().then(|| b"STREAM STATUS RESULT=OK\n".to_vec()),
+                match (initial_message, payload.is_empty()) {
+                    (Some(mut initial), false) => {
+                        initial.extend_from_slice(&payload);
+                        Some(initial)
+                    }
+                    (Some(initial), true) => Some(initial),
+                    (None, false) => Some(payload),
+                    (None, true) => None,
+                },
                 0u32,
                 src_port,
                 dst_port,
