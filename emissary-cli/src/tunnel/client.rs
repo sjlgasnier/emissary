@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::config::TunnelConfig;
+use crate::config::ClientTunnelConfig;
 
 use tokio::{net::TcpListener, task::JoinSet};
 use yosemite::{style, Session, SessionOptions, StreamOptions};
@@ -32,18 +32,18 @@ const RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Client tunnel manager.
 pub struct ClientTunnelManager {
     /// Tunnel futures.
-    futures: JoinSet<Arc<TunnelConfig>>,
+    futures: JoinSet<Arc<ClientTunnelConfig>>,
 
     /// SAMv3 server port of the router.
     sam_tcp_port: u16,
 
     /// Client tunnel configurations.
-    tunnels: Vec<Arc<TunnelConfig>>,
+    tunnels: Vec<Arc<ClientTunnelConfig>>,
 }
 
 impl ClientTunnelManager {
-    /// Create new [`Tunnel`].
-    pub fn new(tunnels: Vec<TunnelConfig>, sam_tcp_port: u16) -> Self {
+    /// Create new [`ClientTunnelManager`].
+    pub fn new(tunnels: Vec<ClientTunnelConfig>, sam_tcp_port: u16) -> Self {
         Self {
             futures: JoinSet::new(),
             sam_tcp_port,
@@ -54,9 +54,8 @@ impl ClientTunnelManager {
     /// Run the event loop of a client tunnel.
     async fn tunnel_event_loop(
         future: impl Future<Output = yosemite::Result<yosemite::Stream>>,
-        tunnel: &Arc<TunnelConfig>,
+        tunnel: &Arc<ClientTunnelConfig>,
     ) -> crate::Result<()> {
-        let mut i2p_stream = future.await?;
         let listener = TcpListener::bind(format!(
             "{}:{}",
             tunnel.address.clone().unwrap_or(String::from("127.0.0.1")),
@@ -65,6 +64,10 @@ impl ClientTunnelManager {
         .await?;
 
         let (mut tcp_stream, _) = listener.accept().await?;
+        tracing::error!(target: LOG_TARGET, "tcp connection received");
+
+        let mut i2p_stream = future.await?;
+        tracing::error!(target: LOG_TARGET, "i2p stream ready, wait for tcp connection");
 
         tokio::io::copy_bidirectional(&mut i2p_stream, &mut tcp_stream).await?;
 
@@ -89,6 +92,8 @@ impl ClientTunnelManager {
             publish: false,
             samv3_tcp_port: self.sam_tcp_port,
             nickname: "i2p-tunnel".to_string(),
+            num_inbound: 4,
+            num_outbound: 4,
             ..Default::default()
         })
         .await
@@ -142,6 +147,8 @@ impl ClientTunnelManager {
                     debug_assert!(false);
                 }
                 Ok(tunnel) => {
+                    tracing::error!(target: LOG_TARGET, "tunnel returned, restart event loop");
+
                     let future = session.connect_detached_with_options(
                         &tunnel.destination,
                         StreamOptions {
@@ -169,5 +176,7 @@ impl ClientTunnelManager {
                 }
             }
         }
+
+        tracing::error!(target: LOG_TARGET, "exiting from tunnel manager");
     }
 }

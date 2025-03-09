@@ -130,12 +130,19 @@ pub struct AddressBookConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TunnelConfig {
+pub struct ClientTunnelConfig {
     pub name: String,
     pub address: Option<String>,
     pub port: u16,
     pub destination: String,
     pub destination_port: Option<u16>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServerTunnelConfig {
+    pub name: String,
+    pub port: u16,
+    pub destination_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,7 +187,10 @@ struct EmissaryConfig {
     sam: Option<SamConfig>,
     ssu2: Option<Ssu2Config>,
     transit: Option<TransitConfig>,
-    tunnels: Option<Vec<TunnelConfig>>,
+    #[serde(rename = "client-tunnels")]
+    client_tunnels: Option<Vec<ClientTunnelConfig>>,
+    #[serde(rename = "server-tunnels")]
+    server_tunnels: Option<Vec<ServerTunnelConfig>>,
 }
 
 /// Router configuration.
@@ -196,6 +206,9 @@ pub struct Config {
 
     /// Router capabilities.
     pub caps: Option<String>,
+
+    /// Client tunnel configurations.
+    pub client_tunnels: Vec<ClientTunnelConfig>,
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<emissary_core::ExploratoryConfig>,
@@ -242,6 +255,9 @@ pub struct Config {
     /// SAMv3 config.
     pub sam_config: Option<emissary_core::SamConfig>,
 
+    /// Server tunnel configurations.
+    pub server_tunnels: Vec<ServerTunnelConfig>,
+
     /// Signing key.
     pub signing_key: [u8; 32],
 
@@ -253,9 +269,6 @@ pub struct Config {
 
     /// Transit tunnel config.
     pub transit: Option<emissary_core::TransitConfig>,
-
-    /// Tunnel config.
-    pub tunnels: Vec<TunnelConfig>,
 }
 
 impl From<Config> for emissary_core::Config {
@@ -638,6 +651,7 @@ impl Config {
             allow_local: false,
             base_path,
             caps: None,
+            client_tunnels: Vec::new(),
             exploratory: None,
             floodfill: false,
             http_proxy: Some(HttpProxyConfig {
@@ -676,6 +690,7 @@ impl Config {
                 udp_port: 7655u16,
                 host: String::from("127.0.0.1"),
             }),
+            server_tunnels: Vec::new(),
             signing_key,
             ssu2_config: Some(emissary_core::Ssu2Config {
                 port: 8888u16,
@@ -688,7 +703,6 @@ impl Config {
             transit: Some(emissary_core::TransitConfig {
                 max_tunnels: Some(5000),
             }),
-            tunnels: Vec::new(),
         })
     }
 
@@ -746,7 +760,7 @@ impl Config {
             }
         };
 
-        if let Some(tunnels) = &config.tunnels {
+        if let Some(tunnels) = &config.client_tunnels {
             // ensure each client tunnel has a unique name
             if tunnels.iter().map(|config| &config.name).collect::<HashSet<_>>().len()
                 != tunnels.len()
@@ -770,11 +784,51 @@ impl Config {
             }
         }
 
+        if let Some(tunnels) = &config.server_tunnels {
+            // ensure each server tunnel has a unique name
+            if tunnels.iter().map(|config| &config.name).collect::<HashSet<_>>().len()
+                != tunnels.len()
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "all server tunnels must have a unique name",
+                );
+                return Err(Error::InvalidData);
+            }
+
+            // ensure each server tunnel has a unique port
+            if tunnels.iter().map(|config| config.port).collect::<HashSet<_>>().len()
+                != tunnels.len()
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "all server tunnels must have a unique port",
+                );
+                return Err(Error::InvalidData);
+            }
+
+            // ensure each server tunnel has a unique path
+            if tunnels
+                .iter()
+                .map(|config| config.destination_path.clone())
+                .collect::<HashSet<_>>()
+                .len()
+                != tunnels.len()
+            {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "all server tunnels must have a destination path",
+                );
+                return Err(Error::InvalidData);
+            }
+        }
+
         Ok(Self {
             address_book: config.address_book,
             allow_local: config.allow_local,
             base_path,
             caps: config.caps,
+            client_tunnels: config.client_tunnels.unwrap_or(Vec::new()),
             exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
                 inbound_len: config.inbound_len,
                 inbound_count: config.inbound_count,
@@ -810,6 +864,7 @@ impl Config {
                 udp_port: config.udp_port,
                 host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
+            server_tunnels: config.server_tunnels.unwrap_or(Vec::new()),
             signing_key,
             ssu2_config: config.ssu2.map(|config| emissary_core::Ssu2Config {
                 port: config.port,
@@ -822,7 +877,6 @@ impl Config {
             transit: config.transit.map(|config| emissary_core::TransitConfig {
                 max_tunnels: config.max_tunnels,
             }),
-            tunnels: config.tunnels.unwrap_or(Vec::new()),
         })
     }
 
@@ -1286,15 +1340,15 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
-            tunnels: Some(vec![
-                TunnelConfig {
+            client_tunnels: Some(vec![
+                ClientTunnelConfig {
                     name: "tunnel".to_string(),
                     address: None,
                     port: 1337,
                     destination: "hello".to_string(),
                     destination_port: None,
                 },
-                TunnelConfig {
+                ClientTunnelConfig {
                     name: "tunnel".to_string(),
                     address: None,
                     port: 1338,
@@ -1321,15 +1375,15 @@ mod tests {
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
-            tunnels: Some(vec![
-                TunnelConfig {
+            client_tunnels: Some(vec![
+                ClientTunnelConfig {
                     name: "tunnel1".to_string(),
                     address: None,
                     port: 1337,
                     destination: "hello".to_string(),
                     destination_port: None,
                 },
-                TunnelConfig {
+                ClientTunnelConfig {
                     name: "tunnel2".to_string(),
                     address: None,
                     port: 1337,

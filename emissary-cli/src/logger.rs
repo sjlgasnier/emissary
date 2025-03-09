@@ -30,7 +30,7 @@ static PRESETS: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(||
         ),
         (
             "sam",
-            "emissary::sam,emissary::streaming,emissary::destination,yosemite=trace,emissary::tunnel::pool=off",
+            "emissary::sam,emissary::streaming,emissary::destination,yosemite=trace,emissary::tunnel::pool=off,emissary::client-tunnel=trace",
         ),
         (
             "transit",

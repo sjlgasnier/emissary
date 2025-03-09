@@ -25,7 +25,7 @@ use crate::{
     proxy::http::HttpProxy,
     signal::SignalHandler,
     storage::Storage,
-    tunnel::ClientTunnelManager,
+    tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
 };
 
 use anyhow::anyhow;
@@ -146,7 +146,8 @@ async fn main() -> anyhow::Result<()> {
     let path = config.base_path.clone();
     let http = config.http_proxy.take();
     let port_forwarding = config.port_forwarding.take();
-    let client_tunnels = mem::take(&mut config.tunnels);
+    let client_tunnels = mem::take(&mut config.client_tunnels);
+    let server_tunnels = mem::take(&mut config.server_tunnels);
 
     let (mut router, local_router_info, address_book_manager) = match config.address_book.take() {
         None => Router::<Runtime>::new(config.into())
@@ -210,8 +211,13 @@ async fn main() -> anyhow::Result<()> {
             });
         }
 
-        // start client tunnels
+        // start client and server tunnels
         tokio::spawn(ClientTunnelManager::new(client_tunnels, address.port()).run());
+        tokio::spawn(
+            ServerTunnelManager::new(server_tunnels, address.port(), path.clone())
+                .await
+                .run(),
+        );
     }
 
     // create port mapper from config and transport protocol info
