@@ -63,6 +63,9 @@ const NSR_CONTEXT_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 /// Maximum age for a tag that belonged to a previous tag set.
 const PREV_TAG_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 
+/// Number of extra tags to generate from the old tag set when it's about to expire.
+const NUM_EXTRA_TAGS_TO_GENERATE: usize = 128usize;
+
 /// Event emitted by [`PendingSession`].
 pub enum PendingSessionEvent<R: Runtime> {
     /// Send message to remote destination.
@@ -846,7 +849,7 @@ impl<R: Runtime> Session<R> {
             "received ES",
         );
 
-        // tryto find a tag set entry from the tag sets generated for this session
+        // try to find a tag set entry from the tag sets generated for this session
         //
         // if no entry is found, try to decrypt the message using one of the tags generated for NSR
         // messages in case this is a late and/or retransmitted NSR message received after an ES
@@ -934,12 +937,33 @@ impl<R: Runtime> Session<R> {
                         // received, tags from the current tag set are marked as expiring which is
                         // not what we want
                         self.pending_next_key = if self.recv_tag_set.can_ratchet(kind) {
-                            // collect all tags of the current tag set into a separate storage from
-                            // which they're easy to expire once the tag set they belonged to us
-                            // expires
-                            let expiring_tags =
-                                self.tag_set_entries.keys().copied().collect::<HashSet<_>>();
-                            self.expiring.push_back((R::now(), expiring_tags));
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.local,
+                                remote = %self.remote,
+                                ?kind,
+                                "ratchet receive tag set",
+                            );
+
+                            {
+                                // generate some extra tags from the old tag set in case the ratchet
+                                // takes long time to perform (due to missed packets)
+                                let mut inner = self.garlic_tags.write();
+
+                                for _ in 0..NUM_EXTRA_TAGS_TO_GENERATE {
+                                    if let Some(entry) = self.recv_tag_set.next_entry() {
+                                        inner.insert(entry.tag, self.remote.clone());
+                                        self.tag_set_entries.insert(entry.tag, entry);
+                                    }
+                                }
+
+                                // collect all tags of the current tag set into a separate storage
+                                // from which they're easy to expire once the tag set they belonged
+                                // to us expires
+                                let expiring_tags =
+                                    self.tag_set_entries.keys().copied().collect::<HashSet<_>>();
+                                self.expiring.push_back((R::now(), expiring_tags));
+                            }
 
                             // handle `NextKey` block which does a DH ratchet and creates a new
                             // `TagSet`, replacing the old one
@@ -969,10 +993,25 @@ impl<R: Runtime> Session<R> {
                             // return `NextKey` block which is sent when the next ES is sent to
                             // remote but don't modify the active tags since they've already been
                             // modified by the first `NextKey` block
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.local,
+                                remote = %self.remote,
+                                ?kind,
+                                "receive tag set already ratcheted",
+                            );
                             self.recv_tag_set.handle_next_key::<R>(kind)?
                         };
                     }
                     NextKeyKind::ReverseKey { .. } => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            local = %self.local,
+                            remote = %self.remote,
+                            ?kind,
+                            "handle reverse key",
+                        );
+
                         self.pending_next_key = self.send_tag_set.handle_next_key::<R>(kind)?;
                     }
                 }
@@ -1025,6 +1064,7 @@ impl<R: Runtime> Session<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
+                    ?kind,
                     "send forward `NextKey` block",
                 );
 
@@ -1040,6 +1080,7 @@ impl<R: Runtime> Session<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
+                    ?kind,
                     "send reverse `NextKey` block",
                 );
 
