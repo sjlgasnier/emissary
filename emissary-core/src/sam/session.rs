@@ -17,9 +17,10 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base32_decode, base64_encode, SigningPrivateKey, StaticPrivateKey},
+    crypto::{base32_decode, base32_encode, base64_encode, SigningPrivateKey, StaticPrivateKey},
     destination::{DeliveryStyle, Destination, DestinationEvent, LeaseSetStatus},
     error::QueryError,
+    events::EventHandle,
     i2cp::{I2cpPayload, I2cpPayloadBuilder},
     primitives::{Destination as Dest, DestinationId, LeaseSet2, LeaseSet2Header},
     protocol::Protocol,
@@ -200,6 +201,10 @@ pub struct SamSession<R: Runtime> {
     /// Encryption key.
     encryption_key: StaticPrivateKey,
 
+    /// Event handle.
+    #[allow(unused)]
+    event_handle: EventHandle<R>,
+
     /// Pending host lookups
     lookup_futures: R::JoinSet<(String, Option<String>)>,
 
@@ -251,14 +256,15 @@ impl<R: Runtime> SamSession<R> {
     pub fn new(context: SamSessionContext<R>) -> Self {
         let SamSessionContext {
             address_book,
+            datagram_tx,
             destination,
+            event_handle,
             inbound,
             mut socket,
             netdb_handle,
             options,
             outbound,
             receiver,
-            datagram_tx,
             session_id,
             session_kind,
             tunnel_pool_handle,
@@ -309,6 +315,16 @@ impl<R: Runtime> SamSession<R> {
                 .serialize(&signing_key),
             );
 
+            // publish the new destination to the event system
+            if is_unpublished {
+                event_handle.client_destination_started(session_id.to_string());
+            } else {
+                event_handle.server_destination_started(
+                    session_id.to_string(),
+                    base32_encode(destination_id.to_vec()),
+                );
+            }
+
             let mut session_destination = Destination::new(
                 destination_id.clone(),
                 *private_key.clone(),
@@ -354,6 +370,7 @@ impl<R: Runtime> SamSession<R> {
             dest: dest.clone(),
             destination: session_destination,
             encryption_key: *encryption_key,
+            event_handle,
             lookup_futures: R::join_set(),
             options,
             pending_host_lookups: HashMap::new(),

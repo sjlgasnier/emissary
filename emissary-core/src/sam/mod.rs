@@ -23,6 +23,7 @@
 use crate::{
     crypto::base64_decode,
     error::{ChannelError, ConnectionError, Error},
+    events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Destination, DestinationId, Str},
     runtime::{AddressBook, JoinSet, Runtime, TcpListener, UdpSocket},
@@ -148,14 +149,14 @@ enum DatagramWriterState {
 
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
-    /// Address book.
-    address_book: Option<Arc<dyn AddressBook>>,
-
     /// Active destinations.
     active_destinations: HashSet<DestinationId>,
 
     /// Active SAMV3 sessions.
     active_sessions: SessionContext<R, Arc<str>>,
+
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
 
     /// RX channel for receiving datagrams that should be to clients.
     datagram_rx: Receiver<(u16, Vec<u8>)>,
@@ -165,6 +166,9 @@ pub struct SamServer<R: Runtime> {
 
     /// Datagra writer state.
     datagram_writer_state: DatagramWriterState,
+
+    /// Event handle.
+    event_handle: EventHandle<R>,
 
     /// Pending host lookups.
     host_lookups: R::JoinSet<(
@@ -216,6 +220,7 @@ impl<R: Runtime> SamServer<R> {
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        event_handle: EventHandle<R>,
     ) -> crate::Result<Self> {
         let listener = R::TcpListener::bind(SocketAddr::new(
             host.parse::<IpAddr>().expect("valid address"),
@@ -242,12 +247,13 @@ impl<R: Runtime> SamServer<R> {
         let (datagram_tx, datagram_rx) = channel(1024);
 
         Ok(Self {
-            address_book,
             active_destinations: HashSet::new(),
             active_sessions: SessionContext::new(),
+            address_book,
             datagram_rx,
             datagram_tx,
             datagram_writer_state: DatagramWriterState::GetMessage,
+            event_handle,
             host_lookups: R::join_set(),
             listener,
             metrics,
@@ -465,6 +471,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 Box::pin(tunnel_pool_future),
                                 netdb_handle,
                                 this.address_book.clone(),
+                                this.event_handle.clone(),
                             ),
                         );
                         this.active_destinations.insert(destination_id.clone());

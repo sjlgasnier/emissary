@@ -2078,6 +2078,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
+        events::EventManager,
         primitives::{
             Capabilities, Date, Destination, DestinationId, LeaseSet2Header, RouterAddress,
             RouterIdentity, RouterInfo, Str, TransportKind,
@@ -2122,6 +2123,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2131,6 +2133,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -2247,6 +2250,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2256,6 +2260,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             false,
             service,
@@ -2355,6 +2360,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2364,6 +2370,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -2465,6 +2472,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2474,6 +2482,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -2779,6 +2788,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2788,6 +2798,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -2900,6 +2911,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2909,6 +2921,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -3000,6 +3013,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3009,6 +3023,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -3129,6 +3144,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3138,6 +3154,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -3234,6 +3251,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3243,6 +3261,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -3362,6 +3381,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3371,6 +3391,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -3447,6 +3468,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3456,6 +3478,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             false,
             service,
@@ -3540,6 +3563,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3549,6 +3573,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -3817,6 +3842,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3826,6 +3852,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4078,6 +4105,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4087,6 +4115,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4177,6 +4206,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4186,6 +4216,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4280,6 +4311,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4289,6 +4321,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4380,6 +4413,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4389,6 +4423,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4469,6 +4504,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4478,6 +4514,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4607,6 +4644,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4616,6 +4654,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4787,6 +4826,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4796,6 +4836,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -4975,6 +5016,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4984,6 +5026,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -5125,6 +5168,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -5134,6 +5178,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -5200,6 +5245,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -5209,6 +5255,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,
@@ -5375,6 +5422,7 @@ mod tests {
         };
         let (_msg_tx, msg_rx) = channel(64);
         let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -5384,6 +5432,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
             service,

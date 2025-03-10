@@ -22,6 +22,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
+    events::EventHandle,
     primitives::{RouterId, RouterInfo},
     runtime::{AsyncRead, AsyncWrite, Runtime},
     subsystem::SubsystemCommand,
@@ -34,6 +35,7 @@ use crate::{
     },
 };
 
+use futures::FutureExt;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{vec, vec::Vec};
@@ -106,6 +108,15 @@ pub struct Ntcp2Session<R: Runtime> {
     /// Direction of the session.
     direction: Direction,
 
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
+    /// Inbound bandwidth.
+    inbound_bandwidth: usize,
+
+    /// Outbound bandwidth.
+    outbound_bandwidth: usize,
+
     /// Read buffer.
     read_buffer: Vec<u8>,
 
@@ -149,6 +160,7 @@ impl<R: Runtime> Ntcp2Session<R> {
         key_context: KeyContext,
         subsystem_handle: SubsystemHandle,
         direction: Direction,
+        event_handle: EventHandle<R>,
     ) -> Self {
         let KeyContext {
             send_key,
@@ -162,6 +174,9 @@ impl<R: Runtime> Ntcp2Session<R> {
             cmd_rx,
             cmd_tx,
             direction,
+            event_handle,
+            inbound_bandwidth: 0usize,
+            outbound_bandwidth: 0usize,
             read_buffer: vec![0u8; 0xffff],
             read_state: ReadState::ReadSize { offset: 0usize },
             recv_cipher: ChaChaPoly::new(&recv_key),
@@ -447,6 +462,11 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     return Poll::Ready(TerminationReason::Unspecified);
                 }
             }
+        }
+
+        if this.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle
+                .transport_bandwidth(self.inbound_bandwidth, self.outbound_bandwidth);
         }
 
         Poll::Pending

@@ -20,6 +20,7 @@ use crate::{
     config::{Config, I2cpConfig, MetricsConfig, SamConfig},
     crypto::{SigningPrivateKey, StaticPrivateKey},
     error::Error,
+    events::{EventManager, EventSubscriber},
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::RouterInfo,
@@ -107,6 +108,9 @@ pub struct Router<R: Runtime> {
     /// Protocol address information.
     address_info: ProtocolAddressInfo,
 
+    /// Event manager
+    event_manager: EventManager<R>,
+
     /// Profile storage.
     profile_storage: ProfileStorage<R>,
 
@@ -130,7 +134,7 @@ pub struct Router<R: Runtime> {
 
 impl<R: Runtime> Router<R> {
     /// Create new [`Router`] from `config`
-    pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
+    pub async fn new(config: Config) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
         Self::make_router(config, None).await
     }
 
@@ -138,7 +142,7 @@ impl<R: Runtime> Router<R> {
     pub async fn with_address_book(
         config: Config,
         address_book: Arc<dyn AddressBook>,
-    ) -> crate::Result<(Self, Vec<u8>)> {
+    ) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
         Self::make_router(config, Some(address_book)).await
     }
 
@@ -147,7 +151,7 @@ impl<R: Runtime> Router<R> {
     async fn make_router(
         mut config: Config,
         address_book: Option<Arc<dyn AddressBook>>,
-    ) -> crate::Result<(Self, Vec<u8>)> {
+    ) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
         // attempt to initialize the ntcp2 transport from provided config
         //
         // this is done prior to constructing local router info in case ntcp2 config contained an
@@ -209,6 +213,7 @@ impl<R: Runtime> Router<R> {
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
         let mut address_info = ProtocolAddressInfo::default();
+        let (event_manager, event_subscriber, event_handle) = EventManager::<R>::new(None); // TODO: configuration
 
         // create router shutdown context and allocate handle `TransitTunnelManager`
         //
@@ -250,7 +255,9 @@ impl<R: Runtime> Router<R> {
             local_static_key.clone(),
             local_signing_key.clone(),
             net_id.unwrap_or(NET_ID),
+            event_handle,
         );
+        let sam_event_handle = router_ctx.event_handle().clone();
 
         // create transport manager builder and initialize & start enabled transports
         //
@@ -335,6 +342,7 @@ impl<R: Runtime> Router<R> {
                 tunnel_manager_handle.clone(),
                 metrics_handle,
                 address_book,
+                sam_event_handle,
             )
             .await?;
 
@@ -357,6 +365,7 @@ impl<R: Runtime> Router<R> {
         Ok((
             Self {
                 address_info,
+                event_manager,
                 profile_storage,
                 profile_storage_backup_timer: Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL)),
                 shutdown_context,
@@ -364,6 +373,7 @@ impl<R: Runtime> Router<R> {
                 transport_manager: transport_manager_builder.build(),
                 _tunnel_manager_handle: tunnel_manager_handle,
             },
+            event_subscriber,
             serialized_router_info,
         ))
     }
@@ -417,6 +427,14 @@ impl<R: Runtime> Stream for Router<R> {
 
         if self.shutdown_context.poll_unpin(cx).is_ready() {
             return Poll::Ready(Some(RouterEvent::Shutdown));
+        }
+
+        if self.event_manager.poll_unpin(cx).is_ready() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "event manager crashed",
+            );
+            return Poll::Ready(None);
         }
 
         match self.transport_manager.poll_unpin(cx) {

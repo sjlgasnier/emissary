@@ -179,7 +179,9 @@ mod tests {
 
     #[test]
     fn unrecognized_bandwidth() {
-        assert!(Capabilities::parse(&Str::from("Z")).is_none());
+        let caps = Capabilities::parse(&Str::from("Z")).unwrap();
+        assert!(caps.bandwidth.is_none());
+        assert!(!caps.floodfill);
     }
 
     #[test]

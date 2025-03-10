@@ -19,6 +19,7 @@
 use crate::{
     crypto::sha256::Sha256,
     error::{Error, RejectionReason, TunnelError},
+    events::EventHandle,
     i2np::{
         tunnel::{
             data::{EncryptedTunnelData, MessageKind, TunnelData},
@@ -53,11 +54,17 @@ const LOG_TARGET: &str = "emissary::tunnel::transit::obep";
 
 /// Outbound endpoint.
 pub struct OutboundEndpoint<R: Runtime> {
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, ()>,
 
     /// Fragment handler.
     fragment: FragmentHandler,
+
+    /// Inbound bandwidth.
+    inbound_bandwidth: usize,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -65,6 +72,9 @@ pub struct OutboundEndpoint<R: Runtime> {
     /// Metrics handle.
     #[allow(unused)]
     metrics_handle: R::MetricsHandle,
+
+    /// Outbound bandwidth.
+    outbound_bandwidth: usize,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -289,12 +299,16 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
         routing_table: RoutingTable,
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
+        event_handle: EventHandle<R>,
     ) -> Self {
         OutboundEndpoint {
+            event_handle,
             expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
             fragment: FragmentHandler::new(),
+            inbound_bandwidth: 0usize,
             message_rx,
             metrics_handle,
+            outbound_bandwidth: 0usize,
             routing_table,
             tunnel_id,
             tunnel_keys,
@@ -316,41 +330,57 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                     );
                     return Poll::Ready(self.tunnel_id);
                 }
-                Some(message) => match message.message_type {
-                    MessageType::TunnelData => match EncryptedTunnelData::parse(&message.payload) {
-                        Some(message) => match self.handle_tunnel_data(&message) {
-                            Ok(messages) => messages.into_iter().for_each(|(router, message)| {
-                                if let Err(error) = self.routing_table.send_message(router, message)
-                                {
-                                    tracing::error!(
-                                        target: LOG_TARGET,
-                                        tunnel_id = %self.tunnel_id,
-                                        ?error,
-                                        "failed to send message",
-                                    )
-                                }
-                            }),
-                            Err(error) => tracing::warn!(
-                                target: LOG_TARGET,
-                                tunnel_id = %self.tunnel_id,
-                                ?error,
-                                "failed to handle tunnel data",
-                            ),
-                        },
-                        None => tracing::warn!(
+                Some(message) => {
+                    self.inbound_bandwidth += message.serialized_len_short();
+
+                    let MessageType::TunnelData = message.message_type else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            message_type = ?message.message_type,
+                            "unsupported message",
+                        );
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    let Some(message) = EncryptedTunnelData::parse(&message.payload) else {
+                        tracing::warn!(
                             target: LOG_TARGET,
                             tunnel_id = %self.tunnel_id,
                             "malformed `TunnelData` message",
+                        );
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    match self.handle_tunnel_data(&message) {
+                        Ok(messages) => messages.into_iter().for_each(|(router, message)| {
+                            self.outbound_bandwidth += message.len();
+
+                            if let Err(error) = self.routing_table.send_message(router, message) {
+                                tracing::error!(
+                                    target: LOG_TARGET,
+                                    tunnel_id = %self.tunnel_id,
+                                    ?error,
+                                    "failed to send message",
+                                )
+                            }
+                        }),
+                        Err(error) => tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            ?error,
+                            "failed to handle tunnel data",
                         ),
-                    },
-                    message_type => tracing::warn!(
-                        target: LOG_TARGET,
-                        tunnel_id = %self.tunnel_id,
-                        ?message_type,
-                        "unsupported message",
-                    ),
-                },
+                    }
+                }
             }
+        }
+
+        if self.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle
+                .transit_tunnel_bandwidth(self.inbound_bandwidth, self.outbound_bandwidth);
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {
@@ -366,6 +396,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{EphemeralPublicKey, StaticPrivateKey},
+        events::EventManager,
         i2np::HopRole,
         primitives::Str,
         runtime::mock::MockRuntime,
@@ -391,6 +422,7 @@ mod tests {
         let (manager_tx, manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
@@ -489,6 +521,7 @@ mod tests {
             routing_table,
             MockRuntime::register_metrics(vec![], None),
             rx,
+            event_handle.clone(),
         );
 
         let (router_id, message) = tunnel.handle_tunnel_data(&parsed).unwrap().next().unwrap();
@@ -506,6 +539,7 @@ mod tests {
         let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
@@ -604,6 +638,7 @@ mod tests {
             routing_table,
             MockRuntime::register_metrics(vec![], None),
             rx,
+            event_handle.clone(),
         );
         assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
     }
@@ -615,6 +650,7 @@ mod tests {
         let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let router_id = RouterId::from(vec![1, 2, 3, 4]);
         let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
@@ -708,6 +744,7 @@ mod tests {
             routing_table,
             MockRuntime::register_metrics(vec![], None),
             rx,
+            event_handle.clone(),
         );
 
         let (_to_router, messages) = obgw.send_to_router(obep_router_id.clone(), message);

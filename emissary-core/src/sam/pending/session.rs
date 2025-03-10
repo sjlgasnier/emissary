@@ -18,6 +18,7 @@
 
 use crate::{
     error::Error,
+    events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Lease, TunnelId},
     runtime::{AddressBook, Runtime},
@@ -49,17 +50,29 @@ pub struct SamSessionContext<R: Runtime> {
     /// Address book, if specified.
     pub address_book: Option<Arc<dyn AddressBook>>,
 
-    /// Active inbound tunnels and their leases.
-    pub inbound: HashMap<TunnelId, Lease>,
-
-    /// Session options.
-    pub options: HashMap<String, String>,
+    /// TX channel which can be used to send datagrams to clients.
+    pub datagram_tx: Sender<(u16, Vec<u8>)>,
 
     /// Destination context.
     pub destination: DestinationContext,
 
+    /// Event handle.
+    pub event_handle: EventHandle<R>,
+
+    /// Active inbound tunnels and their leases.
+    pub inbound: HashMap<TunnelId, Lease>,
+
+    /// Handle to `NetDb`.
+    pub netdb_handle: NetDbHandle,
+
+    /// Session options.
+    pub options: HashMap<String, String>,
+
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
+
+    /// RX channel for receiving commands to an active session.
+    pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
     /// Session ID.
     pub session_id: Arc<str>,
@@ -72,15 +85,6 @@ pub struct SamSessionContext<R: Runtime> {
 
     /// Tunnel pool handle.
     pub tunnel_pool_handle: TunnelPoolHandle,
-
-    /// Handle to `NetDb`.
-    pub netdb_handle: NetDbHandle,
-
-    /// RX channel for receiving commands to an active session.
-    pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
-
-    /// TX channel which can be used to send datagrams to clients.
-    pub datagram_tx: Sender<(u16, Vec<u8>)>,
 }
 
 /// State of the pending I2CP client session.
@@ -90,8 +94,23 @@ enum PendingSessionState<R: Runtime> {
         /// Address book.
         address_book: Option<Arc<dyn AddressBook>>,
 
-        /// SAMv3 socket associated with the session.
-        socket: SamSocket<R>,
+        /// TX channel which can be used to send datagrams to clients.
+        datagram_tx: Sender<(u16, Vec<u8>)>,
+
+        /// Destination context.
+        destination: DestinationContext,
+
+        /// Event handle.
+        event_handle: EventHandle<R>,
+
+        /// Handle to `NetDb`.
+        netdb_handle: NetDbHandle,
+
+        /// Session options.
+        options: HashMap<String, String>,
+
+        /// RX channel for receiving commands to an active session.
+        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
         /// ID of the client session.
         session_id: Arc<str>,
@@ -99,28 +118,16 @@ enum PendingSessionState<R: Runtime> {
         /// Session kind.
         session_kind: SessionKind,
 
-        /// Session options.
-        options: HashMap<String, String>,
-
-        /// Destination context.
-        destination: DestinationContext,
-
-        /// Negotiated version.
-        version: SamVersion,
-
-        /// Handle to `NetDb`.
-        netdb_handle: NetDbHandle,
+        /// SAMv3 socket associated with the session.
+        socket: SamSocket<R>,
 
         /// Tunnel pool build future.
         ///
         /// Resolves to a `TunnelPoolHandle` once the pool has been built.
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
 
-        /// RX channel for receiving commands to an active session.
-        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
-
-        /// TX channel which can be used to send datagrams to clients.
-        datagram_tx: Sender<(u16, Vec<u8>)>,
+        /// Negotiated version.
+        version: SamVersion,
     },
 
     /// Building tunnels.
@@ -128,8 +135,32 @@ enum PendingSessionState<R: Runtime> {
         /// Address book.
         address_book: Option<Arc<dyn AddressBook>>,
 
-        /// SAMv3 socket associated with the session.
-        socket: SamSocket<R>,
+        /// TX channel which can be used to send datagrams to clients.
+        datagram_tx: Sender<(u16, Vec<u8>)>,
+
+        /// Destination context.
+        destination: DestinationContext,
+
+        /// Event handle.
+        event_handle: EventHandle<R>,
+
+        /// Handle to the built tunnel pool.
+        handle: TunnelPoolHandle,
+
+        /// Active inbound tunnels and their leases.
+        inbound: HashMap<TunnelId, Lease>,
+
+        /// Handle to `NetDb`.
+        netdb_handle: NetDbHandle,
+
+        /// Session options.
+        options: HashMap<String, String>,
+
+        /// Active outbound tunnels.
+        outbound: HashSet<TunnelId>,
+
+        /// RX channel for receiving commands to an active session.
+        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
         /// Session ID.
         session_id: Arc<str>,
@@ -137,32 +168,11 @@ enum PendingSessionState<R: Runtime> {
         /// Session kind.
         session_kind: SessionKind,
 
-        /// Session options.
-        options: HashMap<String, String>,
-
-        /// Destination context.
-        destination: DestinationContext,
+        /// SAMv3 socket associated with the session.
+        socket: SamSocket<R>,
 
         /// Negotiated version.
         version: SamVersion,
-
-        /// Handle to `NetDb`.
-        netdb_handle: NetDbHandle,
-
-        /// Handle to the built tunnel pool.
-        handle: TunnelPoolHandle,
-
-        /// RX channel for receiving commands to an active session.
-        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
-
-        /// TX channel which can be used to send datagrams to clients.
-        datagram_tx: Sender<(u16, Vec<u8>)>,
-
-        /// Active inbound tunnels and their leases.
-        inbound: HashMap<TunnelId, Lease>,
-
-        /// Active outbound tunnels.
-        outbound: HashSet<TunnelId>,
     },
 
     /// Pending connection state has been poisoned.
@@ -193,20 +203,22 @@ impl<R: Runtime> PendingSamSession<R> {
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
         netdb_handle: NetDbHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        event_handle: EventHandle<R>,
     ) -> Self {
         Self {
             state: PendingSessionState::BuildingTunnelPool {
                 address_book,
                 datagram_tx,
-                socket,
+                destination,
+                event_handle,
+                netdb_handle,
+                options,
+                receiver,
                 session_id,
                 session_kind,
-                options,
-                version,
-                receiver,
-                destination,
+                socket,
                 tunnel_pool_future,
-                netdb_handle,
+                version,
             },
         }
     }
@@ -220,16 +232,17 @@ impl<R: Runtime> Future for PendingSamSession<R> {
             match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
                 PendingSessionState::BuildingTunnelPool {
                     address_book,
-                    socket,
+                    datagram_tx,
+                    destination,
+                    event_handle,
+                    mut tunnel_pool_future,
+                    netdb_handle,
+                    options,
+                    receiver,
                     session_id,
                     session_kind,
-                    options,
-                    destination,
+                    socket,
                     version,
-                    receiver,
-                    datagram_tx,
-                    netdb_handle,
-                    mut tunnel_pool_future,
                 } => match tunnel_pool_future.poll_unpin(cx) {
                     Poll::Ready(handle) => {
                         tracing::trace!(
@@ -240,67 +253,71 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         self.state = PendingSessionState::BuildingTunnels {
                             address_book,
-                            socket,
+                            datagram_tx,
+                            destination,
+                            event_handle,
+                            handle,
+                            inbound: HashMap::new(),
+                            netdb_handle,
+                            options,
+                            outbound: HashSet::new(),
+                            receiver,
                             session_id,
                             session_kind,
-                            options,
-                            destination,
+                            socket,
                             version,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
-                            inbound: HashMap::new(),
-                            outbound: HashSet::new(),
                         };
                     }
                     Poll::Pending => {
                         self.state = PendingSessionState::BuildingTunnelPool {
                             address_book,
-                            socket,
+                            datagram_tx,
+                            destination,
+                            event_handle,
+                            netdb_handle,
+                            options,
+                            receiver,
                             session_id,
                             session_kind,
-                            options,
-                            destination,
-                            version,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
+                            socket,
                             tunnel_pool_future,
+                            version,
                         };
                         break;
                     }
                 },
                 PendingSessionState::BuildingTunnels {
                     address_book,
-                    socket,
-                    session_id,
-                    session_kind,
-                    options,
-                    destination,
-                    version,
-                    receiver,
                     datagram_tx,
-                    netdb_handle,
+                    destination,
+                    event_handle,
                     mut handle,
                     mut inbound,
                     mut outbound,
+                    netdb_handle,
+                    options,
+                    receiver,
+                    session_id,
+                    session_kind,
+                    socket,
+                    version,
                 } => match handle.poll_next_unpin(cx) {
                     Poll::Pending => {
                         self.state = PendingSessionState::BuildingTunnels {
                             address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            netdb_handle,
-                            receiver,
                             datagram_tx,
+                            destination,
+                            event_handle,
                             handle,
                             inbound,
+                            netdb_handle,
+                            options,
                             outbound,
+                            receiver,
+                            session_id,
+                            session_kind,
+                            socket,
+                            version,
                         };
                         break;
                     }
@@ -319,18 +336,19 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         if inbound.len() == 0 || outbound.len() == 0 {
                             self.state = PendingSessionState::BuildingTunnels {
                                 address_book,
-                                socket,
+                                datagram_tx,
+                                destination,
+                                event_handle,
+                                handle,
+                                inbound,
+                                netdb_handle,
+                                options,
+                                outbound,
+                                receiver,
                                 session_id,
                                 session_kind,
-                                options,
-                                destination,
+                                socket,
                                 version,
-                                netdb_handle,
-                                handle,
-                                receiver,
-                                datagram_tx,
-                                inbound,
-                                outbound,
                             };
                             continue;
                         }
@@ -345,16 +363,17 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         return Poll::Ready(Ok(SamSessionContext {
                             address_book,
-                            inbound,
-                            options,
+                            datagram_tx,
                             destination,
+                            event_handle,
+                            inbound,
+                            netdb_handle,
+                            options,
                             outbound,
+                            receiver,
                             session_id,
                             session_kind,
                             socket,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
                     }
@@ -372,18 +391,19 @@ impl<R: Runtime> Future for PendingSamSession<R> {
                         if inbound.len() == 0 || outbound.len() == 0 {
                             self.state = PendingSessionState::BuildingTunnels {
                                 address_book,
-                                socket,
+                                datagram_tx,
+                                destination,
+                                event_handle,
+                                handle,
+                                inbound,
+                                netdb_handle,
+                                options,
+                                outbound,
+                                receiver,
                                 session_id,
                                 session_kind,
-                                options,
-                                destination,
+                                socket,
                                 version,
-                                netdb_handle,
-                                handle,
-                                receiver,
-                                datagram_tx,
-                                inbound,
-                                outbound,
                             };
                             continue;
                         }
@@ -398,16 +418,17 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         return Poll::Ready(Ok(SamSessionContext {
                             address_book,
-                            inbound,
-                            options,
+                            datagram_tx,
                             destination,
+                            event_handle,
+                            inbound,
+                            netdb_handle,
+                            options,
                             outbound,
+                            receiver,
                             session_id,
                             session_kind,
                             socket,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
                             tunnel_pool_handle: handle,
                         }));
                     }
@@ -422,18 +443,19 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         self.state = PendingSessionState::BuildingTunnels {
                             address_book,
-                            socket,
+                            datagram_tx,
+                            destination,
+                            event_handle,
+                            handle,
+                            inbound,
+                            netdb_handle,
+                            options,
+                            outbound,
+                            receiver,
                             session_id,
                             session_kind,
-                            options,
-                            destination,
+                            socket,
                             version,
-                            netdb_handle,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            inbound,
-                            outbound,
                         };
                     }
                     Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
@@ -447,18 +469,19 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         self.state = PendingSessionState::BuildingTunnels {
                             address_book,
-                            socket,
+                            datagram_tx,
+                            destination,
+                            event_handle,
+                            handle,
+                            inbound,
+                            netdb_handle,
+                            options,
+                            outbound,
+                            receiver,
                             session_id,
                             session_kind,
-                            options,
-                            destination,
+                            socket,
                             version,
-                            netdb_handle,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            inbound,
-                            outbound,
                         };
                     }
                     Poll::Ready(Some(event)) => {
@@ -471,18 +494,19 @@ impl<R: Runtime> Future for PendingSamSession<R> {
 
                         self.state = PendingSessionState::BuildingTunnels {
                             address_book,
-                            socket,
+                            datagram_tx,
+                            destination,
+                            event_handle,
+                            handle,
+                            inbound,
+                            netdb_handle,
+                            options,
+                            outbound,
+                            receiver,
                             session_id,
                             session_kind,
-                            options,
-                            destination,
+                            socket,
                             version,
-                            netdb_handle,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            inbound,
-                            outbound,
                         };
                     }
                 },

@@ -20,6 +20,7 @@ use crate::{
     config::TransitConfig,
     crypto::{chachapoly::ChaChaPoly, EphemeralPublicKey},
     error::TunnelError,
+    events::EventHandle,
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessage, GarlicMessageBuilder},
         tunnel::{
@@ -101,6 +102,7 @@ pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {
         routing_table: RoutingTable,
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
+        event_handle: EventHandle<R>,
     ) -> Self;
 }
 
@@ -108,6 +110,9 @@ pub trait TransitTunnel<R: Runtime>: Future<Output = TunnelId> + Send {
 pub struct TransitTunnelManager<R: Runtime> {
     /// Transit configuration.
     config: Option<TransitConfig>,
+
+    /// Event handle.
+    event_handle: EventHandle<R>,
 
     /// RX channel for receiving messages from `TunnelManager`.
     message_rx: Receiver<Message>,
@@ -151,6 +156,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
 
         Self {
             config,
+            event_handle: router_ctx.event_handle().clone(),
             message_rx,
             router_ctx,
             routing_table,
@@ -327,6 +333,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     build_record.tunnel_iv_key().to_vec(),
                 )?;
                 let (tx, rx) = oneshot::channel::<()>();
+                let event_handle = self.router_ctx.event_handle().clone();
 
                 match role {
                     HopRole::InboundGateway => self.tunnels.push(async move {
@@ -352,6 +359,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             routing_table,
                             metrics,
                             receiver,
+                            event_handle,
                         )
                         .await)
                     }),
@@ -378,6 +386,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             routing_table,
                             metrics,
                             receiver,
+                            event_handle,
                         )
                         .await)
                     }),
@@ -404,6 +413,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                             routing_table,
                             metrics,
                             receiver,
+                            event_handle,
                         )
                         .await)
                     }),
@@ -582,6 +592,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 let next_router_id = next_router.clone();
                 let tunnel_keys = session.finalize()?;
                 let (tx, rx) = oneshot::channel::<()>();
+                let event_handle = self.router_ctx.event_handle().clone();
 
                 match role {
                     HopRole::InboundGateway => {
@@ -609,6 +620,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                                 routing_table,
                                 metrics,
                                 receiver,
+                                event_handle,
                             )
                             .await)
                         });
@@ -640,6 +652,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                                 routing_table,
                                 metrics,
                                 receiver,
+                                event_handle,
                             )
                             .await)
                         });
@@ -674,6 +687,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                                 routing_table,
                                 metrics,
                                 receiver,
+                                event_handle,
                             )
                             .await)
                         });
@@ -857,6 +871,10 @@ impl<R: Runtime> Future for TransitTunnelManager<R> {
             }
         }
 
+        if self.event_handle.poll_unpin(cx).is_ready() {
+            self.router_ctx.event_handle().num_transit_tunnels(self.tunnels.len());
+        }
+
         Poll::Pending
     }
 }
@@ -866,6 +884,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{StaticPrivateKey, StaticPublicKey},
+        events::EventManager,
         primitives::{MessageId, Str},
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
@@ -888,6 +907,7 @@ mod tests {
     #[tokio::test]
     async fn accept_tunnel_build_request_participant() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -917,6 +937,7 @@ mod tests {
                                 static_key,
                                 signing_key,
                                 2u8,
+                                event_handle.clone(),
                             ),
                             routing_table,
                             transit_rx,
@@ -958,6 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tunnel_build_request_ibgw() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -993,6 +1015,7 @@ mod tests {
                                     static_key,
                                     signing_key,
                                     2u8,
+                                    event_handle.clone(),
                                 ),
                                 routing_table,
                                 transit_rx,
@@ -1044,6 +1067,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tunnel_build_request_obep() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1074,6 +1098,7 @@ mod tests {
                                 static_key,
                                 signing_key,
                                 2u8,
+                                event_handle.clone(),
                             ),
                             routing_table,
                             transit_rx,
@@ -1138,8 +1163,9 @@ mod tests {
         pending_tunnel.try_build_tunnel::<MockRuntime>(message).unwrap();
     }
 
-    #[test]
-    fn local_record_not_found() {
+    #[tokio::test]
+    async fn local_record_not_found() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let handle = MockRuntime::register_metrics(vec![], None);
         let (hops, _transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1170,6 +1196,7 @@ mod tests {
                                 static_key,
                                 signing_key,
                                 2u8,
+                                event_handle.clone(),
                             ),
                             routing_table,
                             transit_rx,
@@ -1213,6 +1240,7 @@ mod tests {
         let routing_table = RoutingTable::new(RouterId::from(&local_hash), manager_tx, transit_tx);
         let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
         let shutdown_handle = shutdown_ctx.handle();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
             None,
             RouterContext::new(
@@ -1223,6 +1251,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             routing_table,
             transit_rx,
@@ -1235,9 +1264,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalid_public_key_used() {
+    #[tokio::test]
+    async fn invalid_public_key_used() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -1266,6 +1296,7 @@ mod tests {
                             static_key,
                             signing_key,
                             2u8,
+                            event_handle.clone(),
                         ),
                         routing_table,
                         transit_rx,
@@ -1323,6 +1354,7 @@ mod tests {
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         for i in 0..3 {
             let (router_hash, static_key, signing_key, _, router_info) = make_router(true);
@@ -1356,6 +1388,7 @@ mod tests {
                     static_key,
                     signing_key,
                     2u8,
+                    event_handle.clone(),
                 ),
                 routing_table,
                 transit_rx,
@@ -1429,6 +1462,7 @@ mod tests {
         let routing_table = RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
         let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
         let shutdown_handle = shutdown_ctx.handle();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let mut transit_manager = TransitTunnelManager::<MockRuntime>::new(
             None,
@@ -1440,6 +1474,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             routing_table,
             transit_rx,
@@ -1472,6 +1507,7 @@ mod tests {
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         for i in 0..3 {
             let (router_hash, static_key, signing_key, _, router_info) = make_router(true);
@@ -1502,6 +1538,7 @@ mod tests {
                     static_key,
                     signing_key,
                     2u8,
+                    event_handle.clone(),
                 ),
                 routing_table,
                 transit_rx,
@@ -1572,6 +1609,7 @@ mod tests {
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         for i in 0..3 {
             let (router_hash, static_key, signing_key, _, router_info) = make_router(true);
@@ -1604,6 +1642,7 @@ mod tests {
                     static_key,
                     signing_key,
                     2u8,
+                    event_handle.clone(),
                 ),
                 routing_table,
                 transit_rx,
@@ -1671,6 +1710,7 @@ mod tests {
     #[tokio::test]
     async fn next_hop_dial_failure() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
             Vec<TransitTunnelManager<MockRuntime>>,
@@ -1700,6 +1740,7 @@ mod tests {
                                 static_key,
                                 signing_key,
                                 2u8,
+                                event_handle.clone(),
                             ),
                             routing_table,
                             transit_rx,

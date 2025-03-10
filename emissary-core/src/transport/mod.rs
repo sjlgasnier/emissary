@@ -18,6 +18,7 @@
 
 use crate::{
     error::{ChannelError, QueryError},
+    events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Date, RouterAddress, RouterId, RouterInfo, Str, TransportKind},
     router::context::RouterContext,
@@ -516,6 +517,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
     pub fn build(self) -> TransportManager<R> {
         TransportManager {
             cmd_rx: self.cmd_rx,
+            event_handle: self.router_ctx.event_handle().clone(),
             external_address: None,
             local_router_info: self.local_router_info,
             netdb_handle: self.netdb_handle.expect("to exist"),
@@ -546,6 +548,9 @@ impl<R: Runtime> TransportManagerBuilder<R> {
 pub struct TransportManager<R: Runtime> {
     /// RX channel for receiving commands from other subsystems.
     cmd_rx: Receiver<ProtocolCommand>,
+
+    /// Event handle.
+    event_handle: EventHandle<R>,
 
     /// External address, if any.
     external_address: Option<Ipv4Addr>,
@@ -961,6 +966,10 @@ impl<R: Runtime> Future for TransportManager<R> {
             let _ = self.router_info_republish_timer.poll_unpin(cx);
         }
 
+        if self.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle.num_connected_routers(self.routers.len());
+        }
+
         Poll::Pending
     }
 }
@@ -970,6 +979,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
+        events::EventManager,
         netdb::NetDbAction,
         primitives::{Capabilities, Str},
         profile::ProfileStorage,
@@ -1003,6 +1013,7 @@ mod tests {
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (handle, _) = NetDbHandle::create();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
@@ -1011,6 +1022,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
 
         let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
@@ -1441,6 +1453,7 @@ mod tests {
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (handle, _) = NetDbHandle::create();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
@@ -1449,6 +1462,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
 
         let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
@@ -1563,6 +1577,7 @@ mod tests {
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (handle, _) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1572,6 +1587,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
 
         let router = RouterInfo::random::<MockRuntime>();
@@ -1706,6 +1722,7 @@ mod tests {
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (handle, netdb_rx) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1715,6 +1732,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
         let router_id = RouterId::random();
 
@@ -1847,6 +1865,7 @@ mod tests {
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (handle, _netdb_rx) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1856,6 +1875,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
         let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
             port: 0,
@@ -1916,6 +1936,7 @@ mod tests {
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
         let (handle, _netdb_rx) = NetDbHandle::create();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
             storage.clone(),
@@ -1924,6 +1945,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
         let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
             port: 0,

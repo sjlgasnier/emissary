@@ -19,6 +19,7 @@
 use crate::{
     crypto::aes::{cbc, ecb},
     error::Error,
+    events::EventHandle,
     i2np::{
         tunnel::{data::TunnelDataBuilder, gateway::TunnelGateway},
         Message, MessageBuilder, MessageType,
@@ -56,8 +57,14 @@ const PAYLOAD_OFFSET: RangeFrom<usize> = 20..;
 
 /// Inbound gateway.
 pub struct InboundGateway<R: Runtime> {
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, ()>,
+
+    /// Inbound bandwidth.
+    inbound_bandwidth: usize,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -71,6 +78,9 @@ pub struct InboundGateway<R: Runtime> {
 
     /// Next tunnel ID.
     next_tunnel_id: TunnelId,
+
+    /// Outbound bandwidth.
+    outbound_bandwidth: usize,
 
     /// Random bytes used for tunnel data padding.
     padding_bytes: [u8; 1028],
@@ -155,6 +165,7 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
         routing_table: RoutingTable,
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
+        event_handle: EventHandle<R>,
     ) -> Self {
         // generate random padding bytes used in `TunnelData` messages
         let padding_bytes = {
@@ -173,11 +184,14 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
         };
 
         InboundGateway {
+            event_handle,
             expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
+            inbound_bandwidth: 0usize,
             message_rx,
             metrics_handle,
             next_router,
             next_tunnel_id,
+            outbound_bandwidth: 0usize,
             padding_bytes,
             routing_table,
             tunnel_id,
@@ -200,39 +214,51 @@ impl<R: Runtime> Future for InboundGateway<R> {
                     );
                     return Poll::Ready(self.tunnel_id);
                 }
-                Some(message) => match message.message_type {
-                    MessageType::TunnelGateway => match TunnelGateway::parse(&message.payload) {
-                        Some(message) => match self.handle_tunnel_gateway(&message) {
-                            Ok((router, messages)) => messages.into_iter().for_each(|message| {
-                                if let Err(error) =
-                                    self.routing_table.send_message(router.clone(), message)
-                                {
-                                    tracing::error!(
+                Some(message) => {
+                    self.inbound_bandwidth += message.serialized_len_short();
+
+                    match message.message_type {
+                        MessageType::TunnelGateway =>
+                            match TunnelGateway::parse(&message.payload) {
+                                Some(message) => match self.handle_tunnel_gateway(&message) {
+                                    Ok((router, messages)) =>
+                                        messages.into_iter().for_each(|message| {
+                                            if let Err(error) = self
+                                                .routing_table
+                                                .send_message(router.clone(), message)
+                                            {
+                                                tracing::error!(
+                                                    target: LOG_TARGET,
+                                                    tunnel_id = %self.tunnel_id,
+                                                    ?error,
+                                                    "failed to send message",
+                                                )
+                                            }
+                                        }),
+                                    Err(Error::Expired) => {}
+                                    Err(error) => tracing::warn!(
                                         target: LOG_TARGET,
                                         tunnel_id = %self.tunnel_id,
                                         ?error,
-                                        "failed to send message",
-                                    )
-                                }
-                            }),
-                            Err(Error::Expired) => {}
-                            Err(error) => tracing::warn!(
-                                target: LOG_TARGET,
-                                tunnel_id = %self.tunnel_id,
-                                ?error,
-                                "failed to handle tunnel gateway",
-                            ),
-                        },
-                        None => todo!(),
-                    },
-                    message_type => tracing::warn!(
-                        target: LOG_TARGET,
-                        tunnel_id = %self.tunnel_id,
-                        ?message_type,
-                        "unsupported message",
-                    ),
-                },
+                                        "failed to handle tunnel gateway",
+                                    ),
+                                },
+                                None => todo!(),
+                            },
+                        message_type => tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            ?message_type,
+                            "unsupported message",
+                        ),
+                    }
+                }
             }
+        }
+
+        if self.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle
+                .transit_tunnel_bandwidth(self.inbound_bandwidth, self.outbound_bandwidth);
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {
@@ -248,6 +274,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::EphemeralPublicKey,
+        events::EventManager,
         i2np::HopRole,
         primitives::{MessageId, Str},
         runtime::mock::MockRuntime,
@@ -276,6 +303,7 @@ mod tests {
         let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, ibep_router_info) =
             make_router(false);
 
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (transit_tx, _transit_rx) = channel(64);
         let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
         let routing_table =
@@ -364,6 +392,7 @@ mod tests {
             routing_table,
             MockRuntime::register_metrics(vec![], None),
             msg_rx,
+            event_handle.clone(),
         );
 
         let message = MessageBuilder::standard()
@@ -386,6 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tunnel_gateway_payload() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (ibgw_router_hash, ibgw_static_key, _, ibgw_noise, ibgw_router_info) =
             make_router(false);
         let mut ibgw_garlic = GarlicHandler::<MockRuntime>::new(
@@ -483,6 +513,7 @@ mod tests {
             routing_table,
             MockRuntime::register_metrics(vec![], None),
             msg_rx,
+            event_handle.clone(),
         );
 
         let tunnel_gateway = TunnelGateway {

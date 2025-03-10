@@ -33,6 +33,7 @@
 use crate::{
     crypto::{noise::NoiseContext, sha256::Sha256, siphash::SipHash, StaticPrivateKey},
     error::Error,
+    events::EventHandle,
     primitives::{RouterId, RouterInfo, TransportKind},
     profile::ProfileStorage,
     router::context::RouterContext,
@@ -168,6 +169,7 @@ impl<R: Runtime> SessionManager<R> {
         noise_ctx: NoiseContext,
         allow_local: bool,
         subsystem_handle: SubsystemHandle,
+        event_handle: EventHandle<R>,
     ) -> crate::Result<Ntcp2Session<R>> {
         let router_id = router.identity.id();
 
@@ -268,6 +270,7 @@ impl<R: Runtime> SessionManager<R> {
             key_context,
             subsystem_handle,
             Direction::Outbound,
+            event_handle,
         ))
     }
 
@@ -289,6 +292,7 @@ impl<R: Runtime> SessionManager<R> {
         let chaining_key = self.chaining_key.clone();
         let allow_local = self.allow_local;
         let mut subsystem_handle = self.subsystem_handle.clone();
+        let event_handle = self.router_ctx.event_handle().clone();
         let router_id = router.identity.id();
 
         async move {
@@ -300,6 +304,7 @@ impl<R: Runtime> SessionManager<R> {
                 NoiseContext::new(chaining_key, outbound_initial_state),
                 allow_local,
                 subsystem_handle.clone(),
+                event_handle,
             )
             .await
             {
@@ -329,6 +334,7 @@ impl<R: Runtime> SessionManager<R> {
         local_key: StaticPrivateKey,
         iv: [u8; 16],
         profile_storage: ProfileStorage<R>,
+        event_handle: EventHandle<R>,
     ) -> crate::Result<Ntcp2Session<R>> {
         tracing::trace!(
             target: LOG_TARGET,
@@ -382,6 +388,7 @@ impl<R: Runtime> SessionManager<R> {
                     key_context,
                     subsystem_handle,
                     Direction::Inbound,
+                    event_handle,
                 ))
             }
             Err(error) => {
@@ -410,6 +417,7 @@ impl<R: Runtime> SessionManager<R> {
         let local_key = self.local_key.clone();
         let iv = self.local_iv;
         let profile_storage = self.router_ctx.profile_storage().clone();
+        let event_handle = self.router_ctx.event_handle().clone();
 
         async move {
             Self::accept_session_inner(
@@ -421,6 +429,7 @@ impl<R: Runtime> SessionManager<R> {
                 local_key,
                 iv,
                 profile_storage,
+                event_handle,
             )
             .await
             .map_err(|error| (None, error))
@@ -433,6 +442,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
+        events::EventManager,
         i2np::{MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
         primitives::{
             Capabilities, Date, RouterAddress, RouterIdentity, RouterInfo, Str, TransportKind,
@@ -542,6 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_succeeds() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -554,6 +565,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -574,6 +586,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -599,6 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_network_id_initiator() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().with_net_id(128).build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -611,6 +625,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 128,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -631,6 +646,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -653,6 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_network_id_responder() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -665,6 +682,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -686,6 +704,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 128u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -708,6 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn dialer_local_addresses_disabled() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -720,6 +740,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             false,
@@ -741,6 +762,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -762,6 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_local_addresses_disabled() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -774,6 +797,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -795,6 +819,7 @@ mod tests {
     async fn received_expired_message() {
         let local = Ntcp2Builder::new().build();
         let mut local_handle = SubsystemHandle::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (_local_tunnel_tx, _local_tunnel_rx) = channel(64);
         local_handle.register_subsystem(_local_tunnel_tx);
@@ -813,6 +838,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             local_handle,
             true,
@@ -842,6 +868,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             remote_handle.clone(),
             true,

@@ -149,23 +149,26 @@ async fn main() -> anyhow::Result<()> {
     let client_tunnels = mem::take(&mut config.client_tunnels);
     let server_tunnels = mem::take(&mut config.server_tunnels);
 
-    let (mut router, local_router_info, address_book_manager) = match config.address_book.take() {
-        None => Router::<Runtime>::new(config.into())
-            .await
-            .map(|(router, info)| (router, info, None)),
-
-        Some(address_book_config) => {
-            // create address book, allocate address book handle and pass it to `Router`
-            let address_book_manager =
-                AddressBookManager::new(config.base_path.clone(), address_book_config);
-            let address_book_handle = address_book_manager.handle();
-
-            Router::<Runtime>::with_address_book(config.into(), address_book_handle)
+    let (mut router, _event_subscriber, local_router_info, address_book_manager) =
+        match config.address_book.take() {
+            None => Router::<Runtime>::new(config.into())
                 .await
-                .map(|(router, info)| (router, info, Some(address_book_manager)))
+                .map(|(router, event_subscriber, info)| (router, event_subscriber, info, None)),
+
+            Some(address_book_config) => {
+                // create address book, allocate address book handle and pass it to `Router`
+                let address_book_manager =
+                    AddressBookManager::new(config.base_path.clone(), address_book_config);
+                let address_book_handle = address_book_manager.handle();
+
+                Router::<Runtime>::with_address_book(config.into(), address_book_handle)
+                    .await
+                    .map(|(router, event_subscriber, info)| {
+                        (router, event_subscriber, info, Some(address_book_manager))
+                    })
+            }
         }
-    }
-    .map_err(|error| anyhow!(error))?;
+        .map_err(|error| anyhow!(error))?;
 
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;

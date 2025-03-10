@@ -163,6 +163,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{base32_decode, base64_decode, SigningPrivateKey, StaticPrivateKey},
+        events::EventManager,
         primitives::RouterInfo,
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
@@ -170,8 +171,8 @@ mod tests {
     use bytes::Bytes;
     use rand_core::RngCore;
 
-    #[test]
-    fn lookup() {
+    #[tokio::test]
+    async fn lookup() {
         let routers = HashSet::from_iter([
             RouterId::from(&base64_decode("4wlqrFG46mv7ujZi18KwEf9uJz2MgOIebdMMxDHsh~0=").unwrap()),
             RouterId::from(&base64_decode("909NkRdvZz4UnYKrEdkcPR0-nyjgIyXfcltdus3KbvI=").unwrap()),
@@ -204,6 +205,7 @@ mod tests {
 
             (static_key, signing_key, router_info)
         };
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let mut dht = Dht::<MockRuntime>::new(
             router_info.identity.id(),
             routers,
@@ -215,6 +217,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             true,
         );

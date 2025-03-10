@@ -222,12 +222,16 @@ impl<R: Runtime> Stream for Ssu2Transport<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{crypto::SigningPrivateKey, profile::ProfileStorage, runtime::mock::MockRuntime};
+    use crate::{
+        crypto::SigningPrivateKey, events::EventManager, profile::ProfileStorage,
+        runtime::mock::MockRuntime,
+    };
     use bytes::Bytes;
     use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn connect_ssu2() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (ctx1, address1) = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
             port: 0u16,
             host: Some("127.0.0.1".parse().unwrap()),
@@ -297,6 +301,7 @@ mod tests {
                 static1,
                 signing1,
                 2u8,
+                event_handle.clone(),
             ),
             handle1,
         );
@@ -311,6 +316,7 @@ mod tests {
                 static2,
                 signing2,
                 2u8,
+                event_handle.clone(),
             ),
             handle2,
         );

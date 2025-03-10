@@ -17,7 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use emissary_core::{
-    router::Router, runtime::AddressBook, Config, Ntcp2Config, SamConfig, TransitConfig,
+    events::EventSubscriber, router::Router, runtime::AddressBook, Config, Ntcp2Config, SamConfig,
+    TransitConfig,
 };
 use emissary_util::runtime::tokio::Runtime;
 use futures::StreamExt;
@@ -38,7 +39,7 @@ async fn make_router(
     floodfill: bool,
     net_id: u8,
     routers: Vec<Vec<u8>>,
-) -> (Router<Runtime>, Vec<u8>) {
+) -> (Router<Runtime>, EventSubscriber, Vec<u8>) {
     let config = Config {
         net_id: Some(net_id),
         floodfill,
@@ -85,7 +86,8 @@ async fn generate_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -131,7 +133,8 @@ async fn streaming_works() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -216,7 +219,8 @@ async fn repliable_datagrams_work() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _event, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -304,7 +308,8 @@ async fn anonymous_datagrams_work() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -391,7 +396,8 @@ async fn open_stream_to_self() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -436,7 +442,8 @@ async fn create_same_session_twice_transient() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -488,7 +495,8 @@ async fn create_same_session_twice_persistent() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -551,7 +559,8 @@ async fn duplicate_session_id() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -603,7 +612,8 @@ async fn stream_lots_of_data() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -691,7 +701,8 @@ async fn forward_stream() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -776,7 +787,8 @@ async fn connect_to_inactive_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -829,7 +841,8 @@ async fn closed_stream_detected() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -923,7 +936,8 @@ async fn close_and_reconnect() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -1021,7 +1035,8 @@ async fn create_multiple_sessions() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..6 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -1083,7 +1098,8 @@ async fn send_data_to_destroyed_session() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -1175,7 +1191,8 @@ async fn connect_using_b32_i2p() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -1272,7 +1289,8 @@ async fn unpublished_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -1343,7 +1361,8 @@ async fn host_lookup() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..6 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
@@ -1428,7 +1447,7 @@ async fn host_lookup() {
         }
     }
 
-    let (mut router, _) =
+    let (mut router, _events, _) =
         Router::<Runtime>::with_address_book(config, Arc::new(AddressBookImpl { dest }))
             .await
             .unwrap();

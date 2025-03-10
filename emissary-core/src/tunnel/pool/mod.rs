@@ -19,6 +19,7 @@
 use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPrivateKey},
     error::{ChannelError, Error},
+    events::EventHandle,
     i2np::{
         garlic::{DeliveryInstructions, GarlicMessageBuilder},
         MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
@@ -175,6 +176,9 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     /// Tunne pool context.
     context: TunnelPoolContext,
 
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
     /// Expiring inbound tunnels.
     expiring_inbound: HashSet<TunnelId>,
 
@@ -198,8 +202,11 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
     /// Tunnel maintenance timer.
     maintenance_timer: BoxFuture<'static, ()>,
 
-    /// Router context.
-    router_ctx: RouterContext<R>,
+    /// How many tunnel build failures, either timeouts or rejections, there has been.
+    num_tunnel_build_failures: usize,
+
+    /// How many tunnels have successfully been built.
+    num_tunnels_built: usize,
 
     /// Active outbound tunnels.
     outbound: HashMap<TunnelId, OutboundTunnel<R>>,
@@ -212,6 +219,9 @@ pub struct TunnelPool<R: Runtime, S: TunnelSelector + HopSelector> {
 
     /// Pending tunnel tests.
     pending_tests: R::JoinSet<(TunnelId, TunnelId, crate::Result<Duration>)>,
+
+    /// Router context.
+    router_ctx: RouterContext<R>,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -256,6 +266,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
             Self {
                 config,
                 context,
+                event_handle: router_ctx.event_handle().clone(),
                 expiring_inbound: HashSet::new(),
                 expiring_outbound: HashSet::new(),
                 inbound: R::join_set(),
@@ -271,6 +282,8 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                     routing_table.clone(),
                     router_ctx.profile_storage().clone(),
                 ),
+                num_tunnel_build_failures: 0usize,
+                num_tunnels_built: 0usize,
                 router_ctx,
                 pending_tests: R::join_set(),
                 routing_table,
@@ -854,6 +867,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         .metrics_handle()
                         .gauge(NUM_PENDING_OUTBOUND_TUNNELS)
                         .decrement(1);
+                    self.num_tunnel_build_failures += 1;
                 }
                 Ok(tunnel) => {
                     tracing::info!(
@@ -872,6 +886,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                         .decrement(1);
                     self.router_ctx.metrics_handle().gauge(NUM_OUTBOUND_TUNNELS).increment(1);
                     self.router_ctx.metrics_handle().counter(NUM_BUILD_SUCCESSES).increment(1);
+                    self.num_tunnels_built += 1;
 
                     // inform the owner of the tunnel pool that a new outbound tunnel has been built
                     if let Err(error) = self.context.register_outbound_tunnel_built(tunnel_id) {
@@ -900,6 +915,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     );
                     num_failed_builds += 1;
 
+                    self.num_tunnel_build_failures += 1;
                     self.routing_table.remove_tunnel(&tunnel_id);
                     self.router_ctx.metrics_handle().counter(NUM_BUILD_FAILURES).increment(1);
                     self.router_ctx
@@ -928,6 +944,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                     );
                     self.inbound_tunnels.insert(gateway_tunnel_id, (tunnel_id, router_id.clone()));
                     self.tunnel_timers.add_inbound_tunnel(gateway_tunnel_id);
+                    self.num_tunnels_built += 1;
 
                     // inform the owner of the tunnel pool that a new inbound tunnel has been built
                     if let Err(error) = self.context.register_inbound_tunnel_built(
@@ -1339,6 +1356,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
             }
         }
 
+        if self.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle
+                .tunnel_status(self.num_tunnels_built, self.num_tunnel_build_failures);
+        }
+
         match self.maintenance_timer.poll_unpin(cx) {
             Poll::Ready(()) => {
                 // create new timer and register it into the executor
@@ -1363,6 +1385,7 @@ mod tests {
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
         error::RoutingError,
+        events::EventManager,
         i2np::Message,
         primitives::{RouterId, RouterInfo},
         profile::ProfileStorage,
@@ -1413,6 +1436,7 @@ mod tests {
             (static_key, signing_key, router_info)
         };
         let handle = MockRuntime::register_metrics(Vec::new(), None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
@@ -1430,6 +1454,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -1521,6 +1546,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1534,6 +1560,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -1620,6 +1647,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1633,6 +1661,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -1736,6 +1765,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1749,6 +1779,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -1853,6 +1884,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let exploratory_selector =
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false);
         let router_ctx = RouterContext::new(
@@ -1863,6 +1895,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
 
         let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
@@ -2159,6 +2192,7 @@ mod tests {
 
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let exploratory_selector =
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false);
         let router_ctx = RouterContext::new(
@@ -2169,6 +2203,7 @@ mod tests {
             static_key,
             signing_key,
             2u8,
+            event_handle.clone(),
         );
 
         let (mut exploratory_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
@@ -2465,6 +2500,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -2478,6 +2514,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -2574,6 +2611,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -2587,6 +2625,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -2693,6 +2732,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let our_id = router_info.identity.id();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -2706,6 +2746,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -2928,6 +2969,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -2941,6 +2983,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 
@@ -3100,6 +3143,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (mut tunnel_pool, mut handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -3113,6 +3157,7 @@ mod tests {
                 static_key,
                 signing_key,
                 2u8,
+                event_handle.clone(),
             ),
         );
 

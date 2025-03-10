@@ -549,6 +549,7 @@ mod test {
     use crate::{
         config::TransitConfig,
         crypto::{EphemeralPublicKey, StaticPublicKey},
+        events::EventManager,
         i2np::{tunnel::gateway::TunnelGateway, MessageBuilder},
         primitives::MessageId,
         profile::ProfileStorage,
@@ -630,6 +631,7 @@ mod test {
     #[tokio::test]
     async fn create_inbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -665,6 +667,7 @@ mod test {
                                     static_key,
                                     signing_key,
                                     2u8,
+                                    event_handle.clone(),
                                 ),
                                 routing_table,
                                 transit_rx,
@@ -1046,6 +1049,7 @@ mod test {
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         for _ in 0..3 {
             let (router_hash, static_key, signing_key, _noise_context, router_info) =
@@ -1073,6 +1077,7 @@ mod test {
                     static_key,
                     signing_key,
                     2u8,
+                    event_handle.clone(),
                 ),
                 routing_table,
                 transit_rx,
@@ -1294,6 +1299,7 @@ mod test {
     #[tokio::test]
     async fn hop_record_decrypt_error() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1329,6 +1335,7 @@ mod test {
                                     static_key,
                                     signing_key,
                                     2u8,
+                                    event_handle.clone(),
                                 ),
                                 routing_table,
                                 transit_rx,

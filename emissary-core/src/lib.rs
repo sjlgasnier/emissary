@@ -53,6 +53,7 @@ mod transport;
 mod tunnel;
 mod util;
 
+pub mod events;
 pub mod i2np;
 pub mod primitives;
 pub mod protocol;

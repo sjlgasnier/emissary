@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey, StaticPublicKey},
+    events::EventManager,
     i2np::{tunnel::gateway, Message, MessageType},
     primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
     profile::ProfileStorage,
@@ -134,6 +135,7 @@ impl TestTransitTunnelManager {
         let routing_table =
             RoutingTable::new(RouterId::from(&router_hash), message_tx, transit_tx.clone());
         let mut _shutdown_ctx = ShutdownContext::<MockRuntime>::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         Self {
             garlic: GarlicHandler::new(noise.clone(), MockRuntime::register_metrics(vec![], None)),
@@ -149,6 +151,7 @@ impl TestTransitTunnelManager {
                     static_key,
                     signing_key,
                     2u8,
+                    event_handle.clone(),
                 ),
                 routing_table.clone(),
                 transit_rx,

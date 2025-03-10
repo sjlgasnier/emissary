@@ -16,7 +16,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use emissary_core::{router::Router, Config, Ntcp2Config, SamConfig, TransitConfig};
+use emissary_core::{
+    events::EventSubscriber, router::Router, Config, Ntcp2Config, SamConfig, TransitConfig,
+};
 use emissary_util::runtime::tokio::Runtime;
 use futures::StreamExt;
 use rand::{thread_rng, RngCore};
@@ -28,7 +30,7 @@ async fn make_router(
     floodfill: bool,
     net_id: u8,
     routers: Vec<Vec<u8>>,
-) -> (Router<Runtime>, Vec<u8>) {
+) -> (Router<Runtime>, EventSubscriber, Vec<u8>) {
     let config = Config {
         net_id: Some(net_id),
         floodfill,
@@ -75,7 +77,8 @@ async fn router_exploration() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..6 {
-        let (mut router, router_info) = make_router(i < 3, net_id, router_infos.clone()).await;
+        let (mut router, _events, router_info) =
+            make_router(i < 3, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
         tokio::spawn(async move { while let Some(_) = router.next().await {} });
