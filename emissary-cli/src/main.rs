@@ -31,6 +31,7 @@ use crate::{
 use anyhow::anyhow;
 use clap::Parser;
 use emissary_core::{
+    events::EventSubscriber,
     router::{Router, RouterEvent},
     runtime::Runtime as _,
 };
@@ -50,16 +51,25 @@ mod signal;
 mod storage;
 mod tunnel;
 
+#[cfg(feature = "router-ui")]
+mod ui;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
 
 /// Result type for the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Setup router and related subsystems.
+async fn setup_router() -> anyhow::Result<(
+    Router<Runtime>,
+    EventSubscriber,
+    PortMapper,
+    Storage,
+    SignalHandler,
+)> {
     let arguments = Arguments::parse();
-    let mut handler = SignalHandler::new();
+    let handler = SignalHandler::new();
 
     // initialize logger with any logging directive given as a cli argument
     let handle = init_logger!(arguments.log.clone());
@@ -149,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     let client_tunnels = mem::take(&mut config.client_tunnels);
     let server_tunnels = mem::take(&mut config.server_tunnels);
 
-    let (mut router, _event_subscriber, local_router_info, address_book_manager) =
+    let (router, event_subscriber, local_router_info, address_book_manager) =
         match config.address_book.take() {
             None => Router::<Runtime>::new(config.into())
                 .await
@@ -226,12 +236,27 @@ async fn main() -> anyhow::Result<()> {
     // create port mapper from config and transport protocol info
     //
     // `PortMapper` can be polled for external address discoveries
-    let mut port_mapper = PortMapper::new(
+    let port_mapper = PortMapper::new(
         port_forwarding,
         router.protocol_address_info().ntcp2_port,
         router.protocol_address_info().ssu2_port,
     );
 
+    Ok((router, event_subscriber, port_mapper, storage, handler))
+}
+
+/// Run the event loop of `emissary-cli`
+///
+/// Start a loop which polls:
+///  * `SIGINT` signal handler
+///  * `Router`'s event loop
+///  * [`PortMapper`]'s event loop
+async fn router_event_loop(
+    mut router: Router<Runtime>,
+    mut port_mapper: PortMapper,
+    storage: Storage,
+    mut handler: SignalHandler,
+) {
     loop {
         tokio::select! {
             _ = handler.next() => {
@@ -243,13 +268,13 @@ async fn main() -> anyhow::Result<()> {
                 router.add_external_address(address.expect("value"));
             },
             event = router.next() => match event {
-                None => return Ok(()),
+                None => break,
                 Some(RouterEvent::Shutdown) => {
                     tracing::info!(
                         target: LOG_TARGET,
                         "emissary shut down",
                     );
-                    return Ok(());
+                    break;
                 }
                 Some(RouterEvent::ProfileStorageBackup { routers }) => {
                     let storage_handle = storage.clone();
@@ -291,4 +316,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+#[cfg(not(feature = "router-ui"))]
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (router, _events, port_mapper, storage, handler) = runtime.block_on(setup_router())?;
+
+    runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
+
+    Ok(())
+}
+
+#[cfg(feature = "router-ui")]
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (router, events, port_mapper, storage, handler) = runtime.block_on(setup_router())?;
+
+    std::thread::spawn(move || {
+        runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
+    });
+
+    ui::RouterUi::start(events)
 }
