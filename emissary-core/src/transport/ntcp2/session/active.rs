@@ -288,6 +288,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 };
                                 continue;
                             }
+                            this.inbound_bandwidth += this.read_buffer[..size].len();
 
                             let data_block =
                                 match this.recv_cipher.decrypt(this.read_buffer[..size].to_vec()) {
@@ -416,21 +417,25 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     }
                     Poll::Ready(Err(_)) => return Poll::Ready(TerminationReason::IoError),
                     Poll::Ready(Ok(0)) => return Poll::Ready(TerminationReason::IoError),
-                    Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
-                        true => {
-                            this.write_state = WriteState::SendMessage {
-                                offset: 0usize,
-                                message,
-                            };
+                    Poll::Ready(Ok(nwritten)) => {
+                        this.outbound_bandwidth += nwritten;
+
+                        match nwritten + offset == size.len() {
+                            true => {
+                                this.write_state = WriteState::SendMessage {
+                                    offset: 0usize,
+                                    message,
+                                };
+                            }
+                            false => {
+                                this.write_state = WriteState::SendSize {
+                                    size,
+                                    offset: offset + nwritten,
+                                    message,
+                                };
+                            }
                         }
-                        false => {
-                            this.write_state = WriteState::SendSize {
-                                size,
-                                offset: offset + nwritten,
-                                message,
-                            };
-                        }
-                    },
+                    }
                 },
                 WriteState::SendMessage { offset, message } =>
                     match stream.as_mut().poll_write(cx, &message[offset..]) {
@@ -440,17 +445,21 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         }
                         Poll::Ready(Err(_)) => return Poll::Ready(TerminationReason::IoError),
                         Poll::Ready(Ok(0)) => return Poll::Ready(TerminationReason::IoError),
-                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
-                            true => {
-                                this.write_state = WriteState::GetMessage;
+                        Poll::Ready(Ok(nwritten)) => {
+                            this.outbound_bandwidth += nwritten;
+
+                            match nwritten + offset == message.len() {
+                                true => {
+                                    this.write_state = WriteState::GetMessage;
+                                }
+                                false => {
+                                    this.write_state = WriteState::SendMessage {
+                                        offset: offset + nwritten,
+                                        message,
+                                    };
+                                }
                             }
-                            false => {
-                                this.write_state = WriteState::SendMessage {
-                                    offset: offset + nwritten,
-                                    message,
-                                };
-                            }
-                        },
+                        }
                     },
                 WriteState::Poisoned => {
                     tracing::warn!(

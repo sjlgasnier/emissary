@@ -274,7 +274,7 @@ pub struct RouterStatus {
 }
 
 /// Event manager.
-pub struct EventManager<R: Runtime> {
+pub(crate) struct EventManager<R: Runtime> {
     /// RX channel for receiving events from other subsystems.
     event_rx: Receiver<SubsystemEvent>,
 
