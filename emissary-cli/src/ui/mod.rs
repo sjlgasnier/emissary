@@ -41,8 +41,7 @@ enum Message {
 
 pub struct RouterUi {
     events: EventSubscriber,
-    inbound_bandwith: usize,
-    outbound_bandwith: usize,
+    bandwith: usize,
     transit_bandwidth: usize,
     num_transit_tunnels: usize,
     num_routers: usize,
@@ -57,10 +56,9 @@ impl RouterUi {
     fn new(events: EventSubscriber) -> (Self, Task<Message>) {
         (
             RouterUi {
-                inbound_bandwith: 0usize,
+                bandwith: 0usize,
                 num_routers: 0usize,
                 num_transit_tunnels: 0usize,
-                outbound_bandwith: 0usize,
                 light_mode: true,
                 events,
                 transit_bandwidth: 0usize,
@@ -87,8 +85,7 @@ impl RouterUi {
                 while let Some(status) = self.events.router_status() {
                     self.transit_bandwidth = status.transit.bandwidth;
                     self.num_transit_tunnels = status.transit.num_tunnels;
-                    self.inbound_bandwith = status.transport.inbound_bandwidth;
-                    self.outbound_bandwith = status.transport.outbound_bandwidth;
+                    self.bandwith = status.transport.bandwidth;
                     self.num_routers = status.transport.num_connected_routers;
                     self.server_destinations.extend(status.server_destinations);
                     self.client_destinations.extend(status.client_destinations);
@@ -133,15 +130,10 @@ impl RouterUi {
                     uptime / 60,
                     uptime % 60,
                 ));
-                let inbound_text = Text::new(format!(
-                    "Total inbound: {} KB ({} KB/s)",
-                    self.inbound_bandwith,
-                    (self.inbound_bandwith / uptime as usize) / 1000
-                ));
-                let outbound_text = Text::new(format!(
-                    "Total outbound: {} KB ({} KB/s)",
-                    self.outbound_bandwith,
-                    (self.outbound_bandwith / uptime as usize) / 1000
+                let total_bandwidth_text = Text::new(format!(
+                    "Total bandwidth: {} KB ({} KB/s)",
+                    self.bandwith,
+                    (self.bandwith / uptime as usize) / 1000
                 ));
                 let num_connected_text =
                     Text::new(format!("Number of connected routers: {}", self.num_routers));
@@ -156,8 +148,7 @@ impl RouterUi {
                 column![
                     Text::new("Overview").size(36),
                     uptime_text,
-                    inbound_text,
-                    outbound_text,
+                    total_bandwidth_text,
                     num_connected_text,
                     num_transit_tunnels_text,
                     transit_bandwidth_text,

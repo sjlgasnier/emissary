@@ -67,8 +67,8 @@ pub(crate) struct EventHandle<R: Runtime> {
     /// TX channel for sending events to [`EventSubscriber`].
     event_tx: Sender<SubsystemEvent>,
 
-    /// Cumulative inbound bandwidth used by all transports.
-    inbound_bandwidth: Arc<AtomicUsize>,
+    /// Cumulative bandwidth used by all transports.
+    bandwidth: Arc<AtomicUsize>,
 
     /// Number of connected routers.
     num_connected_routers: Arc<AtomicUsize>,
@@ -81,9 +81,6 @@ pub(crate) struct EventHandle<R: Runtime> {
 
     /// Number of successfully built tunnels.
     num_tunnels_built: Arc<AtomicUsize>,
-
-    /// Cumulative outbound bandwidth used by all transports.
-    outbound_bandwidth: Arc<AtomicUsize>,
 
     /// Cumulative bandwidth used by all transit tunnels.
     transit_bandwidth: Arc<AtomicUsize>,
@@ -102,12 +99,11 @@ impl<R: Runtime> Clone for EventHandle<R> {
     fn clone(&self) -> Self {
         EventHandle {
             event_tx: self.event_tx.clone(),
-            inbound_bandwidth: Arc::clone(&self.inbound_bandwidth),
+            bandwidth: Arc::clone(&self.bandwidth),
             num_connected_routers: Arc::clone(&self.num_connected_routers),
             num_transit_tunnels: Arc::clone(&self.num_transit_tunnels),
             num_tunnel_build_failures: Arc::clone(&self.num_tunnel_build_failures),
             num_tunnels_built: Arc::clone(&self.num_tunnels_built),
-            outbound_bandwidth: Arc::clone(&self.outbound_bandwidth),
             transit_bandwidth: Arc::clone(&self.transit_bandwidth),
             update_interval: self.update_interval.clone(),
             timer: Some(Box::pin(R::delay(self.update_interval))),
@@ -137,9 +133,8 @@ impl<R: Runtime> EventHandle<R> {
     ///
     /// [`AtomicUsize::fetch_add()`] is used because each connection keeps track of its own
     /// bandwidth.
-    pub(crate) fn transport_bandwidth(&self, inbound_bandwidth: usize, outbound_bandwidth: usize) {
-        self.inbound_bandwidth.fetch_add(inbound_bandwidth, Ordering::Release);
-        self.outbound_bandwidth.fetch_add(outbound_bandwidth, Ordering::Release);
+    pub(crate) fn transport_bandwidth(&self, bandwidth: usize) {
+        self.bandwidth.fetch_add(bandwidth, Ordering::Release);
     }
 
     /// Update connected router count.
@@ -226,11 +221,8 @@ pub struct TransportStatus {
     /// Number of connected routers.
     pub num_connected_routers: usize,
 
-    /// Cumulative inbound bandwith consumed by all transports.
-    pub inbound_bandwidth: usize,
-
-    /// Cumulative outbound bandwith consumed by all transports.
-    pub outbound_bandwidth: usize,
+    /// Cumulative bandwith consumed by all transports.
+    pub bandwidth: usize,
 }
 
 /// Tunnel status.
@@ -295,12 +287,11 @@ impl<R: Runtime> EventManager<R> {
         let update_interval = update_interval.unwrap_or(UPDATE_INTERVAL);
         let handle = EventHandle {
             event_tx,
-            inbound_bandwidth: Default::default(),
+            bandwidth: Default::default(),
             num_connected_routers: Default::default(),
             num_transit_tunnels: Default::default(),
             num_tunnel_build_failures: Default::default(),
             num_tunnels_built: Default::default(),
-            outbound_bandwidth: Default::default(),
             transit_bandwidth: Default::default(),
             update_interval,
             timer: None,
@@ -312,12 +303,11 @@ impl<R: Runtime> EventManager<R> {
                 event_rx,
                 handle: EventHandle {
                     event_tx: handle.event_tx.clone(),
-                    inbound_bandwidth: Arc::clone(&handle.inbound_bandwidth),
+                    bandwidth: Arc::clone(&handle.bandwidth),
                     num_connected_routers: Arc::clone(&handle.num_connected_routers),
                     num_transit_tunnels: Arc::clone(&handle.num_transit_tunnels),
                     num_tunnel_build_failures: Arc::clone(&handle.num_tunnel_build_failures),
                     num_tunnels_built: Arc::clone(&handle.num_tunnels_built),
-                    outbound_bandwidth: Arc::clone(&handle.outbound_bandwidth),
                     transit_bandwidth: Arc::clone(&handle.transit_bandwidth),
                     update_interval,
                     timer: None,
@@ -363,8 +353,7 @@ impl<R: Runtime> Future for EventManager<R> {
                         .handle
                         .num_connected_routers
                         .load(Ordering::Acquire),
-                    inbound_bandwidth: self.handle.inbound_bandwidth.load(Ordering::Acquire),
-                    outbound_bandwidth: self.handle.outbound_bandwidth.load(Ordering::Acquire),
+                    bandwidth: self.handle.bandwidth.load(Ordering::Acquire),
                 },
                 tunnel: TunnelStatus {
                     num_tunnels_built: self.handle.num_tunnels_built.load(Ordering::Acquire),
