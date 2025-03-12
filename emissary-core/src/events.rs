@@ -85,11 +85,8 @@ pub(crate) struct EventHandle<R: Runtime> {
     /// Cumulative outbound bandwidth used by all transports.
     outbound_bandwidth: Arc<AtomicUsize>,
 
-    /// Cumulative inbound bandwidth used by all transit tunnels.
-    transit_inbound_bandwidth: Arc<AtomicUsize>,
-
-    /// Cumulative outbound bandwidth used by all transit tunnels.
-    transit_outbound_bandwidth: Arc<AtomicUsize>,
+    /// Cumulative bandwidth used by all transit tunnels.
+    transit_bandwidth: Arc<AtomicUsize>,
 
     /// Update interval.
     update_interval: Duration,
@@ -111,8 +108,7 @@ impl<R: Runtime> Clone for EventHandle<R> {
             num_tunnel_build_failures: Arc::clone(&self.num_tunnel_build_failures),
             num_tunnels_built: Arc::clone(&self.num_tunnels_built),
             outbound_bandwidth: Arc::clone(&self.outbound_bandwidth),
-            transit_inbound_bandwidth: Arc::clone(&self.transit_inbound_bandwidth),
-            transit_outbound_bandwidth: Arc::clone(&self.transit_outbound_bandwidth),
+            transit_bandwidth: Arc::clone(&self.transit_bandwidth),
             update_interval: self.update_interval.clone(),
             timer: Some(Box::pin(R::delay(self.update_interval))),
             _runtime: Default::default(),
@@ -133,13 +129,8 @@ impl<R: Runtime> EventHandle<R> {
     ///
     /// [`AtomicUsize::fetch_add()`] is used because each transit tunnel keeps track
     /// of its own bandwidth.
-    pub(crate) fn transit_tunnel_bandwidth(
-        &self,
-        inbound_bandwidth: usize,
-        outbound_bandwidth: usize,
-    ) {
-        self.transit_inbound_bandwidth.fetch_add(inbound_bandwidth, Ordering::Release);
-        self.transit_outbound_bandwidth.fetch_add(outbound_bandwidth, Ordering::Release);
+    pub(crate) fn transit_tunnel_bandwidth(&self, bandwidth: usize) {
+        self.transit_bandwidth.fetch_add(bandwidth, Ordering::Release);
     }
 
     /// Update transport bandwidth.
@@ -225,11 +216,8 @@ pub struct TransitTunnelStatus {
     /// Number of transit tunnels.
     pub num_tunnels: usize,
 
-    /// Cumulative inbound bandwith consumed by all transit tunnels.
-    pub inbound_bandwidth: usize,
-
-    /// Cumulative outbound bandwith consumed by all transit tunnels.
-    pub outbound_bandwidth: usize,
+    /// Cumulative bandwith used by all transit tunnels.
+    pub bandwidth: usize,
 }
 
 /// Transport status.
@@ -313,8 +301,7 @@ impl<R: Runtime> EventManager<R> {
             num_tunnel_build_failures: Default::default(),
             num_tunnels_built: Default::default(),
             outbound_bandwidth: Default::default(),
-            transit_inbound_bandwidth: Default::default(),
-            transit_outbound_bandwidth: Default::default(),
+            transit_bandwidth: Default::default(),
             update_interval,
             timer: None,
             _runtime: Default::default(),
@@ -331,8 +318,7 @@ impl<R: Runtime> EventManager<R> {
                     num_tunnel_build_failures: Arc::clone(&handle.num_tunnel_build_failures),
                     num_tunnels_built: Arc::clone(&handle.num_tunnels_built),
                     outbound_bandwidth: Arc::clone(&handle.outbound_bandwidth),
-                    transit_inbound_bandwidth: Arc::clone(&handle.transit_inbound_bandwidth),
-                    transit_outbound_bandwidth: Arc::clone(&handle.transit_outbound_bandwidth),
+                    transit_bandwidth: Arc::clone(&handle.transit_bandwidth),
                     update_interval,
                     timer: None,
                     _runtime: Default::default(),
@@ -370,14 +356,7 @@ impl<R: Runtime> Future for EventManager<R> {
             let status = RouterStatus {
                 transit: TransitTunnelStatus {
                     num_tunnels: self.handle.num_transit_tunnels.load(Ordering::Acquire),
-                    inbound_bandwidth: self
-                        .handle
-                        .transit_inbound_bandwidth
-                        .load(Ordering::Acquire),
-                    outbound_bandwidth: self
-                        .handle
-                        .transit_outbound_bandwidth
-                        .load(Ordering::Acquire),
+                    bandwidth: self.handle.transit_bandwidth.load(Ordering::Acquire),
                 },
                 transport: TransportStatus {
                     num_connected_routers: self

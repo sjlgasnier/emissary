@@ -63,8 +63,8 @@ pub struct OutboundEndpoint<R: Runtime> {
     /// Fragment handler.
     fragment: FragmentHandler,
 
-    /// Inbound bandwidth.
-    inbound_bandwidth: usize,
+    /// Used bandwidth.
+    bandwidth: usize,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -72,9 +72,6 @@ pub struct OutboundEndpoint<R: Runtime> {
     /// Metrics handle.
     #[allow(unused)]
     metrics_handle: R::MetricsHandle,
-
-    /// Outbound bandwidth.
-    outbound_bandwidth: usize,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -305,10 +302,9 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
             event_handle,
             expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
             fragment: FragmentHandler::new(),
-            inbound_bandwidth: 0usize,
+            bandwidth: 0usize,
             message_rx,
             metrics_handle,
-            outbound_bandwidth: 0usize,
             routing_table,
             tunnel_id,
             tunnel_keys,
@@ -331,7 +327,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                     return Poll::Ready(self.tunnel_id);
                 }
                 Some(message) => {
-                    self.inbound_bandwidth += message.serialized_len_short();
+                    self.bandwidth += message.serialized_len_short();
 
                     let MessageType::TunnelData = message.message_type else {
                         tracing::warn!(
@@ -356,7 +352,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
 
                     match self.handle_tunnel_data(&message) {
                         Ok(messages) => messages.into_iter().for_each(|(router, message)| {
-                            self.outbound_bandwidth += message.len();
+                            self.bandwidth += message.len();
 
                             if let Err(error) = self.routing_table.send_message(router, message) {
                                 tracing::error!(
@@ -379,8 +375,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
         }
 
         if self.event_handle.poll_unpin(cx).is_ready() {
-            self.event_handle
-                .transit_tunnel_bandwidth(self.inbound_bandwidth, self.outbound_bandwidth);
+            self.event_handle.transit_tunnel_bandwidth(self.bandwidth);
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {

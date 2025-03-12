@@ -63,8 +63,8 @@ pub struct InboundGateway<R: Runtime> {
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, ()>,
 
-    /// Inbound bandwidth.
-    inbound_bandwidth: usize,
+    /// Used bandwidth.
+    bandwidth: usize,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -78,9 +78,6 @@ pub struct InboundGateway<R: Runtime> {
 
     /// Next tunnel ID.
     next_tunnel_id: TunnelId,
-
-    /// Outbound bandwidth.
-    outbound_bandwidth: usize,
 
     /// Random bytes used for tunnel data padding.
     padding_bytes: [u8; 1028],
@@ -96,10 +93,10 @@ pub struct InboundGateway<R: Runtime> {
 }
 
 impl<R: Runtime> InboundGateway<R> {
-    fn handle_tunnel_gateway<'a>(
-        &'a self,
-        tunnel_gateway: &'a TunnelGateway,
-    ) -> crate::Result<(RouterId, impl Iterator<Item = Vec<u8>> + 'a)> {
+    fn handle_tunnel_gateway(
+        &self,
+        tunnel_gateway: &TunnelGateway,
+    ) -> crate::Result<(RouterId, impl Iterator<Item = Vec<u8>> + '_)> {
         match Message::parse_standard(tunnel_gateway.payload) {
             None => {
                 tracing::warn!(
@@ -186,12 +183,11 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
         InboundGateway {
             event_handle,
             expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
-            inbound_bandwidth: 0usize,
+            bandwidth: 0usize,
             message_rx,
             metrics_handle,
             next_router,
             next_tunnel_id,
-            outbound_bandwidth: 0usize,
             padding_bytes,
             routing_table,
             tunnel_id,
@@ -215,50 +211,64 @@ impl<R: Runtime> Future for InboundGateway<R> {
                     return Poll::Ready(self.tunnel_id);
                 }
                 Some(message) => {
-                    self.inbound_bandwidth += message.serialized_len_short();
+                    self.bandwidth += message.serialized_len_short();
 
-                    match message.message_type {
-                        MessageType::TunnelGateway =>
-                            match TunnelGateway::parse(&message.payload) {
-                                Some(message) => match self.handle_tunnel_gateway(&message) {
-                                    Ok((router, messages)) =>
-                                        messages.into_iter().for_each(|message| {
-                                            if let Err(error) = self
-                                                .routing_table
-                                                .send_message(router.clone(), message)
-                                            {
-                                                tracing::error!(
-                                                    target: LOG_TARGET,
-                                                    tunnel_id = %self.tunnel_id,
-                                                    ?error,
-                                                    "failed to send message",
-                                                )
-                                            }
-                                        }),
-                                    Err(Error::Expired) => {}
-                                    Err(error) => tracing::warn!(
-                                        target: LOG_TARGET,
-                                        tunnel_id = %self.tunnel_id,
-                                        ?error,
-                                        "failed to handle tunnel gateway",
-                                    ),
-                                },
-                                None => todo!(),
-                            },
-                        message_type => tracing::warn!(
+                    let MessageType::TunnelGateway = message.message_type else {
+                        tracing::warn!(
                             target: LOG_TARGET,
                             tunnel_id = %self.tunnel_id,
-                            ?message_type,
+                            message_type = ?message.message_type,
                             "unsupported message",
-                        ),
-                    }
+                        );
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    let Some(message) = TunnelGateway::parse(&message.payload) else {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            "malformed tunnel gateway message",
+                        );
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    let (router, messages) = match self.handle_tunnel_gateway(&message) {
+                        Ok((router, messages)) => (router, messages),
+                        Err(Error::Expired) => continue,
+                        Err(error) => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                ?error,
+                                "failed to handle tunnel gateway",
+                            );
+                            continue;
+                        }
+                    };
+
+                    self.bandwidth += messages.into_iter().fold(0usize, |mut acc, message| {
+                        acc += message.len();
+
+                        if let Err(error) = self.routing_table.send_message(router.clone(), message)
+                        {
+                            tracing::error!(
+                                target: LOG_TARGET,
+                                tunnel_id = %self.tunnel_id,
+                                ?error,
+                                "failed to send message",
+                            )
+                        }
+
+                        acc
+                    });
                 }
             }
         }
 
         if self.event_handle.poll_unpin(cx).is_ready() {
-            self.event_handle
-                .transit_tunnel_bandwidth(self.inbound_bandwidth, self.outbound_bandwidth);
+            self.event_handle.transit_tunnel_bandwidth(self.bandwidth);
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {

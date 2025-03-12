@@ -55,8 +55,8 @@ pub struct Participant<R: Runtime> {
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, ()>,
 
-    /// Inbound bandwidth.
-    inbound_bandwidth: usize,
+    /// Used bandwidth.
+    bandwidth: usize,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -70,9 +70,6 @@ pub struct Participant<R: Runtime> {
 
     /// Next tunnel ID.
     next_tunnel_id: TunnelId,
-
-    /// Outbound bandwidth.
-    outbound_bandwidth: usize,
 
     /// Routing table.
     routing_table: RoutingTable,
@@ -134,12 +131,11 @@ impl<R: Runtime> TransitTunnel<R> for Participant<R> {
         Participant {
             event_handle,
             expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
-            inbound_bandwidth: 0usize,
+            bandwidth: 0usize,
             message_rx,
             metrics_handle,
             next_router,
             next_tunnel_id,
-            outbound_bandwidth: 0usize,
             routing_table,
             tunnel_id,
             tunnel_keys,
@@ -162,14 +158,14 @@ impl<R: Runtime> Future for Participant<R> {
                     return Poll::Ready(self.tunnel_id);
                 }
                 Some(message) => {
-                    self.inbound_bandwidth += message.serialized_len_short();
+                    self.bandwidth += message.serialized_len_short();
 
                     match message.message_type {
                         MessageType::TunnelData =>
                             match EncryptedTunnelData::parse(&message.payload) {
                                 Some(message) => match self.handle_tunnel_data(&message) {
                                     Ok((router, message)) => {
-                                        self.outbound_bandwidth += message.len();
+                                        self.bandwidth += message.len();
 
                                         if let Err(error) =
                                             self.routing_table.send_message(router, message)
@@ -206,8 +202,7 @@ impl<R: Runtime> Future for Participant<R> {
         }
 
         if self.event_handle.poll_unpin(cx).is_ready() {
-            self.event_handle
-                .transit_tunnel_bandwidth(self.inbound_bandwidth, self.outbound_bandwidth);
+            self.event_handle.transit_tunnel_bandwidth(self.bandwidth);
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {

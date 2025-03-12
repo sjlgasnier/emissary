@@ -43,8 +43,7 @@ pub struct RouterUi {
     events: EventSubscriber,
     inbound_bandwith: usize,
     outbound_bandwith: usize,
-    transit_inbound_bandwidth: usize,
-    transit_outbound_bandwidth: usize,
+    transit_bandwidth: usize,
     num_transit_tunnels: usize,
     num_routers: usize,
     uptime: Instant,
@@ -64,8 +63,7 @@ impl RouterUi {
                 outbound_bandwith: 0usize,
                 light_mode: true,
                 events,
-                transit_inbound_bandwidth: 0usize,
-                transit_outbound_bandwidth: 0usize,
+                transit_bandwidth: 0usize,
                 uptime: Instant::now(),
                 view: View::Overview,
                 server_destinations: Vec::new(),
@@ -87,8 +85,7 @@ impl RouterUi {
         match message {
             Message::Tick => {
                 while let Some(status) = self.events.router_status() {
-                    self.transit_inbound_bandwidth = status.transit.inbound_bandwidth;
-                    self.transit_outbound_bandwidth = status.transit.outbound_bandwidth;
+                    self.transit_bandwidth = status.transit.bandwidth;
                     self.num_transit_tunnels = status.transit.num_tunnels;
                     self.inbound_bandwith = status.transport.inbound_bandwidth;
                     self.outbound_bandwith = status.transport.outbound_bandwidth;
@@ -150,15 +147,10 @@ impl RouterUi {
                     Text::new(format!("Number of connected routers: {}", self.num_routers));
                 let num_transit_tunnels_text =
                     Text::new(format!("Transit tunnels: {}", self.num_transit_tunnels));
-                let transit_inbound_text = Text::new(format!(
-                    "Transit inbound: {} KB ({} KB/s)",
-                    self.transit_inbound_bandwidth,
-                    (self.transit_inbound_bandwidth / uptime as usize) / 1000
-                ));
-                let transit_outbound_text = Text::new(format!(
-                    "Transit outbound: {} KB ({} KB/s)",
-                    self.transit_outbound_bandwidth,
-                    (self.transit_outbound_bandwidth / uptime as usize) / 1000
+                let transit_bandwidth_text = Text::new(format!(
+                    "Transit bandwidth: {} KB ({} KB/s)",
+                    self.transit_bandwidth,
+                    (self.transit_bandwidth / uptime as usize) / 1000
                 ));
 
                 column![
@@ -168,8 +160,7 @@ impl RouterUi {
                     outbound_text,
                     num_connected_text,
                     num_transit_tunnels_text,
-                    transit_inbound_text,
-                    transit_outbound_text
+                    transit_bandwidth_text,
                 ]
                 .spacing(20)
                 .padding(30)
