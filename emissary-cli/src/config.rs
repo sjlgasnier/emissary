@@ -162,6 +162,26 @@ pub struct PortForwardingConfig {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize)]
+pub enum Theme {
+    #[serde(alias = "light")]
+    Light,
+    #[serde(alias = "dark")]
+    Dark,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::Dark
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RouterUiConfig {
+    pub theme: Theme,
+    pub refresh_interval: usize,
+}
+
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(rename = "address-book")]
@@ -191,6 +211,8 @@ struct EmissaryConfig {
     client_tunnels: Option<Vec<ClientTunnelConfig>>,
     #[serde(rename = "server-tunnels")]
     server_tunnels: Option<Vec<ServerTunnelConfig>>,
+    #[serde(rename = "router-ui")]
+    router_ui: Option<RouterUiConfig>,
 }
 
 /// Router configuration.
@@ -249,6 +271,9 @@ pub struct Config {
     /// Router info.
     pub router_info: Option<Vec<u8>>,
 
+    /// Router UI configuration.
+    pub router_ui: Option<RouterUiConfig>,
+
     /// Router info.
     pub routers: Vec<Vec<u8>>,
 
@@ -291,6 +316,7 @@ impl From<Config> for emissary_core::Config {
             ssu2: val.ssu2_config,
             static_key: Some(val.static_key),
             transit: val.transit,
+            refresh_interval: val.router_ui.map(|config| config.refresh_interval),
         }
     }
 }
@@ -684,6 +710,10 @@ impl Config {
                 hosts: None,
             }),
             router_info: None,
+            router_ui: Some(RouterUiConfig {
+                theme: Theme::Dark,
+                refresh_interval: 5,
+            }),
             routers: Vec::new(),
             sam_config: Some(emissary_core::SamConfig {
                 tcp_port: 7656u16,
@@ -858,6 +888,7 @@ impl Config {
             profiles: Vec::new(),
             reseed: config.reseed,
             router_info,
+            router_ui: config.router_ui,
             routers: Vec::new(),
             sam_config: config.sam.map(|config| emissary_core::SamConfig {
                 tcp_port: config.tcp_port,
@@ -1144,6 +1175,24 @@ impl Config {
 
             if let Some(ref description) = arguments.port_forwarding.upnp_name {
                 *name = description.clone();
+            }
+        }
+
+        if let Some(RouterUiConfig {
+            theme,
+            refresh_interval,
+        }) = &mut self.router_ui
+        {
+            if let Some(selected) = arguments.router_ui.theme {
+                *theme = selected;
+            }
+
+            if let Some(selected) = arguments.router_ui.refresh_interval {
+                *refresh_interval = selected;
+            }
+
+            if let Some(true) = arguments.router_ui.disable_ui {
+                self.router_ui = None;
             }
         }
 

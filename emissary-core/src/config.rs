@@ -141,6 +141,9 @@ pub struct Config {
     /// Router capabilities.
     pub caps: Option<String>,
 
+    /// Event refresh interval in seconds.
+    pub refresh_interval: Option<usize>,
+
     /// Exploratory tunnel pool config.
     pub exploratory: Option<ExploratoryConfig>,
 

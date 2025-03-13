@@ -18,6 +18,8 @@
 
 use clap::{Args, Parser};
 
+use crate::config::Theme;
+
 #[derive(Args)]
 pub struct TunnelOptions {
     /// Length of an inbound exploratory tunnel
@@ -115,8 +117,27 @@ pub struct PortForwardingOptions {
     pub disable_nat_pmp: Option<bool>,
 
     /// Name for the UPnP client.
-    #[arg(long, value_name = "HOST")]
+    #[arg(long, value_name = "NAME")]
     pub upnp_name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct RouterUiOptions {
+    /// Disable router UI
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_ui: Option<bool>,
+
+    /// Router UI refresh interval
+    ///
+    /// How often are events gathered from different subsystem and redrawn in the UI
+    ///
+    /// Unit is seconds and must be at least 1
+    #[arg(long, value_name = "REFRESH_INTERVAL")]
+    pub refresh_interval: Option<usize>,
+
+    /// Router UI theme
+    #[arg(long, value_name = "THEME")]
+    pub theme: Option<Theme>,
 }
 
 #[derive(Parser)]
@@ -184,4 +205,8 @@ pub struct Arguments {
     /// Port forwarding options.
     #[clap(flatten)]
     pub port_forwarding: PortForwardingOptions,
+
+    /// Port forwarding options.
+    #[clap(flatten)]
+    pub router_ui: RouterUiOptions,
 }

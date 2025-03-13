@@ -16,12 +16,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::config::Theme as RouterTheme;
+
 use emissary_core::events::EventSubscriber;
 use iced::{
     time,
     widget::{button, column, container, row, toggler, Column, Text},
     Alignment, Element, Length, Subscription, Task, Theme,
 };
+
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -39,27 +42,59 @@ enum Message {
     Tick,
 }
 
+/// Router UI.
 pub struct RouterUi {
-    events: EventSubscriber,
+    /// Cumulative bandwidth of all transports.
     bandwidth: usize,
-    transit_bandwidth: usize,
-    num_transit_tunnels: usize,
-    num_routers: usize,
-    uptime: Instant,
-    view: View,
-    light_mode: bool,
-    server_destinations: Vec<(String, String)>,
+
+    /// Active client destinations.
     client_destinations: Vec<String>,
+
+    /// Subscriber to events emitted by `emissary-core`.
+    events: EventSubscriber,
+
+    /// Has light mode been enabled.
+    light_mode: bool,
+
+    /// Total number of routers.
+    num_routers: usize,
+
+    /// Total number of transit tunnels.
+    num_transit_tunnels: usize,
+
+    /// How often shoudl the UI be refreshed.
+    refresh_interval: Duration,
+
+    /// Active server destinations.
+    server_destinations: Vec<(String, String)>,
+
+    /// Cumulative bandwidth of all transit tunnels.
+    transit_bandwidth: usize,
+
+    /// Uptime.
+    uptime: Instant,
+
+    /// Current view.
+    view: View,
 }
 
 impl RouterUi {
-    fn new(events: EventSubscriber) -> (Self, Task<Message>) {
+    fn new(
+        events: EventSubscriber,
+        light_mode: bool,
+        refresh_interval: usize,
+    ) -> (Self, Task<Message>) {
         (
             RouterUi {
                 bandwidth: 0usize,
                 num_routers: 0usize,
                 num_transit_tunnels: 0usize,
-                light_mode: true,
+                light_mode,
+                refresh_interval: if refresh_interval == 0 {
+                    Duration::from_secs(10)
+                } else {
+                    Duration::from_secs(refresh_interval as u64)
+                },
                 events,
                 transit_bandwidth: 0usize,
                 uptime: Instant::now(),
@@ -98,11 +133,21 @@ impl RouterUi {
         )
     }
 
-    pub fn start(events: EventSubscriber) -> anyhow::Result<()> {
+    pub fn start(
+        events: EventSubscriber,
+        theme: RouterTheme,
+        refresh_interval: usize,
+    ) -> anyhow::Result<()> {
         iced::application("emissary", RouterUi::update, RouterUi::view)
             .subscription(RouterUi::subscription)
             .theme(RouterUi::theme)
-            .run_with(|| RouterUi::new(events))
+            .run_with(move || {
+                RouterUi::new(
+                    events,
+                    std::matches!(theme, RouterTheme::Light),
+                    refresh_interval,
+                )
+            })
             .map_err(From::from)
     }
 
@@ -243,7 +288,7 @@ impl RouterUi {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        time::every(Duration::from_millis(500)).map(|_| Message::Tick)
+        time::every(self.refresh_interval).map(|_| Message::Tick)
     }
 
     fn theme(&self) -> Theme {

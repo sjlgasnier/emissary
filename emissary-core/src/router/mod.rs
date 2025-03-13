@@ -206,6 +206,7 @@ impl<R: Runtime> Router<R> {
             allow_local,
             metrics,
             transit,
+            refresh_interval,
             ..
         } = config;
 
@@ -213,7 +214,18 @@ impl<R: Runtime> Router<R> {
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
         let mut address_info = ProtocolAddressInfo::default();
-        let (event_manager, event_subscriber, event_handle) = EventManager::<R>::new(None); // TODO: configuration
+        let (event_manager, event_subscriber, event_handle) =
+            EventManager::<R>::new(refresh_interval.and_then(|refresh_interval| {
+                if refresh_interval == 0 {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "invalid refresh interval, using default value"
+                    );
+                    return None;
+                }
+
+                Some(Duration::from_secs(refresh_interval as u64))
+            }));
 
         // create router shutdown context and allocate handle `TransitTunnelManager`
         //

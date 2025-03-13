@@ -19,7 +19,7 @@
 use crate::{
     address_book::AddressBookManager,
     cli::Arguments,
-    config::{Config, ReseedConfig},
+    config::{Config, ReseedConfig, RouterUiConfig},
     error::Error,
     port_mapper::PortMapper,
     proxy::http::HttpProxy,
@@ -67,6 +67,7 @@ async fn setup_router() -> anyhow::Result<(
     PortMapper,
     Storage,
     SignalHandler,
+    Option<RouterUiConfig>,
 )> {
     let arguments = Arguments::parse();
     let handler = SignalHandler::new();
@@ -158,6 +159,7 @@ async fn setup_router() -> anyhow::Result<(
     let port_forwarding = config.port_forwarding.take();
     let client_tunnels = mem::take(&mut config.client_tunnels);
     let server_tunnels = mem::take(&mut config.server_tunnels);
+    let router_ui = config.router_ui.clone();
 
     let (router, event_subscriber, local_router_info, address_book_manager) =
         match config.address_book.take() {
@@ -242,7 +244,14 @@ async fn setup_router() -> anyhow::Result<(
         router.protocol_address_info().ssu2_port,
     );
 
-    Ok((router, event_subscriber, port_mapper, storage, handler))
+    Ok((
+        router,
+        event_subscriber,
+        port_mapper,
+        storage,
+        handler,
+        router_ui,
+    ))
 }
 
 /// Run the event loop of `emissary-cli`
@@ -321,7 +330,7 @@ async fn router_event_loop(
 #[cfg(not(feature = "router-ui"))]
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    let (router, _events, port_mapper, storage, handler) = runtime.block_on(setup_router())?;
+    let (router, _events, port_mapper, storage, handler, _) = runtime.block_on(setup_router())?;
 
     runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
 
@@ -331,11 +340,24 @@ fn main() -> anyhow::Result<()> {
 #[cfg(feature = "router-ui")]
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    let (router, events, port_mapper, storage, handler) = runtime.block_on(setup_router())?;
+    let (router, events, port_mapper, storage, handler, router_ui) =
+        runtime.block_on(setup_router())?;
 
-    std::thread::spawn(move || {
-        runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
-    });
+    match router_ui {
+        None => {
+            // runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
 
-    ui::RouterUi::start(events)
+            Ok(())
+        }
+        Some(RouterUiConfig {
+            theme,
+            refresh_interval,
+        }) => {
+            // std::thread::spawn(move || {
+            //     runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
+            // });
+
+            ui::RouterUi::start(events, theme, refresh_interval)
+        }
+    }
 }
