@@ -41,7 +41,7 @@ enum Message {
 
 pub struct RouterUi {
     events: EventSubscriber,
-    bandwith: usize,
+    bandwidth: usize,
     transit_bandwidth: usize,
     num_transit_tunnels: usize,
     num_routers: usize,
@@ -56,7 +56,7 @@ impl RouterUi {
     fn new(events: EventSubscriber) -> (Self, Task<Message>) {
         (
             RouterUi {
-                bandwith: 0usize,
+                bandwidth: 0usize,
                 num_routers: 0usize,
                 num_transit_tunnels: 0usize,
                 light_mode: true,
@@ -68,6 +68,33 @@ impl RouterUi {
                 client_destinations: Vec::new(),
             },
             Task::none(),
+        )
+    }
+
+    fn calculate_bandwidth(bandwidth: f64) -> (f64, String) {
+        if bandwidth < 1000f64 {
+            return (bandwidth, "B".to_string());
+        }
+
+        if bandwidth < 1000f64 * 1000f64 {
+            return (bandwidth / 1000f64, "KB".to_string());
+        }
+
+        if bandwidth < 1000f64 * 1000f64 * 1000f64 {
+            return (bandwidth / (1000f64 * 1000f64), "MB".to_string());
+        }
+
+        if bandwidth < 1000f64 * 1000f64 * 1000f64 {
+            return (bandwidth / (1000f64 * 1000f64), "GB".to_string());
+        }
+
+        if bandwidth < 1000f64 * 1000f64 * 1000f64 * 1000f64 {
+            return (bandwidth / (1000f64 * 1000f64 * 1000f64), "GB".to_string());
+        }
+
+        (
+            bandwidth / (1000f64 * 1000f64 * 1000f64 * 1000f64),
+            "TB".to_string(),
         )
     }
 
@@ -85,7 +112,7 @@ impl RouterUi {
                 while let Some(status) = self.events.router_status() {
                     self.transit_bandwidth = status.transit.bandwidth;
                     self.num_transit_tunnels = status.transit.num_tunnels;
-                    self.bandwith = status.transport.bandwidth;
+                    self.bandwidth = status.transport.bandwidth;
                     self.num_routers = status.transport.num_connected_routers;
                     self.server_destinations.extend(status.server_destinations);
                     self.client_destinations.extend(status.client_destinations);
@@ -130,20 +157,31 @@ impl RouterUi {
                     uptime / 60,
                     uptime % 60,
                 ));
-                let total_bandwidth_text = Text::new(format!(
-                    "Total bandwidth: {} KB ({} KB/s)",
-                    self.bandwith,
-                    (self.bandwith / uptime as usize) / 1000
-                ));
+                let total_bandwidth_text = {
+                    let (total, total_unit) = Self::calculate_bandwidth(self.bandwidth as f64);
+                    let (per_second, per_second_unit) =
+                        Self::calculate_bandwidth(self.bandwidth as f64 / uptime as f64);
+
+                    Text::new(format!(
+                        "Total bandwidth: {:.1} {} ({:.1} {}/s)",
+                        total, total_unit, per_second, per_second_unit,
+                    ))
+                };
                 let num_connected_text =
                     Text::new(format!("Number of connected routers: {}", self.num_routers));
                 let num_transit_tunnels_text =
                     Text::new(format!("Transit tunnels: {}", self.num_transit_tunnels));
-                let transit_bandwidth_text = Text::new(format!(
-                    "Transit bandwidth: {} KB ({} KB/s)",
-                    self.transit_bandwidth,
-                    (self.transit_bandwidth / uptime as usize) / 1000
-                ));
+                let transit_bandwidth_text = {
+                    let (total, total_unit) =
+                        Self::calculate_bandwidth(self.transit_bandwidth as f64);
+                    let (per_second, per_second_unit) =
+                        Self::calculate_bandwidth(self.transit_bandwidth as f64 / uptime as f64);
+
+                    Text::new(format!(
+                        "Transit bandwidth: {:.1} {} ({:.1} {}/s)",
+                        total, total_unit, per_second, per_second_unit,
+                    ))
+                };
 
                 column![
                     Text::new("Overview").size(36),
