@@ -471,6 +471,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
 
         if this.event_handle.poll_unpin(cx).is_ready() {
             self.event_handle.transport_bandwidth(self.bandwidth);
+            self.bandwidth = 0;
         }
 
         Poll::Pending

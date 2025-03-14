@@ -376,6 +376,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
 
         if self.event_handle.poll_unpin(cx).is_ready() {
             self.event_handle.transit_tunnel_bandwidth(self.bandwidth);
+            self.bandwidth = 0;
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {
