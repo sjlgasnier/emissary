@@ -18,14 +18,18 @@
 
 use crate::config::Theme as RouterTheme;
 
-use emissary_core::events::EventSubscriber;
+use emissary_core::events::{Event, EventSubscriber};
 use iced::{
     time,
     widget::{button, column, container, row, toggler, Column, Text},
     Alignment, Element, Length, Subscription, Task, Theme,
 };
+use tokio::sync::mpsc::Sender;
 
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone)]
 enum View {
@@ -34,11 +38,27 @@ enum View {
     Settings,
 }
 
+enum Status {
+    Active,
+    ShuttingDown,
+}
+
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => write!(f, "Active"),
+            Self::ShuttingDown => write!(f, "Shutting down"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     ButtonPressed(View),
     ThemeToggled(bool),
     CopyToClipboard(String),
+    GracefulShutdown,
+    ForcefulShutdown,
     Tick,
 }
 
@@ -62,11 +82,23 @@ pub struct RouterUi {
     /// Total number of transit tunnels.
     num_transit_tunnels: usize,
 
+    /// How many tunnel builds have failed.
+    num_tunnel_build_failures: usize,
+
+    /// How many tunnels have been built.
+    num_tunnels_built: usize,
+
     /// How often shoudl the UI be refreshed.
     refresh_interval: Duration,
 
     /// Active server destinations.
     server_destinations: Vec<(String, String)>,
+
+    /// TX channel for sending a graceful shutdown signal to router.
+    shutdown_tx: Sender<()>,
+
+    /// Router status.
+    status: Status,
 
     /// Cumulative bandwidth of all transit tunnels.
     transit_bandwidth: usize,
@@ -83,24 +115,29 @@ impl RouterUi {
         events: EventSubscriber,
         light_mode: bool,
         refresh_interval: usize,
+        shutdown_tx: Sender<()>,
     ) -> (Self, Task<Message>) {
         (
             RouterUi {
                 bandwidth: 0usize,
+                client_destinations: Vec::new(),
+                events,
+                light_mode,
                 num_routers: 0usize,
                 num_transit_tunnels: 0usize,
-                light_mode,
+                num_tunnel_build_failures: 0usize,
+                num_tunnels_built: 0usize,
                 refresh_interval: if refresh_interval == 0 {
                     Duration::from_secs(10)
                 } else {
                     Duration::from_secs(refresh_interval as u64)
                 },
-                events,
+                server_destinations: Vec::new(),
+                shutdown_tx,
+                status: Status::Active,
                 transit_bandwidth: 0usize,
                 uptime: Instant::now(),
                 view: View::Overview,
-                server_destinations: Vec::new(),
-                client_destinations: Vec::new(),
             },
             Task::none(),
         )
@@ -137,6 +174,7 @@ impl RouterUi {
         events: EventSubscriber,
         theme: RouterTheme,
         refresh_interval: usize,
+        shutdown_tx: Sender<()>,
     ) -> anyhow::Result<()> {
         iced::application("emissary", RouterUi::update, RouterUi::view)
             .subscription(RouterUi::subscription)
@@ -146,6 +184,7 @@ impl RouterUi {
                     events,
                     std::matches!(theme, RouterTheme::Light),
                     refresh_interval,
+                    shutdown_tx,
                 )
             })
             .map_err(From::from)
@@ -154,13 +193,29 @@ impl RouterUi {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
-                while let Some(status) = self.events.router_status() {
-                    self.transit_bandwidth = status.transit.bandwidth;
-                    self.num_transit_tunnels = status.transit.num_tunnels;
-                    self.bandwidth = status.transport.bandwidth;
-                    self.num_routers = status.transport.num_connected_routers;
-                    self.server_destinations.extend(status.server_destinations);
-                    self.client_destinations.extend(status.client_destinations);
+                while let Some(event) = self.events.router_status() {
+                    match event {
+                        Event::RouterStatus {
+                            client_destinations,
+                            server_destinations,
+                            transit,
+                            transport,
+                            tunnel,
+                        } => {
+                            self.transit_bandwidth = transit.bandwidth;
+                            self.num_transit_tunnels = transit.num_tunnels;
+                            self.bandwidth = transport.bandwidth;
+                            self.num_routers = transport.num_connected_routers;
+                            self.server_destinations.extend(server_destinations);
+                            self.client_destinations.extend(client_destinations);
+                            self.num_tunnels_built = tunnel.num_tunnels_built;
+                            self.num_tunnel_build_failures = tunnel.num_tunnel_build_failures;
+                        }
+                        Event::ShuttingDown => {
+                            self.status = Status::ShuttingDown;
+                        }
+                        Event::ShutDown => {}
+                    }
                 }
 
                 Task::none()
@@ -175,6 +230,13 @@ impl RouterUi {
 
                 Task::none()
             }
+            Message::GracefulShutdown => {
+                self.status = Status::ShuttingDown;
+                let _ = self.shutdown_tx.try_send(());
+
+                Task::none()
+            }
+            Message::ForcefulShutdown => std::process::exit(0),
             Message::CopyToClipboard(address) => iced::clipboard::write(address),
         }
     }
@@ -196,10 +258,12 @@ impl RouterUi {
                     uptime = 1;
                 }
 
+                let status_text = Text::new(format!("Status: {}", self.status));
+
                 let uptime_text = Text::new(format!(
                     "Uptime {} h {} min {} s",
                     uptime / 60 / 60,
-                    uptime / 60,
+                    (uptime / 60) % 60,
                     uptime % 60,
                 ));
                 let total_bandwidth_text = {
@@ -214,6 +278,19 @@ impl RouterUi {
                 };
                 let num_connected_text =
                     Text::new(format!("Number of connected routers: {}", self.num_routers));
+                let tunnel_build_success_rate_text = {
+                    if self.num_tunnels_built == 0 && self.num_tunnel_build_failures == 0 {
+                        Text::new(format!("Tunnel build success rate: 0%",))
+                    } else {
+                        Text::new(format!(
+                            "Tunnel build success rate: {}%",
+                            ((self.num_tunnels_built as f64
+                                / ((self.num_tunnels_built + self.num_tunnel_build_failures)
+                                    as f64))
+                                * 100f64) as usize
+                        ))
+                    }
+                };
                 let num_transit_tunnels_text =
                     Text::new(format!("Transit tunnels: {}", self.num_transit_tunnels));
                 let transit_bandwidth_text = {
@@ -231,10 +308,26 @@ impl RouterUi {
                 column![
                     Text::new("Overview").size(36),
                     uptime_text,
+                    status_text,
                     total_bandwidth_text,
                     num_connected_text,
+                    tunnel_build_success_rate_text,
                     num_transit_tunnels_text,
                     transit_bandwidth_text,
+                    row![
+                        match self.status {
+                            Status::Active =>
+                                button("Graceful shutdown").on_press(Message::GracefulShutdown),
+                            Status::ShuttingDown =>
+                                button("Graceful shutdown").style(|theme, _| {
+                                    iced::widget::button::primary(theme, button::Status::Disabled)
+                                }),
+                        },
+                        button("Forceful shutdown")
+                            .style(|theme, status| iced::widget::button::danger(theme, status))
+                            .on_press(Message::ForcefulShutdown),
+                    ]
+                    .spacing(10)
                 ]
                 .spacing(20)
                 .padding(30)

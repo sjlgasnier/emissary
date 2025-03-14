@@ -37,6 +37,7 @@ use emissary_core::{
 };
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
 use futures::{channel::oneshot, StreamExt};
+use tokio::sync::mpsc::{channel, Receiver};
 
 use std::{fs::File, io::Write, mem};
 
@@ -60,17 +61,33 @@ const LOG_TARGET: &str = "emissary";
 /// Result type for the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Router context.
+struct RouterContext {
+    /// Router.
+    router: Router<Runtime>,
+
+    /// Event subscriber.
+    ///
+    /// Passed onto a router UI if it has been enabled.
+    events: EventSubscriber,
+
+    /// Port mapper for NAT-PMP and UPnP.
+    port_mapper: PortMapper,
+
+    /// Router info/profile storage handle
+    storage: Storage,
+
+    /// Signal handler for `SIGINT`.
+    signal_handler: SignalHandler,
+
+    /// Router UI config, if enabled.
+    router_ui_config: Option<RouterUiConfig>,
+}
+
 /// Setup router and related subsystems.
-async fn setup_router() -> anyhow::Result<(
-    Router<Runtime>,
-    EventSubscriber,
-    PortMapper,
-    Storage,
-    SignalHandler,
-    Option<RouterUiConfig>,
-)> {
+async fn setup_router() -> anyhow::Result<RouterContext> {
     let arguments = Arguments::parse();
-    let handler = SignalHandler::new();
+    let signal_handler = SignalHandler::new();
 
     // initialize logger with any logging directive given as a cli argument
     let handle = init_logger!(arguments.log.clone());
@@ -159,9 +176,9 @@ async fn setup_router() -> anyhow::Result<(
     let port_forwarding = config.port_forwarding.take();
     let client_tunnels = mem::take(&mut config.client_tunnels);
     let server_tunnels = mem::take(&mut config.server_tunnels);
-    let router_ui = config.router_ui.clone();
+    let router_ui_config = config.router_ui.clone();
 
-    let (router, event_subscriber, local_router_info, address_book_manager) =
+    let (router, events, local_router_info, address_book_manager) =
         match config.address_book.take() {
             None => Router::<Runtime>::new(config.into())
                 .await
@@ -244,14 +261,14 @@ async fn setup_router() -> anyhow::Result<(
         router.protocol_address_info().ssu2_port,
     );
 
-    Ok((
+    Ok(RouterContext {
         router,
-        event_subscriber,
+        events,
         port_mapper,
         storage,
-        handler,
-        router_ui,
-    ))
+        signal_handler,
+        router_ui_config,
+    })
 }
 
 /// Run the event loop of `emissary-cli`
@@ -260,15 +277,21 @@ async fn setup_router() -> anyhow::Result<(
 ///  * `SIGINT` signal handler
 ///  * `Router`'s event loop
 ///  * [`PortMapper`]'s event loop
+///  * RX channel for receiving a shutdown signal from router UI
 async fn router_event_loop(
     mut router: Router<Runtime>,
     mut port_mapper: PortMapper,
     storage: Storage,
     mut handler: SignalHandler,
+    mut shutdown_rx: Receiver<()>,
 ) {
     loop {
         tokio::select! {
             _ = handler.next() => {
+                port_mapper.shutdown().await;
+                router.shutdown();
+            }
+            _ = shutdown_rx.recv() => {
                 port_mapper.shutdown().await;
                 router.shutdown();
             }
@@ -330,9 +353,22 @@ async fn router_event_loop(
 #[cfg(not(feature = "router-ui"))]
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    let (router, _events, port_mapper, storage, handler, _) = runtime.block_on(setup_router())?;
+    let (_tx, shutdown_rx) = channel(1);
+    let RouterContext {
+        router,
+        port_mapper,
+        storage,
+        signal_handler,
+        ..
+    } = runtime.block_on(setup_router())?;
 
-    runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
+    runtime.block_on(router_event_loop(
+        router,
+        port_mapper,
+        storage,
+        signal_handler,
+        shutdown_rx,
+    ));
 
     Ok(())
 }
@@ -340,12 +376,25 @@ fn main() -> anyhow::Result<()> {
 #[cfg(feature = "router-ui")]
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    let (router, events, port_mapper, storage, handler, router_ui) =
-        runtime.block_on(setup_router())?;
+    let (shutdown_tx, shutdown_rx) = channel(1);
+    let RouterContext {
+        router,
+        port_mapper,
+        storage,
+        signal_handler,
+        events,
+        router_ui_config,
+    } = runtime.block_on(setup_router())?;
 
-    match router_ui {
+    match router_ui_config {
         None => {
-            // runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
+            runtime.block_on(router_event_loop(
+                router,
+                port_mapper,
+                storage,
+                signal_handler,
+                shutdown_rx,
+            ));
 
             Ok(())
         }
@@ -353,11 +402,20 @@ fn main() -> anyhow::Result<()> {
             theme,
             refresh_interval,
         }) => {
-            // std::thread::spawn(move || {
-            //     runtime.block_on(router_event_loop(router, port_mapper, storage, handler));
-            // });
+            // TODO
 
-            ui::RouterUi::start(events, theme, refresh_interval)
+            std::thread::spawn(move || {
+                runtime.block_on(router_event_loop(
+                    router,
+                    port_mapper,
+                    storage,
+                    signal_handler,
+                    shutdown_rx,
+                ));
+                std::process::exit(0);
+            });
+
+            ui::RouterUi::start(events, theme, refresh_interval, shutdown_tx)
         }
     }
 }

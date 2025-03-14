@@ -298,7 +298,7 @@ impl RoutingTable {
                     | MessageType::ShortTunnelBuild
                     | MessageType::VariableTunnelBuild => self.route_message(message),
                     message_type => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: LOG_TARGET,
                             ?message_type,
                             "received non-tunnel message, route to `TunnelManager`",

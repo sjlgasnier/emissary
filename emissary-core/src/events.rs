@@ -235,22 +235,44 @@ pub struct TunnelStatus {
     pub num_tunnel_build_failures: usize,
 }
 
+/// Events emitted by [`EventManager`].
 #[derive(Debug, Clone, Default)]
-pub struct RouterStatus {
-    /// Client destination status updates.
-    pub client_destinations: Vec<String>,
+pub enum Event {
+    RouterStatus {
+        /// Client destination status updates.
+        client_destinations: Vec<String>,
 
-    /// Server destination status updates.
-    pub server_destinations: Vec<(String, String)>,
+        /// Server destination status updates.
+        server_destinations: Vec<(String, String)>,
 
-    /// Transit tunnel subsystem status.
-    pub transit: TransitTunnelStatus,
+        /// Transit tunnel subsystem status.
+        transit: TransitTunnelStatus,
 
-    /// Transport subsystem status.
-    pub transport: TransportStatus,
+        /// Transport subsystem status.
+        transport: TransportStatus,
 
-    /// Tunnel subsystem status.
-    pub tunnel: TunnelStatus,
+        /// Tunnel subsystem status.
+        tunnel: TunnelStatus,
+    },
+
+    /// Router is shutting down.
+    ShuttingDown,
+
+    /// Router has shut down.
+    #[default]
+    ShutDown,
+}
+
+/// [`EventManager`] state.
+enum State {
+    /// [`EventManager`] and the router is active.
+    Active,
+
+    /// [`EventManager`] and the router is shutting down.
+    ShuttingDown,
+
+    /// [`EventManager`]  and the routerhas shut down.
+    ShutDown,
 }
 
 /// Event manager.
@@ -267,8 +289,11 @@ pub(crate) struct EventManager<R: Runtime> {
     /// Pending server destination updates.
     pending_server_updates: Vec<(String, String)>,
 
+    /// Event manager and router state.
+    state: State,
+
     /// TX channel for sending router status updates to [`EventSubscriber`].
-    status_tx: Sender<RouterStatus>,
+    status_tx: Sender<Event>,
 
     /// Update timer.
     timer: BoxFuture<'static, ()>,
@@ -301,6 +326,7 @@ impl<R: Runtime> EventManager<R> {
         (
             Self {
                 event_rx,
+                state: State::Active,
                 handle: EventHandle {
                     event_tx: handle.event_tx.clone(),
                     bandwidth: Arc::clone(&handle.bandwidth),
@@ -323,6 +349,23 @@ impl<R: Runtime> EventManager<R> {
             handle,
         )
     }
+
+    /// Send shutdown signal to [`EventSubscriber`].
+    pub(crate) fn shutdown(&mut self) {
+        match self.state {
+            State::Active => {
+                let _ = self.status_tx.try_send(Event::ShuttingDown);
+
+                self.state = State::ShuttingDown;
+            }
+            State::ShuttingDown => {
+                let _ = self.status_tx.try_send(Event::ShutDown);
+
+                self.state = State::ShutDown;
+            }
+            State::ShutDown => {}
+        }
+    }
 }
 
 impl<R: Runtime> Future for EventManager<R> {
@@ -343,7 +386,10 @@ impl<R: Runtime> Future for EventManager<R> {
         }
 
         if self.timer.poll_unpin(cx).is_ready() {
-            let status = RouterStatus {
+            let server_destinations = mem::take(&mut self.pending_server_updates);
+            let client_destinations = mem::take(&mut self.pending_client_updates);
+
+            let _ = self.status_tx.try_send(Event::RouterStatus {
                 transit: TransitTunnelStatus {
                     num_tunnels: self.handle.num_transit_tunnels.load(Ordering::Acquire),
                     bandwidth: self.handle.transit_bandwidth.load(Ordering::Acquire),
@@ -362,11 +408,9 @@ impl<R: Runtime> Future for EventManager<R> {
                         .num_tunnel_build_failures
                         .load(Ordering::Acquire),
                 },
-                server_destinations: mem::take(&mut self.pending_server_updates),
-                client_destinations: mem::take(&mut self.pending_client_updates),
-            };
-
-            let _ = self.status_tx.try_send(status);
+                server_destinations,
+                client_destinations,
+            });
 
             self.timer = Box::pin(R::delay(self.handle.update_interval));
             let _ = self.timer.poll_unpin(cx);
@@ -379,12 +423,12 @@ impl<R: Runtime> Future for EventManager<R> {
 /// Event subscriber.
 pub struct EventSubscriber {
     /// RX channel for receiving events.
-    status_rx: Receiver<RouterStatus>,
+    status_rx: Receiver<Event>,
 }
 
 impl EventSubscriber {
-    /// Attempt to get [`RouterStatus`]
-    pub fn router_status(&mut self) -> Option<RouterStatus> {
+    /// Attempt to get next [`Event`].
+    pub fn router_status(&mut self) -> Option<Event> {
         self.status_rx.try_recv().ok()
     }
 }
