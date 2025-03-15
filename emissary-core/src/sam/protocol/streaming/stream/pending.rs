@@ -116,7 +116,7 @@ impl<R: Runtime> PendingStream<R> {
                     false => VecDeque::from_iter([syn_payload]),
                 },
                 recv_stream_id,
-                send_stream_id: R::rng().next_u32(),
+                send_stream_id,
                 seq_nro: 0u32,
             },
             packet,

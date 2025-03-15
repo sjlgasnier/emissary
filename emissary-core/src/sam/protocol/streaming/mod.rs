@@ -884,6 +884,7 @@ impl<R: Runtime> StreamManager<R> {
 
         tracing::debug!(
             target: LOG_TARGET,
+            local = %self.destination_id,
             ?send_stream_id,
             ?recv_stream_id,
             ?seq_nro,

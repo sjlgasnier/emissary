@@ -721,6 +721,8 @@ impl<R: Runtime> Stream<R> {
             target: LOG_TARGET,
             local = %self.local,
             remote = %self.remote,
+            recv_id = ?self.recv_stream_id,
+            send_id = ?self.send_stream_id,
             ?ack_through,
             ?nacks,
             unacked = ?self.unacked.len(),
@@ -737,6 +739,8 @@ impl<R: Runtime> Stream<R> {
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
                 ?ack_through,
                 next_seq_nro = ?self.next_seq_nro,
                 "unexpected ack",
@@ -854,6 +858,8 @@ impl<R: Runtime> Stream<R> {
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
                 "shutting down stream",
             );
             return Err(StreamingError::Closed);
@@ -912,6 +918,8 @@ impl<R: Runtime> Stream<R> {
             target: LOG_TARGET,
             local = %self.local,
             remote = %self.remote,
+            recv_id = ?self.recv_stream_id,
+            send_id = ?self.send_stream_id,
             num_packets = ?packets.len(),
             windows_size = %self.window_size,
             "send packets",
@@ -974,8 +982,13 @@ impl<R: Runtime> Stream<R> {
             Some(routing_path) => {
                 tracing::debug!(
                     target: LOG_TARGET,
+                    local = %self.local,
+                    remote = %self.remote,
+                    recv_id = ?self.recv_stream_id,
+                    send_id = ?self.send_stream_id,
                     inbound = ?routing_path.inbound,
                     outbound = ?routing_path.outbound,
+                    "routing path recreated"
                 );
                 self.rto = Rto::new();
                 self.rtt = Rtt::new();
@@ -987,6 +1000,8 @@ impl<R: Runtime> Stream<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
+                    recv_id = ?self.recv_stream_id,
+                    send_id = ?self.send_stream_id,
                     "no routing path, cannot resend packets",
                 );
                 self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
@@ -1001,6 +1016,8 @@ impl<R: Runtime> Stream<R> {
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
                 seq_nro = ?packet.seq_nro,
                 "resend packet"
             );
@@ -1017,6 +1034,8 @@ impl<R: Runtime> Stream<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
+                    recv_id = ?self.recv_stream_id,
+                    send_id = ?self.send_stream_id,
                     ?error,
                     "failed to send packet",
                 );
@@ -1084,6 +1103,8 @@ impl<R: Runtime> Stream<R> {
             target: LOG_TARGET,
             local = %self.local,
             remote = %self.remote,
+            recv_id = ?self.recv_stream_id,
+            send_id = ?self.send_stream_id,
             num_pending = ?self.pending.len(),
             num_unacked = ?self.unacked.len(),
             "shutdown stream",
@@ -1112,6 +1133,9 @@ impl<R: Runtime> Stream<R> {
                 target: LOG_TARGET,
                 local = %self.local,
                 remote = %self.remote,
+                recv_id = ?self.recv_stream_id,
+                send_id = ?self.send_stream_id,
+                wnd = ?self.window_size,
                 "postponing `CLOSE`, send window is full",
             );
 
@@ -1176,6 +1200,8 @@ impl<R: Runtime> Future for Stream<R> {
                 target: LOG_TARGET,
                 local = %this.local,
                 remote = %this.remote,
+                recv_id = ?this.recv_stream_id,
+                send_id = ?this.send_stream_id,
                 "routing path handle exited",
             );
             return Poll::Ready(this.recv_stream_id);
@@ -1210,6 +1236,8 @@ impl<R: Runtime> Future for Stream<R> {
                                     target: LOG_TARGET,
                                     local = %this.local,
                                     remote = %this.remote,
+                                    recv_id = ?this.recv_stream_id,
+                                    send_id = ?this.send_stream_id,
                                     ?error,
                                     "failed to handle packet"
                                 );
@@ -1269,6 +1297,8 @@ impl<R: Runtime> Future for Stream<R> {
                                     target: LOG_TARGET,
                                     local = %this.local,
                                     remote = %this.remote,
+                                    recv_id = ?this.recv_stream_id,
+                                    send_id = ?this.send_stream_id,
                                     ?error,
                                     "failed to handle packet"
                                 );
@@ -1284,6 +1314,8 @@ impl<R: Runtime> Future for Stream<R> {
                         target: LOG_TARGET,
                         local = %this.local,
                         remote = %this.remote,
+                        recv_id = ?this.recv_stream_id,
+                        send_id = ?this.send_stream_id,
                         "write state is poisoned",
                     );
                     debug_assert!(false);
@@ -1309,6 +1341,8 @@ impl<R: Runtime> Future for Stream<R> {
                             target: LOG_TARGET,
                             local = %this.local,
                             remote = %this.remote,
+                            recv_id = ?this.recv_stream_id,
+                            send_id = ?this.send_stream_id,
                             window_size = this.window_size,
                             num_unacked = ?this.unacked.len(),
                             num_pending = ?this.pending.len(),
@@ -1432,6 +1466,8 @@ impl<R: Runtime> Future for Stream<R> {
                     target: LOG_TARGET,
                     local = %this.local,
                     remote = %this.remote,
+                    recv_id = ?this.recv_stream_id,
+                    send_id = ?this.send_stream_id,
                     ?error,
                     "failed to send packet",
                 );
