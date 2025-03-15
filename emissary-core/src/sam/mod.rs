@@ -543,7 +543,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                     let result = address_book
                                         .resolve(host)
                                         .await
-                                        .and_then(|destination| base64_decode(destination))
+                                        .and_then(base64_decode)
                                         .and_then(|destination| Destination::parse(&destination))
                                         .map(|destination| (destination.id(), options));
 
@@ -671,7 +671,7 @@ impl<R: Runtime> Future for SamServer<R> {
                     R::spawn(async move {
                         let _ = socket
                             .send_message_blocking(
-                                format!("STREAM STATUS RESULT=I2P_ERROR\n").as_bytes().to_vec(),
+                                "STREAM STATUS RESULT=I2P_ERROR\n".to_string().as_bytes().to_vec(),
                             )
                             .await;
                     });

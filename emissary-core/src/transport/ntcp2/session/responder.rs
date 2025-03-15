@@ -372,7 +372,7 @@ impl Responder {
         }?;
 
         // create send and receive keys
-        let temp_key = Hmac::new(&noise_ctx.chaining_key()).update([]).finalize();
+        let temp_key = Hmac::new(noise_ctx.chaining_key()).update([]).finalize();
         let send_key = Hmac::new(&temp_key).update([0x01]).finalize();
         let recv_key = Hmac::new(&temp_key).update(&send_key).update([0x02]).finalize();
 

@@ -204,6 +204,6 @@ impl Ord for FloodFill {
 
 impl PartialOrd for FloodFill {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        self.score.partial_cmp(&other.score)
+        Some(self.cmp(other))
     }
 }

@@ -141,10 +141,10 @@ impl<R: Runtime> SessionManager<R> {
     ) -> Self {
         let local_key = StaticPrivateKey::from(local_key);
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize_new();
-        let chaining_key = state.clone();
-        let outbound_initial_state = Sha256::new().update(&state).finalize_new();
+        let chaining_key = state;
+        let outbound_initial_state = Sha256::new().update(state).finalize_new();
         let inbound_initial_state = Sha256::new()
-            .update(&outbound_initial_state)
+            .update(outbound_initial_state)
             .update(local_key.public().to_vec())
             .finalize_new();
 
@@ -288,8 +288,8 @@ impl<R: Runtime> SessionManager<R> {
         let net_id = self.router_ctx.net_id();
         let local_info = self.router_ctx.router_info();
         let local_key = self.local_key.clone();
-        let outbound_initial_state = self.outbound_initial_state.clone();
-        let chaining_key = self.chaining_key.clone();
+        let outbound_initial_state = self.outbound_initial_state;
+        let chaining_key = self.chaining_key;
         let allow_local = self.allow_local;
         let mut subsystem_handle = self.subsystem_handle.clone();
         let event_handle = self.router_ctx.event_handle().clone();
@@ -411,8 +411,8 @@ impl<R: Runtime> SessionManager<R> {
     ) -> impl Future<Output = Result<Ntcp2Session<R>, (Option<RouterId>, Error)>> {
         let net_id = self.router_ctx.net_id();
         let local_router_hash = self.router_ctx.router_id().to_vec();
-        let inbound_initial_state = self.inbound_initial_state.clone();
-        let chaining_key = self.chaining_key.clone();
+        let inbound_initial_state = self.inbound_initial_state;
+        let chaining_key = self.chaining_key;
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
         let iv = self.local_iv;

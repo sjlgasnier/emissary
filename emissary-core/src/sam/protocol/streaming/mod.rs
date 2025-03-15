@@ -914,7 +914,7 @@ impl<R: Runtime> StreamManager<R> {
     ) -> (u32, BytesMut, DeliveryStyle, u16, u16) {
         let silent = options
             .get("SILENT")
-            .map_or(false, |value| value.parse::<bool>().unwrap_or(false));
+            .is_some_and(|value| value.parse::<bool>().unwrap_or(false));
         let src_port = options
             .get("FROM_PORT")
             .map_or(0u16, |value| value.parse::<u16>().unwrap_or(0u16));

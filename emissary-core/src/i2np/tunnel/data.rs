@@ -196,7 +196,7 @@ pub enum MessageKind<'a> {
     },
 }
 
-impl<'a> MessageKind<'a> {
+impl MessageKind<'_> {
     /// Get serialized length of [`MessageKind`]'s [`DeliveryInstructions`].
     fn serialized_len(&self) -> usize {
         match self {
@@ -310,7 +310,7 @@ pub struct TunnelDataBlock<'a> {
     pub message: &'a [u8],
 }
 
-impl<'a> fmt::Debug for TunnelDataBlock<'a> {
+impl fmt::Debug for TunnelDataBlock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TunnelDataBlock")
             .field("message_kind", &self.message_kind)

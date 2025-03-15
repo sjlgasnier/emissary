@@ -26,6 +26,7 @@ use num_traits::{Num, One, Zero};
 use sha1::{Digest, Sha1};
 use subtle::{Choice, ConstantTimeEq};
 
+use alloc::{vec, vec::Vec};
 use core::ops::Sub;
 
 /// From https://geti2p.net/spec/cryptography#dsa

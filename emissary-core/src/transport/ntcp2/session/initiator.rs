@@ -147,7 +147,7 @@ impl Initiator {
         let pk = sk.public();
 
         // MixHash(rs), MixHash(e.pubkey)
-        noise_ctx.mix_hash(&remote_static_key).mix_hash(&pk);
+        noise_ctx.mix_hash(remote_static_key).mix_hash(&pk);
 
         // MixKey(DH())
         let mut local_key = noise_ctx.mix_key(&sk, remote_static_key);
@@ -318,7 +318,7 @@ impl Initiator {
             out.put_slice(&message);
 
             // create send and receive keys
-            let temp_key = Hmac::new(&noise_ctx.chaining_key()).update([]).finalize();
+            let temp_key = Hmac::new(noise_ctx.chaining_key()).update([]).finalize();
             let send_key = Hmac::new(&temp_key).update([0x01]).finalize();
             let receive_key = Hmac::new(&temp_key).update(&send_key).update([0x02]).finalize();
 

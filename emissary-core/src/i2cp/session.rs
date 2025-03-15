@@ -238,7 +238,7 @@ impl<R: Runtime> I2cpSession<R> {
                             let destination = address_book
                                 .resolve(host_name.to_string())
                                 .await
-                                .and_then(|destination| base64_decode(destination));
+                                .and_then(base64_decode);
 
                             (
                                 session_id,

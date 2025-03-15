@@ -244,7 +244,7 @@ impl<R: Runtime> PendingSamSession<R> {
             }
         }
 
-        return Ok(SamSessionContext {
+        Ok(SamSessionContext {
             address_book: self.address_book,
             datagram_tx: self.datagram_tx,
             destination: self.destination,
@@ -258,6 +258,6 @@ impl<R: Runtime> PendingSamSession<R> {
             session_kind: self.session_kind,
             socket: self.socket,
             tunnel_pool_handle,
-        });
+        })
     }
 }

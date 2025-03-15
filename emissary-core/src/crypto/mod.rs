@@ -370,7 +370,7 @@ impl SigningPublicKey {
 
     /// Attempt to construct `SigningPublicKey::P256` from `data`.
     pub fn dsa_sha1(data: &[u8]) -> Option<Self> {
-        DsaPublicKey::from_bytes(data).map(|key| Self::DsaSha1(key))
+        DsaPublicKey::from_bytes(data).map(Self::DsaSha1)
     }
 
     /// Verify `signature` of `message`.

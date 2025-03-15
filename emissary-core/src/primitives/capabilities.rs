@@ -133,14 +133,14 @@ impl Capabilities {
     ///
     /// Router is considered fast if it's reachable and its capabilities specify either O, P or X.
     pub fn is_fast(&self) -> bool {
-        self.bandwidth.map_or(false, |bandwidth| {
+        self.bandwidth.is_some_and(|bandwidth| {
             core::matches!(bandwidth, Bandwidth::O | Bandwidth::P | Bandwidth::X)
         })
     }
 
     /// Is the router considered to have "standard" bandwidth.
     pub fn is_standard(&self) -> bool {
-        self.bandwidth.map_or(false, |bandwidth| {
+        self.bandwidth.is_some_and(|bandwidth| {
             core::matches!(
                 bandwidth,
                 Bandwidth::K | Bandwidth::L | Bandwidth::M | Bandwidth::N

@@ -257,7 +257,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 continue;
                             }
 
-                            let size = (this.read_buffer[0] as u16) << 8
+                            let size = ((this.read_buffer[0] as u16) << 8)
                                 | (this.read_buffer[1] as u16) & 0xff;
 
                             this.read_state = ReadState::ReadFrame {

@@ -1137,7 +1137,7 @@ impl<'a> DataMessageBuilder<'a> {
                 }) => {
                     out.put_u8(BlockType::FollowOnFragment.as_u8());
                     out.put_u16((fragment.len() + 1 + 4) as u16);
-                    out.put_u8(fragment_num << 1 | last as u8);
+                    out.put_u8((fragment_num << 1) | last as u8);
                     out.put_u32(message_id);
                     out.put_slice(fragment);
                 }

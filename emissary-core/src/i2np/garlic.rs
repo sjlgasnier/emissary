@@ -176,7 +176,7 @@ impl<'a> From<&'a DeliveryInstructions<'a>> for OwnedDeliveryInstructions {
     }
 }
 
-impl<'a> DeliveryInstructions<'a> {
+impl DeliveryInstructions<'_> {
     /// Get serialized length of the delivery instructions.
     fn serialized_len(&self) -> usize {
         match self {
@@ -398,7 +398,7 @@ pub enum GarlicMessageBlock<'a> {
     },
 }
 
-impl<'a> fmt::Debug for GarlicMessageBlock<'a> {
+impl fmt::Debug for GarlicMessageBlock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DateTime { timestamp } => f
@@ -454,7 +454,7 @@ impl<'a> GarlicMessage<'a> {
     fn parse_delivery_instructions(input: &'a [u8]) -> IResult<&'a [u8], DeliveryInstructions<'a>> {
         let (rest, flag) = be_u8(input)?;
 
-        if flag >> 7 & 1 != 0 {
+        if (flag >> 7) & 1 != 0 {
             tracing::warn!(
                 target: LOG_TARGET,
                 "encrypted garlic messages not supported",
@@ -462,7 +462,7 @@ impl<'a> GarlicMessage<'a> {
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         }
 
-        if flag >> 4 & 1 != 0 {
+        if (flag >> 4) & 1 != 0 {
             tracing::warn!(
                 target: LOG_TARGET,
                 "delay not supproted",
@@ -561,7 +561,7 @@ impl<'a> GarlicMessage<'a> {
             0 => NextKeyKind::ForwardKey {
                 key_id,
                 public_key,
-                reverse_key_requested: (flag >> 2 & 1) == 1,
+                reverse_key_requested: (flag >> 2) & 1 == 1,
             },
             _ => unreachable!(),
         };

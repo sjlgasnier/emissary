@@ -27,7 +27,10 @@ use crate::{
 use chrono::DateTime;
 use hashbrown::HashSet;
 
-use alloc::string::{String, ToString};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Score adjustment when floodfill doesn't answer to a query.
 const LOOKUP_REPLY_NOT_RECEIVED_SCORE: isize = -5isize;
@@ -116,20 +119,20 @@ impl<R: Runtime> Dht<R> {
 
     /// Register lookup success for `router_id`.
     pub fn register_lookup_success(&mut self, router_id: &RouterId) {
-        self.routing_table.adjust_score(&router_id, LOOKUP_SUCCEEDED_SCORE);
-        self.router_ctx.profile_storage().database_lookup_success(&router_id);
+        self.routing_table.adjust_score(router_id, LOOKUP_SUCCEEDED_SCORE);
+        self.router_ctx.profile_storage().database_lookup_success(router_id);
     }
 
     /// Register lookup failure for `router_id`.
     pub fn register_lookup_failure(&mut self, router_id: &RouterId) {
-        self.routing_table.adjust_score(&router_id, LOOKUP_FAILED_SCORE);
-        self.router_ctx.profile_storage().database_lookup_failure(&router_id);
+        self.routing_table.adjust_score(router_id, LOOKUP_FAILED_SCORE);
+        self.router_ctx.profile_storage().database_lookup_failure(router_id);
     }
 
     /// Register lookup timeout for `router_id`.
     pub fn register_lookup_timeout(&mut self, router_id: &RouterId) {
-        self.routing_table.adjust_score(&router_id, LOOKUP_REPLY_NOT_RECEIVED_SCORE);
-        self.router_ctx.profile_storage().database_lookup_no_response(&router_id);
+        self.routing_table.adjust_score(router_id, LOOKUP_REPLY_NOT_RECEIVED_SCORE);
+        self.router_ctx.profile_storage().database_lookup_no_response(router_id);
     }
 
     /// Get `limit` many routers clost to `key`.

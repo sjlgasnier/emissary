@@ -24,6 +24,7 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt};
 use hashbrown::HashMap;
 
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,
@@ -81,17 +82,14 @@ impl<R: Runtime> LeaseSetManager<R> {
     pub fn register_inbound_tunnel(&mut self, lease: Lease) {
         self.tunnels.insert(lease.tunnel_id, lease.clone());
 
-        match self.state {
-            PublishState::Inactive => {
-                self.state = PublishState::WaitingForInboundTunnels {
-                    timer: Box::pin(R::delay(REPUBLISH_TIMEOUT)),
-                };
+        if let PublishState::Inactive = self.state {
+            self.state = PublishState::WaitingForInboundTunnels {
+                timer: Box::pin(R::delay(REPUBLISH_TIMEOUT)),
+            };
 
-                if let Some(waker) = self.waker.take() {
-                    waker.wake_by_ref();
-                }
+            if let Some(waker) = self.waker.take() {
+                waker.wake_by_ref();
             }
-            _ => {}
         }
     }
 
@@ -99,17 +97,14 @@ impl<R: Runtime> LeaseSetManager<R> {
     pub fn register_expired_inbound_tunnel(&mut self, tunnel_id: TunnelId) {
         self.tunnels.remove(&tunnel_id);
 
-        match self.state {
-            PublishState::Inactive => {
-                self.state = PublishState::WaitingForInboundTunnels {
-                    timer: Box::pin(R::delay(REPUBLISH_TIMEOUT)),
-                };
+        if let PublishState::Inactive = self.state {
+            self.state = PublishState::WaitingForInboundTunnels {
+                timer: Box::pin(R::delay(REPUBLISH_TIMEOUT)),
+            };
 
-                if let Some(waker) = self.waker.take() {
-                    waker.wake_by_ref();
-                }
+            if let Some(waker) = self.waker.take() {
+                waker.wake_by_ref();
             }
-            _ => {}
         }
     }
 }

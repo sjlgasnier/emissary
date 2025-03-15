@@ -25,6 +25,7 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt};
 use rand_core::RngCore;
 
+use alloc::boxed::Box;
 use core::{
     future::Future,
     net::Ipv4Addr,
@@ -56,7 +57,7 @@ impl<'a, T: AsyncRead + Unpin> ReadExact<'a, T> {
     }
 }
 
-impl<'a, T: AsyncRead + Unpin> Future for ReadExact<'a, T> {
+impl<T: AsyncRead + Unpin> Future for ReadExact<'_, T> {
     type Output = crate::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

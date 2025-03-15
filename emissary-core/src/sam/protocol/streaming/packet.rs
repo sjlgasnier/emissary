@@ -72,7 +72,7 @@ pub struct Flags<'a> {
     signature: Option<&'a [u8]>,
 }
 
-impl<'a> fmt::Display for Flags<'a> {
+impl fmt::Display for Flags<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut flags = Vec::<&'static str>::new();
 
@@ -255,7 +255,7 @@ impl<'a> Flags<'a> {
     }
 }
 
-impl<'a> fmt::Debug for Flags<'a> {
+impl fmt::Debug for Flags<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Flags").field("flags", &self.flags).finish()
     }
@@ -343,7 +343,7 @@ pub struct Packet<'a> {
     pub payload: &'a [u8],
 }
 
-impl<'a> fmt::Debug for Packet<'a> {
+impl fmt::Debug for Packet<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let test = str::from_utf8(self.payload).unwrap_or("falure");
 
@@ -465,7 +465,7 @@ pub struct FlagsBuilder<'a> {
     signature: Option<&'a [u8]>,
 }
 
-impl<'a> FlagsBuilder<'a> {
+impl FlagsBuilder<'_> {
     /// Specify `SYNCHRONIZE` .
     pub fn with_synchronize(mut self) -> Self {
         self.flags |= 1;

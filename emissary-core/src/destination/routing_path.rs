@@ -27,7 +27,7 @@ use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
@@ -239,10 +239,10 @@ impl<R: Runtime> RoutingPathManager<R> {
                 self.subscribers.insert(destination_id.clone(), vec![tx]);
             }
         }
-        let inbound_tunnels = self.inbound_tunnels.get(&destination_id).map_or_else(
-            || Vec::new(),
-            |tunnels| tunnels.iter().map(|lease| (lease.tunnel_id, lease.expires)).collect(),
-        );
+        let inbound_tunnels =
+            self.inbound_tunnels.get(&destination_id).map_or_else(Vec::new, |tunnels| {
+                tunnels.iter().map(|lease| (lease.tunnel_id, lease.expires)).collect()
+            });
 
         RoutingPathHandle::new(
             destination_id,
@@ -403,7 +403,7 @@ impl<R: Unpin> Future for RoutingPathManager<R> {
                         }
                     }
                     let inbound_tunnels = self.inbound_tunnels.get(&destination_id).map_or_else(
-                        || Vec::new(),
+                        Vec::new,
                         |tunnels| {
                             tunnels.iter().map(|lease| (lease.tunnel_id, lease.expires)).collect()
                         },
@@ -732,7 +732,7 @@ impl<R: Runtime> RoutingPathHandle<R> {
             destination_id: self.destination_id.clone(),
         });
 
-        return self.routing_path.clone();
+        self.routing_path.clone()
     }
 
     /// Get a copy of the assigned routing path.
@@ -936,7 +936,7 @@ impl<R: Runtime> Future for RoutingPathHandle<R> {
                         if self
                             .routing_path
                             .as_ref()
-                            .map_or(false, |routing_path| routing_path.outbound == tunnel_id)
+                            .is_some_and(|routing_path| routing_path.outbound == tunnel_id)
                         {
                             tracing::trace!(
                                 target: LOG_TARGET,
@@ -956,7 +956,7 @@ impl<R: Runtime> Future for RoutingPathHandle<R> {
                         if self
                             .routing_path
                             .as_ref()
-                            .map_or(false, |routing_path| routing_path.outbound == tunnel_id)
+                            .is_some_and(|routing_path| routing_path.outbound == tunnel_id)
                         {
                             tracing::warn!(
                                 target: LOG_TARGET,

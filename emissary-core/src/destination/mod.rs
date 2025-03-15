@@ -50,7 +50,7 @@ use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     mem,
     pin::Pin,
@@ -103,7 +103,7 @@ impl DeliveryStyle {
     pub fn destination_id(&self) -> &DestinationId {
         match self {
             Self::ViaRoute { routing_path } => &routing_path.destination_id,
-            Self::Unspecified { destination_id } => &destination_id,
+            Self::Unspecified { destination_id } => destination_id,
             Self::Dummy => unreachable!(),
         }
     }

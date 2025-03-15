@@ -50,7 +50,7 @@ use futures::{
 use futures_channel::oneshot;
 use thingbuf::mpsc::Receiver;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::ToString, vec::Vec};
 use core::{
     future::Future,
     ops::{Range, RangeFrom},

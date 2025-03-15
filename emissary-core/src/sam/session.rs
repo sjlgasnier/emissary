@@ -41,7 +41,13 @@ use futures::StreamExt;
 use hashbrown::HashMap;
 use thingbuf::mpsc::Receiver;
 
-use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 use core::{
     fmt,
     future::Future,
@@ -542,7 +548,7 @@ impl<R: Runtime> SamSession<R> {
             socket,
             silent: options
                 .get("SILENT")
-                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+                .is_some_and(|value| value.parse::<bool>().unwrap_or(false)),
         }) {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -581,7 +587,7 @@ impl<R: Runtime> SamSession<R> {
             port,
             silent: options
                 .get("SILENT")
-                .map_or(false, |value| value.parse::<bool>().unwrap_or(false)),
+                .is_some_and(|value| value.parse::<bool>().unwrap_or(false)),
         }) {
             tracing::warn!(
                 target: LOG_TARGET,

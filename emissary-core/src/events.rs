@@ -21,7 +21,7 @@ use crate::runtime::Runtime;
 use futures::{future::BoxFuture, FutureExt};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,
@@ -105,7 +105,7 @@ impl<R: Runtime> Clone for EventHandle<R> {
             num_tunnel_build_failures: Arc::clone(&self.num_tunnel_build_failures),
             num_tunnels_built: Arc::clone(&self.num_tunnels_built),
             transit_bandwidth: Arc::clone(&self.transit_bandwidth),
-            update_interval: self.update_interval.clone(),
+            update_interval: self.update_interval,
             timer: Some(Box::pin(R::delay(self.update_interval))),
             _runtime: Default::default(),
         }

@@ -182,7 +182,7 @@ pub struct Reader<'a> {
     profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
 }
 
-impl<'a> Reader<'a> {
+impl Reader<'_> {
     /// Get reference to [`RouterInfo`].
     pub fn router_info(&self, router_id: &RouterId) -> Option<&RouterInfo> {
         self.router_infos.get(router_id)
@@ -414,7 +414,7 @@ impl<R: Runtime> ProfileStorage<R> {
         self.routers
             .read()
             .get(router_id)
-            .map_or(false, |router_info| router_info.is_floodfill())
+            .is_some_and(|router_info| router_info.is_floodfill())
     }
 
     /// Record that `router_id` was selected for a tunnel.

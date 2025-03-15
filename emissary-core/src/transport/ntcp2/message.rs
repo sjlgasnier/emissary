@@ -170,7 +170,7 @@ pub enum MessageBlock<'a> {
     },
 }
 
-impl<'a> fmt::Debug for MessageBlock<'a> {
+impl fmt::Debug for MessageBlock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Self::DateTime { timestamp } =>
