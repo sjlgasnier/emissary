@@ -84,6 +84,19 @@ pub enum NetDbAction {
         router_info: Bytes,
     },
 
+    /// Wait for [`NetDb`] to be ready.
+    ///
+    /// Exploratory tunnel is owned by the [`NetDb`] and the pool is built alongside any client
+    /// tunnel pools when the router is starting. Tunnel pool for a client destination may get
+    /// built before the exploratory tunnel pool and if the client destination sends a lease set
+    /// query as soon as it's ready, the query might fail simply because the exploratory tunnel
+    /// pool doesn't have enough tunnels to perform the query.
+    ///
+    /// [`NetDbAction::WaitUntilReady`] returns a oneshot receiver which allows the client
+    /// destination to wait for [`NetDb`] to be ready before it sends any lease set queries to
+    /// prevent these tunnel-related issues from happening.
+    WaitUntilReady { tx: oneshot::Sender<()> },
+
     /// Dummy value.
     Dummy,
 }
@@ -172,6 +185,16 @@ impl NetDbHandle {
                 "failed to send router info for publication to netdb",
             );
         }
+    }
+
+    /// Send request to [`NetDb`] to inform the caller when it's ready.
+    pub fn wait_until_ready(&self) -> Result<oneshot::Receiver<()>, ChannelError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx
+            .try_send(NetDbAction::WaitUntilReady { tx })
+            .map(|_| rx)
+            .map_err(From::from)
     }
 
     #[cfg(test)]

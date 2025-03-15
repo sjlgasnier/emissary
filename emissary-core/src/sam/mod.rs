@@ -465,14 +465,14 @@ impl<R: Runtime> Future for SamServer<R> {
                                 Arc::clone(&session_id),
                                 session_kind,
                                 options,
-                                version,
                                 rx,
                                 this.datagram_tx.clone(),
                                 Box::pin(tunnel_pool_future),
                                 netdb_handle,
                                 this.address_book.clone(),
                                 this.event_handle.clone(),
-                            ),
+                            )
+                            .run(),
                         );
                         this.active_destinations.insert(destination_id.clone());
                         this.session_id_destinations.insert(session_id, destination_id);

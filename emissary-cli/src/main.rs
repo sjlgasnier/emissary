@@ -69,6 +69,7 @@ struct RouterContext {
     /// Event subscriber.
     ///
     /// Passed onto a router UI if it has been enabled.
+    #[allow(unused)]
     events: EventSubscriber,
 
     /// Port mapper for NAT-PMP and UPnP.
@@ -81,6 +82,7 @@ struct RouterContext {
     signal_handler: SignalHandler,
 
     /// Router UI config, if enabled.
+    #[allow(unused)]
     router_ui_config: Option<RouterUiConfig>,
 }
 
@@ -355,10 +357,10 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let (_tx, shutdown_rx) = channel(1);
     let RouterContext {
-        router,
         port_mapper,
-        storage,
+        router,
         signal_handler,
+        storage,
         ..
     } = runtime.block_on(setup_router())?;
 

@@ -56,6 +56,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     fmt,
     future::Future,
+    mem,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -110,6 +111,11 @@ impl<T: Clone> TunnelSelector<T> {
     /// Add `tunnel` into [`TunnelSelector`].
     pub fn add_tunnel(&mut self, tunnel: T) {
         self.tunnels.push(tunnel);
+    }
+
+    /// Get tunnel count.
+    pub fn len(&self) -> usize {
+        self.tunnels.len()
     }
 
     /// Remove tunnel from [`TunnelSelector`] using predicate.
@@ -273,6 +279,9 @@ pub struct NetDb<R: Runtime> {
     /// Active inbound tunhnels
     outbound_tunnels: TunnelSelector<TunnelId>,
 
+    /// TX channels of client destinations awaiting ready signal from [`NetDb`]
+    pending_ready_awaits: Vec<oneshot::Sender<()>>,
+
     /// Query timers.
     query_timers: R::JoinSet<Bytes>,
 
@@ -354,6 +363,7 @@ impl<R: Runtime> NetDb<R> {
                 maintenance_timer: Box::pin(R::delay(Duration::from_secs(5))),
                 netdb_msg_rx,
                 outbound_tunnels: TunnelSelector::new(),
+                pending_ready_awaits: Vec::new(),
                 query_timers: R::join_set(),
                 router_ctx: router_ctx.clone(),
                 router_dht,
@@ -1993,12 +2003,24 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
                     self.outbound_tunnels.add_tunnel(tunnel_id);
+
+                    if self.inbound_tunnels.len() > 0 && !self.pending_ready_awaits.is_empty() {
+                        mem::take(&mut self.pending_ready_awaits).into_iter().for_each(|tx| {
+                            let _ = tx.send(());
+                        });
+                    }
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
                     self.outbound_tunnels.remove_tunnel(|tunnel| tunnel != &tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { lease, .. })) => {
                     self.inbound_tunnels.add_tunnel(lease);
+
+                    if self.outbound_tunnels.len() > 0 && !self.pending_ready_awaits.is_empty() {
+                        mem::take(&mut self.pending_ready_awaits).into_iter().for_each(|tx| {
+                            let _ = tx.send(());
+                        });
+                    }
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
                     self.inbound_tunnels.remove_tunnel(|lease| lease.tunnel_id != tunnel_id);
@@ -2025,6 +2047,15 @@ impl<R: Runtime> Future for NetDb<R> {
                     router_id,
                     router_info,
                 })) => self.on_publish_router_info(router_id, router_info),
+                Poll::Ready(Some(NetDbAction::WaitUntilReady { tx })) => {
+                    // if there's at least one inbound and one outbound tunnel,
+                    // netdb is considered ready
+                    if self.inbound_tunnels.len() > 0 && self.outbound_tunnels.len() > 0 {
+                        let _ = tx.send(());
+                    } else {
+                        self.pending_ready_awaits.push(tx);
+                    }
+                }
                 Poll::Ready(Some(NetDbAction::Dummy)) => unreachable!(),
             }
         }
