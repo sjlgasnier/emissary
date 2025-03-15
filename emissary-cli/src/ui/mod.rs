@@ -40,14 +40,31 @@ enum View {
 
 enum Status {
     Active,
-    ShuttingDown,
+    ShuttingDown(Instant),
 }
 
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Active => write!(f, "Active"),
-            Self::ShuttingDown => write!(f, "Shutting down"),
+            Self::ShuttingDown(shutdown_started) => {
+                let remaining = (Duration::from_secs(10 * 60)
+                    .saturating_sub(shutdown_started.elapsed()))
+                .as_secs();
+
+                if remaining > 60 {
+                    write!(
+                        f,
+                        "Shutting down ({} m {} s)",
+                        remaining / 60,
+                        remaining % 60
+                    )
+                } else if remaining == 0 {
+                    write!(f, "Shutting down now")
+                } else {
+                    write!(f, "Shutting down ({remaining} s)")
+                }
+            }
         }
     }
 }
@@ -211,9 +228,12 @@ impl RouterUi {
                             self.num_tunnels_built = tunnel.num_tunnels_built;
                             self.num_tunnel_build_failures = tunnel.num_tunnel_build_failures;
                         }
-                        Event::ShuttingDown => {
-                            self.status = Status::ShuttingDown;
-                        }
+                        Event::ShuttingDown => match self.status {
+                            Status::Active => {
+                                self.status = Status::ShuttingDown(Instant::now());
+                            }
+                            _ => {}
+                        },
                         Event::ShutDown => {}
                     }
                 }
@@ -231,7 +251,7 @@ impl RouterUi {
                 Task::none()
             }
             Message::GracefulShutdown => {
-                self.status = Status::ShuttingDown;
+                self.status = Status::ShuttingDown(Instant::now());
                 let _ = self.shutdown_tx.try_send(());
 
                 Task::none()
@@ -318,7 +338,7 @@ impl RouterUi {
                         match self.status {
                             Status::Active =>
                                 button("Graceful shutdown").on_press(Message::GracefulShutdown),
-                            Status::ShuttingDown =>
+                            Status::ShuttingDown(_) =>
                                 button("Graceful shutdown").style(|theme, _| {
                                     iced::widget::button::primary(theme, button::Status::Disabled)
                                 }),
