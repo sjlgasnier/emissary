@@ -22,7 +22,7 @@ use crate::{
     error::{ChannelError, RoutingError},
     i2np::{Message, MessageType},
     primitives::{Lease, MessageId, RouterId, TunnelId},
-    tunnel::pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle, TUNNEL_CHANNEL_SIZE},
+    tunnel::pool::{TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use bytes::Bytes;
@@ -45,6 +45,12 @@ use core::{
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::context";
+
+/// Channel size for the client -> pool channel size.
+///
+/// The size of this channel needs to be large because it's shared by all of the outbound tunnels of
+/// the tunnel pool for outbound messages.
+const TUNNEL_CHANNEL_SIZE: usize = 4096usize;
 
 /// Message listeners.
 ///
