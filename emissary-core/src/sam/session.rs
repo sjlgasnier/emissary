@@ -121,43 +121,15 @@ impl<R: Runtime> Default for SamSessionCommand<R> {
     }
 }
 
-/// What kind of protocol is awaiting session to open.
-enum ProtocolKind<R: Runtime> {
-    /// Streaming protocol.
-    Stream {
+/// State of a pending outbound session.
+enum PendingSessionState<R: Runtime> {
+    /// Awaiting lease set query result.
+    AwaitingLeaseSet {
         /// SAMv3 client socket.
         socket: SamSocket<R>,
 
         /// Stream options.
         options: HashMap<String, String>,
-    },
-
-    /// Datagram protocol.
-    Datagram {
-        /// Destination of the remote peer.
-        destination: Dest,
-
-        /// Datagrams that are waiting to be sent.
-        datagrams: Vec<Vec<u8>>,
-    },
-}
-
-impl<R: Runtime> fmt::Debug for ProtocolKind<R> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Stream { .. } => f.debug_struct("ProtocolKind::Stream").finish_non_exhaustive(),
-            Self::Datagram { .. } =>
-                f.debug_struct("ProtocolKind::Datagram").finish_non_exhaustive(),
-        }
-    }
-}
-
-/// State of a pending outbound session.
-enum PendingSessionState<R: Runtime> {
-    /// Awaiting lease set query result.
-    AwaitingLeaseSet {
-        /// Protocol kind.
-        protocol: ProtocolKind<R>,
     },
 
     /// Awaiting session to be created
@@ -170,14 +142,41 @@ enum PendingSessionState<R: Runtime> {
 impl<R: Runtime> fmt::Debug for PendingSessionState<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AwaitingLeaseSet { protocol } => f
-                .debug_struct("PendingSessionState::AwaitingLeaseSet")
-                .field("protocol", &protocol)
-                .finish_non_exhaustive(),
+            Self::AwaitingLeaseSet { .. } =>
+                f.debug_struct("PendingSessionState::AwaitingLeaseSet").finish_non_exhaustive(),
             Self::AwaitingSession { stream_id } => f
                 .debug_struct("PendingSessionState::AwaitingSession")
                 .field("stream_id", &stream_id)
                 .finish(),
+        }
+    }
+}
+
+/// Pending sessions.
+///
+/// Session is considered pending if it's lease set is being queried.
+///
+/// Streams are also considered pending if one or more `SYN`s have been sent but no response
+/// has been received yet.
+#[derive(Default)]
+pub struct PendingSession<R: Runtime> {
+    /// Pending streams.
+    ///
+    /// Contains one or more pending streams for the remote destination.
+    streams: Vec<PendingSessionState<R>>,
+
+    /// Pending datagrams.
+    ///
+    /// Only set if there are pending datagrams for the remote destination.
+    datagrams: Option<(Dest, Vec<Vec<u8>>)>,
+}
+
+impl<R: Runtime> PendingSession<R> {
+    /// Create new [`PendingSession`].
+    fn new() -> Self {
+        Self {
+            streams: Vec::new(),
+            datagrams: None,
         }
     }
 }
@@ -217,12 +216,18 @@ pub struct SamSession<R: Runtime> {
     /// while the corresponding lease set is being queried.
     pending_host_lookups: HashMap<DestinationId, String>,
 
-    /// Pending outbound streams.
+    /// Pending outbound sessions.
     ///
     /// `STREAM CONNECT` is marked pending if there is no active lease set for the remote
     /// destination. The stream is moved from pending to active/rejected, based on the lease set
-    /// query result.
-    pending_outbound: HashMap<DestinationId, PendingSessionState<R>>,
+    /// query result. The stream is also set into pending state even if a lease set is found,
+    /// for the duration of the handshake process and if the remote doesn't answer any of the three
+    /// `SYN` messages that are sent, the stream is destroyed.
+    ///
+    /// If a datagram is sent to a remote destination whose lease set is not available, the session
+    /// is marked as pending until the lease set is found and all datagrams sent while the lease
+    /// set is being queried are stored in the pending session state.
+    pending_outbound: HashMap<DestinationId, PendingSession<R>>,
 
     /// Receiver for commands sent for this session.
     ///
@@ -413,10 +418,11 @@ impl<R: Runtime> SamSession<R> {
         //
         // from now on `StreamManager` will drive forward the stream progress and will
         // emit an event when the stream opens/fails to open
-        self.pending_outbound.insert(
-            destination_id.clone(),
-            PendingSessionState::AwaitingSession { stream_id },
-        );
+        self.pending_outbound
+            .entry(destination_id.clone())
+            .or_insert(PendingSession::<R>::new())
+            .streams
+            .push(PendingSessionState::AwaitingSession { stream_id });
 
         let Some(message) = I2cpPayloadBuilder::<R>::new(&packet)
             .with_protocol(Protocol::Streaming)
@@ -496,28 +502,20 @@ impl<R: Runtime> SamSession<R> {
 
                 self.create_outbound_stream(destination_id, socket, options);
             }
-            LeaseSetStatus::NotFound => {
+            status @ (LeaseSetStatus::NotFound | LeaseSetStatus::Pending) => {
                 tracing::trace!(
                     target: LOG_TARGET,
                     session_id = %self.session_id,
                     %destination_id,
-                    "lease set query started, mark outbound stream as pending",
+                    ?status,
+                    "lease set query started or pending, mark outbound stream as pending",
                 );
 
-                self.pending_outbound.insert(
-                    destination_id,
-                    PendingSessionState::AwaitingLeaseSet {
-                        protocol: ProtocolKind::Stream { socket, options },
-                    },
-                );
-            }
-            LeaseSetStatus::Pending => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id = %self.session_id,
-                    %destination_id,
-                    "received duplicate `STREAM CONNECT` for destination",
-                );
+                self.pending_outbound
+                    .entry(destination_id.clone())
+                    .or_insert(PendingSession::<R>::new())
+                    .streams
+                    .push(PendingSessionState::AwaitingLeaseSet { socket, options });
             }
         }
     }
@@ -647,15 +645,23 @@ impl<R: Runtime> SamSession<R> {
                     "lease set query started, mark outbound datagram as pending",
                 );
 
-                self.pending_outbound.insert(
-                    destination_id,
-                    PendingSessionState::AwaitingLeaseSet {
-                        protocol: ProtocolKind::Datagram {
-                            destination,
-                            datagrams: vec![datagram],
-                        },
+                match self.pending_outbound.get_mut(&destination_id) {
+                    Some(PendingSession { datagrams, .. }) => match datagrams {
+                        None => {
+                            *datagrams = Some((destination, vec![datagram]));
+                        }
+                        Some((_, datagrams)) => datagrams.push(datagram),
                     },
-                );
+                    None => {
+                        self.pending_outbound.insert(
+                            destination_id,
+                            PendingSession {
+                                streams: Vec::new(),
+                                datagrams: Some((destination, vec![datagram])),
+                            },
+                        );
+                    }
+                }
             }
             LeaseSetStatus::Pending => {
                 tracing::warn!(
@@ -666,20 +672,20 @@ impl<R: Runtime> SamSession<R> {
                 );
 
                 match self.pending_outbound.get_mut(&destination_id) {
-                    Some(PendingSessionState::AwaitingLeaseSet {
-                        protocol: ProtocolKind::Datagram { datagrams, .. },
-                    }) => {
-                        datagrams.push(datagram);
-                    }
-                    state => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            session_id = %self.session_id,
-                            %destination_id,
-                            ?state,
-                            "invalid state for repliable datagram",
+                    Some(PendingSession { datagrams, .. }) => match datagrams {
+                        None => {
+                            *datagrams = Some((destination, vec![datagram]));
+                        }
+                        Some((_, datagrams)) => datagrams.push(datagram),
+                    },
+                    None => {
+                        self.pending_outbound.insert(
+                            destination_id,
+                            PendingSession {
+                                streams: Vec::new(),
+                                datagrams: Some((destination, vec![datagram])),
+                            },
                         );
-                        debug_assert!(false);
                     }
                 }
             }
@@ -688,9 +694,14 @@ impl<R: Runtime> SamSession<R> {
 
     /// Handle succeeded lease set query result.
     ///
-    /// Lease set query is initiated only if the client wants to create a new session with remote
-    /// destination so fetch the initial protocol message from the protocol handler and send it to
+    /// For each of the pending streams, create a new outbound stream which allocates context in
+    /// [`StreamManger`] for it and creates a `SYN` packet which is sent sent in an NS message to
     /// remote destination.
+    ///
+    /// Same deal for datagrams: send all pending datagrams to remote destination in NS messages.
+    ///
+    /// All pending host lookups are also resolved with a success and the destination of the remote
+    /// peer is sent via the active socket to client.
     fn on_lease_set_found(&mut self, destination_id: DestinationId) {
         tracing::trace!(
             target: LOG_TARGET,
@@ -699,15 +710,27 @@ impl<R: Runtime> SamSession<R> {
             "lease set found",
         );
 
-        match self.pending_outbound.remove(&destination_id) {
-            Some(PendingSessionState::AwaitingLeaseSet { protocol }) => match protocol {
-                ProtocolKind::Stream {
-                    socket, options, ..
-                } => self.create_outbound_stream(destination_id.clone(), socket, options),
-                ProtocolKind::Datagram {
-                    destination,
-                    datagrams,
-                } => datagrams.into_iter().for_each(|datagram| {
+        if let Some(PendingSession { streams, datagrams }) =
+            self.pending_outbound.remove(&destination_id)
+        {
+            streams.into_iter().for_each(|state| match state {
+                PendingSessionState::AwaitingLeaseSet { socket, options } => {
+                    self.create_outbound_stream(destination_id.clone(), socket, options);
+                }
+                PendingSessionState::AwaitingSession { .. } => {
+                    // new stream was opened but by the the time the initial `SYN` packet was sent,
+                    // remote's lease set had expired and they had not sent us, a new lease set a
+                    // lease set query was started and the lease set was found
+                    //
+                    // the new lease set can be ignored for `PendingSessionState::AwaitinSession`
+                    // since the `SYN` packet was queued in `Destination` and
+                    // was sent to remote destination when the lease set was
+                    // received
+                }
+            });
+
+            if let Some((destination, datagrams)) = datagrams {
+                datagrams.into_iter().for_each(|datagram| {
                     let datagram = self.datagram_manager.make_datagram(datagram);
 
                     if let Some(message) = I2cpPayloadBuilder::<R>::new(&datagram)
@@ -729,23 +752,15 @@ impl<R: Runtime> SamSession<R> {
                             )
                         }
                     };
-                }),
-            },
-            Some(PendingSessionState::AwaitingSession { .. }) => {
-                // new stream was opened but by the the time the initial `SYN` packet was sent,
-                // remote's lease set had expired and they had not sent us, a new lease set a lease
-                // set query was started and the lease set was found
-                //
-                // the new lease set can be ignored for `PendingSessionState::AwaitinSession` since
-                // the `SYN` packet was queued in `Destination` and was sent to remote destination
-                // when the lease set was received
+                });
             }
-            None => tracing::debug!(
+        } else {
+            tracing::debug!(
                 target: LOG_TARGET,
                 session_id = ?self.session_id,
                 %destination_id,
                 "lease set query succeeded but no stream is interested in the lease set",
-            ),
+            );
         }
 
         if let Some(name) = self.pending_host_lookups.remove(&destination_id) {
@@ -782,7 +797,13 @@ impl<R: Runtime> SamSession<R> {
 
     /// Handle lease set query error for `destination_id`.
     ///
-    /// Client is notified that the remote destination is not reachable and the socket is closed.
+    /// Lease set query can fail for either streams, datagrams or a host lookup, either one of them,
+    /// some of them all or all of them at the same time, depending on what kind protocol is being
+    /// used.
+    ///
+    /// Any pending datagrams for the unreachable destiantion are discarded, an error is sent to the
+    /// user on each of the active stream and if there are pending host lookups, the client is
+    /// notified of the error via the open socket
     fn on_lease_set_not_found(&mut self, destination_id: DestinationId, error: QueryError) {
         tracing::trace!(
             target: LOG_TARGET,
@@ -792,47 +813,71 @@ impl<R: Runtime> SamSession<R> {
             "lease set not found",
         );
 
-        match self.pending_outbound.remove(&destination_id) {
-            Some(PendingSessionState::AwaitingLeaseSet { protocol }) => {
-                tracing::warn!(
+        if let Some(PendingSession { streams, datagrams }) =
+            self.pending_outbound.remove(&destination_id)
+        {
+            if let Some((_, datagrams)) = datagrams {
+                tracing::debug!(
                     target: LOG_TARGET,
-                    session_id = ?self.session_id,
                     %destination_id,
-                    ?protocol,
-                    ?error,
-                    "failed to find lease set",
+                    num_datagrams = ?datagrams.len(),
+                    "discarding pending datagrams, lease set not found",
                 );
+            }
 
-                if let ProtocolKind::Stream { mut socket, .. } = protocol {
-                    R::spawn(async move {
+            let sockets = streams
+                .into_iter()
+                .filter_map(|state| match state {
+                    PendingSessionState::AwaitingLeaseSet { socket, .. } => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            %destination_id,
+                            ?error,
+                            "unable to open stream, lease set not found",
+                        );
+
+                        Some(socket)
+                    }
+                    PendingSessionState::AwaitingSession { stream_id } => {
+                        // new stream was opened but by the the time the initial `SYN` packet was
+                        // sent, remote's lease set had expired and they had
+                        // not sent us, a new lease set a lease
+                        // set query was started but the lease set was not found in the netdb
+                        //
+                        // as the remote cannot be contacted, remove the pending stream from
+                        // `StreamManager`
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id = ?self.session_id,
+                            %destination_id,
+                            ?stream_id,
+                            "stream awaiting session but remote lease set not found",
+                        );
+
+                        self.stream_manager.remove_session(&destination_id);
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if !sockets.is_empty() {
+                R::spawn(async move {
+                    for mut socket in sockets {
                         let _ = socket
                             .send_message_blocking(b"STREAM STATUS RESULT=CANT_REACH_PEER".to_vec())
                             .await;
-                    });
-                }
+                    }
+                });
             }
-            Some(PendingSessionState::AwaitingSession { stream_id }) => {
-                // new stream was opened but by the the time the initial `SYN` packet was sent,
-                // remote's lease set had expired and they had not sent us, a new lease set a lease
-                // set query was started but the lease set was not found in the netdb
-                //
-                // as the remote cannot be contacted, remove the pending stream from `StreamManager`
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id = ?self.session_id,
-                    %destination_id,
-                    ?stream_id,
-                    "stream awaiting session but remote lease set not found",
-                );
-                self.stream_manager.remove_session(&destination_id);
-            }
-            None => tracing::debug!(
+        } else {
+            tracing::debug!(
                 target: LOG_TARGET,
                 session_id = ?self.session_id,
                 %destination_id,
                 ?error,
                 "lease set query failure but no stream is interested in the lease set",
-            ),
+            );
         }
 
         if let Some(name) = self.pending_host_lookups.remove(&destination_id) {

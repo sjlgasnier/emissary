@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    task::JoinSet,
 };
 use yosemite::{
     style::{Anonymous, Repliable, Stream},
@@ -151,7 +152,7 @@ async fn streaming_works() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -241,7 +242,7 @@ async fn repliable_datagrams_work() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -330,7 +331,7 @@ async fn anonymous_datagrams_work() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(60),
@@ -630,7 +631,7 @@ async fn stream_lots_of_data() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -719,7 +720,7 @@ async fn forward_stream() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -859,7 +860,7 @@ async fn closed_stream_detected() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -954,7 +955,7 @@ async fn close_and_reconnect() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1047,7 +1048,7 @@ async fn create_multiple_sessions() {
     tokio::spawn(async move { while let Some(_) = router.next().await {} });
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let stream = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1218,7 +1219,7 @@ async fn connect_using_b32_i2p() {
     };
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1307,7 +1308,7 @@ async fn unpublished_destination() {
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1374,7 +1375,7 @@ async fn host_lookup() {
     tokio::spawn(async move { while let Some(_) = router.next().await {} });
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1480,4 +1481,113 @@ async fn host_lookup() {
     stream.write_all(b"goodbye, world!\n").await.unwrap();
 
     assert!(handle.await.is_ok());
+}
+
+#[tokio::test]
+async fn open_parallel_streams() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
+    let mut router_infos = Vec::<Vec<u8>>::new();
+    let net_id = (thread_rng().next_u32() % 255) as u8;
+
+    for i in 0..4 {
+        let (mut router, _events, router_info) =
+            make_router(i < 2, net_id, router_infos.clone()).await;
+
+        router_infos.push(router_info);
+        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    }
+
+    // create two more routers, fetch their sam tcp ports and spawn them in the background
+    let mut ports = Vec::<u16>::new();
+
+    for _ in 0..2 {
+        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+
+        ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
+        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    }
+
+    // let the network boot up
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let mut session1 = tokio::time::timeout(
+        Duration::from_secs(30),
+        Session::<Stream>::new(SessionOptions {
+            samv3_tcp_port: ports[0],
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("no timeout")
+    .expect("to succeed");
+    let dest = session1.destination().to_owned();
+
+    let handle1 = tokio::spawn(async move {
+        for _ in 0..2 {
+            let mut stream = tokio::time::timeout(Duration::from_secs(15), session1.accept())
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+
+            stream.write_all(b"hello, world!\n").await.unwrap();
+
+            let mut buffer = vec![0u8; 64];
+            let nread = stream.read(&mut buffer).await.unwrap();
+            assert_eq!(
+                std::str::from_utf8(&buffer[..nread]),
+                Ok("goodbye, world!\n")
+            );
+        }
+    });
+
+    let mut session2 = tokio::time::timeout(
+        Duration::from_secs(30),
+        Session::<Stream>::new(SessionOptions {
+            samv3_tcp_port: ports[1],
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("no timeout")
+    .expect("to succeed");
+
+    let fut1 = session2.connect_detached(&dest);
+    let fut2 = session2.connect_detached(&dest);
+
+    let handle2 = tokio::spawn(async move {
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), fut1)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let mut buffer = vec![0u8; 64];
+        let nread = stream.read(&mut buffer).await.unwrap();
+        assert_eq!(std::str::from_utf8(&buffer[..nread]), Ok("hello, world!\n"));
+
+        stream.write_all(b"goodbye, world!\n").await.unwrap();
+    });
+
+    let handle3 = tokio::spawn(async move {
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), fut2)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let mut buffer = vec![0u8; 64];
+        let nread = stream.read(&mut buffer).await.unwrap();
+        assert_eq!(std::str::from_utf8(&buffer[..nread]), Ok("hello, world!\n"));
+
+        stream.write_all(b"goodbye, world!\n").await.unwrap();
+    });
+
+    let mut futures = JoinSet::new();
+    futures.spawn(handle1);
+    futures.spawn(handle2);
+    futures.spawn(handle3);
+
+    let values = tokio::time::timeout(Duration::from_secs(30), futures.join_all()).await.unwrap();
+    assert!(values.into_iter().all(|value| value.is_ok()));
 }
