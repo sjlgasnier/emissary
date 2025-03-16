@@ -435,7 +435,7 @@ impl<R: Runtime> TransitTunnelManager<R> {
                 Ok((next_router, message, maybe_feedback_tx))
             }
             HopRole::OutboundEndpoint => {
-                let message = MessageBuilder::short()
+                let message = MessageBuilder::standard()
                     .with_message_type(MessageType::VariableTunnelBuildReply)
                     .with_message_id(next_message_id)
                     .with_expiration(expiration)
