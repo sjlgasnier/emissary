@@ -269,9 +269,13 @@ impl<R: Runtime> TransitTunnelManager<R> {
         // if the router is active and capable of accepting a transit tunnel, check if a new
         // receiver can be added to routing table and if so, create new receiver for the transit
         // tunnel and add it to routing table
-        let maybe_receiver = match self.can_accept_transit_tunnel() {
-            false => None,
-            true => match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
+        //
+        // NOTE: currently only OBEPs are supported because tunnel context (used to encrypt the
+        // records) doesn't have aes-cbc support
+        let maybe_receiver = if self.can_accept_transit_tunnel()
+            && core::matches!(role, HopRole::OutboundEndpoint)
+        {
+            match self.routing_table.try_add_tunnel::<TUNNEL_CHANNEL_SIZE>(tunnel_id) {
                 Ok(receiver) => Some(receiver),
                 Err(error) => {
                     tracing::warn!(
@@ -282,7 +286,9 @@ impl<R: Runtime> TransitTunnelManager<R> {
                     );
                     None
                 }
-            },
+            }
+        } else {
+            None
         };
 
         let maybe_feedback_tx = match maybe_receiver {
