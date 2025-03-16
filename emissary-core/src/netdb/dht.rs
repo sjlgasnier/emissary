@@ -28,6 +28,7 @@ use chrono::DateTime;
 use hashbrown::HashSet;
 
 use alloc::{
+    collections::BTreeMap,
     string::{String, ToString},
     vec::Vec,
 };
@@ -158,6 +159,26 @@ impl<R: Runtime> Dht<R> {
             Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
 
         self.routing_table.closest_with_ignore(target, limit, ignore)
+    }
+
+    /// Get ID of the router from `routers` closest to `key`.
+    pub fn get_closest(key: impl AsRef<[u8]>, routers: &HashSet<RouterId>) -> Option<RouterId> {
+        if routers.is_empty() {
+            return None;
+        }
+
+        let target =
+            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let mut routers = routers
+            .iter()
+            .map(|router_id| {
+                let distance = target.distance(&Key::from(router_id.clone()));
+
+                (distance, router_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        routers.pop_first().map(|(_, router_id)| router_id.clone())
     }
 }
 

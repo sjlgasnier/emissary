@@ -38,6 +38,11 @@ use core::{fmt, time::Duration};
 /// Message type (1 byte) + size (2 bytes).
 const GARLIC_HEADER_LEN: usize = 3;
 
+/// Garlic message overhead.
+///
+/// Poly13055 tag, ephemeral key and garlic message length.
+pub const GARLIC_MESSAGE_OVERHEAD: usize = 16 + 32 + 4;
+
 /// Garlic message type.
 #[derive(Debug)]
 pub enum GarlicMessageType {
