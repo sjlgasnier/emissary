@@ -60,6 +60,9 @@ const LOG_TARGET: &str = "emissary::transport-manager";
 /// Local router info gets republished to `NetDb` every 15 minutes.
 const ROUTER_INFO_REPUBLISH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// Default channel size.
+const DEFAULT_CHANNEL_SIZE: usize = 1024;
+
 /// Termination reason.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum TerminationReason {
@@ -461,7 +464,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
 
     //// Register subsystem.
     pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService<R> {
-        let (event_tx, event_rx) = channel(64);
+        let (event_tx, event_rx) = channel(DEFAULT_CHANNEL_SIZE);
 
         tracing::debug!(
             target: LOG_TARGET,
