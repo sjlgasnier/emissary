@@ -35,14 +35,14 @@ use crate::{
         tunnel::gateway::TunnelGateway,
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
-    netdb::{dht::Dht, handle::NetDbActionRecycle, metrics::*},
+    netdb::{handle::NetDbActionRecycle, metrics::*},
     primitives::{Lease, LeaseSet2, MessageId, RouterId, RouterInfo, TunnelId},
     profile::Bucket,
     router::context::RouterContext,
     runtime::{Counter, Gauge, Instant, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transport::TransportService,
-    tunnel::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
+    tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -62,6 +62,7 @@ use core::{
     time::Duration,
 };
 
+pub use dht::Dht;
 pub use handle::NetDbHandle;
 
 #[cfg(test)]
@@ -864,11 +865,12 @@ impl<R: Runtime> NetDb<R> {
                     .with_payload(&message)
                     .build();
 
-                if let Err(error) = self.exploratory_pool_handle.sender().try_send_to_tunnel(
-                    router_id.clone(),
-                    tunnel_id,
-                    message,
-                ) {
+                if let Err(error) = self
+                    .exploratory_pool_handle
+                    .send_message(message)
+                    .tunnel_delivery(router_id.clone(), tunnel_id)
+                    .try_send()
+                {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
@@ -967,11 +969,12 @@ impl<R: Runtime> NetDb<R> {
                     .with_payload(&message)
                     .build();
 
-                if let Err(error) = self.exploratory_pool_handle.sender().try_send_to_tunnel(
-                    router_id.clone(),
-                    tunnel_id,
-                    message,
-                ) {
+                if let Err(error) = self
+                    .exploratory_pool_handle
+                    .send_message(message)
+                    .tunnel_delivery(router_id.clone(), tunnel_id)
+                    .try_send()
+                {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %router_id,
@@ -1313,7 +1316,7 @@ impl<R: Runtime> NetDb<R> {
                     })
                     .unzip();
 
-                tracing::debug!(
+                tracing::error!(
                     target: LOG_TARGET,
                     key = base32_encode(&key),
                     num_queried = ?queried.len(),
@@ -1549,11 +1552,13 @@ impl<R: Runtime> NetDb<R> {
             .with_payload(&out)
             .build();
 
-        if let Err(error) = self.exploratory_pool_handle.sender().try_send_to_router(
-            outbound_tunnel,
-            floodfill.clone(),
-            message,
-        ) {
+        if let Err(error) = self
+            .exploratory_pool_handle
+            .send_message(message)
+            .router_delivery(floodfill.clone())
+            .via_outbound_tunnel(outbound_tunnel)
+            .try_send()
+        {
             tracing::warn!(
                 target: LOG_TARGET,
                 %floodfill,
@@ -1972,6 +1977,8 @@ impl<R: Runtime> Future for NetDb<R> {
                                 if let Some(floodfill) = selected {
                                     self.floodfill_dht.register_lookup_timeout(&floodfill);
                                 }
+
+                                tracing::error!(target: LOG_TARGET, "started: {:?}", started.elapsed().as_secs());
 
                                 if started.elapsed() >= QUERY_TOTAL_TIMEOUT {
                                     tracing::debug!(
@@ -3119,10 +3126,11 @@ mod tests {
             .is_ok());
 
         match tm_rx.try_recv().unwrap() {
-            TunnelMessage::TunnelDelivery {
-                gateway,
+            TunnelMessage::TunnelDeliveryViaRoute {
+                router_id: gateway,
                 tunnel_id: dst_tunnel_id,
                 message,
+                ..
             } => {
                 assert_eq!(gateway, router_id);
                 assert_eq!(dst_tunnel_id, tunnel_id);
@@ -3215,10 +3223,11 @@ mod tests {
             .is_ok());
 
         match tm_rx.try_recv().unwrap() {
-            TunnelMessage::TunnelDelivery {
-                gateway,
+            TunnelMessage::TunnelDeliveryViaRoute {
+                router_id: gateway,
                 tunnel_id: dst_tunnel_id,
                 message,
+                ..
             } => {
                 assert_eq!(gateway, router_id);
                 assert_eq!(dst_tunnel_id, tunnel_id);
@@ -4474,7 +4483,7 @@ mod tests {
         }
         assert!(std::matches!(
             tm_rx.try_recv().unwrap(),
-            TunnelMessage::RouterDelivery { .. }
+            TunnelMessage::RouterDeliveryViaRoute { .. }
         ));
 
         // create database search reply indicating the lease set was not found

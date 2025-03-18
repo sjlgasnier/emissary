@@ -65,7 +65,7 @@ use core::{
 pub use context::{
     TunnelMessage, TunnelPoolBuildParameters, TunnelPoolContext, TunnelPoolContextHandle,
 };
-pub use handle::{TunnelPoolEvent, TunnelPoolHandle, TunnelSender};
+pub use handle::{TunnelMessageSender, TunnelPoolEvent, TunnelPoolHandle};
 pub use selector::{ClientSelector, ExploratorySelector};
 
 mod context;
@@ -1132,34 +1132,114 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                             .histogram(NUM_FRAGMENTS)
                             .record(count as f64);
                     }
-                    TunnelMessage::TunnelDeliveryViaRoute {
-                        ibgw_router_id,
-                        ibgw_tunnel_id,
-                        obgw_tunnel_id,
+                    TunnelMessage::RouterDeliveryViaRoute {
+                        router_id,
+                        outbound_tunnel,
                         message,
                     } => {
-                        let (outbound_gateway, tunnel) = match self.outbound.get(&obgw_tunnel_id) {
-                            Some(tunnel) => (obgw_tunnel_id, tunnel),
-                            None => {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?obgw_tunnel_id,
-                                    "outbound tunnel specified by routing path doesn't exist",
-                                );
-                                debug_assert!(false);
-
-                                let Some((outbound_gateway, tunnel)) = self.outbound.iter().next()
-                                else {
+                        let (outbound_gateway, tunnel) = match outbound_tunnel {
+                            None => match self.outbound.iter().next() {
+                                Some((obgw_tunnel_id, tunnel)) => (*obgw_tunnel_id, tunnel),
+                                None => {
                                     tracing::warn!(
                                         target: LOG_TARGET,
                                         name = %self.config.name,
                                         "failed to send tunnel message, no outbound tunnel available",
                                     );
                                     continue;
-                                };
+                                }
+                            },
+                            Some(obgw_tunnel_id) => match self.outbound.get(&obgw_tunnel_id) {
+                                Some(tunnel) => (obgw_tunnel_id, tunnel),
+                                None => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?obgw_tunnel_id,
+                                        "outbound tunnel specified by routing path doesn't exist",
+                                    );
+                                    debug_assert!(false);
 
-                                (*outbound_gateway, tunnel)
+                                    let Some((outbound_gateway, tunnel)) =
+                                        self.outbound.iter().next()
+                                    else {
+                                        tracing::warn!(
+                                            target: LOG_TARGET,
+                                            name = %self.config.name,
+                                            "failed to send tunnel message, no outbound tunnel available",
+                                        );
+                                        continue;
+                                    };
+
+                                    (*outbound_gateway, tunnel)
+                                }
+                            },
+                        };
+
+                        let (router_id, messages) = tunnel.send_to_router(router_id, message);
+
+                        let count = messages.into_iter().fold(0usize, |count, message| {
+                            if let Err(error) =
+                                self.routing_table.send_message(router_id.clone(), message)
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    name = %self.config.name,
+                                    %outbound_gateway,
+                                    ?error,
+                                    "failed to send tunnel message to router",
+                                );
                             }
+
+                            count + 1
+                        });
+
+                        self.router_ctx
+                            .metrics_handle()
+                            .histogram(NUM_FRAGMENTS)
+                            .record(count as f64);
+                    }
+                    TunnelMessage::TunnelDeliveryViaRoute {
+                        router_id: ibgw_router_id,
+                        tunnel_id: ibgw_tunnel_id,
+                        outbound_tunnel,
+                        message,
+                    } => {
+                        let (outbound_gateway, tunnel) = match outbound_tunnel {
+                            None => match self.outbound.iter().next() {
+                                Some((obgw_tunnel_id, tunnel)) => (*obgw_tunnel_id, tunnel),
+                                None => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        name = %self.config.name,
+                                        "failed to send tunnel message, no outbound tunnel available",
+                                    );
+                                    continue;
+                                }
+                            },
+                            Some(obgw_tunnel_id) => match self.outbound.get(&obgw_tunnel_id) {
+                                Some(tunnel) => (obgw_tunnel_id, tunnel),
+                                None => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?obgw_tunnel_id,
+                                        "outbound tunnel specified by routing path doesn't exist",
+                                    );
+                                    debug_assert!(false);
+
+                                    let Some((outbound_gateway, tunnel)) =
+                                        self.outbound.iter().next()
+                                    else {
+                                        tracing::warn!(
+                                            target: LOG_TARGET,
+                                            name = %self.config.name,
+                                            "failed to send tunnel message, no outbound tunnel available",
+                                        );
+                                        continue;
+                                    };
+
+                                    (*outbound_gateway, tunnel)
+                                }
+                            },
                         };
 
                         tracing::trace!(
@@ -1181,7 +1261,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                                     name = %self.config.name,
                                     %ibgw_router_id,
                                     %ibgw_tunnel_id,
-                                    %obgw_tunnel_id,
+                                    obgw_tunnel_id = %outbound_gateway,
                                     ?error,
                                     "failed to send tunnel message to router",
                                 );
@@ -1189,6 +1269,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 
                             count + 1
                         });
+
                         self.router_ctx
                             .metrics_handle()
                             .histogram(NUM_FRAGMENTS)

@@ -61,7 +61,7 @@ impl<R: Runtime> Dht<R> {
     /// Create new [`Dht`].
     ///
     /// `floodfill` denotes whether this is a [`Dht`] for floodfills or not.
-    pub fn new(
+    pub(super) fn new(
         local_router_id: RouterId,
         routers: HashSet<RouterId>,
         router_ctx: RouterContext<R>,
@@ -114,30 +114,30 @@ impl<R: Runtime> Dht<R> {
     }
 
     /// Insert new router into [`Dht`].
-    pub fn add_router(&mut self, router_id: RouterId) {
+    pub(super) fn add_router(&mut self, router_id: RouterId) {
         self.routing_table.add_router(router_id);
     }
 
     /// Register lookup success for `router_id`.
-    pub fn register_lookup_success(&mut self, router_id: &RouterId) {
+    pub(super) fn register_lookup_success(&mut self, router_id: &RouterId) {
         self.routing_table.adjust_score(router_id, LOOKUP_SUCCEEDED_SCORE);
         self.router_ctx.profile_storage().database_lookup_success(router_id);
     }
 
     /// Register lookup failure for `router_id`.
-    pub fn register_lookup_failure(&mut self, router_id: &RouterId) {
+    pub(super) fn register_lookup_failure(&mut self, router_id: &RouterId) {
         self.routing_table.adjust_score(router_id, LOOKUP_FAILED_SCORE);
         self.router_ctx.profile_storage().database_lookup_failure(router_id);
     }
 
     /// Register lookup timeout for `router_id`.
-    pub fn register_lookup_timeout(&mut self, router_id: &RouterId) {
+    pub(super) fn register_lookup_timeout(&mut self, router_id: &RouterId) {
         self.routing_table.adjust_score(router_id, LOOKUP_REPLY_NOT_RECEIVED_SCORE);
         self.router_ctx.profile_storage().database_lookup_no_response(router_id);
     }
 
     /// Get `limit` many routers clost to `key`.
-    pub fn closest(
+    pub(super) fn closest(
         &mut self,
         key: impl AsRef<[u8]>,
         limit: usize,
@@ -149,7 +149,7 @@ impl<R: Runtime> Dht<R> {
     }
 
     /// Get closest routers to `key`.
-    pub fn closest_with_ignore<'a>(
+    pub(super) fn closest_with_ignore<'a>(
         &'a mut self,
         key: impl AsRef<[u8]>,
         limit: usize,

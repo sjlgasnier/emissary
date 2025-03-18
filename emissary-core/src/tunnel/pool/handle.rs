@@ -30,7 +30,6 @@ use thingbuf::mpsc;
 use alloc::vec::Vec;
 use core::{
     fmt,
-    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -117,152 +116,130 @@ impl Default for TunnelPoolEvent {
     }
 }
 
-/// Tunnel sender.
-pub trait TunnelSender: Clone {
-    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
-    ///
-    /// Return an error if the channel is busy/closed.
-    fn try_send_to_router(
-        &self,
-        gateway: TunnelId,
-        router_id: RouterId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError>;
-
-    /// Send `message` via one of the `TunnelPool`'s outbound tunnels to remote tunnel
-    /// identified by (`gateway`, `tunnel_id`) tuple.
-    ///
-    /// Return an error if the channel is busy/closed.
-    fn try_send_to_tunnel(
-        &self,
-        gateway: RouterId,
-        tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError>;
-
-    /// Send `message` via `obgw_tunnel_id` to remote tunnel identified by
-    /// (`ibgw_router_id`, `ibgw_tunnel_id`) tuple.
-    ///
-    /// Return an error if the channel is busy/closed.
-    fn try_send_to_tunnel_via_route(
-        &self,
-        ibgw_router_id: RouterId,
-        ibgw_tunnel_id: TunnelId,
-        obgw_tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError>;
-
-    /// Send `message` to `router_id` via an outbound tunnel identified by `gateway`.
-    ///
-    /// Blocks until the message is sent and returns an error if the channel is closed.
-    fn send_to_router(
-        &self,
-        gateway: TunnelId,
-        router_id: RouterId,
-        message: Vec<u8>,
-    ) -> impl Future<Output = Result<(), ChannelError>> + Send;
-
-    /// Send `message` via one of the `TunnelPool`'s outbound tunnels to remote tunnel
-    /// identified by (`gateway`, `tunnel_id`) tuple.
-    ///
-    /// Blocks until the message is sent and returns an error if the channel is closed.
-    #[allow(unused)]
-    fn send_to_tunnel(
-        &self,
-        gateway: RouterId,
-        tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> impl Future<Output = Result<(), ChannelError>> + Send;
-}
-
 /// Tunnel message sender.
 #[derive(Clone)]
-struct TunnelMessageSender(mpsc::Sender<TunnelMessage, TunnelMessageRecycle>);
+pub struct TunnelMessageSender(mpsc::Sender<TunnelMessage, TunnelMessageRecycle>);
 
-impl TunnelSender for TunnelMessageSender {
-    fn try_send_to_router(
-        &self,
-        gateway: TunnelId,
+impl TunnelMessageSender {
+    /// Create [`TunnelSender`] with `message`.
+    ///
+    /// [`TunnelSender`] allows the sender to construct a tunnel message of correct kind
+    /// (router/tunnel delivery) and send it either in blocking or non-blocking manner.
+    pub fn send_message(&self, message: Vec<u8>) -> TunnelSender<'_> {
+        TunnelSender {
+            kind: None,
+            message,
+            outbound_tunnel: None,
+            tx: &self.0,
+        }
+    }
+}
+
+/// Delivery kind.
+enum DeliveryKind {
+    /// Tunnel delivery.
+    TunnelDelivery {
+        /// ID of the IBGW tunenl.
+        tunnel_id: TunnelId,
+
+        /// ID of the IBGW router.
         router_id: RouterId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError> {
-        self.0
-            .try_send(TunnelMessage::RouterDelivery {
-                gateway,
-                router_id,
-                message,
-                feedback_tx: None,
-            })
-            .map_err(From::from)
+    },
+
+    /// Router delivery.
+    RouterDelivery {
+        /// ID of the router.
+        router_id: RouterId,
+    },
+}
+
+/// Tunnel sender builder for a single message.
+pub struct TunnelSender<'a> {
+    /// Delivery kind.
+    kind: Option<DeliveryKind>,
+
+    /// Message.
+    message: Vec<u8>,
+
+    /// Outbound tunnel over which the message should be sent, if specified.
+    ///
+    /// If not specified, a random tunnel of the pool is used for delivery.
+    outbound_tunnel: Option<TunnelId>,
+
+    /// TX channel for sending the message.
+    tx: &'a mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
+}
+
+impl<'a> TunnelSender<'a> {
+    /// Send message to router identified by `router_id`.
+    pub fn router_delivery(mut self, router_id: RouterId) -> Self {
+        self.kind = Some(DeliveryKind::RouterDelivery { router_id });
+        self
     }
 
-    fn try_send_to_tunnel(
-        &self,
-        gateway: RouterId,
-        tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError> {
-        self.0
-            .try_send(TunnelMessage::TunnelDelivery {
-                gateway,
+    /// Send message to tunnel identified by (`router_id`, `tunnel_id`) tuple (IBGW).
+    pub fn tunnel_delivery(mut self, router_id: RouterId, tunnel_id: TunnelId) -> Self {
+        self.kind = Some(DeliveryKind::TunnelDelivery {
+            tunnel_id,
+            router_id,
+        });
+        self
+    }
+
+    /// Specify the ID of the outbound tunnel over which the messages should be sent.
+    ///
+    /// If not specified, a random outbound tunnel is selected for delivery.
+    pub fn via_outbound_tunnel(mut self, tunnel_id: TunnelId) -> Self {
+        self.outbound_tunnel = Some(tunnel_id);
+        self
+    }
+
+    /// Attempt to send message to tunnel pool for delivery and return and error if the channel is
+    /// full or closed.
+    pub fn try_send(self) -> Result<(), ChannelError> {
+        let message = match self.kind.expect("to exist") {
+            DeliveryKind::TunnelDelivery {
                 tunnel_id,
-                message,
-            })
-            .map_err(From::from)
+                router_id,
+            } => TunnelMessage::TunnelDeliveryViaRoute {
+                router_id,
+                tunnel_id,
+                outbound_tunnel: self.outbound_tunnel,
+                message: self.message,
+            },
+            DeliveryKind::RouterDelivery { router_id } => TunnelMessage::RouterDeliveryViaRoute {
+                router_id,
+                outbound_tunnel: self.outbound_tunnel,
+                message: self.message,
+            },
+        };
+
+        self.tx.try_send(message).map_err(From::from)
     }
 
-    fn try_send_to_tunnel_via_route(
-        &self,
-        ibgw_router_id: RouterId,
-        ibgw_tunnel_id: TunnelId,
-        obgw_tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> Result<(), ChannelError> {
-        self.0
-            .try_send(TunnelMessage::TunnelDeliveryViaRoute {
-                ibgw_router_id,
-                ibgw_tunnel_id,
-                obgw_tunnel_id,
-                message,
-            })
-            .map_err(From::from)
-    }
+    /// Attempt to send message to tunnel pool for delivery and return and error if the channel is
+    /// closed
+    ///
+    /// The function blocks until there's enough capacity in the channel to send the message.
+    pub async fn send(self) -> Result<(), ChannelError> {
+        let message = match self.kind.expect("to exist") {
+            DeliveryKind::TunnelDelivery {
+                tunnel_id,
+                router_id,
+            } => TunnelMessage::TunnelDeliveryViaRoute {
+                router_id,
+                tunnel_id,
+                outbound_tunnel: self.outbound_tunnel,
+                message: self.message,
+            },
+            DeliveryKind::RouterDelivery { router_id } => TunnelMessage::RouterDeliveryViaRoute {
+                router_id,
+                outbound_tunnel: self.outbound_tunnel,
+                message: self.message,
+            },
+        };
 
-    fn send_to_router(
-        &self,
-        gateway: TunnelId,
-        router_id: RouterId,
-        message: Vec<u8>,
-    ) -> impl Future<Output = Result<(), ChannelError>> {
-        async move {
-            self.0
-                .send(TunnelMessage::RouterDelivery {
-                    gateway,
-                    router_id,
-                    message,
-                    feedback_tx: None,
-                })
-                .await
-                .map_err(|_| ChannelError::Closed)
-        }
-    }
-
-    fn send_to_tunnel(
-        &self,
-        gateway: RouterId,
-        tunnel_id: TunnelId,
-        message: Vec<u8>,
-    ) -> impl Future<Output = Result<(), ChannelError>> {
-        async move {
-            self.0
-                .send(TunnelMessage::TunnelDelivery {
-                    gateway,
-                    tunnel_id,
-                    message,
-                })
-                .await
-                .map_err(|_| ChannelError::Closed)
-        }
+        self.tx.send(message).await.map_err(|_| ChannelError::Closed)
     }
 }
 
@@ -317,9 +294,17 @@ impl TunnelPoolHandle {
         &self.config
     }
 
-    /// Get reference to [`TunnelSender`].
-    pub fn sender(&self) -> &impl TunnelSender {
-        &self.sender
+    /// Create [`TunnelSender`] with `message`.
+    ///
+    /// Note that this function doesn't send the message but creates a sender which the caller
+    /// can use to construct a message with correct delivery style.
+    pub fn send_message(&self, message: Vec<u8>) -> TunnelSender<'_> {
+        self.sender.send_message(message)
+    }
+
+    /// Get a copy of [`TunnelMessageSender`].
+    pub fn sender(&self) -> TunnelMessageSender {
+        self.sender.clone()
     }
 
     /// Create new [`TunnelPoolHandle`] for testing.
@@ -380,5 +365,132 @@ impl Stream for TunnelPoolHandle {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.event_rx.poll_recv(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn send_to_router_via_any() {
+        let (tx, rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
+        let sender = TunnelMessageSender(tx);
+
+        let remote = RouterId::random();
+
+        sender
+            .send_message(vec![1, 3, 3, 7])
+            .router_delivery(remote.clone())
+            .send()
+            .await
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            TunnelMessage::RouterDeliveryViaRoute {
+                router_id,
+                outbound_tunnel,
+                message,
+            } => {
+                assert_eq!(router_id, remote);
+                assert_eq!(message, vec![1, 3, 3, 7]);
+                assert!(outbound_tunnel.is_none());
+            }
+            _ => panic!("invalid message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_tunnel_via_any() {
+        let (tx, rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
+        let sender = TunnelMessageSender(tx);
+
+        let remote_router = RouterId::random();
+        let remote_tunnel = TunnelId::random();
+
+        sender
+            .send_message(vec![1, 3, 3, 7])
+            .tunnel_delivery(remote_router.clone(), remote_tunnel)
+            .send()
+            .await
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            TunnelMessage::TunnelDeliveryViaRoute {
+                router_id,
+                tunnel_id,
+                outbound_tunnel,
+                message,
+            } => {
+                assert_eq!(router_id, remote_router);
+                assert_eq!(tunnel_id, remote_tunnel);
+                assert_eq!(message, vec![1, 3, 3, 7]);
+                assert!(outbound_tunnel.is_none());
+            }
+            _ => panic!("invalid message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_router_via_route() {
+        let (tx, rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
+        let sender = TunnelMessageSender(tx);
+
+        let remote = RouterId::random();
+        let obgw = TunnelId::random();
+
+        sender
+            .send_message(vec![1, 3, 3, 7])
+            .router_delivery(remote.clone())
+            .via_outbound_tunnel(obgw)
+            .send()
+            .await
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            TunnelMessage::RouterDeliveryViaRoute {
+                router_id,
+                outbound_tunnel,
+                message,
+            } => {
+                assert_eq!(router_id, remote);
+                assert_eq!(message, vec![1, 3, 3, 7]);
+                assert_eq!(outbound_tunnel, Some(obgw));
+            }
+            _ => panic!("invalid message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_tunnel_via_route() {
+        let (tx, rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
+        let sender = TunnelMessageSender(tx);
+
+        let remote_router = RouterId::random();
+        let remote_tunnel = TunnelId::random();
+        let obgw = TunnelId::random();
+
+        sender
+            .send_message(vec![1, 3, 3, 7])
+            .tunnel_delivery(remote_router.clone(), remote_tunnel)
+            .via_outbound_tunnel(obgw)
+            .send()
+            .await
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            TunnelMessage::TunnelDeliveryViaRoute {
+                router_id,
+                tunnel_id,
+                outbound_tunnel,
+                message,
+            } => {
+                assert_eq!(router_id, remote_router);
+                assert_eq!(tunnel_id, remote_tunnel);
+                assert_eq!(message, vec![1, 3, 3, 7]);
+                assert_eq!(outbound_tunnel, Some(obgw));
+            }
+            _ => panic!("invalid message"),
+        }
     }
 }

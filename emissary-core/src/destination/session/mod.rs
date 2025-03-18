@@ -205,7 +205,7 @@ impl<R: Runtime> SessionManager<R> {
     /// A timer is also started for each session and if no upper-level protocol activity happens for
     /// [`LEASE_SET_PUBLISH_WAIT_TIMEOUT`], meaning `lease_set` cannot be bundled with that data,
     /// the [`DatabaseStore`] is sent separately.
-    pub fn set_local_leaseset(&mut self, lease_set: Bytes) {
+    pub fn register_lease_set(&mut self, lease_set: Bytes) {
         tracing::trace!(
             target: LOG_TARGET,
             local = %self.destination_id,
@@ -2063,7 +2063,7 @@ mod tests {
             }
             .serialize(&outbound_signing_key),
         );
-        outbound_session.set_local_leaseset(lease_set);
+        outbound_session.register_lease_set(lease_set);
 
         assert!(outbound_session
             .active
@@ -2294,7 +2294,7 @@ mod tests {
             }
             .serialize(&outbound_signing_key),
         );
-        outbound_session.set_local_leaseset(lease_set);
+        outbound_session.register_lease_set(lease_set);
 
         assert!(outbound_session
             .active

@@ -127,7 +127,7 @@ impl NetDbHandle {
     ///
     /// If the channel towards `NetDb` is full, `ChannelError::Full` is returned and the caller must
     /// retry later.
-    pub fn query_leaseset(
+    pub fn query_lease_set(
         &self,
         key: Bytes,
     ) -> Result<oneshot::Receiver<Result<LeaseSet2, QueryError>>, ChannelError> {
@@ -221,7 +221,7 @@ mod tests {
         let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
-        assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
+        assert!(handle.query_lease_set(Bytes::from(vec![1, 2, 3, 4])).is_ok());
 
         match rx.try_recv() {
             Ok(NetDbAction::QueryLeaseSet2 { key, .. }) => {
@@ -286,11 +286,11 @@ mod tests {
         let handle = NetDbHandle::new(tx);
 
         for _ in 0..5 {
-            assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
+            assert!(handle.query_lease_set(Bytes::from(vec![1, 2, 3, 4])).is_ok());
         }
 
         // try to send one more element and ensure the call fails
-        match handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).unwrap_err() {
+        match handle.query_lease_set(Bytes::from(vec![1, 2, 3, 4])).unwrap_err() {
             ChannelError::Full => {}
             error => panic!("invalid error: {error}"),
         }

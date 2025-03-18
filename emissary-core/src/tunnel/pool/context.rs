@@ -320,18 +320,30 @@ pub enum TunnelMessage {
         message: Vec<u8>,
     },
 
-    /// Send message to remote inbound tunnel via specific OBGW.
+    /// Router delivery, potentially via a specified outbound tunnel.
+    RouterDeliveryViaRoute {
+        /// `RouterId` of the recipient.
+        router_id: RouterId,
+
+        /// Outbound tunnel over which the message should be sent, if specified.
+        outbound_tunnel: Option<TunnelId>,
+
+        /// Message.
+        message: Vec<u8>,
+    },
+
+    /// Tunnel delivery.
     TunnelDeliveryViaRoute {
         /// ID of the IBGW router.
-        ibgw_router_id: RouterId,
+        router_id: RouterId,
 
-        /// ID of the IBGW this message should be delivered to.
-        ibgw_tunnel_id: TunnelId,
+        /// ID of the IBGW tunnel.
+        tunnel_id: TunnelId,
 
-        /// ID of OBGW this message should be sent through.
-        obgw_tunnel_id: TunnelId,
+        /// Outbound tunnel over which the message should be sent, if specified.
+        outbound_tunnel: Option<TunnelId>,
 
-        /// Serialize I2NP message.
+        /// Message.
         message: Vec<u8>,
     },
 

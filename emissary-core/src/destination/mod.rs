@@ -42,7 +42,7 @@ use crate::{
     netdb::NetDbHandle,
     primitives::{DestinationId, Lease, LeaseSet2, MessageId, RouterId, TunnelId},
     runtime::{JoinSet, Runtime},
-    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
+    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -327,7 +327,7 @@ impl<R: Runtime> Destination<R> {
         self.pending_queries.insert(destination_id.clone());
         self.query_futures.push(async move {
             for _ in 0..NUM_QUERY_RETRIES {
-                let Ok(rx) = handle.query_leaseset(Bytes::from(destination_id.to_vec())) else {
+                let Ok(rx) = handle.query_lease_set(Bytes::from(destination_id.to_vec())) else {
                     R::delay(NETDB_BACKOFF_TIMEOUT).await;
                     continue;
                 };
@@ -426,8 +426,10 @@ impl<R: Runtime> Destination<R> {
                 Some(Lease { router_id, .. }) => {
                     if let Err(error) = self
                         .tunnel_pool_handle
-                        .sender()
-                        .try_send_to_tunnel_via_route(router_id.clone(), inbound, outbound, message)
+                        .send_message(message)
+                        .tunnel_delivery(router_id.clone(), inbound)
+                        .via_outbound_tunnel(outbound)
+                        .try_send()
                     {
                         tracing::debug!(
                             target: LOG_TARGET,
@@ -443,13 +445,12 @@ impl<R: Runtime> Destination<R> {
                 }
                 None => match context.expiring_leases.get(&inbound) {
                     Some(Lease { router_id, .. }) => {
-                        if let Err(error) =
-                            self.tunnel_pool_handle.sender().try_send_to_tunnel_via_route(
-                                router_id.clone(),
-                                inbound,
-                                outbound,
-                                message,
-                            )
+                        if let Err(error) = self
+                            .tunnel_pool_handle
+                            .send_message(message)
+                            .tunnel_delivery(router_id.clone(), inbound)
+                            .via_outbound_tunnel(outbound)
+                            .try_send()
                         {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -479,11 +480,15 @@ impl<R: Runtime> Destination<R> {
                 // select random tunnel for delivery
                 let random_lease = R::rng().next_u32() as usize % context.lease_set.leases.len();
 
-                if let Err(error) = self.tunnel_pool_handle.sender().try_send_to_tunnel(
-                    context.lease_set.leases[random_lease].router_id.clone(),
-                    context.lease_set.leases[random_lease].tunnel_id,
-                    message,
-                ) {
+                if let Err(error) = self
+                    .tunnel_pool_handle
+                    .send_message(message)
+                    .tunnel_delivery(
+                        context.lease_set.leases[random_lease].router_id.clone(),
+                        context.lease_set.leases[random_lease].tunnel_id,
+                    )
+                    .try_send()
+                {
                     tracing::debug!(
                         target: LOG_TARGET,
                         local = %self.destination_id,
@@ -730,7 +735,7 @@ impl<R: Runtime> Destination<R> {
     pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
         // store our new lease set proactively to `SessionManager` so it can be given to all active
         // session right away while publishing the new lease set to NetDb in the background
-        self.session_manager.set_local_leaseset(lease_set.clone());
+        self.session_manager.register_lease_set(lease_set.clone());
 
         if self.unpublished {
             tracing::debug!(
@@ -874,7 +879,12 @@ impl<R: Runtime> Destination<R> {
                 .build();
 
             // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].0.clone(), message).await;
+            let _ = tunnel_sender
+                .send_message(message)
+                .router_delivery(floodfills[0].0.clone())
+                .via_outbound_tunnel(gateway)
+                .send()
+                .await;
 
             // verify there's at least one other floodfill before proceeding to storage verification
             if floodfills.len() == 1 {
@@ -934,7 +944,12 @@ impl<R: Runtime> Destination<R> {
                 .build();
 
             // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[1].0.clone(), message).await;
+            let _ = tunnel_sender
+                .send_message(message)
+                .router_delivery(floodfills[1].0.clone())
+                .via_outbound_tunnel(gateway)
+                .send()
+                .await;
         })
     }
 
@@ -1296,7 +1311,7 @@ mod tests {
 
         // spam the netdb handle full of queries
         loop {
-            if netdb_handle.query_leaseset(Bytes::new()).is_err() {
+            if netdb_handle.query_lease_set(Bytes::new()).is_err() {
                 break;
             }
         }
@@ -1541,7 +1556,7 @@ mod tests {
                         _ => panic!("invalid event"),
                     },
                     message = tm_rx.recv() => match message.unwrap() {
-                        TunnelMessage::RouterDelivery { message, router_id, .. } => {
+                        TunnelMessage::RouterDeliveryViaRoute { message, router_id, .. } => {
                             let message = Message::parse_standard(&message).unwrap();
                             assert_eq!(message.message_type, MessageType::Garlic);
 
@@ -1715,7 +1730,7 @@ mod tests {
                         _ => panic!("invalid event"),
                     },
                     message = tm_rx.recv() => match message.unwrap() {
-                        TunnelMessage::RouterDelivery { message, router_id, .. } => {
+                        TunnelMessage::RouterDeliveryViaRoute { message, router_id, .. } => {
                             let message = Message::parse_standard(&message).unwrap();
                             assert_eq!(message.message_type, MessageType::Garlic);
 
@@ -1969,7 +1984,7 @@ mod tests {
                 .expect("no timeout")
                 .expect("to succeed")
             {
-                TunnelMessage::TunnelDelivery { .. } => {}
+                TunnelMessage::TunnelDeliveryViaRoute { .. } => {}
                 _ => panic!("invalid tunnel message type"),
             }
         }
@@ -2126,7 +2141,7 @@ mod tests {
             }
             .serialize(&signing_key),
         );
-        session_manager.set_local_leaseset(new_lease_set);
+        session_manager.register_lease_set(new_lease_set);
 
         // send ES with a bundled lease set
         let payload = session_manager.encrypt(&destination_id, vec![1, 3, 4, 0]).unwrap();

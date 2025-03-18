@@ -346,6 +346,7 @@ impl<R: Runtime> SamSession<R> {
                 inbound.into_values().collect(),
                 is_unpublished,
             );
+            // // TODO: not needed anymore?
             session_destination
                 .publish_lease_set(Bytes::from(destination_id.to_vec()), local_leaseset.clone());
 
