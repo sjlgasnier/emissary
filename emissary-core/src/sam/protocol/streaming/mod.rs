@@ -743,10 +743,6 @@ impl<R: Runtime> StreamManager<R> {
     /// Register listener into [`StreamManager`].
     ///
     /// This function calls [`StreamListener::register_listener()`] which either rejects `kind`
-    /// because it's in conflict with an active listener kind, puts the listener on hold because
-    /// there are no active streams or starts an active stream for a pending inbound stream.
-    ///
-    /// This function calls [`StreamListener::register_listener()`] which either rejects `kind`
     /// because it's in conflict with an active listener kind, accepts the listener and possibly
     /// notifies the client of if it the socket wasn't configured to be silent. Client notification
     /// happens in the background, making the listener temporarily inactive. Once the client has
@@ -756,8 +752,8 @@ impl<R: Runtime> StreamManager<R> {
     /// If the listener was configured to be silent and it was of type [`ListenerKind::Ephemeral`],
     /// the listener is immediately available for use. In these cases,
     /// [`StreamListener::register_listener()`] returns `Ok(true)` to indicate that
-    /// [`StreamManager`] can accept a pending inbound stream using the registered listener, if a
-    /// pending stream exists.
+    /// [`StreamManager`] can accept a pending inbound stream using the registered listener,
+    /// if a pending stream exists.
     pub fn register_listener(&mut self, kind: ListenerKind<R>) -> Result<(), StreamingError> {
         if self.listener.register_listener(kind)? {
             self.on_listener_ready();

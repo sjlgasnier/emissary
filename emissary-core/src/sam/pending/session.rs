@@ -21,6 +21,7 @@ use crate::{
     events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Lease, TunnelId},
+    profile::ProfileStorage,
     runtime::{AddressBook, Runtime},
     sam::{
         parser::{DestinationContext, SessionKind},
@@ -69,6 +70,9 @@ pub struct SamSessionContext<R: Runtime> {
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
 
+    /// Profile storage.
+    pub profile_storage: ProfileStorage<R>,
+
     /// RX channel for receiving commands to an active session.
     pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
@@ -115,6 +119,9 @@ pub struct PendingSamSession<R: Runtime> {
     /// Active outbound tunnels.
     outbound: HashSet<TunnelId>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// RX channel for receiving commands to an active session.
     receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
@@ -147,6 +154,7 @@ impl<R: Runtime> PendingSamSession<R> {
         netdb_handle: NetDbHandle,
         address_book: Option<Arc<dyn AddressBook>>,
         event_handle: EventHandle<R>,
+        profile_storage: ProfileStorage<R>,
     ) -> Self {
         Self {
             address_book,
@@ -157,6 +165,7 @@ impl<R: Runtime> PendingSamSession<R> {
             netdb_handle,
             options,
             outbound: HashSet::new(),
+            profile_storage,
             receiver,
             session_id,
             session_kind,
@@ -253,6 +262,7 @@ impl<R: Runtime> PendingSamSession<R> {
             netdb_handle: self.netdb_handle,
             options: self.options,
             outbound: self.outbound,
+            profile_storage: self.profile_storage,
             receiver: self.receiver,
             session_id: self.session_id,
             session_kind: self.session_kind,

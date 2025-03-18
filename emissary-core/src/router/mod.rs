@@ -334,6 +334,7 @@ impl<R: Runtime> Router<R> {
                 netdb_handle.clone(),
                 tunnel_manager_handle.clone(),
                 address_book.clone(),
+                profile_storage.clone(),
             )
             .await?;
 
@@ -355,6 +356,7 @@ impl<R: Runtime> Router<R> {
                 metrics_handle,
                 address_book,
                 sam_event_handle,
+                profile_storage.clone(),
             )
             .await?;
 

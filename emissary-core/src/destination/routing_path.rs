@@ -259,9 +259,9 @@ impl<R: Runtime> RoutingPathManager<R> {
     /// [`RoutingPathHandle`] bound to a specific destination once the destination ID is resolved.
     ///
     /// This is used by protocols that accept inbound connection and thus don't know which
-    /// `DestinationId` they should subscribe at the time of creating the handle.
+    /// `DestinationId` they should subscribe to at the time of creating the handle.
     ///
-    /// Once the `DestinationId` is resolved, [`PendingRoutingPathHandle::handle()`] is called with
+    /// Once the `DestinationId` is resolved, [`PendingRoutingPathHandle::bind()`] is called with
     /// remote's `DestinationId` which sends a command to [`RoutingPathManager`] which creates a new
     /// handle subscribing to that destination's inbound tunnel events and sends that to the owner
     /// of the [`PendingRoutingPathHandle`].

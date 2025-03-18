@@ -34,6 +34,7 @@ use crate::{
         socket::I2cpSocket,
     },
     primitives::{Date, DestinationId, Lease, Str, TunnelId},
+    profile::ProfileStorage,
     runtime::{AddressBook, Runtime},
     tunnel::{TunnelManagerHandle, TunnelPoolConfig, TunnelPoolEvent, TunnelPoolHandle},
 };
@@ -77,6 +78,9 @@ pub struct I2cpSessionContext<R: Runtime> {
 
     /// Private keys of the destination.
     pub private_keys: Vec<StaticPrivateKey>,
+
+    /// Profile storage.
+    pub profile_storage: ProfileStorage<R>,
 
     /// Session ID.
     pub session_id: u16,
@@ -228,6 +232,9 @@ pub struct PendingI2cpSession<R: Runtime> {
     /// Address book.
     address_book: Option<Arc<dyn AddressBook>>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// State of the pending session.
     state: PendingSessionState<R>,
 
@@ -242,9 +249,11 @@ impl<R: Runtime> PendingI2cpSession<R> {
         socket: I2cpSocket<R>,
         tunnel_manager_handle: TunnelManagerHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        profile_storage: ProfileStorage<R>,
     ) -> Self {
         Self {
             address_book,
+            profile_storage,
             state: PendingSessionState::Inactive { session_id, socket },
             tunnel_manager_handle,
         }
@@ -398,15 +407,16 @@ impl<R: Runtime> PendingI2cpSession<R> {
                     // it to netdb
                     return Some(I2cpSessionContext {
                         address_book: self.address_book.clone(),
+                        destination_id: DestinationId::from(key),
                         inbound,
+                        leaseset,
                         options,
                         outbound,
                         private_keys,
+                        profile_storage: self.profile_storage.clone(),
                         session_id,
                         socket,
                         tunnel_pool_handle: handle,
-                        destination_id: DestinationId::from(key),
-                        leaseset,
                     });
                 }
                 state => {

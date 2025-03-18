@@ -28,6 +28,7 @@ use crate::{
         socket::I2cpSocket,
     },
     netdb::NetDbHandle,
+    profile::ProfileStorage,
     runtime::{AddressBook, JoinSet, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
     util::AsyncReadExt,
@@ -80,6 +81,9 @@ pub struct I2cpServer<R: Runtime> {
     /// Pending sessions.
     pending_session: R::JoinSet<Option<I2cpSessionContext<R>>>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
 }
@@ -92,6 +96,7 @@ impl<R: Runtime> I2cpServer<R> {
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        profile_storage: ProfileStorage<R>,
     ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
@@ -111,6 +116,7 @@ impl<R: Runtime> I2cpServer<R> {
             next_session_id: 1u16,
             pending_connections: R::join_set(),
             pending_session: R::join_set(),
+            profile_storage,
             tunnel_manager_handle,
         })
     }
@@ -184,6 +190,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     let session_id = self.next_session_id();
                     let tunnel_manager_handle = self.tunnel_manager_handle.clone();
                     let address_book = self.address_book.clone();
+                    let profile_storage = self.profile_storage.clone();
 
                     tracing::trace!(
                         target: LOG_TARGET,
@@ -196,6 +203,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         I2cpSocket::new(stream),
                         tunnel_manager_handle,
                         address_book,
+                        profile_storage,
                     ));
                 }
             }

@@ -275,6 +275,7 @@ impl<R: Runtime> SamSession<R> {
             netdb_handle,
             options,
             outbound,
+            profile_storage,
             receiver,
             session_id,
             session_kind,
@@ -345,10 +346,10 @@ impl<R: Runtime> SamSession<R> {
                 outbound.into_iter().collect(),
                 inbound.into_values().collect(),
                 is_unpublished,
+                profile_storage,
             );
             // // TODO: not needed anymore?
-            session_destination
-                .publish_lease_set(Bytes::from(destination_id.to_vec()), local_leaseset.clone());
+            session_destination.publish_lease_set(local_leaseset.clone());
 
             tracing::info!(
                 target: LOG_TARGET,
@@ -1287,9 +1288,7 @@ impl<R: Runtime> Future for SamSession<R> {
                         }
                         .serialize(&self.signing_key),
                     );
-                    let destination_id = Bytes::from(self.dest.id().to_vec());
-
-                    self.destination.publish_lease_set(destination_id, lease_set);
+                    self.destination.publish_lease_set(lease_set);
                 }
                 Poll::Ready(Some(DestinationEvent::SessionTerminated { destination_id })) => {
                     tracing::info!(

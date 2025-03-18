@@ -100,15 +100,16 @@ impl<R: Runtime> I2cpSession<R> {
     pub fn new(netdb_handle: NetDbHandle, context: I2cpSessionContext<R>) -> Self {
         let I2cpSessionContext {
             address_book,
+            destination_id,
             inbound,
+            leaseset,
+            options,
             outbound,
+            private_keys,
+            profile_storage,
             session_id,
             socket,
-            options,
             tunnel_pool_handle,
-            private_keys,
-            leaseset,
-            destination_id,
         } = context;
 
         tracing::info!(
@@ -136,8 +137,9 @@ impl<R: Runtime> I2cpSession<R> {
                 .get(&Str::from("i2cp.dontPublishLeaseSet"))
                 .map(|value| value.parse::<bool>().unwrap_or(true))
                 .unwrap_or(true),
+            profile_storage,
         );
-        destination.publish_lease_set(Bytes::from(destination_id.to_vec()), leaseset);
+        destination.publish_lease_set(leaseset);
 
         Self {
             address_book,
@@ -300,9 +302,9 @@ impl<R: Runtime> I2cpSession<R> {
             }
             Message::CreateLeaseSet2 {
                 session_id,
-                key,
                 leaseset,
                 private_keys,
+                ..
             } => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -311,7 +313,7 @@ impl<R: Runtime> I2cpSession<R> {
                     "store lease set",
                 );
 
-                self.destination.publish_lease_set(key, leaseset);
+                self.destination.publish_lease_set(leaseset);
             }
             Message::SendMessageExpires {
                 session_id,

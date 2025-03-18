@@ -26,6 +26,7 @@ use crate::{
     events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Destination, DestinationId, Str},
+    profile::ProfileStorage,
     runtime::{AddressBook, JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
         parser::{Datagram, HostKind},
@@ -203,6 +204,9 @@ pub struct SamServer<R: Runtime> {
     /// Pending SAMv3 sessions that are in the process of building a tunnel pool.
     pending_sessions: SessionContext<R, crate::Result<SamSessionContext<R>>>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// Datagram read buffer.
     read_buffer: Vec<u8>,
 
@@ -227,6 +231,7 @@ impl<R: Runtime> SamServer<R> {
         metrics: R::MetricsHandle,
         address_book: Option<Arc<dyn AddressBook>>,
         event_handle: EventHandle<R>,
+        profile_storage: ProfileStorage<R>,
     ) -> crate::Result<Self> {
         let listener = R::TcpListener::bind(SocketAddr::new(
             host.parse::<IpAddr>().expect("valid address"),
@@ -266,6 +271,7 @@ impl<R: Runtime> SamServer<R> {
             netdb_handle,
             pending_inbound_connections: R::join_set(),
             pending_sessions: SessionContext::new(),
+            profile_storage,
             read_buffer: vec![0u8; 0xfff],
             session_id_destinations: HashMap::new(),
             socket,
@@ -477,6 +483,7 @@ impl<R: Runtime> Future for SamServer<R> {
                                 netdb_handle,
                                 this.address_book.clone(),
                                 this.event_handle.clone(),
+                                this.profile_storage.clone(),
                             )
                             .run(),
                         );
