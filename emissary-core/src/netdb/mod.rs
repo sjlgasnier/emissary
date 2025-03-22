@@ -17,13 +17,11 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{
-        base32_encode, base64_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPublicKey,
-    },
+    crypto::{base32_encode, base64_encode, StaticPublicKey},
     error::{Error, QueryError},
     i2np::{
         database::{
-            lookup::{DatabaseLookup, DatabaseLookupBuilder, LookupType, ReplyType},
+            lookup::{DatabaseLookup, LookupType, ReplyType},
             search_reply::DatabaseSearchReply,
             store::{
                 DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
@@ -31,21 +29,20 @@ use crate::{
             },
         },
         delivery_status::DeliveryStatus,
-        garlic::{DeliveryInstructions, GarlicMessageBuilder, GARLIC_MESSAGE_OVERHEAD},
         tunnel::gateway::TunnelGateway,
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
-    netdb::{handle::NetDbActionRecycle, metrics::*},
-    primitives::{Lease, LeaseSet2, MessageId, RouterId, RouterInfo, TunnelId},
-    profile::{Bucket, ProfileStorage},
+    netdb::{handle::NetDbActionRecycle, metrics::*, query::*},
+    primitives::{LeaseSet2, RouterId, RouterInfo},
+    profile::Bucket,
     router::context::RouterContext,
-    runtime::{Counter, Gauge, Instant, JoinSet, MetricType, MetricsHandle, Runtime},
+    runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transport::TransportService,
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
@@ -74,14 +71,12 @@ mod bucket;
 mod dht;
 mod handle;
 mod metrics;
+mod query;
 mod routing_table;
 mod types;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::netdb";
-
-/// Total query timeout.
-const QUERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Timeout for an invididual `DatatabaseLookupMessage`.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1600);
@@ -92,57 +87,14 @@ const NETDB_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 /// Number of router hashes to include into [`DatabaseSearchReply`].
 const SEARCH_REPLY_NUM_ROUTERS: usize = 5usize;
 
-/// Tunnel selector.
-///
-/// Distributes tunnel usage fairly across all tunnels.
-struct TunnelSelector<T: Clone> {
-    /// Iterator index.
-    iterator: usize,
+/// What is considered high amount of routers.
+const HIGH_ROUTER_COUNT: usize = 2500usize;
 
-    /// Tunnels.
-    tunnels: Vec<T>,
-}
+/// How often should router exploration be performed if the known peer count is low.
+const EXPLORATION_INTERVAL_LOW_ROUTER_COUNT: usize = 55usize;
 
-impl<T: Clone> TunnelSelector<T> {
-    /// Create new [`TunnelSelector`].
-    pub fn new() -> Self {
-        Self {
-            iterator: 0usize,
-            tunnels: Vec::new(),
-        }
-    }
-
-    /// Add `tunnel` into [`TunnelSelector`].
-    pub fn add_tunnel(&mut self, tunnel: T) {
-        self.tunnels.push(tunnel);
-    }
-
-    /// Get tunnel count.
-    pub fn len(&self) -> usize {
-        self.tunnels.len()
-    }
-
-    /// Remove tunnel from [`TunnelSelector`] using predicate.
-    pub fn remove_tunnel(&mut self, predicate: impl Fn(&T) -> bool) {
-        self.tunnels.retain(|tunnel| predicate(tunnel))
-    }
-
-    /// Get next tunnel from [`TunnelSelector`], if any exists.
-    pub fn next_tunnel(&mut self) -> Option<T> {
-        if self.tunnels.is_empty() {
-            return None;
-        }
-
-        let index = {
-            let index = self.iterator;
-            self.iterator = self.iterator.wrapping_add(1usize);
-
-            index
-        };
-
-        Some(self.tunnels[index % self.tunnels.len()].clone())
-    }
-}
+/// How often should router exploration be performed if the known peer count is high
+const EXPLORATION_INTERVAL_HIGH_ROUTER_COUNT: usize = 170usize;
 
 /// Message kind.
 #[derive(Clone)]
@@ -197,284 +149,6 @@ impl fmt::Debug for RouterState {
     }
 }
 
-/// Query, either [`LeaseSet2`] or [`RouterInfo`].
-pub struct Query<R: Runtime, T> {
-    /// Lookup key.
-    key: Bytes,
-
-    /// New pending routers discovered via `DatabaseSearchReply` messages.
-    ///
-    /// RI lookup is pending for these routers before a lease set query can be sent.
-    pending: HashSet<RouterId>,
-
-    /// Queried (or pending) floodfills.
-    ///
-    /// This is used to prevent quering the same floodfills twice during recursive queries.
-    queried: HashSet<RouterId>,
-
-    /// New queryable routers discovered via `DatabaseSearchReply` messages.
-    queryable: HashSet<RouterId>,
-
-    /// Selected floofill.
-    selected: Option<RouterId>,
-
-    /// When was the query started.
-    started: R::Instant,
-
-    /// Oneshot sender for sending the result to caller.
-    tx: oneshot::Sender<Result<T, QueryError>>,
-}
-
-impl<R: Runtime, T> Query<R, T> {
-    /// Create new [`Query`].
-    fn new(key: Bytes, tx: oneshot::Sender<Result<T, QueryError>>, selected: RouterId) -> Self {
-        Self {
-            key,
-            pending: HashSet::new(),
-            queried: HashSet::from_iter([selected.clone()]),
-            queryable: HashSet::new(),
-            selected: Some(selected),
-            started: R::now(),
-            tx,
-        }
-    }
-
-    /// Handle `DatabaseSearchReply`.
-    ///
-    /// This function is called when a `DatabaseSearchReply` is received for an active query,
-    /// meaning database lookup failed.
-    ///
-    /// The reply may contain routers that are closer to the search key so filter out all queried
-    /// routers, mark all routers whose router infos we already have as queryable and mark rest of
-    /// routers as pending and return their router IDs so their router infos can be downloaded.
-    fn handle_search_reply(
-        &mut self,
-        routers: &Vec<RouterId>,
-        profile_storage: &ProfileStorage<R>,
-    ) -> Vec<RouterId> {
-        // database search reply was received so there is selected router right now
-        //
-        // the next lookup will be sent (and router will be selected) when the timer expires
-        self.selected = None;
-
-        routers
-            .iter()
-            .filter_map(|router_id| {
-                // router already queried
-                if self.queried.contains(router_id) {
-                    return None;
-                }
-
-                // router not yet queried but its router info is available
-                if profile_storage.contains(&router_id) {
-                    self.queryable.insert(router_id.clone());
-                    return None;
-                }
-
-                // non-queried router and router info not available, download it
-                self.pending.insert(router_id.clone());
-
-                Some(router_id.clone())
-            })
-            .collect()
-    }
-
-    /// Handle `DatabaseLookUp` timeout.
-    //
-    // TODO: explain
-    fn handle_timeout(
-        &mut self,
-        dht: &Dht<R>,
-        profile_storage: &ProfileStorage<R>,
-    ) -> Result<RouterId, QueryError> {
-        if self.started.elapsed() >= QUERY_TOTAL_TIMEOUT {
-            return Err(QueryError::Timeout);
-        }
-
-        // move all queried routers to queryable
-        self.pending.retain(|router_id| {
-            if profile_storage.contains(router_id) {
-                self.queryable.insert(router_id.clone());
-                return false;
-            }
-
-            true
-        });
-
-        // attempt to select next floodfill
-        //
-        // if new floodfills were found with previous searches, attempt to select a floodfill from
-        // them that's closest to the search key and if we haven't received any "floodfill replies",
-        // attempt to select a floodfill from the dht
-        match Dht::<R>::get_closest(&self.key, &self.queryable) {
-            Some(floodfill) => {
-                self.queryable.remove(&floodfill);
-                Ok(floodfill)
-            }
-            None => dht
-                .closest_with_ignore(&self.key, 1usize, &self.queried)
-                .next()
-                .ok_or(QueryError::NoFloodfills),
-        }
-    }
-
-    /// Complete query by sending the result to caller.
-    fn complete(self, value: Result<T, QueryError>) {
-        let _ = self.tx.send(value);
-    }
-}
-
-/// Message sender.
-pub struct NetDbMessageBuilder<R: Runtime> {
-    /// Active inbound tunhnels
-    outbound_tunnels: TunnelSelector<TunnelId>,
-
-    /// Active inbound tunnels.
-    inbound_tunnels: TunnelSelector<Lease>,
-
-    /// Router context.
-    router_ctx: RouterContext<R>,
-}
-
-impl<R: Runtime> NetDbMessageBuilder<R> {
-    pub fn new(router_ctx: RouterContext<R>) -> Self {
-        Self {
-            outbound_tunnels: TunnelSelector::new(),
-            inbound_tunnels: TunnelSelector::new(),
-            router_ctx,
-        }
-    }
-
-    /// Create [`DatabaseLookup`] message for a lease set identified by `key` and garlic-encrypt it
-    /// with `static_key`.
-    ///
-    /// The function fails with `QueryError::NoTunnel` if there is are no inbound or outbound
-    /// tunnels.
-    pub fn query_lease_set(
-        &mut self,
-        key: Bytes,
-        static_key: StaticPublicKey,
-    ) -> Result<(Vec<u8>, TunnelId), QueryError> {
-        let outbound_tunnel = self.outbound_tunnels.next_tunnel().ok_or(QueryError::NoTunnel)?;
-        let Lease {
-            router_id,
-            tunnel_id,
-            ..
-        } = self.inbound_tunnels.next_tunnel().ok_or(QueryError::NoTunnel)?;
-
-        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
-            .with_reply_type(ReplyType::Tunnel {
-                tunnel_id,
-                router_id,
-            })
-            .build();
-
-        let mut message = GarlicMessageBuilder::default()
-            .with_date_time(R::time_since_epoch().as_secs() as u32)
-            .with_garlic_clove(
-                MessageType::DatabaseLookup,
-                MessageId::from(R::rng().next_u32()),
-                R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                DeliveryInstructions::Local,
-                &message,
-            )
-            .build();
-
-        let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-        let ephemeral_public = ephemeral_secret.public();
-        let (garlic_key, garlic_tag) =
-            self.router_ctx.noise().derive_outbound_garlic_key(static_key, ephemeral_secret);
-
-        // message length + poly13055 tg + ephemeral key + garlic message length
-        let mut out = BytesMut::with_capacity(message.len() + GARLIC_MESSAGE_OVERHEAD);
-
-        // encryption must succeed since the parameters are managed by us
-        ChaChaPoly::new(&garlic_key)
-            .encrypt_with_ad_new(&garlic_tag, &mut message)
-            .expect("to succeed");
-
-        out.put_u32(message.len() as u32 + 32);
-        out.put_slice(&ephemeral_public.to_vec());
-        out.put_slice(&message);
-
-        Ok((
-            MessageBuilder::standard()
-                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::Garlic)
-                .with_message_id(R::rng().next_u32())
-                .with_payload(&out)
-                .build(),
-            outbound_tunnel,
-        ))
-    }
-
-    /// Create [`DatabaseLookup`] message for a router info identified by `key`.
-    ///
-    /// On success, returns a serialized [`DatabaseLookup`] message and ID of the selected outbound
-    /// tunnel.
-    ///
-    /// The function fails with `QueryError::NoTunnel` if there is are no inbound or outbound
-    /// tunnels.
-    pub fn query_router_info(&mut self, key: Bytes) -> Result<(Vec<u8>, TunnelId), QueryError> {
-        let outbound_tunnel = self.outbound_tunnels.next_tunnel().ok_or(QueryError::NoTunnel)?;
-        let Lease {
-            router_id,
-            tunnel_id,
-            ..
-        } = self.inbound_tunnels.next_tunnel().ok_or(QueryError::NoTunnel)?;
-
-        Ok((
-            MessageBuilder::standard()
-                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::Garlic)
-                .with_message_id(R::rng().next_u32())
-                .with_payload(
-                    &DatabaseLookupBuilder::new(key, LookupType::Router)
-                        .with_reply_type(ReplyType::Tunnel {
-                            tunnel_id,
-                            router_id,
-                        })
-                        .build(),
-                )
-                .build(),
-            outbound_tunnel,
-        ))
-    }
-}
-
-/// Query kind.
-enum QueryKind<R: Runtime> {
-    /// Lease set query.
-    LeaseSet {
-        /// Active query.
-        query: Query<R, LeaseSet2>,
-    },
-
-    /// Router info.
-    RouterInfo {
-        /// Active query.
-        query: Query<R, ()>,
-    },
-
-    /// Router exploration.
-    Exploration,
-
-    /// Router info lookup.
-    Router,
-}
-
-impl<R: Runtime> fmt::Debug for QueryKind<R> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LeaseSet { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
-            Self::RouterInfo { .. } =>
-                f.debug_struct("QueryKind::RouterInfo").finish_non_exhaustive(),
-            Self::Exploration => f.debug_struct("QueryKind::Exploration").finish(),
-            Self::Router => f.debug_struct("QueryKind::Router").finish(),
-        }
-    }
-}
-
 /// Network database (NetDB).
 pub struct NetDb<R: Runtime> {
     /// Active queries.
@@ -482,6 +156,11 @@ pub struct NetDb<R: Runtime> {
 
     /// Exploratory tunnel pool handle.
     exploratory_pool_handle: TunnelPoolHandle,
+
+    /// Router exploration timer.
+    ///
+    /// `None` if the router is run as floodfill.
+    exploration_timer: Option<BoxFuture<'static, ()>>,
 
     /// Has the router been configured to act as a floodfill router.
     floodfill: bool,
@@ -577,6 +256,23 @@ impl<R: Runtime> NetDb<R> {
             Self {
                 active: HashMap::new(),
                 exploratory_pool_handle,
+                exploration_timer: if !floodfill {
+                    let variance = R::rng().next_u64() as usize;
+
+                    Some(Box::pin(R::delay(Duration::from_secs(
+                        if router_ctx.profile_storage().num_routers() >= HIGH_ROUTER_COUNT {
+                            ((EXPLORATION_INTERVAL_LOW_ROUTER_COUNT
+                                + (variance % EXPLORATION_INTERVAL_LOW_ROUTER_COUNT))
+                                / 2) as u64
+                        } else {
+                            (EXPLORATION_INTERVAL_HIGH_ROUTER_COUNT
+                                + (variance % EXPLORATION_INTERVAL_HIGH_ROUTER_COUNT))
+                                as u64
+                        },
+                    ))))
+                } else {
+                    None
+                },
                 floodfill,
                 floodfill_dht: Dht::new(
                     router_ctx.router_id().clone(),
@@ -1471,7 +1167,7 @@ impl<R: Runtime> NetDb<R> {
                 routers.into_iter().for_each(|lookup_key| {
                     let key = Bytes::from(lookup_key.to_vec());
 
-                    match self.message_builder.query_router_info(key.clone()) {
+                    match self.message_builder.create_router_info_query(key.clone()) {
                         Ok((message, outbound_tunnel)) => match self
                             .exploratory_pool_handle
                             .send_message(message)
@@ -1516,7 +1212,7 @@ impl<R: Runtime> NetDb<R> {
                 unknown.iter().for_each(|lookup_router_id| {
                     let key = Bytes::from(lookup_router_id.to_vec());
 
-                    match self.message_builder.query_router_info(key.clone()) {
+                    match self.message_builder.create_router_info_query(key.clone()) {
                         Ok((message, outbound_tunnel)) => match self
                             .exploratory_pool_handle
                             .send_message(message)
@@ -1563,7 +1259,7 @@ impl<R: Runtime> NetDb<R> {
                 unknown.iter().for_each(|lookup_router_id| {
                     let key = Bytes::from(lookup_router_id.to_vec());
 
-                    match self.message_builder.query_router_info(key.clone()) {
+                    match self.message_builder.create_router_info_query(key.clone()) {
                         Ok((message, outbound_tunnel)) => match self
                             .exploratory_pool_handle
                             .send_message(message)
@@ -1694,7 +1390,7 @@ impl<R: Runtime> NetDb<R> {
             "query lease set",
         );
 
-        match self.message_builder.query_lease_set(key.clone(), floodfill_public_key) {
+        match self.message_builder.create_lease_set_query(key.clone(), floodfill_public_key) {
             Ok((message, outbound_tunnel)) => match self
                 .exploratory_pool_handle
                 .send_message(message)
@@ -1752,7 +1448,7 @@ impl<R: Runtime> NetDb<R> {
             "query router info",
         );
 
-        match self.message_builder.query_router_info(key.clone()) {
+        match self.message_builder.create_router_info_query(key.clone()) {
             Ok((message, outbound_tunnel)) => match self
                 .exploratory_pool_handle
                 .send_message(message)
@@ -1890,12 +1586,10 @@ impl<R: Runtime> NetDb<R> {
                 );
             }
         }
+    }
 
-        // don't do exploration if the router is run as a floodfill router
-        if self.floodfill {
-            return;
-        }
-
+    /// Perform router exploration.
+    fn explore_routers(&mut self) {
         let key = {
             let mut key = BytesMut::zeroed(32);
             R::rng().fill_bytes(&mut key);
@@ -1903,11 +1597,10 @@ impl<R: Runtime> NetDb<R> {
             key.freeze()
         };
 
-        let floodfills = self.floodfill_dht.closest(&key, 1usize).collect::<Vec<_>>();
-        let Some(floodfill) = floodfills.first() else {
+        let Some(floodfill) = self.floodfill_dht.closest(&key, 1usize).next() else {
             tracing::warn!(
                 target: LOG_TARGET,
-                "cannot perform router exploration, not enough floodfills",
+                "cannot perform router exploration, no floodfills",
             );
             return;
         };
@@ -1918,25 +1611,36 @@ impl<R: Runtime> NetDb<R> {
             "send router exploration query",
         );
 
-        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Exploration)
-            .with_reply_type(ReplyType::Router {
-                router_id: self.router_ctx.router_id().clone(),
-            })
-            .build();
+        let Ok((message, outbound_tunnel)) =
+            self.message_builder.create_router_exploration(key.clone())
+        else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "cannot perform router exploration, no inbound/outbound tunnels",
+            );
+            return;
+        };
 
-        let message = MessageBuilder::short()
-            .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-            .with_message_type(MessageType::DatabaseLookup)
-            .with_message_id(R::rng().next_u32())
-            .with_payload(&message)
-            .build();
-
-        self.active.insert(key.clone(), QueryKind::Exploration);
-        self.query_timers.push(async move {
-            R::delay(QUERY_TIMEOUT).await;
-            key
-        });
-        self.send_message(&[floodfill.clone()], MessageKind::NonExpiring { message });
+        match self
+            .exploratory_pool_handle
+            .send_message(message)
+            .router_delivery(floodfill)
+            .via_outbound_tunnel(outbound_tunnel)
+            .try_send()
+        {
+            Ok(()) => {
+                self.active.insert(key.clone(), QueryKind::Exploration);
+                self.query_timers.push(async move {
+                    R::delay(QUERY_TIMEOUT).await;
+                    key
+                });
+            }
+            Err(error) => tracing::debug!(
+                target: LOG_TARGET,
+                ?error,
+                "failed to send router exploration query",
+            ),
+        }
     }
 
     /// Handle timeout for `query`.
@@ -1987,7 +1691,7 @@ impl<R: Runtime> NetDb<R> {
                     "send lease set query",
                 );
 
-                match self.message_builder.query_lease_set(key.clone(), public_key) {
+                match self.message_builder.create_lease_set_query(key.clone(), public_key) {
                     Ok((message, outbound_tunnel)) => match self
                         .exploratory_pool_handle
                         .send_message(message)
@@ -2159,6 +1863,30 @@ impl<R: Runtime> Future for NetDb<R> {
             let _ = self.maintenance_timer.poll_unpin(cx);
         }
 
+        if let Some(ref mut timer) = self.exploration_timer {
+            if timer.poll_unpin(cx).is_ready() {
+                self.explore_routers();
+
+                // create new timer and register it into the executor
+                self.exploration_timer = Some({
+                    let variance = R::rng().next_u64() as usize;
+
+                    Box::pin(R::delay(Duration::from_secs(
+                        if self.router_ctx.profile_storage().num_routers() >= HIGH_ROUTER_COUNT {
+                            ((EXPLORATION_INTERVAL_LOW_ROUTER_COUNT
+                                + (variance % EXPLORATION_INTERVAL_LOW_ROUTER_COUNT))
+                                / 2) as u64
+                        } else {
+                            (EXPLORATION_INTERVAL_HIGH_ROUTER_COUNT
+                                + (variance % EXPLORATION_INTERVAL_HIGH_ROUTER_COUNT))
+                                as u64
+                        },
+                    )))
+                });
+                let _ = self.exploration_timer.as_mut().expect("to exist").poll_unpin(cx);
+            }
+        }
+
         Poll::Pending
     }
 }
@@ -2169,9 +1897,10 @@ mod tests {
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
         events::EventManager,
+        i2np::database::lookup::DatabaseLookupBuilder,
         primitives::{
-            Capabilities, Date, Destination, DestinationId, LeaseSet2Header, RouterAddress,
-            RouterIdentity, RouterInfo, Str, TransportKind,
+            Capabilities, Date, Destination, DestinationId, Lease, LeaseSet2Header, RouterAddress,
+            RouterIdentity, RouterInfo, Str, TransportKind, TunnelId,
         },
         runtime::mock::MockRuntime,
         subsystem::{InnerSubsystemEvent, SubsystemCommand},
@@ -3559,16 +3288,17 @@ mod tests {
 
             (static_key, signing_key, router_info)
         };
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+        let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
                 storage,
                 router_info.identity.id(),
-                Bytes::from(router_info.serialize(&signing_key)),
+                serialized.clone(),
                 static_key,
-                signing_key,
+                signing_key.clone(),
                 2u8,
                 event_handle.clone(),
             ),
@@ -3578,11 +3308,13 @@ mod tests {
             msg_rx,
         );
 
-        // set timer to a shorter timeout and poll netdb until it sends a router exploration
-        netdb.maintenance_timer = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+        // publish local router info
+        handle.publish_router_info(router_info.identity.id(), serialized);
+
+        // wait until netdb processes the publish request
         tokio::time::timeout(Duration::from_secs(5), &mut netdb).await.unwrap_err();
 
-        let selected_floofill = netdb
+        let selected_floodfill = netdb
             .routers
             .iter()
             .find(|(_, state)| match state {
@@ -3595,7 +3327,7 @@ mod tests {
         // register the selected floodfill into netdb
         let (conn_tx, conn_rx) = channel(16);
         tx.send(InnerSubsystemEvent::ConnectionEstablished {
-            router: selected_floofill.clone(),
+            router: selected_floodfill.clone(),
             tx: conn_tx,
         })
         .await
@@ -3616,11 +3348,8 @@ mod tests {
         let message = tokio::time::timeout(Duration::from_secs(2), future).await.unwrap();
         let message = Message::parse_short(&message).unwrap();
 
-        assert_eq!(message.message_type, MessageType::DatabaseLookup);
-        assert_eq!(
-            DatabaseLookup::parse(&message.payload).unwrap().lookup,
-            LookupType::Exploration
-        );
+        assert_eq!(message.message_type, MessageType::DatabaseStore);
+        assert!(DatabaseStore::<MockRuntime>::parse(&message.payload).is_some());
     }
 
     #[tokio::test]
@@ -4732,7 +4461,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // poll netdb so the pending messages get sent to floodfills
-        // and verify all floofills get a database store message for the local router info
+        // and verify all floodfills get a database store message for the local router info
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.is_err());
         assert!(
             receivers.into_iter().all(|rx| match rx.try_recv().unwrap() {
@@ -4760,5 +4489,86 @@ mod tests {
                 _ => false,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn router_exploration_works() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let floodfills = (0..3)
+            .map(|_| {
+                let info = RouterInfo::floodfill::<MockRuntime>();
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (static_key, signing_key, router_info) = {
+            let mut static_key_bytes = vec![0u8; 32];
+            let mut signing_key_bytes = vec![0u8; 32];
+
+            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
+            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+
+            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
+            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+
+            let router_info =
+                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+
+            (static_key, signing_key, router_info)
+        };
+        let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+                event_handle.clone(),
+            ),
+            false,
+            service,
+            tp_handle,
+            msg_rx,
+        );
+
+        netdb
+            .message_builder
+            .inbound_tunnels
+            .add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.message_builder.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        // set shorter timeout for exploration and wait until netdb sends exploration request
+        netdb.exploration_timer = Some(Box::pin(tokio::time::sleep(Duration::from_secs(1))));
+        tokio::time::timeout(Duration::from_secs(3), &mut netdb).await.unwrap_err();
+
+        match tm_rx.try_recv().unwrap() {
+            TunnelMessage::RouterDeliveryViaRoute {
+                router_id, message, ..
+            } => {
+                assert!(floodfills.contains(&router_id));
+                let Message {
+                    payload,
+                    message_type,
+                    ..
+                } = Message::parse_standard(&message).unwrap();
+
+                assert_eq!(message_type, MessageType::DatabaseLookup);
+                assert_eq!(
+                    DatabaseLookup::parse(&payload).unwrap().lookup,
+                    LookupType::Exploration
+                );
+            }
+            _ => panic!("invalid message received"),
+        }
     }
 }

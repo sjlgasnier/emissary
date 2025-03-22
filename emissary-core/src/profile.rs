@@ -334,7 +334,13 @@ impl<R: Runtime> ProfileStorage<R> {
         false
     }
 
+    /// Get the number of routers currently stored in [`ProfileStorage`].
+    pub fn num_routers(&self) -> usize {
+        self.routers.read().len()
+    }
+
     // TODO: remove
+    // TODO: why?
     pub fn get(&self, router: &RouterId) -> Option<RouterInfo> {
         self.routers.read().get(router).cloned()
     }
