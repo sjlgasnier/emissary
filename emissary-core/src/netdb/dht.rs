@@ -150,7 +150,7 @@ impl<R: Runtime> Dht<R> {
 
     /// Get closest routers to `key`.
     pub(super) fn closest_with_ignore<'a>(
-        &'a mut self,
+        &'a self,
         key: impl AsRef<[u8]>,
         limit: usize,
         ignore: &'a HashSet<RouterId>,

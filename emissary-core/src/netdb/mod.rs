@@ -37,7 +37,7 @@ use crate::{
     },
     netdb::{handle::NetDbActionRecycle, metrics::*},
     primitives::{Lease, LeaseSet2, MessageId, RouterId, RouterInfo, TunnelId},
-    profile::Bucket,
+    profile::{Bucket, ProfileStorage},
     router::context::RouterContext,
     runtime::{Counter, Gauge, Instant, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
@@ -197,31 +197,139 @@ impl fmt::Debug for RouterState {
     }
 }
 
+/// Query, either [`LeaseSet2`] or [`RouterInfo`].
+pub struct Query<R: Runtime, T> {
+    /// Lookup key.
+    key: Bytes,
+
+    /// New pending routers discovered via `DatabaseSearchReply` messages.
+    ///
+    /// RI lookup is pending for these routers before a lease set query can be sent.
+    pending: HashSet<RouterId>,
+
+    /// Queried (or pending) floodfills.
+    ///
+    /// This is used to prevent quering the same floodfills twice during recursive queries.
+    queried: HashSet<RouterId>,
+
+    /// New queryable routers discovered via `DatabaseSearchReply` messages.
+    queryable: HashSet<RouterId>,
+
+    /// Selected floofill.
+    selected: Option<RouterId>,
+
+    /// When was the query started.
+    started: R::Instant,
+
+    /// Oneshot sender for sending the result to caller.
+    tx: oneshot::Sender<Result<T, QueryError>>,
+}
+
+impl<R: Runtime, T> Query<R, T> {
+    /// Create new [`Query`].
+    fn new(key: Bytes, tx: oneshot::Sender<Result<T, QueryError>>, selected: RouterId) -> Self {
+        Self {
+            key,
+            pending: HashSet::new(),
+            queried: HashSet::from_iter([selected.clone()]),
+            queryable: HashSet::new(),
+            selected: Some(selected),
+            started: R::now(),
+            tx,
+        }
+    }
+
+    /// Handle `DatabaseSearchReply`.
+    ///
+    /// This function is called when a `DatabaseSearchReply` is received for an active query,
+    /// meaning database lookup failed.
+    ///
+    /// The reply may contain routers that are closer to the search key so filter out all queried
+    /// routers, mark all routers whose router infos we already have as queryable and mark rest of
+    /// routers as pending and return their router IDs so their router infos can be downloaded.
+    fn handle_search_reply(
+        &mut self,
+        routers: &Vec<RouterId>,
+        profile_storage: &ProfileStorage<R>,
+    ) -> Vec<RouterId> {
+        // database search reply was received so there is selected router right now
+        //
+        // the next lookup will be sent (and router will be selected) when the timer expires
+        self.selected = None;
+
+        routers
+            .iter()
+            .filter_map(|router_id| {
+                // router already queried
+                if self.queried.contains(router_id) {
+                    return None;
+                }
+
+                // router not yet queried but its router info is available
+                if profile_storage.contains(&router_id) {
+                    self.queryable.insert(router_id.clone());
+                    return None;
+                }
+
+                // non-queried router and router info not available, download it
+                self.pending.insert(router_id.clone());
+
+                Some(router_id.clone())
+            })
+            .collect()
+    }
+
+    /// Handle `DatabaseLookUp` timeout.
+    //
+    // TODO: explain
+    fn handle_timeout(
+        &mut self,
+        dht: &Dht<R>,
+        profile_storage: &ProfileStorage<R>,
+    ) -> Result<RouterId, QueryError> {
+        if self.started.elapsed() >= QUERY_TOTAL_TIMEOUT {
+            return Err(QueryError::Timeout);
+        }
+
+        // move all queried routers to queryable
+        self.pending.retain(|router_id| {
+            if profile_storage.contains(router_id) {
+                self.queryable.insert(router_id.clone());
+                return false;
+            }
+
+            true
+        });
+
+        // attempt to select next floodfill
+        //
+        // if new floodfills were found with previous searches, attempt to select a floodfill from
+        // them that's closest to the search key and if we haven't received any "floodfill replies",
+        // attempt to select a floodfill from the dht
+        match Dht::<R>::get_closest(&self.key, &self.queryable) {
+            Some(floodfill) => {
+                self.queryable.remove(&floodfill);
+                Ok(floodfill)
+            }
+            None => dht
+                .closest_with_ignore(&self.key, 1usize, &self.queried)
+                .next()
+                .ok_or(QueryError::NoFloodfills),
+        }
+    }
+
+    /// Complete query by sending the result to caller.
+    fn complete(self, value: Result<T, QueryError>) {
+        let _ = self.tx.send(value);
+    }
+}
+
 /// Query kind.
 enum QueryKind<R: Runtime> {
-    /// Leaseset query.
-    Leaseset {
-        /// Oneshot sender for sending the result to caller.
-        tx: oneshot::Sender<Result<LeaseSet2, QueryError>>,
-
-        /// When was the query started.
-        started: R::Instant,
-
-        /// New queryable routers discovered via `DatabaseSearchReply` messages.
-        queryable: HashSet<RouterId>,
-
-        /// Selected floofill.
-        selected: Option<RouterId>,
-
-        /// New pending routers discovered via `DatabaseSearchReply` messages.
-        ///
-        /// RI lookup is pending for these routers before a lease set query can be sent.
-        pending: HashSet<RouterId>,
-
-        /// Queried (or pending) floodfills.
-        ///
-        /// This is used to prevent quering the same floodfills twice during recursive queries.
-        queried: HashSet<RouterId>,
+    /// Lease set query.
+    LeaseSet {
+        /// Active query.
+        query: Query<R, LeaseSet2>,
     },
 
     /// Router info.
@@ -243,7 +351,7 @@ enum QueryKind<R: Runtime> {
 impl<R: Runtime> fmt::Debug for QueryKind<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Leaseset { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
+            Self::LeaseSet { .. } => f.debug_struct("QueryKind::LeaseSet").finish_non_exhaustive(),
             Self::RouterInfo { .. } =>
                 f.debug_struct("QueryKind::RouterInfo").finish_non_exhaustive(),
             Self::Exploration => f.debug_struct("QueryKind::Exploration").finish(),
@@ -1101,14 +1209,13 @@ impl<R: Runtime> NetDb<R> {
                 ),
             },
             Some(kind) => match (payload, kind) {
-                (DatabaseStorePayload::LeaseSet2 { lease_set }, QueryKind::Leaseset { tx, .. }) => {
+                (DatabaseStorePayload::LeaseSet2 { lease_set }, QueryKind::LeaseSet { query }) => {
                     tracing::trace!(
                         target: LOG_TARGET,
                         destination_id = %lease_set.header.destination.id(),
                         "lease set query reply received",
                     );
-
-                    let _ = tx.send(Ok(lease_set));
+                    query.complete(Ok(lease_set));
                 }
                 (DatabaseStorePayload::RouterInfo { router_info }, QueryKind::Router) => {
                     let router_id = router_info.identity.id();
@@ -1236,6 +1343,8 @@ impl<R: Runtime> NetDb<R> {
             )
             .build();
 
+        // TODO: exploratory tunnel
+
         self.active.insert(key.clone(), query_kind);
         self.query_timers.push(async move {
             R::delay(QUERY_TIMEOUT).await;
@@ -1291,42 +1400,20 @@ impl<R: Runtime> NetDb<R> {
                     );
                 });
             }
-            Some(QueryKind::Leaseset {
-                mut pending,
-                queried,
-                mut queryable,
-                started,
-                tx,
-                ..
-            }) => {
-                // filter out already-queried routers
-                routers.retain(|router_id| !queried.contains(router_id));
-
-                // split the remaining routers into two buckets:
-                // - routers which are available and can be queried immediately
-                // - routers which are missing a router info
-                let (new_queryable, new_pending): (HashSet<_>, HashSet<_>) = routers
-                    .into_iter()
-                    .map(|router_id| {
-                        if self.router_ctx.profile_storage().contains(&router_id) {
-                            (Some(router_id), None)
-                        } else {
-                            (None, (!pending.contains(&router_id)).then_some(router_id))
-                        }
-                    })
-                    .unzip();
+            Some(QueryKind::LeaseSet { mut query }) => {
+                let unknown =
+                    query.handle_search_reply(&routers, &self.router_ctx.profile_storage());
 
                 tracing::error!(
                     target: LOG_TARGET,
                     key = base32_encode(&key),
-                    num_queried = ?queried.len(),
-                    ?queryable,
-                    ?pending,
+                    num_queried = ?query.queried.len(),
+                    ?unknown,
                     "received `DatabaseSearchReply` for lease set query",
                 );
 
                 // send lookup messages for the found routers
-                new_pending.iter().flatten().for_each(|router_id| {
+                unknown.iter().for_each(|router_id| {
                     let key = Bytes::from(router_id.to_vec());
 
                     if let Some(Lease {
@@ -1335,6 +1422,8 @@ impl<R: Runtime> NetDb<R> {
                         ..
                     }) = self.inbound_tunnels.next_tunnel()
                     {
+                        // TODO: unencrypted
+                        // TODO: send through tunnel
                         let message = MessageBuilder::short()
                             .with_message_type(MessageType::DatabaseLookup)
                             .with_message_id(R::rng().next_u32())
@@ -1370,23 +1459,7 @@ impl<R: Runtime> NetDb<R> {
                     }
                 });
 
-                self.active.insert(
-                    key.clone(),
-                    QueryKind::Leaseset {
-                        pending: {
-                            pending.extend(new_pending.into_iter().flatten());
-                            pending
-                        },
-                        queried,
-                        queryable: {
-                            queryable.extend(new_queryable.into_iter().flatten());
-                            queryable
-                        },
-                        selected: None,
-                        started,
-                        tx,
-                    },
-                );
+                self.active.insert(key.clone(), QueryKind::LeaseSet { query });
             }
             Some(QueryKind::RouterInfo { num_floodfills, tx }) => {
                 let router_id = RouterId::from(&key);
@@ -1624,13 +1697,8 @@ impl<R: Runtime> NetDb<R> {
         // store leaseset query into active queries and start timer for the query
         self.active.insert(
             key.clone(),
-            QueryKind::Leaseset {
-                pending: HashSet::new(),
-                queried: HashSet::from_iter([floodfill.clone()]),
-                queryable: HashSet::new(),
-                selected: Some(floodfill),
-                started: R::now(),
-                tx,
+            QueryKind::LeaseSet {
+                query: Query::new(key.clone(), tx, floodfill),
             },
         );
         self.query_timers.push(async move {
@@ -1670,6 +1738,8 @@ impl<R: Runtime> NetDb<R> {
             ?floodfills,
             "query router info",
         );
+
+        // TODO: send through exploratory tunnel
 
         let message = MessageBuilder::short()
             .with_message_type(MessageType::DatabaseLookup)
@@ -1965,68 +2035,26 @@ impl<R: Runtime> Future for NetDb<R> {
                 Poll::Ready(Some(key)) =>
                     if let Some(kind) = self.active.remove(&key) {
                         match kind {
-                            QueryKind::Leaseset {
-                                mut pending,
-                                mut queried,
-                                mut queryable,
-                                selected,
-                                started,
-                                tx,
-                                ..
-                            } => {
-                                if let Some(floodfill) = selected {
+                            QueryKind::LeaseSet { mut query } => {
+                                if let Some(floodfill) = query.selected.take() {
                                     self.floodfill_dht.register_lookup_timeout(&floodfill);
                                 }
 
-                                tracing::error!(target: LOG_TARGET, "started: {:?}", started.elapsed().as_secs());
-
-                                if started.elapsed() >= QUERY_TOTAL_TIMEOUT {
-                                    tracing::debug!(
-                                        target: LOG_TARGET,
-                                        key = %base32_encode(&key),
-                                        "leaseset query timed out",
-                                    );
-                                    let _ = tx.send(Err(QueryError::Timeout));
-                                    continue;
-                                }
-
-                                // move all queried routers to queryable
-                                pending.retain(|router_id| {
-                                    if self.router_ctx.profile_storage().contains(router_id) {
-                                        queryable.insert(router_id.clone());
-                                        return false;
+                                let floodfill = match query.handle_timeout(
+                                    &self.floodfill_dht,
+                                    self.router_ctx.profile_storage(),
+                                ) {
+                                    Err(error) => {
+                                        tracing::debug!(
+                                            target: LOG_TARGET,
+                                            key = %base32_encode(&key),
+                                            ?error,
+                                            "lease set query timed out",
+                                        );
+                                        query.complete(Err(error));
+                                        continue;
                                     }
-
-                                    true
-                                });
-
-                                // attempt to select next floodfill
-                                //
-                                // if new floodfills were found with previous searches, attempt to
-                                // select a floodfill from them that's closest to the search key and
-                                // if we haven't received any "floodfill replies", attempt to select
-                                // a floodfill from the dht
-                                let floodfill = match Dht::<R>::get_closest(&key, &queryable) {
-                                    Some(floodfill) => {
-                                        queryable.remove(&floodfill);
-                                        floodfill
-                                    }
-                                    None => match self
-                                        .floodfill_dht
-                                        .closest_with_ignore(&key, 1usize, &queried)
-                                        .next()
-                                    {
-                                        Some(floodfill) => floodfill,
-                                        None => {
-                                            tracing::debug!(
-                                                target: LOG_TARGET,
-                                                key = base32_encode(&key),
-                                                "cannot send lease set query, no floodfills",
-                                            );
-                                            let _ = tx.send(Err(QueryError::NoFloodfills));
-                                            continue;
-                                        }
-                                    },
+                                    Ok(floodfill) => floodfill,
                                 };
 
                                 tracing::debug!(
@@ -2047,7 +2075,7 @@ impl<R: Runtime> Future for NetDb<R> {
                                         key = ?base32_encode(&key),
                                         "cannot send lease set query, no inbound tunnel available",
                                     );
-                                    let _ = tx.send(Err(QueryError::NoTunnel));
+                                    query.complete(Err(QueryError::NoTunnel));
                                     continue;
                                 };
 
@@ -2064,24 +2092,14 @@ impl<R: Runtime> Future for NetDb<R> {
                                     message,
                                     floodfill.clone(),
                                 ) {
-                                    let _ = tx.send(Err(error));
+                                    query.complete(Err(error));
                                     continue;
                                 }
 
-                                self.active.insert(
-                                    key.clone(),
-                                    QueryKind::Leaseset {
-                                        pending,
-                                        queried: {
-                                            queried.insert(floodfill.clone());
-                                            queried
-                                        },
-                                        queryable,
-                                        selected: Some(floodfill),
-                                        started,
-                                        tx,
-                                    },
-                                );
+                                query.queried.insert(floodfill.clone());
+                                query.selected = Some(floodfill);
+
+                                self.active.insert(key.clone(), QueryKind::LeaseSet { query });
                                 self.query_timers.push(async move {
                                     R::delay(QUERY_TIMEOUT).await;
                                     key
@@ -4476,8 +4494,8 @@ mod tests {
         // netdb sends the query to three floodfills
         netdb.query_lease_set(key.clone(), res_tx);
         match netdb.active.get(&key) {
-            Some(QueryKind::Leaseset { queried, .. }) => {
-                assert_eq!(queried.len(), 1);
+            Some(QueryKind::LeaseSet { query }) => {
+                assert_eq!(query.queried.len(), 1);
             }
             _ => panic!("invalid state"),
         }
@@ -4507,11 +4525,9 @@ mod tests {
             )
             .unwrap();
         match netdb.active.get(&key) {
-            Some(QueryKind::Leaseset {
-                queried, pending, ..
-            }) => {
-                assert_eq!(queried.len(), 1);
-                assert_eq!(pending.len(), 3);
+            Some(QueryKind::LeaseSet { query }) => {
+                assert_eq!(query.queried.len(), 1);
+                assert_eq!(query.pending.len(), 3);
             }
             _ => panic!("invalid state"),
         }
@@ -4545,12 +4561,10 @@ mod tests {
             )
             .unwrap();
         match netdb.active.get(&key) {
-            Some(QueryKind::Leaseset {
-                queried, pending, ..
-            }) => {
+            Some(QueryKind::LeaseSet { query }) => {
                 // 1 queried floodfill + 3 pending router lookups
-                assert_eq!(queried.len(), 1);
-                assert_eq!(pending.len(), 3);
+                assert_eq!(query.queried.len(), 1);
+                assert_eq!(query.pending.len(), 3);
             }
             _ => panic!("invalid state"),
         }

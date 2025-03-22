@@ -142,7 +142,7 @@ impl RoutingTable {
     /// Get `limit` many floodfills closest to `target` from the k-buckets, ignoring routers
     /// specified in `ignore`.
     pub fn closest_with_ignore<'a, 'b: 'a, K: Clone + 'a>(
-        &'a mut self,
+        &'a self,
         target: Key<K>,
         limit: usize,
         ignore: &'b HashSet<RouterId>,
