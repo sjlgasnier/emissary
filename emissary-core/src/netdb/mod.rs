@@ -1198,7 +1198,7 @@ impl<R: Runtime> NetDb<R> {
             }
             Some(QueryKind::LeaseSet { mut query }) => {
                 let unknown =
-                    query.handle_search_reply(&routers, &self.router_ctx.profile_storage());
+                    query.handle_search_reply(&routers, self.router_ctx.profile_storage());
 
                 tracing::error!(
                     target: LOG_TARGET,
@@ -1245,7 +1245,7 @@ impl<R: Runtime> NetDb<R> {
             }
             Some(QueryKind::RouterInfo { mut query }) => {
                 let unknown =
-                    query.handle_search_reply(&routers, &self.router_ctx.profile_storage());
+                    query.handle_search_reply(&routers, self.router_ctx.profile_storage());
 
                 tracing::error!(
                     target: LOG_TARGET,
@@ -1326,7 +1326,7 @@ impl<R: Runtime> NetDb<R> {
                 })?;
 
                 match lookup {
-                    LookupType::Leaseset => self.on_lease_set_lookup(key, reply, ignore),
+                    LookupType::LeaseSet => self.on_lease_set_lookup(key, reply, ignore),
                     LookupType::Router => self.on_router_info_lookup(key, reply, ignore),
                     LookupType::Exploration => self.on_router_exploration(key, reply, ignore),
                     kind => tracing::warn!(
@@ -1677,12 +1677,15 @@ impl<R: Runtime> NetDb<R> {
                     match reader.router_info(&floodfill) {
                         Some(router_info) =>
                             break (floodfill, router_info.identity.static_key().clone()),
-                        None => tracing::warn!(
-                            target: LOG_TARGET,
-                            key = ?base32_encode(&key),
-                            %floodfill,
-                            "cannot send lease set query, floodfill router info doesn't exist",
-                        ),
+                        None => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                key = ?base32_encode(&key),
+                                %floodfill,
+                                "cannot send lease set query, floodfill router info doesn't exist",
+                            );
+                            query.queried.insert(floodfill);
+                        }
                     }
                 };
 
@@ -2855,7 +2858,7 @@ mod tests {
         let tunnel_id = TunnelId::random();
         let router_id = RouterId::random();
 
-        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
+        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::LeaseSet)
             .with_reply_type(ReplyType::Tunnel {
                 tunnel_id,
                 router_id: router_id.clone(),
@@ -2937,7 +2940,7 @@ mod tests {
         let tunnel_id = TunnelId::random();
         let router_id = RouterId::random();
 
-        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
+        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::LeaseSet)
             .with_reply_type(ReplyType::Tunnel {
                 tunnel_id,
                 router_id: router_id.clone(),

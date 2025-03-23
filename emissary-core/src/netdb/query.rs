@@ -146,7 +146,7 @@ impl<R: Runtime, T> Query<R, T> {
     /// routers as pending and return their router IDs so their router infos can be downloaded.
     pub fn handle_search_reply(
         &mut self,
-        routers: &Vec<RouterId>,
+        routers: &[RouterId],
         profile_storage: &ProfileStorage<R>,
     ) -> Vec<RouterId> {
         // database search reply was received so there is selected router right now
@@ -163,7 +163,7 @@ impl<R: Runtime, T> Query<R, T> {
                 }
 
                 // router not yet queried but its router info is available
-                if profile_storage.contains(&router_id) {
+                if profile_storage.contains(router_id) {
                     self.queryable.insert(router_id.clone());
                     return None;
                 }
@@ -292,7 +292,7 @@ impl<R: Runtime> NetDbMessageBuilder<R> {
             ..
         } = self.inbound_tunnels.next_tunnel().ok_or(QueryError::NoTunnel)?;
 
-        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::Leaseset)
+        let message = DatabaseLookupBuilder::new(key.clone(), LookupType::LeaseSet)
             .with_reply_type(ReplyType::Tunnel {
                 tunnel_id,
                 router_id,

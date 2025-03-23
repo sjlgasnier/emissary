@@ -758,7 +758,7 @@ impl<R: Runtime> TransportManager<R> {
                     return;
                 }
 
-                match self.netdb_handle.query_router_info(router_id.clone()) {
+                match self.netdb_handle.try_query_router_info(router_id.clone()) {
                     Err(error) => tracing::warn!(
                         target: LOG_TARGET,
                         %router_id,
@@ -770,7 +770,20 @@ impl<R: Runtime> TransportManager<R> {
                         self.pending_queries.insert(router_id.clone());
                         self.pending_query_futures.push(async move {
                             match rx.await {
-                                Err(_) => (router_id, Err(QueryError::Timeout)),
+                                // `Err(_)` indicates that `NetDb` didn't finish the query and
+                                // instead dropped the channel which shouldn't happen unless there
+                                // is a bug in router info query logic
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        %router_id,
+                                        ?error,
+                                        "netdb didn't properly finish the router info lookup",
+                                    );
+                                    debug_assert!(false);
+
+                                    (router_id, Err(QueryError::Timeout))
+                                }
                                 Ok(Err(error)) => (router_id, Err(error)),
                                 Ok(Ok(lease_set)) => (router_id, Ok(lease_set)),
                             }

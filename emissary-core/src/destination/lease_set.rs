@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPublicKey},
+    error::QueryError,
     i2np::{
         database::{
             lookup::{DatabaseLookupBuilder, LookupType, ReplyType as LookupReplyType},
@@ -29,14 +30,14 @@ use crate::{
     netdb::{Dht, NetDbHandle},
     primitives::{DestinationId, Lease, MessageId, RouterId, TunnelId},
     profile::ProfileStorage,
-    runtime::{Instant, Runtime},
+    runtime::{Instant, JoinSet, Runtime},
     tunnel::{NoiseContext, TunnelMessageSender},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{
     future::{select, BoxFuture, Either},
-    FutureExt,
+    FutureExt, StreamExt,
 };
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
@@ -143,6 +144,7 @@ impl<R: Runtime> LeaseSetManager<R> {
                     profile_storage,
                     tunnels.clone(),
                     rx,
+                    tx.clone(),
                 )
                 .run(),
             );
@@ -315,6 +317,17 @@ enum Event {
         floodfills: Vec<RouterId>,
     },
 
+    /// Router info query results.
+    RouterInfoQueryResult {
+        /// Router Id.
+        router_id: RouterId,
+
+        /// Query result for a floodfill's router info.
+        ///
+        /// If the query succeeded, the floodfill's public key be found from [`ProfileStorage`].
+        result: Result<(), QueryError>,
+    },
+
     #[default]
     Dummy,
 }
@@ -419,11 +432,9 @@ struct LeaseSetPublisher<R: Runtime> {
     /// `RouterInfo`s are currently not available and cannot be used for storage or lookups.
     ///
     /// Floodfills are moved to `floodfills` once their `RouterInfo`s have been found.
-    #[allow(unused)]
-    pending_floodfills: Vec<RouterId>,
+    pending_floodfills: HashSet<RouterId>,
 
     /// Profile storage.
-    #[allow(unused)]
     profile_storage: ProfileStorage<R>,
 
     /// RX channel for receiving [`Event`]s from [`LeaseSetManager`].
@@ -437,6 +448,9 @@ struct LeaseSetPublisher<R: Runtime> {
 
     /// Active inbound tunnels.
     tunnels: Vec<Lease>,
+
+    /// TX channel used to receive router info lookup results.
+    tx: Sender<Event>,
 }
 
 impl<R: Runtime> LeaseSetPublisher<R> {
@@ -450,6 +464,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
         profile_storage: ProfileStorage<R>,
         tunnels: Vec<Lease>,
         rx: Receiver<Event>,
+        tx: Sender<Event>,
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
@@ -458,7 +473,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
             lease_set,
             netdb_handle,
             noise_ctx,
-            pending_floodfills: Vec::new(),
+            pending_floodfills: HashSet::new(),
             profile_storage,
             rx,
             state: LeaseSetPublisherState::PublishLeaseSet {
@@ -466,6 +481,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
             },
             tunnel_message_sender,
             tunnels,
+            tx,
         }
     }
 
@@ -627,14 +643,14 @@ impl<R: Runtime> LeaseSetPublisher<R> {
         // must succeed since `floodfill` was selected from `self.floodfills`
         let floodfill_public_key = self.floodfills.get(&floodfill).expect("to exist");
 
-        // select random tunnel for `DatabaseStore`
+        // select random tunnel for DSM
         let Lease {
             router_id: ref gateway_router_id,
             tunnel_id: ref gateway_tunnel_id,
             ..
         } = self.tunnels[R::rng().next_u32() as usize % self.tunnels.len()];
 
-        let message = DatabaseLookupBuilder::new(self.key.clone(), LookupType::Leaseset)
+        let message = DatabaseLookupBuilder::new(self.key.clone(), LookupType::LeaseSet)
             .with_reply_type(LookupReplyType::Tunnel {
                 tunnel_id: *gateway_tunnel_id,
                 router_id: gateway_router_id.clone(),
@@ -701,7 +717,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                 );
                 self.tunnels.retain(|tunnel| tunnel.tunnel_id != tunnel_id);
             }
-            // `DatabaseStore` received as the lease set storage verification is in progress
+            // DSM received as the lease set storage verification is in progress
             //
             // the lease set publisher can start waiting on a new lease set
             (LeaseSetPublisherState::AwaitingVerification { .. }, Event::DatabaseStore { key })
@@ -714,26 +730,141 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                 );
                 self.state = LeaseSetPublisherState::AwaitingNewLeaseSet;
             }
-            // lease set storage verification in progress and `DatabaseSearchReply` received
+            // lease set storage verification in progress and DSRM received
             //
             // this either means that the lease set publish failed or the floodfill it was sent to
             // flooded it to floodfills that are closer to the key and unknown to us
+            //
+            // filter out the routers from `floodfills` that are already known to us (their public
+            // key is available) and store them in the set of available floodfills
+            //
+            // if there are unknown floodfills, start router info lookups in the background
             (
                 LeaseSetPublisherState::AwaitingVerification { .. },
-                Event::DatabaseSearchReply { .. },
-            ) => {
-                // TODO: check which floodfills are found locally
-                // TODO: add them to `floodfill`
-                // TODO: for others, start router info lookups
+                Event::DatabaseSearchReply { key, floodfills },
+            ) if key == self.key => {
+                let floodfills_to_query = {
+                    let reader = self.profile_storage.reader();
+
+                    floodfills
+                        .into_iter()
+                        .filter_map(|router_id| match reader.router_info(&router_id) {
+                            Some(info) => {
+                                self.floodfills
+                                    .insert(router_id, info.identity.static_key().clone());
+                                None
+                            }
+                            None => (!self.pending_floodfills.contains(&router_id)).then_some(router_id),
+                        })
+                        .collect::<HashSet<_>>()
+                };
+
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    floodfills = ?floodfills_to_query,
+                    "received `DatabaseSearchReply` for lease set storage verification",
+                );
+
+                // start router info lookups in the background
+                //
+                // send DLM for the router info of each unknown floodfill and poll the
+                // results until all queries have completed, either successfully or not
+                //
+                // `LeaseSetPublisher` decides whether to restart lookups if they failed
+                if !floodfills_to_query.is_empty() {
+                    let tx = self.tx.clone();
+                    let netdb_handle = self.netdb_handle.clone();
+
+                    // mark the floodfills as pending so lease set republish is postponed until
+                    // their router info lookups have concluded
+                    self.pending_floodfills.extend(floodfills_to_query.clone());
+
+                    R::spawn(async move {
+                        let mut futures = R::join_set::<(RouterId, Result<(), QueryError>)>();
+
+                        for router_id in floodfills_to_query {
+                            let rx = netdb_handle.query_router_info(router_id.clone()).await;
+
+                            futures.push(async move {
+                                (router_id, rx.await.unwrap_or(Err(QueryError::RetryFailure)))
+                            });
+                        }
+
+                        while !futures.is_empty() {
+                            match futures.next().await {
+                                None => return,
+                                Some((router_id, result)) => {
+                                    let _ = tx
+                                        .send(Event::RouterInfoQueryResult { router_id, result })
+                                        .await;
+                                }
+                            }
+                        }
+                    });
+                }
             }
             // new lease set has been created
             //
-            // irrespective of what the previous state was, start publishing the new lease set
+            // irrespective of what the previous state was, start publishing the new lease set as
+            // this is the latest lease set and publish/confirmation of old lease set doesn't matter
+            // anymore
             (_, Event::LeaseSet { lease_set }) => {
                 self.lease_set = lease_set;
                 self.state = LeaseSetPublisherState::PublishLeaseSet {
                     previous_floodfill: None,
                 };
+            }
+            // router info lookup has resolved
+            //
+            // if the query failed, the query is not restarted as if we good floodfills, we don't
+            // need to this "failed floodfill" and if we don't have enough floodfill and the failed
+            // floodfill is actually closer to `key` and any of the floodfills we currently have,
+            // the "failed floodfill" will be readvertised in a future DSRM and we can reinitiate a
+            // query for its router info
+            (_, Event::RouterInfoQueryResult { router_id, result }) => {
+                if !self.pending_floodfills.remove(&router_id) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        %router_id,
+                        ?result,
+                        "router info query concluded for unknown router",
+                    );
+                    debug_assert!(false);
+                }
+
+                match result {
+                    Err(error) => tracing::trace!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        %router_id,
+                        ?error,
+                        "failed to find router info for requested floodfill",
+                    ),
+                    Ok(()) => match self.profile_storage.reader().router_info(&router_id) {
+                        Some(router_info) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                %router_id,
+                                "router info lookup succeeded for requested floodfill",
+                            );
+
+                            self.floodfills
+                                .insert(router_id, router_info.identity.static_key().clone());
+                        }
+                        None => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                %router_id,
+                                "router info lookup succeeded but router if not found in storage",
+                            );
+                            debug_assert!(false);
+                        }
+                    },
+                }
             }
             (state, event) => tracing::trace!(
                 target: LOG_TARGET,
@@ -750,7 +881,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
         // get the floofills closest to key right now
         //
         // these may change as more floodfills closer to key are discovered either through
-        // kademlia random walks or via `DatabaseSearchReply` messages
+        // kademlia random walks or via DSRM messages
         self.floodfills = loop {
             match self.netdb_handle.get_closest_floodfills(self.key.clone()) {
                 Ok(query_rx) => match query_rx.await {
@@ -870,24 +1001,53 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                         }
                         let mut queried = mem::take(queried);
 
-                        // if there aren't enough floodfills, try to republish the lease set using
-                        // the old floodfills
+                        // if there aren't enough floodfills and there are no pending RI lookups for
+                        // unknown floodfills, try to republish the lease set using the old
+                        // floodfills
+                        //
+                        // if there are pending RI lookups for unknown floodfills, wait for them to
+                        // conclude before attempting to republish the lease set
                         //
                         // if there aren't inbound tunnels, the state machine moves to
                         // `AwaitingNewLeaseSet` as there's nothing it can do right now
-                        let Some((lookup_floodfill, message)) =
-                            self.create_database_lookup(&queried)
-                        else {
-                            self.state = LeaseSetPublisherState::PublishLeaseSet {
-                                previous_floodfill: Some(floodfill.clone()),
+                        let (lookup_floodfill, message) =
+                            match self.create_database_lookup(&queried) {
+                                Some((lookup_floodfill, message)) => (lookup_floodfill, message),
+                                None if !self.pending_floodfills.is_empty() => {
+                                    tracing::debug!(
+                                        target: LOG_TARGET,
+                                        local = %self.destination_id,
+                                        num_pending = ?self.pending_floodfills.len(),
+                                        "waiting pending router info lookups to conclude",
+                                    );
+
+                                    self.state = LeaseSetPublisherState::AwaitingVerification {
+                                        floodfill: floodfill.clone(),
+                                        queried,
+                                        started: *started,
+                                        timer: Box::pin(R::delay(STORAGE_VERIFICATION_TIMEOUT)),
+                                    };
+                                    continue;
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        target: LOG_TARGET,
+                                        local = %self.destination_id,
+                                        "lookup failed for all floodfills, republishing",
+                                    );
+                                    self.state = LeaseSetPublisherState::PublishLeaseSet {
+                                        previous_floodfill: Some(floodfill.clone()),
+                                    };
+                                    continue;
+                                }
                             };
-                            continue;
-                        };
 
                         tracing::trace!(
                             target: LOG_TARGET,
                             local = %self.destination_id,
-                            "verification timed out, resending lease set storage verification",
+                            floodfill = %lookup_floodfill,
+                            pending_floodfills = ?self.pending_floodfills.len(),
+                            "resending lease set storage verification",
                         );
 
                         // this is a blocking call so the only way it'd fail is if the tunnel pool
@@ -929,7 +1089,7 @@ mod tests {
             Message,
         },
         netdb::NetDbAction,
-        primitives::LeaseSet2,
+        primitives::{LeaseSet2, RouterInfo, RouterInfoBuilder},
         runtime::mock::MockRuntime,
         tunnel::{
             DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler, TunnelMessage,
@@ -1607,6 +1767,951 @@ mod tests {
                     }
                 }
                 _ => panic!("unexpected tunnel message"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn database_search_reply_with_locally_available_routers() {
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let sender = tp_handle.sender();
+        let (netdb_handle, netdb_rx) = NetDbHandle::create();
+        let noise_ctx = NoiseContext::new(
+            StaticPrivateKey::random(MockRuntime::rng()),
+            Bytes::from(RouterId::random().to_vec()),
+        );
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let tunnels = lease_set.leases.clone();
+        let destination_id = lease_set.header.destination.id();
+        let key = Bytes::from(destination_id.to_vec());
+        let serialized = lease_set.serialize(&signing_key);
+        let profile_storage = ProfileStorage::new(&[], &[]);
+        let manager = LeaseSetManager::<MockRuntime>::new(
+            tunnels,
+            destination_id,
+            sender,
+            netdb_handle,
+            noise_ctx,
+            profile_storage.clone(),
+            false,
+            Bytes::from(serialized),
+        );
+
+        let mut floodfills = (0..3)
+            .map(|_| {
+                (
+                    RouterId::random(),
+                    StaticPrivateKey::random(MockRuntime::rng()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut lookup_floodfills = floodfills.clone();
+
+        match tokio::time::timeout(Duration::from_secs(5), netdb_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            NetDbAction::GetClosestFloodfills { tx, .. } => {
+                tx.send(
+                    floodfills
+                        .iter()
+                        .map(|(router_id, key)| (router_id.clone(), key.public()))
+                        .collect(),
+                )
+                .unwrap();
+            }
+            _ => panic!("invalid action received"),
+        }
+
+        // handle lease set store
+        match tokio::time::timeout(Duration::from_secs(5), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                // remove the floodfill from the set of floodfills since is shouldn't be for
+                // verification
+                let key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                match message.message_type {
+                    MessageType::DatabaseStore => {
+                        let DatabaseStore { .. } =
+                            DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // read first database lookup and send database search reply
+        match tokio::time::timeout(Duration::from_secs(12), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                let static_key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                // ensure that database lookup was receveid but don't respond to it
+                match message.message_type {
+                    MessageType::DatabaseLookup => {
+                        let DatabaseLookup {
+                            key: lookup_key, ..
+                        } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                        assert_eq!(key.as_ref(), &lookup_key);
+
+                        // send database search reply with random routers
+                        let floodfills = (0..2)
+                            .map(|_| {
+                                let (floodfill, static_key, _) =
+                                    RouterInfoBuilder::default().as_floodfill().build();
+                                let router_id = floodfill.identity.id();
+
+                                floodfills.insert(router_id.clone(), static_key.clone());
+                                lookup_floodfills.insert(router_id.clone(), static_key);
+                                profile_storage.add_router(floodfill);
+
+                                router_id
+                            })
+                            .collect();
+
+                        manager.register_database_search_reply(lookup_key, floodfills);
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // keep reading database lookups and ignore them until the lease set is republished
+        loop {
+            match tokio::time::timeout(Duration::from_secs(12), tm_rx.recv())
+                .await
+                .expect("no timeout")
+                .expect("to succeed")
+            {
+                TunnelMessage::RouterDeliveryViaRoute {
+                    outbound_tunnel: None,
+                    router_id,
+                    message,
+                } => {
+                    let message = Message::parse_standard(&message).unwrap();
+                    assert_eq!(message.message_type, MessageType::Garlic);
+
+                    let static_key = floodfills.get(&router_id).unwrap();
+                    let _ = lookup_floodfills.remove(&router_id);
+
+                    let mut garlic = GarlicHandler::<MockRuntime>::new(
+                        NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                        MockRuntime::register_metrics(vec![], None),
+                    );
+                    let GarlicDeliveryInstructions::Local { message } = garlic
+                        .handle_message(message)
+                        .unwrap()
+                        .filter(|message| {
+                            std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                        })
+                        .collect::<VecDeque<_>>()
+                        .pop_front()
+                        .expect("to exist")
+                    else {
+                        panic!("invalid type");
+                    };
+
+                    // ensure that database lookup was receveid but don't respond to it
+                    match message.message_type {
+                        MessageType::DatabaseLookup => {
+                            let DatabaseLookup {
+                                key: lookup_key, ..
+                            } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                            assert_eq!(key.as_ref(), &lookup_key);
+                        }
+                        MessageType::DatabaseStore => {
+                            assert!(lookup_floodfills.is_empty());
+                            break;
+                        }
+                        _ => panic!("invalid message type"),
+                    }
+                }
+                _ => panic!("unexpected tunnel message"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn router_info_lookup_started_for_new_floodfills_all_queries_succeed() {
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let sender = tp_handle.sender();
+        let (netdb_handle, netdb_rx) = NetDbHandle::create();
+        let noise_ctx = NoiseContext::new(
+            StaticPrivateKey::random(MockRuntime::rng()),
+            Bytes::from(RouterId::random().to_vec()),
+        );
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let tunnels = lease_set.leases.clone();
+        let destination_id = lease_set.header.destination.id();
+        let key = Bytes::from(destination_id.to_vec());
+        let serialized = lease_set.serialize(&signing_key);
+        let profile_storage = ProfileStorage::new(&[], &[]);
+        let manager = LeaseSetManager::<MockRuntime>::new(
+            tunnels,
+            destination_id,
+            sender,
+            netdb_handle,
+            noise_ctx,
+            profile_storage.clone(),
+            false,
+            Bytes::from(serialized),
+        );
+
+        let mut floodfills = (0..3)
+            .map(|_| {
+                (
+                    RouterId::random(),
+                    StaticPrivateKey::random(MockRuntime::rng()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut lookup_floodfills = floodfills.clone();
+        let mut new_floodfills = HashMap::<RouterId, (RouterInfo, StaticPrivateKey)>::new();
+
+        match tokio::time::timeout(Duration::from_secs(5), netdb_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            NetDbAction::GetClosestFloodfills { tx, .. } => {
+                tx.send(
+                    floodfills
+                        .iter()
+                        .map(|(router_id, key)| (router_id.clone(), key.public()))
+                        .collect(),
+                )
+                .unwrap();
+            }
+            _ => panic!("invalid action received"),
+        }
+
+        // handle lease set store
+        match tokio::time::timeout(Duration::from_secs(5), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                // remove the floodfill from the set of floodfills since is shouldn't be for
+                // verification
+                let key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                match message.message_type {
+                    MessageType::DatabaseStore => {
+                        let DatabaseStore { .. } =
+                            DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // read first database lookup and send database search reply
+        match tokio::time::timeout(Duration::from_secs(12), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                let static_key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                // ensure that database lookup was receveid but don't respond to it
+                match message.message_type {
+                    MessageType::DatabaseLookup => {
+                        let DatabaseLookup {
+                            key: lookup_key, ..
+                        } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                        assert_eq!(key.as_ref(), &lookup_key);
+
+                        // send database search reply with random routers but don't add them to
+                        // profile storage meaning `LeaseSetPublishe` must issue RI lookups for
+                        // these floodfills
+                        let floodfills = (0..2)
+                            .map(|_| {
+                                let (floodfill, static_key, _) =
+                                    RouterInfoBuilder::default().as_floodfill().build();
+                                let router_id = floodfill.identity.id();
+                                new_floodfills.insert(router_id.clone(), (floodfill, static_key));
+
+                                router_id
+                            })
+                            .collect();
+
+                        manager.register_database_search_reply(lookup_key, floodfills);
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // keep reading DBLs and respond to router queries with the router info
+        loop {
+            tokio::select! {
+                event = tm_rx.recv() => match event.unwrap() {
+                    TunnelMessage::RouterDeliveryViaRoute {
+                        outbound_tunnel: None,
+                        router_id,
+                        message,
+                    } => {
+                        let message = Message::parse_standard(&message).unwrap();
+                        assert_eq!(message.message_type, MessageType::Garlic);
+
+                        let static_key = floodfills.get(&router_id).unwrap();
+
+                        let mut garlic = GarlicHandler::<MockRuntime>::new(
+                            NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                            MockRuntime::register_metrics(vec![], None),
+                        );
+                        let GarlicDeliveryInstructions::Local { message } = garlic
+                            .handle_message(message)
+                            .unwrap()
+                            .filter(|message| {
+                                std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                            })
+                            .collect::<VecDeque<_>>()
+                            .pop_front()
+                            .expect("to exist")
+                        else {
+                            panic!("invalid type");
+                        };
+
+                        // ensure that database lookup was receveid but don't respond to it
+                        match message.message_type {
+                            MessageType::DatabaseLookup => {
+                                let DatabaseLookup {
+                                    key: lookup_key,
+                                    lookup,
+                                    ..
+                                } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                                assert_eq!(lookup, LookupType::LeaseSet);
+                                assert_eq!(key.as_ref(), &lookup_key);
+                                assert!(lookup_floodfills.remove(&router_id).is_some());
+                            }
+                            MessageType::DatabaseStore => {
+                                assert!(lookup_floodfills.is_empty());
+                                break;
+                            }
+                            _ => panic!("invalid message type"),
+                        }
+                    }
+                    _ => panic!("unexpected tunnel message"),
+                },
+                event = netdb_rx.recv() => match event.unwrap() {
+                    NetDbAction::QueryRouterInfo { router_id, tx } => {
+                        let (router_info, static_key) = new_floodfills.remove(&router_id).unwrap();
+
+                        floodfills.insert(router_id.clone(), static_key.clone());
+                        lookup_floodfills.insert(router_id.clone(), static_key.clone());
+                        profile_storage.add_router(router_info);
+
+                        tx.send(Ok(())).unwrap();
+                    }
+                    _ => panic!("unexpected netdb action"),
+                },
+                _ = tokio::time::sleep(Duration::from_secs(12)) => {
+                    panic!("unexpected timeout");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn router_info_lookup_started_for_new_floodfills_one_query_succeeds() {
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let sender = tp_handle.sender();
+        let (netdb_handle, netdb_rx) = NetDbHandle::create();
+        let noise_ctx = NoiseContext::new(
+            StaticPrivateKey::random(MockRuntime::rng()),
+            Bytes::from(RouterId::random().to_vec()),
+        );
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let tunnels = lease_set.leases.clone();
+        let destination_id = lease_set.header.destination.id();
+        let key = Bytes::from(destination_id.to_vec());
+        let serialized = lease_set.serialize(&signing_key);
+        let profile_storage = ProfileStorage::new(&[], &[]);
+        let manager = LeaseSetManager::<MockRuntime>::new(
+            tunnels,
+            destination_id,
+            sender,
+            netdb_handle,
+            noise_ctx,
+            profile_storage.clone(),
+            false,
+            Bytes::from(serialized),
+        );
+
+        let mut floodfills = (0..3)
+            .map(|_| {
+                (
+                    RouterId::random(),
+                    StaticPrivateKey::random(MockRuntime::rng()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut lookup_floodfills = floodfills.clone();
+        let mut new_floodfills = HashMap::<RouterId, (RouterInfo, StaticPrivateKey)>::new();
+
+        match tokio::time::timeout(Duration::from_secs(5), netdb_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            NetDbAction::GetClosestFloodfills { tx, .. } => {
+                tx.send(
+                    floodfills
+                        .iter()
+                        .map(|(router_id, key)| (router_id.clone(), key.public()))
+                        .collect(),
+                )
+                .unwrap();
+            }
+            _ => panic!("invalid action received"),
+        }
+
+        // handle lease set store
+        match tokio::time::timeout(Duration::from_secs(5), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                // remove the floodfill from the set of floodfills since is shouldn't be for
+                // verification
+                let key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                match message.message_type {
+                    MessageType::DatabaseStore => {
+                        let DatabaseStore { .. } =
+                            DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // read first database lookup and send database search reply
+        match tokio::time::timeout(Duration::from_secs(12), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                let static_key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                // ensure that database lookup was receveid but don't respond to it
+                match message.message_type {
+                    MessageType::DatabaseLookup => {
+                        let DatabaseLookup {
+                            key: lookup_key, ..
+                        } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                        assert_eq!(key.as_ref(), &lookup_key);
+
+                        // send database search reply with random routers but don't add them to
+                        // profile storage meaning `LeaseSetPublishe` must issue RI lookups for
+                        // these floodfills
+                        let floodfills = (0..3)
+                            .map(|_| {
+                                let (floodfill, static_key, _) =
+                                    RouterInfoBuilder::default().as_floodfill().build();
+                                let router_id = floodfill.identity.id();
+                                new_floodfills.insert(router_id.clone(), (floodfill, static_key));
+
+                                router_id
+                            })
+                            .collect();
+
+                        manager.register_database_search_reply(lookup_key, floodfills);
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // keep reading DBLs and respond to router queries with the router info
+        loop {
+            tokio::select! {
+                event = tm_rx.recv() => match event.unwrap() {
+                    TunnelMessage::RouterDeliveryViaRoute {
+                        outbound_tunnel: None,
+                        router_id,
+                        message,
+                    } => {
+                        let message = Message::parse_standard(&message).unwrap();
+                        assert_eq!(message.message_type, MessageType::Garlic);
+
+                        let static_key = floodfills.get(&router_id).unwrap();
+
+                        let mut garlic = GarlicHandler::<MockRuntime>::new(
+                            NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                            MockRuntime::register_metrics(vec![], None),
+                        );
+                        let GarlicDeliveryInstructions::Local { message } = garlic
+                            .handle_message(message)
+                            .unwrap()
+                            .filter(|message| {
+                                std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                            })
+                            .collect::<VecDeque<_>>()
+                            .pop_front()
+                            .expect("to exist")
+                        else {
+                            panic!("invalid type");
+                        };
+
+                        // ensure that database lookup was receveid but don't respond to it
+                        match message.message_type {
+                            MessageType::DatabaseLookup => {
+                                let DatabaseLookup {
+                                    key: lookup_key,
+                                    lookup,
+                                    ..
+                                } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                                assert_eq!(lookup, LookupType::LeaseSet);
+                                assert_eq!(key.as_ref(), &lookup_key);
+                                assert!(lookup_floodfills.remove(&router_id).is_some());
+                            }
+                            MessageType::DatabaseStore => {
+                                assert!(lookup_floodfills.is_empty());
+                                break;
+                            }
+                            _ => panic!("invalid message type"),
+                        }
+                    }
+                    _ => panic!("unexpected tunnel message"),
+                },
+                event = netdb_rx.recv() => match event.unwrap() {
+                    NetDbAction::QueryRouterInfo { router_id, tx } => {
+                        // only respond to the first query and let the two others timeout
+                        if new_floodfills.len() == 3 {
+                            let (router_info, static_key) = new_floodfills.remove(&router_id).unwrap();
+
+                            floodfills.insert(router_id.clone(), static_key.clone());
+                            lookup_floodfills.insert(router_id.clone(), static_key.clone());
+                            profile_storage.add_router(router_info);
+
+                            tx.send(Ok(())).unwrap();
+                        } else {
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(15)).await;
+                                tx.send(Err(QueryError::Timeout)).unwrap();
+                            });
+                        }
+
+                    }
+                    _ => panic!("unexpected netdb action"),
+                },
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    panic!("unexpected timeout");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn router_info_lookups_fail_lease_set_republished() {
+        let (tp_handle, tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let sender = tp_handle.sender();
+        let (netdb_handle, netdb_rx) = NetDbHandle::create();
+        let noise_ctx = NoiseContext::new(
+            StaticPrivateKey::random(MockRuntime::rng()),
+            Bytes::from(RouterId::random().to_vec()),
+        );
+        let (lease_set, signing_key) = LeaseSet2::random();
+        let tunnels = lease_set.leases.clone();
+        let destination_id = lease_set.header.destination.id();
+        let key = Bytes::from(destination_id.to_vec());
+        let serialized = lease_set.serialize(&signing_key);
+        let profile_storage = ProfileStorage::new(&[], &[]);
+        let manager = LeaseSetManager::<MockRuntime>::new(
+            tunnels,
+            destination_id,
+            sender,
+            netdb_handle,
+            noise_ctx,
+            profile_storage.clone(),
+            false,
+            Bytes::from(serialized),
+        );
+
+        let floodfills = (0..3)
+            .map(|_| {
+                (
+                    RouterId::random(),
+                    StaticPrivateKey::random(MockRuntime::rng()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut lookup_floodfills = floodfills.clone();
+        let mut new_floodfills = HashMap::<RouterId, (RouterInfo, StaticPrivateKey)>::new();
+
+        match tokio::time::timeout(Duration::from_secs(5), netdb_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            NetDbAction::GetClosestFloodfills { tx, .. } => {
+                tx.send(
+                    floodfills
+                        .iter()
+                        .map(|(router_id, key)| (router_id.clone(), key.public()))
+                        .collect(),
+                )
+                .unwrap();
+            }
+            _ => panic!("invalid action received"),
+        }
+
+        // handle lease set store
+        match tokio::time::timeout(Duration::from_secs(5), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                // remove the floodfill from the set of floodfills since is shouldn't be for
+                // verification
+                let key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                match message.message_type {
+                    MessageType::DatabaseStore => {
+                        let DatabaseStore { .. } =
+                            DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // read first database lookup and send database search reply
+        match tokio::time::timeout(Duration::from_secs(12), tm_rx.recv())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            TunnelMessage::RouterDeliveryViaRoute {
+                outbound_tunnel: None,
+                router_id,
+                message,
+            } => {
+                let message = Message::parse_standard(&message).unwrap();
+                assert_eq!(message.message_type, MessageType::Garlic);
+
+                let static_key = floodfills.get(&router_id).unwrap();
+                assert!(lookup_floodfills.remove(&router_id).is_some());
+
+                let mut garlic = GarlicHandler::<MockRuntime>::new(
+                    NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                    MockRuntime::register_metrics(vec![], None),
+                );
+                let GarlicDeliveryInstructions::Local { message } = garlic
+                    .handle_message(message)
+                    .unwrap()
+                    .filter(|message| {
+                        std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                    })
+                    .collect::<VecDeque<_>>()
+                    .pop_front()
+                    .expect("to exist")
+                else {
+                    panic!("invalid type");
+                };
+
+                // ensure that database lookup was receveid but don't respond to it
+                match message.message_type {
+                    MessageType::DatabaseLookup => {
+                        let DatabaseLookup {
+                            key: lookup_key, ..
+                        } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                        assert_eq!(key.as_ref(), &lookup_key);
+
+                        // send database search reply with random routers but don't add them to
+                        // profile storage meaning `LeaseSetPublishe` must issue RI lookups for
+                        // these floodfills
+                        let floodfills = (0..3)
+                            .map(|_| {
+                                let (floodfill, static_key, _) =
+                                    RouterInfoBuilder::default().as_floodfill().build();
+                                let router_id = floodfill.identity.id();
+                                new_floodfills.insert(router_id.clone(), (floodfill, static_key));
+
+                                router_id
+                            })
+                            .collect();
+
+                        manager.register_database_search_reply(lookup_key, floodfills);
+                    }
+                    _ => panic!("invalid message type"),
+                }
+            }
+            _ => panic!("unexpected tunnel message"),
+        }
+
+        // keep reading DBLs and respond to router queries with the router info
+        loop {
+            tokio::select! {
+                event = tm_rx.recv() => match event.unwrap() {
+                    TunnelMessage::RouterDeliveryViaRoute {
+                        outbound_tunnel: None,
+                        router_id,
+                        message,
+                    } => {
+                        let message = Message::parse_standard(&message).unwrap();
+                        assert_eq!(message.message_type, MessageType::Garlic);
+
+                        let static_key = floodfills.get(&router_id).unwrap();
+
+                        let mut garlic = GarlicHandler::<MockRuntime>::new(
+                            NoiseContext::new(static_key.clone(), Bytes::from(router_id.to_vec())),
+                            MockRuntime::register_metrics(vec![], None),
+                        );
+                        let GarlicDeliveryInstructions::Local { message } = garlic
+                            .handle_message(message)
+                            .unwrap()
+                            .filter(|message| {
+                                std::matches!(message, GarlicDeliveryInstructions::Local { .. })
+                            })
+                            .collect::<VecDeque<_>>()
+                            .pop_front()
+                            .expect("to exist")
+                        else {
+                            panic!("invalid type");
+                        };
+
+                        // ensure that database lookup was receveid but don't respond to it
+                        match message.message_type {
+                            MessageType::DatabaseLookup => {
+                                let DatabaseLookup {
+                                    key: lookup_key,
+                                    lookup,
+                                    ..
+                                } = DatabaseLookup::parse(&message.payload).unwrap();
+
+                                assert_eq!(lookup, LookupType::LeaseSet);
+                                assert_eq!(key.as_ref(), &lookup_key);
+                                assert!(lookup_floodfills.remove(&router_id).is_some());
+                            }
+                            MessageType::DatabaseStore => {
+                                assert!(lookup_floodfills.is_empty());
+                                break;
+                            }
+                            _ => panic!("invalid message type"),
+                        }
+                    }
+                    _ => panic!("unexpected tunnel message"),
+                },
+                event = netdb_rx.recv() => match event.unwrap() {
+                    NetDbAction::QueryRouterInfo { router_id, tx } => {
+                        let _ = new_floodfills.remove(&router_id);
+                        let sleep = Duration::from_secs((new_floodfills.len() + 1) as u64 * 2);
+
+                        tokio::spawn(async move {
+                            tokio::time::sleep(sleep).await;
+                            tx.send(Err(QueryError::Timeout)).unwrap();
+                        });
+                    }
+                    _ => panic!("unexpected netdb action"),
+                },
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    panic!("unexpected timeout");
+                }
             }
         }
     }

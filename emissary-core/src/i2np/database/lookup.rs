@@ -44,7 +44,7 @@ pub enum LookupType {
     Normal,
 
     /// Lease set lookup.
-    Leaseset,
+    LeaseSet,
 
     /// Router lookup.
     Router,
@@ -58,7 +58,7 @@ impl LookupType {
     fn from_u8(lookup_type: u8) -> Option<Self> {
         match (lookup_type >> 2) & 0x3 {
             0x00 => Some(Self::Normal),
-            0x01 => Some(Self::Leaseset),
+            0x01 => Some(Self::LeaseSet),
             0x02 => Some(Self::Router),
             0x03 => Some(Self::Exploration),
             lookup_type => {
@@ -77,7 +77,7 @@ impl LookupType {
     fn as_u8(self) -> u8 {
         match self {
             Self::Normal => 0x00 << 2,
-            Self::Leaseset => 0x01 << 2,
+            Self::LeaseSet => 0x01 << 2,
             Self::Router => 0x02 << 2,
             Self::Exploration => 0x03 << 2,
         }
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn leaseset_lookup() {
-        let message = DatabaseLookupBuilder::new(Bytes::from(vec![2u8; 32]), LookupType::Leaseset)
+        let message = DatabaseLookupBuilder::new(Bytes::from(vec![2u8; 32]), LookupType::LeaseSet)
             .with_reply_type(ReplyType::Tunnel {
                 router_id: RouterId::from(vec![1u8; 32]),
                 tunnel_id: TunnelId::from(1337u32),
@@ -338,7 +338,7 @@ mod tests {
             .build();
 
         let message = DatabaseLookup::parse(&message).unwrap();
-        assert_eq!(message.lookup, LookupType::Leaseset);
+        assert_eq!(message.lookup, LookupType::LeaseSet);
         assert_eq!(message.key, vec![2u8; 32]);
 
         match message.reply {

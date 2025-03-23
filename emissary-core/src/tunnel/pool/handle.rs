@@ -170,7 +170,7 @@ pub struct TunnelSender<'a> {
     tx: &'a mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
 }
 
-impl<'a> TunnelSender<'a> {
+impl TunnelSender<'_> {
     /// Send message to router identified by `router_id`.
     pub fn router_delivery(mut self, router_id: RouterId) -> Self {
         self.kind = Some(DeliveryKind::RouterDelivery { router_id });

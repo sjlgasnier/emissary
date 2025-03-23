@@ -139,14 +139,14 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
-    /// Send `DatabaseLookup` for a `RouterInf` identified by `router_id`.
+    /// Send `DatabaseLookup` for a `RouterInfo` identified by `router_id`.
     ///
     /// On success returns a `oneshot::Receiver` the caller must poll for a reply poll for a reply.
-    /// If the query succeeded, `RouterInfo` is returned and if ti failed, `QueryError` is returned.
+    /// If the query succeeded, `RouterInfo` is returned and if it failed, `QueryError` is returned.
     ///
     /// If the channel towards `NetDb` is full, `ChannelError::Full` is returned and the caller must
     /// retry later.
-    pub fn query_router_info(
+    pub fn try_query_router_info(
         &self,
         router_id: RouterId,
     ) -> Result<oneshot::Receiver<Result<(), QueryError>>, ChannelError> {
@@ -156,6 +156,25 @@ impl NetDbHandle {
             .try_send(NetDbAction::QueryRouterInfo { router_id, tx })
             .map(|_| rx)
             .map_err(From::from)
+    }
+
+    /// Send `DatabaseLookup` for a `RouterInfo` identified by `router_id`.
+    ///
+    /// On success returns a `oneshot::Receiver` the caller must poll for a reply poll for a reply.
+    /// If the query succeeded, `RouterInfo` is returned and if it failed, `QueryError` is returned.
+    ///
+    /// Panics if `NetDb` has shutdown and is unable to process the request.
+    pub async fn query_router_info(
+        &self,
+        router_id: RouterId,
+    ) -> oneshot::Receiver<Result<(), QueryError>> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx
+            .send(NetDbAction::QueryRouterInfo { router_id, tx })
+            .await
+            .map(|_| rx)
+            .expect("netdb to be active")
     }
 
     /// Get `RouterId`'s and encryption public keys of the floodfills closest to `key`.
@@ -209,12 +228,7 @@ impl NetDbHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        crypto::SigningPrivateKey,
-        primitives::{RouterInfo, RouterInfoBuilder},
-        runtime::{mock::MockRuntime, Runtime},
-    };
-    use rand_core::RngCore;
+    use crate::primitives::{RouterInfo, RouterInfoBuilder};
 
     #[test]
     fn send_leaseset_query() {
@@ -237,7 +251,7 @@ mod tests {
         let handle = NetDbHandle::new(tx);
         let remote = RouterId::random();
 
-        assert!(handle.query_router_info(remote.clone()).is_ok());
+        assert!(handle.try_query_router_info(remote.clone()).is_ok());
 
         match rx.try_recv() {
             Ok(NetDbAction::QueryRouterInfo { router_id, .. }) => {
