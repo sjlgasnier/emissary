@@ -142,7 +142,7 @@ impl fmt::Display for I2cpError {
 }
 
 /// Query error.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum QueryError {
     /// No floodfills.
     NoFloodfills,

@@ -1900,7 +1900,7 @@ mod tests {
         i2np::database::lookup::DatabaseLookupBuilder,
         primitives::{
             Capabilities, Date, Destination, DestinationId, Lease, LeaseSet2Header, RouterAddress,
-            RouterIdentity, RouterInfo, Str, TransportKind, TunnelId,
+            RouterIdentity, RouterInfo, RouterInfoBuilder, Str, TransportKind, TunnelId,
         },
         runtime::mock::MockRuntime,
         subsystem::{InnerSubsystemEvent, SubsystemCommand},
@@ -1918,7 +1918,7 @@ mod tests {
         // add few floodfills to router storage
         let mut floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -1926,21 +1926,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2045,7 +2031,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2053,21 +2039,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2155,7 +2127,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2163,21 +2135,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2267,7 +2225,7 @@ mod tests {
         // add few floodfills to router storage
         let mut floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2275,21 +2233,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2583,7 +2527,7 @@ mod tests {
         // add few floodfills to router storage
         let mut floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2591,21 +2535,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2706,7 +2636,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2714,21 +2644,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2808,7 +2724,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2816,21 +2732,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -2940,7 +2842,7 @@ mod tests {
         // add few floodfills to router storage
         let floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -2948,21 +2850,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -3048,7 +2936,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -3056,21 +2944,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -3178,7 +3052,7 @@ mod tests {
         // add few floodfills to router storage
         let floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -3186,21 +3060,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -3265,7 +3125,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -3273,21 +3133,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
@@ -3360,7 +3206,7 @@ mod tests {
         // add few floodfills to router storage
         let mut floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -3368,21 +3214,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -3633,7 +3465,7 @@ mod tests {
         // add few floodfills to router storage
         let mut floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
 
                 storage.add_router(info);
@@ -3642,21 +3474,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -3897,7 +3715,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -3905,21 +3723,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -3998,7 +3802,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -4006,21 +3810,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -4103,7 +3893,7 @@ mod tests {
         // add few floodfills to router storage
         let _floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -4111,21 +3901,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -4205,7 +3981,7 @@ mod tests {
         // add few floodfills to router storage
         let mut floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -4213,21 +3989,7 @@ mod tests {
             })
             .collect::<VecDeque<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
@@ -4385,7 +4147,7 @@ mod tests {
         // add few floodfills to router storage
         let floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -4393,21 +4155,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
@@ -4499,7 +4247,7 @@ mod tests {
         // add few floodfills to router storage
         let floodfills = (0..3)
             .map(|_| {
-                let info = RouterInfo::floodfill::<MockRuntime>();
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
                 let id = info.identity.id();
                 storage.add_router(info);
 
@@ -4507,21 +4255,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
 
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_msg_tx, msg_rx) = channel(64);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(

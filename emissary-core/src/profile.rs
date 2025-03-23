@@ -636,13 +636,13 @@ impl<R: Runtime> ProfileStorage<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{crypto::base64_encode, runtime::mock::MockRuntime};
+    use crate::{crypto::base64_encode, primitives::RouterInfoBuilder, runtime::mock::MockRuntime};
 
     #[test]
     fn initialize_with_infos_without_profiles() {
         let (_, infos): (Vec<_>, Vec<_>) = (0..5)
             .map(|_| {
-                let (info, _, sgn_key) = RouterInfo::random_with_keys::<MockRuntime>();
+                let (info, _, sgn_key) = RouterInfoBuilder::default().build();
                 let router_id = info.identity.id();
 
                 (router_id, info.serialize(&sgn_key))
@@ -665,7 +665,7 @@ mod tests {
     fn initialize_with_infos_and_profiles() {
         let (router_ids, infos): (Vec<_>, Vec<_>) = (0..5)
             .map(|_| {
-                let (info, _, sgn_key) = RouterInfo::random_with_keys::<MockRuntime>();
+                let (info, _, sgn_key) = RouterInfoBuilder::default().build();
                 let router_id = info.identity.id();
 
                 (router_id, info.serialize(&sgn_key))

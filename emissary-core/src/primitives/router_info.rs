@@ -390,162 +390,66 @@ impl RouterInfo {
 }
 
 #[cfg(test)]
-impl RouterInfo {
-    /// Create new random [`RouterInfo`].
-    pub fn random<R: crate::runtime::Runtime>() -> Self {
-        use rand_core::RngCore;
+#[derive(Default)]
+pub struct RouterInfoBuilder {
+    floodfill: bool,
+    static_key: Option<Vec<u8>>,
+    signing_key: Option<Vec<u8>>,
+    ntcp2: Option<crate::Ntcp2Config>,
+    ssu2: Option<crate::Ssu2Config>,
+}
 
-        let static_key = {
-            let mut key_bytes = vec![0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-
-        let signing_key = {
-            let mut key_bytes = vec![0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-
-        Self::from_keys::<R>(static_key, signing_key)
+#[cfg(test)]
+impl RouterInfoBuilder {
+    /// Mark the router as floodfill
+    pub fn as_floodfill(mut self) -> Self {
+        self.floodfill = true;
+        self
     }
 
-    /// Create new random [`RouterInfo`] and serialize it.
-    pub fn random_with_keys<R: crate::runtime::Runtime>(
-    ) -> (Self, crate::crypto::StaticPrivateKey, SigningPrivateKey) {
-        use rand_core::RngCore;
-
-        let raw_static_key = {
-            let mut key_bytes = vec![0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-        let static_key = crate::crypto::StaticPrivateKey::from_bytes(&raw_static_key).unwrap();
-
-        let raw_signing_key = {
-            let mut key_bytes = vec![0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-        let signing_key = SigningPrivateKey::from_bytes(&raw_signing_key).unwrap();
-
-        (
-            Self::from_keys::<R>(raw_static_key, raw_signing_key),
-            static_key,
-            signing_key,
-        )
+    /// Specify static key.
+    pub fn with_static_key(mut self, static_key: Vec<u8>) -> Self {
+        self.static_key = Some(static_key);
+        self
     }
 
-    /// Create new random [`RouterInfo`] for a floodfill router.
-    pub fn floodfill<R: crate::runtime::Runtime>() -> Self {
-        use rand_core::RngCore;
-
-        let static_key = {
-            let mut key_bytes = vec![0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-
-        let signing_key = {
-            let mut key_bytes = vec![0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-
-        let mut info = Self::from_keys::<R>(static_key, signing_key);
-        info.options.insert(Str::from("caps"), Str::from("XfR"));
-        info.options.insert(Str::from("netId"), Str::from("2"));
-        info.capabilities = Capabilities::parse(&Str::from("XfR")).expect("to succeed");
-
-        info
+    /// Specify signing key.
+    pub fn with_signing_key(mut self, signing_key: Vec<u8>) -> Self {
+        self.signing_key = Some(signing_key);
+        self
     }
 
-    /// Create new random [`RouterInfo`] from static and signing keys.
-    pub fn from_keys<R: crate::runtime::Runtime>(
-        static_key: Vec<u8>,
-        signing_key: Vec<u8>,
-    ) -> Self {
-        use rand_core::RngCore;
-
-        let static_key = StaticPrivateKey::from_bytes(&static_key).unwrap();
-        let signing_key = SigningPrivateKey::from_bytes(&signing_key).unwrap();
-        let identity =
-            RouterIdentity::from_keys::<R>(&static_key, &signing_key).expect("to succeed");
-
-        let ntcp2_port = R::rng().next_u32() as u16;
-        let ntcp2_host = format!(
-            "{}.{}.{}.{}",
-            {
-                loop {
-                    let address = R::rng().next_u32() % 256;
-
-                    if address != 0 {
-                        break address;
-                    }
-                }
-            },
-            R::rng().next_u32() % 256,
-            R::rng().next_u32() % 256,
-            R::rng().next_u32() % 256,
-        );
-        let ntcp2_key = {
-            let mut key_bytes = [0u8; 32];
-            R::rng().fill_bytes(&mut key_bytes);
-
-            key_bytes
-        };
-        let ntcp2_iv = {
-            let mut iv_bytes = [0u8; 16];
-            R::rng().fill_bytes(&mut iv_bytes);
-
-            iv_bytes
-        };
-
-        let ntcp2 = RouterAddress::new_published_ntcp2(
-            ntcp2_key,
-            ntcp2_iv,
-            ntcp2_port,
-            ntcp2_host.parse().unwrap(),
-        );
-        let net_id = Mapping::new(Str::from("netId"), Str::from("2"));
-        let caps = Mapping::new(Str::from("caps"), Str::from("L"));
-        let router_version = Mapping::new(Str::from("router.version"), Str::from("0.9.62"));
-        let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
-
-        RouterInfo {
-            addresses: HashMap::from_iter([(TransportKind::Ntcp2, ntcp2)]),
-            capabilities: Capabilities::parse(&Str::from("L")).expect("to succeed"),
-            identity,
-            net_id: 2,
-            options,
-            published: Date::new(R::rng().next_u64()),
-        }
+    /// Specify NTCP configuration.
+    pub fn with_ntcp2(mut self, ntcp2: crate::Ntcp2Config) -> Self {
+        self.ntcp2 = Some(ntcp2);
+        self
     }
 
-    pub fn from_keys_and_transports<R: crate::runtime::Runtime>(
-        static_key: Vec<u8>,
-        signing_key: Vec<u8>,
-        ntcp2: Option<crate::Ntcp2Config>,
-        ssu2: Option<crate::Ssu2Config>,
-    ) -> Self {
+    /// Specify SSU2 configuration.
+    pub fn with_ssu2(mut self, ssu2: crate::Ssu2Config) -> Self {
+        self.ssu2 = Some(ssu2);
+        self
+    }
+
+    /// Build [`RouterInfoBuilder`] into a [`RouterInfo].
+    pub fn build(&mut self) -> (RouterInfo, StaticPrivateKey, SigningPrivateKey) {
+        use crate::{runtime::mock::MockRuntime, Ntcp2Config, Ssu2Config};
         use rand_core::RngCore;
 
-        assert!(ntcp2.is_some() || ssu2.is_some());
+        let static_key = match self.static_key.take() {
+            Some(key) => StaticPrivateKey::from_bytes(&key).unwrap(),
+            None => StaticPrivateKey::random(rand::thread_rng()),
+        };
+        let signing_key = match self.signing_key.take() {
+            Some(key) => SigningPrivateKey::from_bytes(&key).unwrap(),
+            None => SigningPrivateKey::random(rand::thread_rng()),
+        };
+        let identity = RouterIdentity::from_keys::<MockRuntime>(&static_key, &signing_key)
+            .expect("to succeed");
 
-        let static_key = StaticPrivateKey::from_bytes(&static_key).unwrap();
-        let signing_key = SigningPrivateKey::from_bytes(&signing_key).unwrap();
-        let identity =
-            RouterIdentity::from_keys::<R>(&static_key, &signing_key).expect("to succeed");
-
-        let ntcp2 = match ntcp2 {
+        let mut ntcp2 = match self.ntcp2.take() {
             None => None,
-            Some(crate::Ntcp2Config {
+            Some(Ntcp2Config {
                 port,
                 host,
                 publish,
@@ -556,9 +460,9 @@ impl RouterInfo {
                 (_, _) => Some(RouterAddress::new_unpublished_ntcp2(key, port)),
             },
         };
-        let ssu2 = match ssu2 {
+        let mut ssu2 = match self.ssu2.take() {
             None => None,
-            Some(crate::Ssu2Config {
+            Some(Ssu2Config {
                 port,
                 host,
                 publish,
@@ -573,28 +477,81 @@ impl RouterInfo {
                 )),
             },
         };
-        let net_id = Mapping::new(Str::from("netId"), Str::from("2"));
-        let caps = Mapping::new(Str::from("caps"), Str::from("L"));
-        let router_version = Mapping::new(Str::from("router.version"), Str::from("0.9.62"));
-        let options = Mapping::into_hashmap(vec![net_id, caps, router_version]);
+
+        // create default ntcp2 transport if neither transport was explicitly enabled
+        if ntcp2.is_none() && ssu2.is_none() {
+            let ntcp2_port = MockRuntime::rng().next_u32() as u16;
+            let ntcp2_host = format!(
+                "{}.{}.{}.{}",
+                {
+                    loop {
+                        let address = MockRuntime::rng().next_u32() % 256;
+
+                        if address != 0 {
+                            break address;
+                        }
+                    }
+                },
+                MockRuntime::rng().next_u32() % 256,
+                MockRuntime::rng().next_u32() % 256,
+                MockRuntime::rng().next_u32() % 256,
+            );
+            let ntcp2_key = {
+                let mut key_bytes = [0u8; 32];
+                MockRuntime::rng().fill_bytes(&mut key_bytes);
+
+                key_bytes
+            };
+            let ntcp2_iv = {
+                let mut iv_bytes = [0u8; 16];
+                MockRuntime::rng().fill_bytes(&mut iv_bytes);
+
+                iv_bytes
+            };
+
+            ntcp2 = Some(RouterAddress::new_published_ntcp2(
+                ntcp2_key,
+                ntcp2_iv,
+                ntcp2_port,
+                ntcp2_host.parse().unwrap(),
+            ));
+        }
+
+        let mut options = Mapping::into_hashmap(vec![
+            Mapping::new(Str::from("netId"), Str::from("2")),
+            Mapping::new(Str::from("router.version"), Str::from("0.9.62")),
+        ]);
+
+        let capabilities = if self.floodfill {
+            options.insert(Str::from("caps"), Str::from("XfR"));
+            Capabilities::parse(&Str::from("XfR")).expect("to succeed")
+        } else {
+            options.insert(Str::from("caps"), Str::from("L"));
+            Capabilities::parse(&Str::from("L")).expect("to succeed")
+        };
+
         let mut addresses = HashMap::<TransportKind, RouterAddress>::new();
 
-        if let Some(ntcp2) = ntcp2 {
+        if let Some(ntcp2) = ntcp2.take() {
             addresses.insert(TransportKind::Ntcp2, ntcp2);
         }
 
-        if let Some(ssu2) = ssu2 {
+        if let Some(ssu2) = ssu2.take() {
             addresses.insert(TransportKind::Ssu2, ssu2);
         }
 
-        RouterInfo {
-            addresses,
-            capabilities: Capabilities::parse(&Str::from("L")).expect("to succeed"),
-            identity,
-            net_id: 2,
-            options,
-            published: Date::new(R::rng().next_u64()),
-        }
+        (
+            RouterInfo {
+                addresses,
+                capabilities,
+                identity,
+                net_id: 2,
+                options,
+                published: Date::new(MockRuntime::rng().next_u64()),
+            },
+            static_key,
+            signing_key,
+        )
     }
 }
 

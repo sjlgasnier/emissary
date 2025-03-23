@@ -20,7 +20,7 @@ use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey, StaticPublicKey},
     events::EventManager,
     i2np::{tunnel::gateway, Message, MessageType},
-    primitives::{Capabilities, MessageId, RouterId, RouterInfo, Str, TunnelId},
+    primitives::{Capabilities, MessageId, RouterId, RouterInfo, RouterInfoBuilder, Str, TunnelId},
     profile::ProfileStorage,
     router::context::RouterContext,
     runtime::{mock::MockRuntime, Runtime},
@@ -62,16 +62,7 @@ pub fn make_router(
     NoiseContext,
     RouterInfo,
 ) {
-    let mut static_key_bytes = vec![0u8; 32];
-    let mut signing_key_bytes = vec![0u8; 32];
-
-    MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-    MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-    let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-    let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-    let mut router_info = RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+    let (mut router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
     if fast {
         router_info.capabilities = Capabilities::parse(&Str::from("XR")).expect("to succeed");
     }

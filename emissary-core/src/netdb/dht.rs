@@ -186,14 +186,13 @@ impl<R: Runtime> Dht<R> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::{base32_decode, base64_decode, SigningPrivateKey, StaticPrivateKey},
+        crypto::{base32_decode, base64_decode},
         events::EventManager,
-        primitives::RouterInfo,
+        primitives::RouterInfoBuilder,
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
     };
     use bytes::Bytes;
-    use rand_core::RngCore;
 
     #[tokio::test]
     async fn lookup() {
@@ -214,21 +213,7 @@ mod tests {
             RouterId::from(&base64_decode("QVGqliH7Pdye7P7UAtM~fKQIfjKOzKbMVvhdKVSGlQ8=").unwrap()),
             RouterId::from(&base64_decode("x4Q9dpbvHfyUuIhK9xDiy1XL9lvrpe9Kmmy9Gg~wFeQ=").unwrap()),
         ]);
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let mut dht = Dht::<MockRuntime>::new(
             router_info.identity.id(),

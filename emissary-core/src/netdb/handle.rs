@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::SigningPrivateKey,
-        primitives::RouterInfo,
+        primitives::{RouterInfo, RouterInfoBuilder},
         runtime::{mock::MockRuntime, Runtime},
     };
     use rand_core::RngCore;
@@ -252,16 +252,7 @@ mod tests {
         let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
         let (router_id, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+            let (router_info, _, signing_key) = RouterInfoBuilder::default().build();
             let router_id = router_info.identity.id();
 
             (router_id, Bytes::from(router_info.serialize(&signing_key)))

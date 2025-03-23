@@ -29,6 +29,9 @@ pub use router_identity::{RouterId, RouterIdentity};
 pub use router_info::RouterInfo;
 pub use string::Str;
 
+#[cfg(test)]
+pub use router_info::RouterInfoBuilder;
+
 mod capabilities;
 mod date;
 mod destination;

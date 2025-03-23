@@ -981,38 +981,30 @@ impl<R: Runtime> Future for TransportManager<R> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::{SigningPrivateKey, StaticPrivateKey},
         events::EventManager,
         netdb::NetDbAction,
-        primitives::{Capabilities, Str},
+        primitives::{Capabilities, RouterInfoBuilder, Str},
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
     };
-    use rand_core::RngCore;
     use tokio::sync::mpsc;
 
     fn make_transport_manager(
         ntcp2: Option<Ntcp2Config>,
         ssu2: Option<Ssu2Config>,
     ) -> TransportManagerBuilder<MockRuntime> {
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
+        let (router_info, static_key, signing_key) = {
+            let mut builder = RouterInfoBuilder::default();
 
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
+            if let Some(ntcp2) = ntcp2 {
+                builder = builder.with_ntcp2(ntcp2);
+            }
 
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
+            if let Some(ssu2) = ssu2 {
+                builder = builder.with_ssu2(ssu2);
+            }
 
-            let router_info = RouterInfo::from_keys_and_transports::<MockRuntime>(
-                static_key_bytes,
-                signing_key_bytes,
-                ntcp2,
-                ssu2,
-            );
-
-            (static_key, signing_key, router_info)
+            builder.build()
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (handle, _) = NetDbHandle::create();
@@ -1439,21 +1431,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_connection_rejected_connection_already_exists() {
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (handle, _) = NetDbHandle::create();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
@@ -1563,21 +1541,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_connection_rejected_outbound_pending() {
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
@@ -1593,7 +1557,7 @@ mod tests {
             event_handle.clone(),
         );
 
-        let router = RouterInfo::random::<MockRuntime>();
+        let router = RouterInfoBuilder::default().build().0;
         let router_id = router.identity.id();
         storage.add_router(router);
 
@@ -1708,21 +1672,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_connection_rejected_while_netdb_lookup_pending() {
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
@@ -1851,21 +1801,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_shutting_down() {
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
@@ -1921,21 +1857,7 @@ mod tests {
 
     #[tokio::test]
     async fn transit_tunnels_disabled() {
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
         let (handle, _netdb_rx) = NetDbHandle::create();

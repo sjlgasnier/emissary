@@ -1464,11 +1464,10 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::{SigningPrivateKey, StaticPrivateKey},
         error::RoutingError,
         events::EventManager,
         i2np::Message,
-        primitives::{RouterId, RouterInfo},
+        primitives::{RouterId, RouterInfoBuilder},
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
         tunnel::{
@@ -1501,21 +1500,7 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
@@ -1606,21 +1591,7 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -1707,21 +1678,7 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -1825,21 +1782,7 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -1944,21 +1887,7 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -2251,21 +2180,7 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -2560,21 +2475,7 @@ mod tests {
             num_outbound_hops: 3usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -2671,21 +2572,7 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, transit_rx) = mpsc::channel(64);
@@ -2791,21 +2678,7 @@ mod tests {
             num_outbound_hops: 2usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -3029,21 +2902,7 @@ mod tests {
             num_outbound_hops: 2usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
@@ -3203,21 +3062,7 @@ mod tests {
             num_outbound_hops: 0usize,
             ..Default::default()
         };
-        let (static_key, signing_key, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let static_key = StaticPrivateKey::from_bytes(&static_key_bytes).unwrap();
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
-
-            (static_key, signing_key, router_info)
-        };
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let handle = MockRuntime::register_metrics(Vec::new(), None);
         let (manager_tx, manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);

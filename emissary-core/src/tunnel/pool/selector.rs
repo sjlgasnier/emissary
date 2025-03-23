@@ -798,7 +798,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
 mod tests {
     use super::*;
     use crate::{
-        primitives::{Capabilities, RouterAddress, RouterInfo, Str},
+        primitives::{Capabilities, RouterAddress, RouterInfoBuilder, Str},
         runtime::mock::MockRuntime,
         tunnel::pool::TunnelPoolBuildParameters,
     };
@@ -810,7 +810,7 @@ mod tests {
 
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -831,7 +831,7 @@ mod tests {
 
         for _ in 0..10 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -868,7 +868,7 @@ mod tests {
 
         for i in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -885,7 +885,7 @@ mod tests {
 
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -934,7 +934,7 @@ mod tests {
 
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("X")).unwrap();
                 info
             });
@@ -958,7 +958,7 @@ mod tests {
 
         for _ in 0..10 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("OR")).unwrap();
                 info
             });
@@ -998,7 +998,7 @@ mod tests {
 
         for _ in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -1006,7 +1006,7 @@ mod tests {
 
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XRf")).unwrap();
                 info
             });
@@ -1048,7 +1048,7 @@ mod tests {
         // 5 addresses from 192.168.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1066,7 +1066,7 @@ mod tests {
         // 5 addresses from 172.20.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1101,7 +1101,7 @@ mod tests {
         // 5 addresses from 192.168.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1119,7 +1119,7 @@ mod tests {
         // 5 addresses from 172.20.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1155,7 +1155,7 @@ mod tests {
         // 5 unreachable standard routers
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LU")).unwrap();
                 info.addresses.insert(
                     TransportKind::Ntcp2,
@@ -1168,7 +1168,7 @@ mod tests {
         // 3 reachable fast routers
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("OR")).unwrap();
                 info
             });
@@ -1193,7 +1193,7 @@ mod tests {
         // 3 reachable standard routers
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -1202,7 +1202,7 @@ mod tests {
         // 5 unreachable fast routers
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("OU")).unwrap();
                 info.addresses.insert(
                     TransportKind::Ntcp2,
@@ -1232,7 +1232,7 @@ mod tests {
         // 5 addresses from 192.168.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1250,7 +1250,7 @@ mod tests {
         // 5 addresses from 172.20.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1289,7 +1289,7 @@ mod tests {
         // 5 addresses from 192.168.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1307,7 +1307,7 @@ mod tests {
         // 5 addresses from 172.20.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1347,7 +1347,7 @@ mod tests {
         // 5 addresses from 192.168.x.x subnet
         for i in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1365,7 +1365,7 @@ mod tests {
         // 5 addresses from 172.20.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1428,7 +1428,7 @@ mod tests {
         // 5 addresses from 192.168.x.x subnet
         for i in 0..5 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1446,7 +1446,7 @@ mod tests {
         // 5 addresses from 172.20.x.x subnet
         for i in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XfR")).unwrap();
                 info.addresses = HashMap::from_iter([(
                     TransportKind::Ntcp2,
@@ -1588,7 +1588,7 @@ mod tests {
 
         for _ in 0..6 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -1627,7 +1627,7 @@ mod tests {
 
         for _ in 0..6 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -1665,7 +1665,7 @@ mod tests {
 
         for _ in 0..6 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -1673,7 +1673,7 @@ mod tests {
 
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
                 info
             });
@@ -1740,7 +1740,7 @@ mod tests {
 
         for _ in 0..6 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
                 info
             });
@@ -1782,7 +1782,7 @@ mod tests {
 
         for _ in 0..6 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
                 info
             });
@@ -1823,7 +1823,7 @@ mod tests {
 
         for _ in 0..3 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("LR")).unwrap();
                 info
             });
@@ -1831,7 +1831,7 @@ mod tests {
 
         for _ in 0..6 {
             profile_storage.add_router({
-                let mut info = RouterInfo::random::<MockRuntime>();
+                let mut info = RouterInfoBuilder::default().build().0;
                 info.capabilities = Capabilities::parse(&Str::from("XR")).unwrap();
                 info
             });
