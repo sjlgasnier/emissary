@@ -1287,6 +1287,8 @@ impl<R: Runtime> NetDb<R> {
                         ),
                     }
                 });
+
+                self.active.insert(key.clone(), QueryKind::RouterInfo { query });
             }
             Some(QueryKind::Router) => tracing::debug!(
                 target: LOG_TARGET,
@@ -1716,6 +1718,67 @@ impl<R: Runtime> NetDb<R> {
                     Err(error) => {
                         query.complete(Err(error));
                     }
+                }
+            }
+            QueryKind::RouterInfo { mut query } => {
+                if let Some(floodfill) = query.selected.take() {
+                    self.floodfill_dht.register_lookup_timeout(&floodfill);
+                }
+
+                // attempt to select next floodfill if none is found or the query has expired,
+                // send failure to caller
+                let floodfill = match query
+                    .handle_timeout(&self.floodfill_dht, self.router_ctx.profile_storage())
+                {
+                    Err(error) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            key = %base32_encode(&key),
+                            ?error,
+                            "router info query timed out",
+                        );
+                        query.complete(Err(error));
+                        return;
+                    }
+                    Ok(floodfill) => floodfill,
+                };
+
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    %floodfill,
+                    "send router info query",
+                );
+
+                match self.message_builder.create_router_info_query(key.clone()) {
+                    Ok((message, outbound_tunnel)) => match self
+                        .exploratory_pool_handle
+                        .send_message(message)
+                        .router_delivery(floodfill.clone())
+                        .via_outbound_tunnel(outbound_tunnel)
+                        .try_send()
+                    {
+                        Ok(()) => {
+                            query.queried.insert(floodfill.clone());
+                            query.selected = Some(floodfill);
+
+                            self.active.insert(key.clone(), QueryKind::RouterInfo { query });
+                            self.query_timers.push(async move {
+                                R::delay(QUERY_TIMEOUT).await;
+                                key
+                            });
+                        }
+                        Err(error) => tracing::debug!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to send database lookup message for router info",
+                        ),
+                    },
+                    Err(error) => tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed to database lookup message for router info",
+                    ),
                 }
             }
             kind => tracing::debug!(
