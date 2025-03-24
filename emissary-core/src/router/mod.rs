@@ -24,9 +24,9 @@ use crate::{
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::RouterInfo,
-    profile::{Profile, ProfileStorage},
+    profile::ProfileStorage,
     router::context::RouterContext,
-    runtime::{AddressBook, Runtime},
+    runtime::{AddressBook, Runtime, Storage},
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
@@ -35,16 +35,13 @@ use crate::{
 };
 
 use bytes::Bytes;
-use futures::{future::BoxFuture, FutureExt, Stream};
+use futures::FutureExt;
 use rand_core::RngCore;
 
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::{
+    future::Future,
+    marker::PhantomData,
     net::{Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
@@ -85,22 +82,49 @@ pub struct ProtocolAddressInfo {
     pub ssu2_port: Option<u16>,
 }
 
-/// Events emitted by [`Router`].
-#[derive(Debug)]
-pub enum RouterEvent {
-    /// Router has been shut down.
-    Shutdown,
+/// Router builder.
+#[derive(Default)]
+pub struct RouterBuilder<R> {
+    /// Object providing [`AddressBook`] service for [`Router`], if enabled.
+    address_book: Option<Arc<dyn AddressBook>>,
 
-    /// Save backup of the contents of [`ProfileStorage`].
-    ProfileStorageBackup {
-        /// Backup of [`ProfileStorage`].
-        ///
-        /// First element is serialized [`RouterId`], second element is serialized [`RouterInfo`]
-        /// and the third element is unserialized [`Profile`].
-        ///
-        /// [`RouterInfo`] may be `None` if there has been no chance to it since the last backup.
-        routers: Vec<(String, Option<Vec<u8>>, Profile)>,
-    },
+    /// Router configuration.
+    config: Config,
+
+    /// Object providing storage access for [`Router`], if enabled.
+    storage: Option<Arc<dyn Storage>>,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> RouterBuilder<R> {
+    /// Create new [`RouterBuilder`].
+    pub fn new(config: Config) -> Self {
+        Self {
+            address_book: None,
+            config,
+            storage: None,
+            _runtime: Default::default(),
+        }
+    }
+
+    /// Provide [`AddressBook`] for [`Router`].
+    pub fn with_address_book(mut self, address_book: Arc<dyn AddressBook>) -> Self {
+        self.address_book = Some(address_book);
+        self
+    }
+
+    /// Provide [`StorageHandle`] for [`Router`].
+    pub fn with_storage(mut self, storage: Arc<dyn Storage>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Build [`Router`]
+    pub async fn build(self) -> crate::Result<(Router<R>, EventSubscriber, Vec<u8>)> {
+        Router::new(self.config, self.address_book, self.storage).await
+    }
 }
 
 /// Router.
@@ -110,12 +134,6 @@ pub struct Router<R: Runtime> {
 
     /// Event manager
     event_manager: EventManager<R>,
-
-    /// Profile storage.
-    profile_storage: ProfileStorage<R>,
-
-    /// Profile storage backup timer.
-    profile_storage_backup_timer: BoxFuture<'static, ()>,
 
     /// Shutdown context.
     shutdown_context: ShutdownContext<R>,
@@ -133,24 +151,12 @@ pub struct Router<R: Runtime> {
 }
 
 impl<R: Runtime> Router<R> {
-    /// Create new [`Router`] from `config`
-    pub async fn new(config: Config) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
-        Self::make_router(config, None).await
-    }
-
-    /// Create new [`Router`] from `config` and pass `address_book` to SAM and I2CP.
-    pub async fn with_address_book(
-        config: Config,
-        address_book: Arc<dyn AddressBook>,
-    ) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
-        Self::make_router(config, Some(address_book)).await
-    }
-
     /// Create new [`Router`] from `config` and pass `address_book` to [`SamServer`] and
     /// [`I2cpServer`] if address book support was enabled.
-    async fn make_router(
+    pub async fn new(
         mut config: Config,
         address_book: Option<Arc<dyn AddressBook>>,
+        storage: Option<Arc<dyn Storage>>,
     ) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
         // attempt to initialize the ntcp2 transport from provided config
         //
@@ -366,6 +372,29 @@ impl<R: Runtime> Router<R> {
             R::spawn(sam_server)
         }
 
+        // start profile storage task in the background if it was enabled
+        //
+        // all this task does is periodically backup router infos and profiles to disk
+        if let Some(storage) = storage {
+            R::spawn(async move {
+                loop {
+                    let _ = R::delay(PROFILE_STORAGE_BACKUP_INTERVAL).await;
+
+                    let routers = profile_storage.backup();
+
+                    if !routers.is_empty() {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            num_routers = ?routers.len(),
+                            "taking backup of profile storage",
+                        );
+
+                        storage.save_to_disk(routers);
+                    }
+                }
+            });
+        }
+
         if let Some(context) = ntcp2_context {
             address_info.ntcp2_port = Some(context.port());
             transport_manager_builder.register_ntcp2(context);
@@ -380,8 +409,6 @@ impl<R: Runtime> Router<R> {
             Self {
                 address_info,
                 event_manager,
-                profile_storage,
-                profile_storage_backup_timer: Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL)),
                 shutdown_context,
                 shutdown_count: 0usize,
                 transport_manager: transport_manager_builder.build(),
@@ -432,16 +459,16 @@ impl<R: Runtime> Router<R> {
     }
 }
 
-impl<R: Runtime> Stream for Router<R> {
-    type Item = RouterEvent;
+impl<R: Runtime> Future for Router<R> {
+    type Output = ();
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.shutdown_count >= IMMEDIATE_SHUTDOWN_COUNT {
-            return Poll::Ready(Some(RouterEvent::Shutdown));
+            return Poll::Ready(());
         }
 
         if self.shutdown_context.poll_unpin(cx).is_ready() {
-            return Poll::Ready(Some(RouterEvent::Shutdown));
+            return Poll::Ready(());
         }
 
         if self.event_manager.poll_unpin(cx).is_ready() {
@@ -449,31 +476,12 @@ impl<R: Runtime> Stream for Router<R> {
                 target: LOG_TARGET,
                 "event manager crashed",
             );
-            return Poll::Ready(None);
+            return Poll::Ready(());
         }
 
         match self.transport_manager.poll_unpin(cx) {
             Poll::Pending => {}
-            Poll::Ready(()) => return Poll::Ready(None),
-        }
-
-        if self.profile_storage_backup_timer.poll_unpin(cx).is_ready() {
-            let routers = self.profile_storage.backup();
-
-            if !routers.is_empty() {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    num_routers = ?routers.len(),
-                    "taking backup of profile storage",
-                );
-
-                // reset timer and register it to the executor
-                self.profile_storage_backup_timer =
-                    Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL));
-                let _ = self.profile_storage_backup_timer.poll_unpin(cx);
-
-                return Poll::Ready(Some(RouterEvent::ProfileStorageBackup { routers }));
-            }
+            Poll::Ready(()) => return Poll::Ready(()),
         }
 
         Poll::Pending

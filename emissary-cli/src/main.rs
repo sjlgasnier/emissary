@@ -24,22 +24,18 @@ use crate::{
     port_mapper::PortMapper,
     proxy::http::HttpProxy,
     signal::SignalHandler,
-    storage::Storage,
+    storage::RouterStorage,
     tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
 };
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::{
-    events::EventSubscriber,
-    router::{Router, RouterEvent},
-    runtime::Runtime as _,
-};
+use emissary_core::{events::EventSubscriber, router::Router};
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
 use futures::{channel::oneshot, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver};
 
-use std::{fs::File, io::Write, mem};
+use std::{fs::File, io::Write, mem, sync::Arc};
 
 mod address_book;
 mod cli;
@@ -75,9 +71,6 @@ struct RouterContext {
     /// Port mapper for NAT-PMP and UPnP.
     port_mapper: PortMapper,
 
-    /// Router info/profile storage handle
-    storage: Storage,
-
     /// Signal handler for `SIGINT`.
     signal_handler: SignalHandler,
 
@@ -104,7 +97,7 @@ async fn setup_router() -> anyhow::Result<RouterContext> {
 
         error
     })?;
-    let storage = Storage::new(config.base_path.clone());
+    let storage = RouterStorage::new(config.base_path.clone());
 
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
@@ -182,7 +175,7 @@ async fn setup_router() -> anyhow::Result<RouterContext> {
 
     let (router, events, local_router_info, address_book_manager) =
         match config.address_book.take() {
-            None => Router::<Runtime>::new(config.into())
+            None => Router::<Runtime>::new(config.into(), None, Some(Arc::new(storage)))
                 .await
                 .map(|(router, event_subscriber, info)| (router, event_subscriber, info, None)),
 
@@ -192,11 +185,15 @@ async fn setup_router() -> anyhow::Result<RouterContext> {
                     AddressBookManager::new(config.base_path.clone(), address_book_config);
                 let address_book_handle = address_book_manager.handle();
 
-                Router::<Runtime>::with_address_book(config.into(), address_book_handle)
-                    .await
-                    .map(|(router, event_subscriber, info)| {
-                        (router, event_subscriber, info, Some(address_book_manager))
-                    })
+                Router::<Runtime>::new(
+                    config.into(),
+                    Some(address_book_handle),
+                    Some(Arc::new(storage)),
+                )
+                .await
+                .map(|(router, event_subscriber, info)| {
+                    (router, event_subscriber, info, Some(address_book_manager))
+                })
             }
         }
         .map_err(|error| anyhow!(error))?;
@@ -267,7 +264,6 @@ async fn setup_router() -> anyhow::Result<RouterContext> {
         router,
         events,
         port_mapper,
-        storage,
         signal_handler,
         router_ui_config,
     })
@@ -283,7 +279,6 @@ async fn setup_router() -> anyhow::Result<RouterContext> {
 async fn router_event_loop(
     mut router: Router<Runtime>,
     mut port_mapper: PortMapper,
-    storage: Storage,
     mut handler: SignalHandler,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -301,52 +296,12 @@ async fn router_event_loop(
                 // the value must exist since the stream never terminates
                 router.add_external_address(address.expect("value"));
             },
-            event = router.next() => match event {
-                None => break,
-                Some(RouterEvent::Shutdown) => {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        "emissary shut down",
-                    );
-                    break;
-                }
-                Some(RouterEvent::ProfileStorageBackup { routers }) => {
-                    let storage_handle = storage.clone();
-
-                    tokio::task::spawn_blocking(move || {
-                        for (router_id, router_info, profile) in routers {
-                            if let Err(error) = storage_handle.store_profile(router_id.clone(), profile) {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?router_id,
-                                    ?error,
-                                    "failed to store router profile to disk",
-                                );
-                            }
-
-                            let Some(router_info) = router_info else {
-                                continue;
-                            };
-
-                            match Runtime::gzip_decompress(router_info) {
-                                Some(router_info) =>
-                                    if let Err(error) = storage_handle.store_router_info(router_id.clone(), router_info) {
-                                        tracing::warn!(
-                                            target: LOG_TARGET,
-                                            ?router_id,
-                                            ?error,
-                                            "failed to store router info to disk",
-                                        );
-                                    },
-                                None => tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?router_id,
-                                    "failed to decompress router info",
-                                ),
-                            }
-                        }
-                    });
-                }
+            _ = &mut router => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "emissary shut down",
+                );
+                break;
             }
         }
     }
@@ -360,14 +315,12 @@ fn main() -> anyhow::Result<()> {
         port_mapper,
         router,
         signal_handler,
-        storage,
         ..
     } = runtime.block_on(setup_router())?;
 
     runtime.block_on(router_event_loop(
         router,
         port_mapper,
-        storage,
         signal_handler,
         shutdown_rx,
     ));
@@ -382,7 +335,6 @@ fn main() -> anyhow::Result<()> {
     let RouterContext {
         router,
         port_mapper,
-        storage,
         signal_handler,
         events,
         router_ui_config,
@@ -393,7 +345,6 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(router_event_loop(
                 router,
                 port_mapper,
-                storage,
                 signal_handler,
                 shutdown_rx,
             ));
@@ -404,13 +355,10 @@ fn main() -> anyhow::Result<()> {
             theme,
             refresh_interval,
         }) => {
-            // TODO
-
             std::thread::spawn(move || {
                 runtime.block_on(router_event_loop(
                     router,
                     port_mapper,
-                    storage,
                     signal_handler,
                     shutdown_rx,
                 ));

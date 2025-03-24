@@ -202,3 +202,8 @@ pub trait AddressBook: Unpin + Send + Sync + 'static {
     /// Attempt to resolve `host` into a base64-encoded `Destination`.
     fn resolve(&self, host: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
 }
+
+pub trait Storage: Unpin + Send + Sync + 'static {
+    /// Save routers and their profiles to disk.
+    fn save_to_disk(&self, routers: Vec<(String, Option<Vec<u8>>, crate::Profile)>);
+}

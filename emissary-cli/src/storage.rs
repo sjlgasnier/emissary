@@ -18,16 +18,22 @@
 
 use crate::{config::Profile, error::Error};
 
+use emissary_core::runtime::Storage;
+use flate2::write::GzDecoder;
+
 use std::{fs::File, io::Write, path::PathBuf};
 
-/// Storage.
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::router-storage";
+
+/// Router torage.
 #[derive(Clone)]
-pub struct Storage {
+pub struct RouterStorage {
     /// Base path.
     base_path: PathBuf,
 }
 
-impl Storage {
+impl RouterStorage {
     /// Create new [`Storage`].
     pub fn new(base_path: PathBuf) -> Self {
         Self { base_path }
@@ -48,7 +54,7 @@ impl Storage {
     }
 
     /// Store `profile` for `router_id` in `peerProfiles`.
-    pub fn store_profile(
+    fn store_profile(
         &self,
         router_id: String,
         profile: emissary_core::Profile,
@@ -61,5 +67,55 @@ impl Storage {
         file.write_all(config.as_bytes())?;
 
         Ok(())
+    }
+
+    /// Decompress `bytes`.
+    fn decompress(bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let mut e = GzDecoder::new(Vec::new());
+        e.write_all(bytes.as_ref()).ok()?;
+
+        e.finish().ok()
+    }
+}
+
+impl Storage for RouterStorage {
+    fn save_to_disk(&self, routers: Vec<(String, Option<Vec<u8>>, emissary_core::Profile)>) {
+        let storage_handle = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            for (router_id, router_info, profile) in routers {
+                if let Err(error) = storage_handle.store_profile(router_id.clone(), profile) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?router_id,
+                        ?error,
+                        "failed to store router profile to disk",
+                    );
+                }
+
+                let Some(router_info) = router_info else {
+                    continue;
+                };
+
+                match RouterStorage::decompress(router_info) {
+                    Some(router_info) =>
+                        if let Err(error) =
+                            storage_handle.store_router_info(router_id.clone(), router_info)
+                        {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?router_id,
+                                ?error,
+                                "failed to store router info to disk",
+                            );
+                        },
+                    None => tracing::warn!(
+                        target: LOG_TARGET,
+                        ?router_id,
+                        "failed to decompress router info",
+                    ),
+                }
+            }
+        });
     }
 }
