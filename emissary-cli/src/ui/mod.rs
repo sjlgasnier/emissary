@@ -361,9 +361,10 @@ impl RouterUi {
                 for (name, address) in &self.server_destinations {
                     test.push(
                         row![
-                            Text::new(format!("{name}: {address}")),
-                            button("Copy to clipboard")
-                                .on_press(Message::CopyToClipboard(address.to_string()))
+                            Text::new(format!("{name}: http://{address}.b32.i2p")),
+                            button("Copy to clipboard").on_press(Message::CopyToClipboard(
+                                format!("http://{address}.b32.i2p")
+                            ))
                         ]
                         .spacing(10)
                         .into(),
