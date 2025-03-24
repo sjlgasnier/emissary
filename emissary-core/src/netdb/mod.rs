@@ -1359,30 +1359,36 @@ impl<R: Runtime> NetDb<R> {
     /// destination. The query is considered failed if `DatabaseSearchReply` is received from all
     /// three floodfill routers or if the query timer expires.
     fn query_lease_set(&mut self, key: Bytes, tx: oneshot::Sender<Result<LeaseSet2, QueryError>>) {
-        let Some(floodfill) = self.floodfill_dht.closest(&key, 1usize).next() else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "cannot query lease set, no floodfills",
-            );
-            let _ = tx.send(Err(QueryError::NoFloodfills));
-            return;
-        };
+        let mut ignored = HashSet::<RouterId>::new();
 
-        let floodfill_public_key = {
-            let reader = self.router_ctx.profile_storage().reader();
-
-            let Some(router_info) = reader.router_info(&floodfill) else {
-                tracing::debug!(
+        let (floodfill, floodfill_public_key) = loop {
+            let Some(floodfill) =
+                self.floodfill_dht.closest_with_ignore(&key, 1usize, &ignored).next()
+            else {
+                tracing::warn!(
                     target: LOG_TARGET,
-                    key = ?base32_encode(&key),
-                    %floodfill,
-                    "cannot send lease set query, floodfill router info doesn't exist",
+                    "cannot query lease set, no floodfills",
                 );
                 let _ = tx.send(Err(QueryError::NoFloodfills));
                 return;
             };
 
-            router_info.identity.static_key().clone()
+            let reader = self.router_ctx.profile_storage().reader();
+
+            match reader.router_info(&floodfill) {
+                Some(router_info) => {
+                    break (floodfill, router_info.identity.static_key().clone());
+                }
+                None => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        key = ?base32_encode(&key),
+                        %floodfill,
+                        "cannot send lease set query, floodfill router info doesn't exist",
+                    );
+                    ignored.insert(floodfill);
+                }
+            }
         };
 
         tracing::debug!(
