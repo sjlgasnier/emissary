@@ -31,7 +31,7 @@ use nom::{
 };
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::{iter, time::Duration};
+use core::{fmt, iter, time::Duration};
 
 /// [`LeaseSet2`] is unpublished.
 ///
@@ -129,7 +129,7 @@ impl LeaseSet2Header {
 ///
 /// [1] https://geti2p.net/spec/common-structures#struct-lease
 /// [2] https://geti2p.net/spec/common-structures#struct-lease2
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Lease {
     /// ID of the gateway router.
     pub router_id: RouterId,
@@ -139,6 +139,16 @@ pub struct Lease {
 
     /// When the lease expires.
     pub expires: Duration,
+}
+
+impl fmt::Debug for Lease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Lease")
+            .field("router_id", &format_args!("{}", self.router_id))
+            .field("tunnel_id", &self.tunnel_id)
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 impl Lease {

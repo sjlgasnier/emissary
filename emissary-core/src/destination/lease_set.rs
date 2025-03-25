@@ -309,11 +309,9 @@ enum Event {
     /// [`DatabaseSearchReply`] message has been received to [`Destination`].
     DatabaseSearchReply {
         /// Key of the message.
-        #[allow(unused)]
         key: Bytes,
 
         /// Floodfills closest to key.
-        #[allow(unused)]
         floodfills: Vec<RouterId>,
     },
 
@@ -762,7 +760,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                 tracing::trace!(
                     target: LOG_TARGET,
                     local = %self.destination_id,
-                    floodfills = ?floodfills_to_query,
+                    new_floodfills = ?floodfills_to_query,
                     "received `DatabaseSearchReply` for lease set storage verification",
                 );
 
@@ -906,6 +904,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                     tracing::debug!(
                         target: LOG_TARGET,
                         local = %self.destination_id,
+                        %floodfill,
                         "publish local lease set",
                     );
 
@@ -956,6 +955,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                         tracing::trace!(
                             target: LOG_TARGET,
                             local = %self.destination_id,
+                            floodfill = %lookup_floodfill,
                             "sending lease set storage verification",
                         );
 
@@ -992,6 +992,7 @@ impl<R: Runtime> LeaseSetPublisher<R> {
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 local = %self.destination_id,
+                                previous_floodfill = %floodfill,
                                 "failed to verify storage after multiple retries, republishing",
                             );
                             self.state = LeaseSetPublisherState::PublishLeaseSet {
