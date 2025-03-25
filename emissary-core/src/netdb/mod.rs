@@ -1200,7 +1200,7 @@ impl<R: Runtime> NetDb<R> {
                 let unknown =
                     query.handle_search_reply(&routers, self.router_ctx.profile_storage());
 
-                tracing::error!(
+                tracing::trace!(
                     target: LOG_TARGET,
                     key = base32_encode(&key),
                     num_queried = ?query.queried.len(),
@@ -1247,9 +1247,9 @@ impl<R: Runtime> NetDb<R> {
                 let unknown =
                     query.handle_search_reply(&routers, self.router_ctx.profile_storage());
 
-                tracing::error!(
+                tracing::trace!(
                     target: LOG_TARGET,
-                    key = base32_encode(&key),
+                    key = %RouterId::from(&key),
                     num_queried = ?query.queried.len(),
                     ?unknown,
                     "received `DatabaseSearchReply` for router info query",
@@ -1359,6 +1359,29 @@ impl<R: Runtime> NetDb<R> {
     /// destination. The query is considered failed if `DatabaseSearchReply` is received from all
     /// three floodfill routers or if the query timer expires.
     fn query_lease_set(&mut self, key: Bytes, tx: oneshot::Sender<Result<LeaseSet2, QueryError>>) {
+        match self.active.get_mut(&key) {
+            Some(QueryKind::LeaseSet { query }) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    key = base32_encode(&key),
+                    "lease set query already in progress, adding subscriber",
+                );
+
+                query.add_subscriber(tx);
+                return;
+            }
+            Some(kind) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    key = ?key.to_vec(),
+                    "unable to handle lease set query, different kind of query alreayd in progress",
+                );
+                return;
+            }
+            None => {}
+        }
+
         let mut ignored = HashSet::<RouterId>::new();
 
         let (floodfill, floodfill_public_key) = loop {
@@ -1440,6 +1463,30 @@ impl<R: Runtime> NetDb<R> {
         tx: oneshot::Sender<Result<(), QueryError>>,
     ) {
         let key = Bytes::from(router_id.to_vec());
+
+        match self.active.get_mut(&key) {
+            Some(QueryKind::RouterInfo { query }) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    key = %router_id,
+                    "router info query already in progress, adding subscriber",
+                );
+
+                query.add_subscriber(tx);
+                return;
+            }
+            Some(kind) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    ?kind,
+                    key = %router_id,
+                    "unable to handle router info query, different kind of query already in progress",
+                );
+                return;
+            }
+            None => {}
+        }
+
         let Some(floodfill) = self.floodfill_dht.closest(&key, 1usize).next() else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -4375,6 +4422,157 @@ mod tests {
                 );
             }
             _ => panic!("invalid message received"),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_lease_set_query() {
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let _floodfills = (0..5)
+            .map(|_| {
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
+        let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (mut netdb, handle) = NetDb::<MockRuntime>::new(
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+                event_handle.clone(),
+            ),
+            true,
+            service,
+            tp_handle,
+            msg_rx,
+        );
+
+        netdb
+            .message_builder
+            .inbound_tunnels
+            .add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.message_builder.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        // query random lease set and verify that a query has started
+        let remote = Bytes::from(DestinationId::random().to_vec());
+        let mut rx1 = handle.query_lease_set(remote.clone()).unwrap();
+
+        // wait until the query has been started
+        tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.unwrap_err();
+        assert!(netdb.active.contains_key(&remote));
+        assert!(rx1.try_recv().unwrap().is_none());
+
+        // send another query for the same lease set and verify the first query is still active
+        let mut rx2 = handle.query_lease_set(remote.clone()).unwrap();
+
+        // register new query to netdb
+        tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.unwrap_err();
+
+        assert!(rx1.try_recv().unwrap().is_none());
+        assert!(rx2.try_recv().unwrap().is_none());
+
+        // poll netdb until the query times out
+        tokio::time::timeout(Duration::from_secs(15), &mut netdb).await.unwrap_err();
+
+        match rx1.try_recv() {
+            Ok(Some(Err(QueryError::NoFloodfills))) => {}
+            _ => panic!("invalid value"),
+        }
+
+        match rx2.try_recv() {
+            Ok(Some(Err(QueryError::NoFloodfills))) => {}
+            _ => panic!("invalid value"),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_router_info_query() {
+        crate::util::init_logger();
+
+        let (service, _rx, _tx, storage) = TransportService::new();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+
+        // add few floodfills to router storage
+        let _floodfills = (0..5)
+            .map(|_| {
+                let info = RouterInfoBuilder::default().as_floodfill().build().0;
+                let id = info.identity.id();
+                storage.add_router(info);
+
+                id
+            })
+            .collect::<HashSet<_>>();
+
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
+        let (_msg_tx, msg_rx) = channel(64);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (mut netdb, handle) = NetDb::<MockRuntime>::new(
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                storage,
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+                event_handle.clone(),
+            ),
+            true,
+            service,
+            tp_handle,
+            msg_rx,
+        );
+
+        netdb
+            .message_builder
+            .inbound_tunnels
+            .add_tunnel(LeaseSet2::random().0.leases[0].clone());
+        netdb.message_builder.outbound_tunnels.add_tunnel(TunnelId::random());
+
+        // query random router info and verify that a query has started
+        let remote = RouterId::random();
+        let remote_key = Bytes::from(remote.to_vec());
+        let mut rx1 = handle.try_query_router_info(remote.clone()).unwrap();
+
+        // wait until the query has been started
+        tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.unwrap_err();
+        assert!(netdb.active.contains_key(&remote_key));
+        assert!(rx1.try_recv().unwrap().is_none());
+
+        // send another query for the same router info and verify the first query is still active
+        let mut rx2 = handle.try_query_router_info(remote.clone()).unwrap();
+
+        // register new query to netdb
+        tokio::time::timeout(Duration::from_secs(2), &mut netdb).await.unwrap_err();
+
+        assert!(rx1.try_recv().unwrap().is_none());
+        assert!(rx2.try_recv().unwrap().is_none());
+
+        // poll netdb until the query times out
+        tokio::time::timeout(Duration::from_secs(15), &mut netdb).await.unwrap_err();
+
+        match rx1.try_recv() {
+            Ok(Some(Err(QueryError::NoFloodfills))) => {}
+            _ => panic!("invalid value"),
+        }
+
+        match rx2.try_recv() {
+            Ok(Some(Err(QueryError::NoFloodfills))) => {}
+            _ => panic!("invalid value"),
         }
     }
 }

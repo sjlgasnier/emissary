@@ -118,11 +118,11 @@ pub struct Query<R: Runtime, T> {
     /// When was the query started.
     pub started: R::Instant,
 
-    /// Oneshot sender for sending the result to caller.
-    pub tx: oneshot::Sender<Result<T, QueryError>>,
+    /// Oneshot senders for sending the result to caller.
+    pub subscribers: Vec<oneshot::Sender<Result<T, QueryError>>>,
 }
 
-impl<R: Runtime, T> Query<R, T> {
+impl<R: Runtime, T: Clone> Query<R, T> {
     /// Create new [`Query`].
     pub fn new(key: Bytes, tx: oneshot::Sender<Result<T, QueryError>>, selected: RouterId) -> Self {
         Self {
@@ -132,7 +132,7 @@ impl<R: Runtime, T> Query<R, T> {
             queryable: HashSet::new(),
             selected: Some(selected),
             started: R::now(),
-            tx,
+            subscribers: vec![tx],
         }
     }
 
@@ -177,8 +177,6 @@ impl<R: Runtime, T> Query<R, T> {
     }
 
     /// Handle `DatabaseLookUp` timeout.
-    //
-    // TODO: explain
     pub fn handle_timeout(
         &mut self,
         dht: &Dht<R>,
@@ -215,9 +213,16 @@ impl<R: Runtime, T> Query<R, T> {
         }
     }
 
-    /// Complete query by sending the result to caller.
+    /// Add new subscriber for the query.
+    pub fn add_subscriber(&mut self, tx: oneshot::Sender<Result<T, QueryError>>) {
+        self.subscribers.push(tx);
+    }
+
+    /// Complete query by sending the result to caller(s).
     pub fn complete(self, value: Result<T, QueryError>) {
-        let _ = self.tx.send(value);
+        self.subscribers.into_iter().for_each(|tx| {
+            let _ = tx.send(value.clone());
+        });
     }
 }
 
