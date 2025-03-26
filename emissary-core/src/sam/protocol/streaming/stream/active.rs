@@ -962,13 +962,11 @@ impl<R: Runtime> Stream<R> {
             return;
         }
 
-        // TODO: check if there are any packets to send
-        // TODO: if so, switch routing path
-
         let expired = self
             .unacked
             .values_mut()
             .take_while(|packet| packet.sent.elapsed() > *self.rto)
+            .take(self.window_size)
             .collect::<Vec<_>>();
 
         // no expired packetes
@@ -1042,55 +1040,11 @@ impl<R: Runtime> Stream<R> {
             }
         }
 
-        // let num_expired = self.unacked.values_mut().reduce(|packet| {
-        // })
-
-        // let num_resent = self.unacked.values_mut().fold(0usize, |count, packet| {
-        //     if packet.sent.elapsed() < *self.rto {
-        //         return count;
-        //     }
-        //     packet.sent = R::now();
-
-        //     tracing::trace!(
-        //         target: LOG_TARGET,
-        //         local = %self.local,
-        //         remote = %self.remote,
-        //         seq_nro = ?packet.seq_nro,
-        //         "resend packet"
-        //     );
-
-        //     if let Err(error) = self.event_tx.try_send((
-        //         match self.routing_path_handle.routing_path() {
-        //             None => DeliveryStyle::Unspecified {
-        //                 destination_id: self.remote.clone(),
-        //             },
-        //             Some(routing_path) => DeliveryStyle::ViaRoute { routing_path },
-        //         },
-        //         packet.packet.clone(),
-        //         self.src_port,
-        //         self.dst_port,
-        //     )) {
-        //         tracing::warn!(
-        //             target: LOG_TARGET,
-        //             local = %self.local,
-        //             remote = %self.remote,
-        //             ?error,
-        //             "failed to send packet",
-        //         );
-        //     }
-
-        //     count + 1
-        // });
-
-        // if num_resent > 0 {
         self.rto_timer = Some(Box::pin(R::delay(self.rto.exponential_backoff())));
 
         if self.window_size > 1 {
             self.window_size -= 1;
         }
-        // } else {
-        //     self.rto_timer = Some(Box::pin(R::delay(*self.rto)));
-        // }
     }
 
     /// Client has closed down the socket.
