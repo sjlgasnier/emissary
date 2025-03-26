@@ -36,7 +36,7 @@ use futures_channel::oneshot;
 use hashbrown::HashSet;
 use rand_core::RngCore;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::{fmt, time::Duration};
 
 /// Total query timeout.

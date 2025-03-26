@@ -1447,6 +1447,7 @@ mod tests {
             TcpStream,
         },
     };
+    use futures::StreamExt;
     use rand::{
         distributions::{Alphanumeric, DistString},
         seq::SliceRandom,
@@ -1483,14 +1484,10 @@ mod tests {
             let inbound = Lease::random();
             let mut path_manager =
                 RoutingPathManager::<MockRuntime>::new(destination_id.clone(), vec![outbound]);
-            path_manager.register_inbound_tunnel(&remote, vec![inbound.clone()]);
+            path_manager.register_leases(&remote, Ok(vec![inbound.clone()]));
             let handle = path_manager.handle(remote.clone());
 
-            tokio::spawn(async move {
-                loop {
-                    let _ = (&mut path_manager).await;
-                }
-            });
+            tokio::spawn(async move { while let Some(_) = path_manager.next().await {} });
 
             (
                 Stream::new(

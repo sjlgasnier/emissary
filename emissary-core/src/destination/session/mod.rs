@@ -69,7 +69,7 @@ mod tag_set;
 const LOG_TARGET: &str = "emissary::destination::session";
 
 /// Number of garlic tags to generate.
-const NUM_TAGS_TO_GENERATE: usize = 128;
+const NUM_TAGS_TO_GENERATE: usize = 4096;
 
 /// Number of tag set entries consumed per key before a DH ratchet is performed.
 const SESSION_DH_RATCHET_THRESHOLD: usize = 20_000usize;

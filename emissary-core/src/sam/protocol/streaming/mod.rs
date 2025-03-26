@@ -1266,7 +1266,8 @@ mod tests {
     use super::*;
     use crate::{
         destination::routing_path::{PendingRoutingPathHandle, RoutingPathManager},
-        primitives::{Destination, Lease, TunnelId},
+        error::QueryError,
+        primitives::{Destination, Lease, RouterId, TunnelId},
         protocol::Protocol,
         runtime::{
             mock::{MockRuntime, MockTcpStream},
@@ -1781,14 +1782,10 @@ mod tests {
         let inbound = Lease::random();
         let mut path_manager =
             RoutingPathManager::<MockRuntime>::new(destination_id.clone(), vec![outbound]);
-        path_manager.register_inbound_tunnel(&destination_id, vec![inbound]);
+        path_manager.register_leases(&destination_id, Ok(vec![inbound]));
         let pending_handle = path_manager.pending_handle();
 
-        tokio::spawn(async move {
-            loop {
-                let _ = (&mut path_manager).await;
-            }
-        });
+        tokio::spawn(async move { while let Some(_) = path_manager.next().await {} });
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1832,7 +1829,7 @@ mod tests {
             vec![outbound1],
         );
         let pending_handle = path_manager1.pending_handle();
-        path_manager1.register_inbound_tunnel(&manager2.destination_id, vec![inbound1]);
+        path_manager1.register_leases(&manager2.destination_id, Ok(vec![inbound1]));
 
         let outbound2 = TunnelId::random();
         let inbound2 = Lease::random();
@@ -1840,14 +1837,14 @@ mod tests {
             manager2.destination_id.clone(),
             vec![outbound2],
         );
-        path_manager2.register_inbound_tunnel(&manager1.destination_id, vec![inbound2]);
+        path_manager2.register_leases(&manager1.destination_id, Ok(vec![inbound2]));
         let handle = path_manager2.handle(manager1.destination_id.clone());
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = &mut path_manager1 => {}
-                    _ = &mut path_manager2 => {}
+                    _ = &mut path_manager1.next() => {}
+                    _ = &mut path_manager2.next() => {}
                 }
             }
         });
@@ -1940,7 +1937,7 @@ mod tests {
             manager2.destination_id.clone(),
             vec![TunnelId::random()],
         );
-        path_manager.register_inbound_tunnel(&remote, vec![Lease::random()]);
+        path_manager.register_leases(&remote, Ok(vec![Lease::random()]));
 
         // create new oubound stream to `manager1`
         let (socket, client_stream) = socket_factory.socket().await;
@@ -2016,13 +2013,9 @@ mod tests {
         let mut path_manager1 =
             RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound1]);
         let pending_handle = path_manager1.pending_handle();
-        path_manager1.register_inbound_tunnel(&destination.id(), vec![inbound1]);
+        path_manager1.register_leases(&destination.id(), Ok(vec![inbound1]));
 
-        tokio::spawn(async move {
-            loop {
-                let _ = (&mut path_manager1).await;
-            }
-        });
+        tokio::spawn(async move { while let Some(_) = path_manager1.next().await {} });
 
         // register listener for `manager1`
         let (socket, mut client_socket) = socket_factory.socket().await;
@@ -2086,13 +2079,9 @@ mod tests {
         let mut path_manager1 =
             RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound1]);
         let pending_handle = path_manager1.pending_handle();
-        path_manager1.register_inbound_tunnel(&destination.id(), vec![inbound1]);
+        path_manager1.register_leases(&destination.id(), Ok(vec![inbound1]));
 
-        tokio::spawn(async move {
-            loop {
-                let _ = (&mut path_manager1).await;
-            }
-        });
+        tokio::spawn(async move { while let Some(_) = path_manager1.next().await {} });
 
         // register listener for `manager1`
         let (socket, client_socket) = socket_factory.socket().await;
@@ -2172,14 +2161,10 @@ mod tests {
         let inbound = Lease::random();
         let mut path_manager =
             RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound]);
-        path_manager.register_inbound_tunnel(&destination.id(), vec![inbound]);
+        path_manager.register_leases(&destination.id(), Ok(vec![inbound]));
         let pending_handle = path_manager.pending_handle();
 
-        tokio::spawn(async move {
-            loop {
-                let _ = (&mut path_manager).await;
-            }
-        });
+        tokio::spawn(async move { while let Some(_) = path_manager.next().await {} });
 
         // register listener for `manager1`
         let (socket, client_socket) = socket_factory.socket().await;
@@ -2248,14 +2233,10 @@ mod tests {
         let inbound = Lease::random();
         let mut path_manager =
             RoutingPathManager::<MockRuntime>::new(manager.destination_id.clone(), vec![outbound]);
-        path_manager.register_inbound_tunnel(&destination.id(), vec![inbound]);
+        path_manager.register_leases(&destination.id(), Ok(vec![inbound]));
         let pending_handle = path_manager.pending_handle();
 
-        tokio::spawn(async move {
-            loop {
-                let _ = (&mut path_manager).await;
-            }
-        });
+        tokio::spawn(async move { while let Some(_) = path_manager.next().await {} });
 
         // register listener for `manager1`
         let (socket, client_socket) = socket_factory.socket().await;
@@ -2301,7 +2282,7 @@ mod tests {
             vec![outbound1],
         );
         let pending_handle = path_manager1.pending_handle();
-        path_manager1.register_inbound_tunnel(&manager2.destination_id, vec![inbound1]);
+        path_manager1.register_leases(&manager2.destination_id, Ok(vec![inbound1]));
 
         let outbound2 = TunnelId::random();
         let inbound2 = Lease::random();
@@ -2309,14 +2290,14 @@ mod tests {
             manager2.destination_id.clone(),
             vec![outbound2],
         );
-        path_manager2.register_inbound_tunnel(&manager1.destination_id, vec![inbound2]);
+        path_manager2.register_leases(&manager1.destination_id, Ok(vec![inbound2]));
         let handle = path_manager2.handle(manager1.destination_id.clone());
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = &mut path_manager1 => {}
-                    _ = &mut path_manager2 => {}
+                    _ = &mut path_manager1.next() => {}
+                    _ = &mut path_manager2.next() => {}
                 }
             }
         });
@@ -2717,8 +2698,7 @@ mod tests {
             manager2.destination_id.clone(),
             vec![TunnelId::random()],
         );
-        path_manager
-            .register_inbound_tunnel(&manager1.destination_id.clone(), vec![Lease::random()]);
+        path_manager.register_leases(&manager1.destination_id.clone(), Ok(vec![Lease::random()]));
 
         // create new oubound stream to `manager1`
         let (socket, _client_stream) = socket_factory.socket().await;
@@ -2774,7 +2754,7 @@ mod tests {
             vec![outbound1],
         );
         let pending_handle = path_manager1.pending_handle();
-        path_manager1.register_inbound_tunnel(&manager2.destination_id, vec![inbound1]);
+        path_manager1.register_leases(&manager2.destination_id, Ok(vec![inbound1]));
 
         let outbound2 = TunnelId::random();
         let inbound2 = Lease::random();
@@ -2782,14 +2762,14 @@ mod tests {
             manager2.destination_id.clone(),
             vec![outbound2],
         );
-        path_manager2.register_inbound_tunnel(&manager1.destination_id, vec![inbound2]);
+        path_manager2.register_leases(&manager1.destination_id, Ok(vec![inbound2]));
         let handle = path_manager2.handle(manager1.destination_id.clone());
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = &mut path_manager1 => {}
-                    _ = &mut path_manager2 => {}
+                    _ = &mut path_manager1.next() => {}
+                    _ = &mut path_manager2.next() => {}
                 }
             }
         });
@@ -2896,7 +2876,7 @@ mod tests {
             manager2.destination_id.clone(),
             outbound.iter().cloned().collect(),
         );
-        path_manager.register_inbound_tunnel(&remote, inbound.values().cloned().collect());
+        path_manager.register_leases(&remote, Ok(inbound.values().cloned().collect()));
 
         // create new oubound stream to `manager1`
         let (socket, _client_stream) = socket_factory.socket().await;
@@ -2958,6 +2938,148 @@ mod tests {
                     }
                     _ => panic!("invalid delivery style"),
                 }
+            }
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_exists_after_multiple_lease_set_query_failures() {
+        let socket_factory = SocketFactory::new().await;
+
+        let mut manager1 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let outbound1 = TunnelId::random();
+        let inbound1 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(35),
+        };
+        let mut path_manager1 = RoutingPathManager::<MockRuntime>::new(
+            manager1.destination_id.clone(),
+            vec![outbound1],
+        );
+        let pending_handle = path_manager1.pending_handle();
+        path_manager1.register_leases(&manager2.destination_id, Ok(vec![inbound1]));
+
+        let outbound2 = TunnelId::random();
+        let inbound2 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(35),
+        };
+        let mut path_manager2 = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![outbound2],
+        );
+        path_manager2.register_leases(&manager1.destination_id, Ok(vec![inbound2]));
+        let handle = path_manager2.handle(manager1.destination_id.clone());
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    event = &mut path_manager1.next() => {
+                        let remote = event.unwrap();
+                        path_manager1.register_leases(&remote, Err(QueryError::Timeout));
+                    }
+                    event = &mut path_manager2.next() => {
+                        let remote = event.unwrap();
+                        path_manager1.register_leases(&remote, Err(QueryError::Timeout));
+                    }
+                }
+            }
+        });
+
+        // register listener for `manager1`
+        let (socket, _) = socket_factory.socket().await;
+        assert!(manager1
+            .register_listener(ListenerKind::Ephemeral {
+                socket,
+                silent: true,
+                pending_routing_path_handle: pending_handle,
+            })
+            .is_ok());
+
+        // create new oubound stream to `manager1`
+        let (socket, _client_stream) = socket_factory.socket().await;
+        let manager2_dest = manager2.destination_id.clone();
+        let (_stream_id, packet, _, _, _) = manager2.create_stream(
+            manager1.destination_id.clone(),
+            handle,
+            socket,
+            HashMap::new(),
+        );
+
+        assert!(manager1
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet.to_vec()
+            })
+            .is_ok());
+
+        assert!(std::matches!(
+            manager1.next().await,
+            Some(StreamManagerEvent::StreamOpened { .. })
+        ));
+
+        let (destination_id, packet) =
+            match tokio::time::timeout(Duration::from_secs(5), manager1.next())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                StreamManagerEvent::SendPacket {
+                    delivery_style,
+                    packet,
+                    ..
+                } => (delivery_style.destination_id().clone(), packet),
+                _ => panic!("invalid event"),
+            };
+
+        assert_eq!(destination_id, manager2.destination_id);
+        assert!(manager2
+            .on_packet(I2cpPayload {
+                src_port: 0u16,
+                dst_port: 0u16,
+                protocol: Protocol::Streaming,
+                payload: packet
+            })
+            .is_ok());
+
+        tokio::spawn(async move {
+            loop {
+                let _ = manager2.next().await;
+            }
+        });
+
+        match tokio::time::timeout(Duration::from_secs(50), manager1.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            StreamManagerEvent::SendPacket { .. } => {}
+            _ => panic!("invalid event"),
+        }
+
+        match tokio::time::timeout(Duration::from_secs(50), manager1.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            StreamManagerEvent::StreamClosed { destination_id } => {
+                assert_eq!(destination_id, manager2_dest)
             }
             _ => panic!("invalid event"),
         }

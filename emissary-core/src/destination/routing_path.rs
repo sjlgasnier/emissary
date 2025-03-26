@@ -17,11 +17,15 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    error::QueryError,
     primitives::{DestinationId, Lease, TunnelId},
     runtime::Runtime,
 };
 
-use futures::future::{BoxFuture, FutureExt};
+use futures::{
+    future::{BoxFuture, FutureExt},
+    Stream,
+};
 use futures_channel::oneshot;
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
@@ -41,17 +45,16 @@ use core::{
 const LOG_TARGET: &str = "emissary::destination::routing-path";
 
 /// Outbound tunnel expiration.
-//
-// TODO: explain
 const OUTBOUND_TUNNEL_EXPIRATION: Duration = Duration::from_secs(30);
 
 /// Inbound tunnel minimum age.
-//
-// TODO: explain
 const INBOUND_TUNNEL_MIN_AGE: Duration = Duration::from_secs(30);
 
+/// Maximum number of lease set queries before remote is considered unreachable.
+const MAX_LEASE_SET_QUERIES: usize = 3usize;
+
 /// Recycling strategy for [`NetDbAction`].
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct RoutingPathCommandRecycle(());
 
 impl thingbuf::Recycle<RoutingPathCommand> for RoutingPathCommandRecycle {
@@ -76,14 +79,40 @@ enum RoutingPathCommand {
         /// Oneshot channel for sending context for [`RoutingPathHandle`].
         tx: oneshot::Sender<(
             mpsc::Receiver<RoutingPathEvent>,
+            mpsc::Sender<RoutingPathCommand, RoutingPathCommandRecycle>,
             Vec<(TunnelId, Duration)>,
             HashSet<TunnelId>,
             Vec<(TunnelId, Duration)>,
         )>,
     },
 
+    /// Request remote lease set.
+    RequestLeaseSet {
+        /// Destination ID.
+        destination_id: DestinationId,
+
+        /// TX channel for receiving the result.
+        tx: oneshot::Sender<Result<(), QueryError>>,
+    },
+
     #[default]
     Dummy,
+}
+
+impl fmt::Debug for RoutingPathCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GetHandle { destination_id, .. } => f
+                .debug_struct("RoutingPathCommand::GetHandle")
+                .field("destination_id", &format_args!("{destination_id}"))
+                .finish(),
+            Self::RequestLeaseSet { destination_id, .. } => f
+                .debug_struct("RoutingPathCommand::RequestLeaseSet")
+                .field("destination_id", &format_args!("{destination_id}"))
+                .finish_non_exhaustive(),
+            Self::Dummy => unreachable!(),
+        }
+    }
 }
 
 /// Routing path used to send a message to remote destination.
@@ -200,6 +229,9 @@ pub struct RoutingPathManager<R> {
     /// Outbound tunnels.
     outbound_tunnels: HashSet<TunnelId>,
 
+    /// Pending lease set queries.
+    pending_queries: HashMap<DestinationId, Vec<oneshot::Sender<Result<(), QueryError>>>>,
+
     /// Subscribers to routing path events.
     ///
     /// These are the TX channels of all objects that are interested in routing path events
@@ -222,6 +254,7 @@ impl<R: Runtime> RoutingPathManager<R> {
             expiring_outbound_tunnels: Vec::new(),
             inbound_tunnels: HashMap::new(),
             outbound_tunnels: outbound_tunnels.into_iter().collect(),
+            pending_queries: HashMap::new(),
             subscribers: HashMap::new(),
             _runtime: Default::default(),
         }
@@ -247,6 +280,7 @@ impl<R: Runtime> RoutingPathManager<R> {
         RoutingPathHandle::new(
             destination_id,
             rx,
+            self.cmd_tx.clone(),
             inbound_tunnels,
             self.outbound_tunnels.clone(),
             self.expiring_outbound_tunnels.clone(),
@@ -338,10 +372,59 @@ impl<R: Runtime> RoutingPathManager<R> {
         });
     }
 
-    /// Register one or more inbound tunnels for `destination_id`.
+    /// Register potential new leases for `destination_id`.
     ///
-    /// Purge old lease sets and send the new lease sets to all subscribers.
-    pub fn register_inbound_tunnel(&mut self, destination_id: &DestinationId, leases: Vec<Lease>) {
+    /// All lease set stores and query results get reported to [`RoutingPathManager`] because lease
+    /// sets can be learned through either remote-initiated `DatabaseStore`s or lease set queries
+    /// initiated by one of the higher-level protocols or directly by routing path.
+    ///
+    /// Each routing path keeps track of many times it has requested remote lease set and if the
+    /// number of consecutive failures is more than [`MAX_LEASE_SET_QUERIES`], the routing path
+    /// signals the protocol that remote destination is unreachable and the protocol closes.
+    ///
+    /// Lease sets learned through `DatabaseStore` messages are always passed in as `Ok(LeaseSet2)`
+    /// whereas query results are passed in as either `Ok(LeaseSet2)` or `Err(QueryError)`,
+    /// depending on whether the query succeeded.
+    ///
+    /// If the query was not initiated by any of the active [`RoutingPathHandle`]s, the error is
+    /// ignored.
+    pub fn register_leases(
+        &mut self,
+        destination_id: &DestinationId,
+        lease_set: Result<Vec<Lease>, QueryError>,
+    ) {
+        let leases = match (self.pending_queries.remove(destination_id), lease_set) {
+            (None, Err(_)) => return, // nobody is interested in the query failure
+            (Some(channels), Err(error)) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %destination_id,
+                    ?error,
+                    num_subscribers = ?channels.len(),
+                    "lease set query failed",
+                );
+
+                return channels.into_iter().for_each(|tx| {
+                    let _ = tx.send(Err(error));
+                });
+            }
+            (Some(channels), Ok(leases)) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %destination_id,
+                    num_subscribers = ?channels.len(),
+                    "lease set query succeeded",
+                );
+
+                channels.into_iter().for_each(|tx| {
+                    let _ = tx.send(Ok(()));
+                });
+
+                leases
+            }
+            (None, Ok(leases)) => leases,
+        };
+
         let current_leases = match self.inbound_tunnels.get_mut(destination_id) {
             Some(leases) => leases,
             None => {
@@ -378,13 +461,13 @@ impl<R: Runtime> RoutingPathManager<R> {
     }
 }
 
-impl<R: Unpin> Future for RoutingPathManager<R> {
-    type Output = Result<(), ()>;
+impl<R: Unpin> Stream for RoutingPathManager<R> {
+    type Item = DestinationId;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match futures::ready!(self.cmd_rx.poll_recv(cx)) {
-                None => return Poll::Ready(Err(())),
+                None => return Poll::Ready(None),
                 Some(RoutingPathCommand::GetHandle { destination_id, tx }) => {
                     tracing::debug!(
                         target: LOG_TARGET,
@@ -411,6 +494,7 @@ impl<R: Unpin> Future for RoutingPathManager<R> {
 
                     if let Err(error) = tx.send((
                         event_rx,
+                        self.cmd_tx.clone(),
                         inbound_tunnels,
                         self.outbound_tunnels.clone(),
                         self.expiring_outbound_tunnels.clone(),
@@ -423,6 +507,27 @@ impl<R: Unpin> Future for RoutingPathManager<R> {
                         );
                     }
                 }
+                Some(RoutingPathCommand::RequestLeaseSet { destination_id, tx }) =>
+                    match self.pending_queries.get_mut(&destination_id) {
+                        Some(channels) => {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                "lease set query already in progress",
+                            );
+                            channels.push(tx);
+                        }
+                        None => {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                "starting lease set query",
+                            );
+                            self.pending_queries.insert(destination_id.clone(), vec![tx]);
+
+                            return Poll::Ready(Some(destination_id));
+                        }
+                    },
                 Some(RoutingPathCommand::Dummy) => {}
             }
         }
@@ -463,10 +568,11 @@ impl PendingRoutingPathHandle {
             .ok()?;
 
         rx.await.ok().map(
-            |(rx, inbound_tunnels, outbound_tunnels, expiring_outbound_tunnels)| {
+            |(rx, cmd_tx, inbound_tunnels, outbound_tunnels, expiring_outbound_tunnels)| {
                 RoutingPathHandle::<R>::new(
                     destination_id,
                     rx,
+                    cmd_tx,
                     inbound_tunnels,
                     outbound_tunnels,
                     expiring_outbound_tunnels,
@@ -534,22 +640,54 @@ enum TunnelKind {
     },
 }
 
+/// Remote lease set query status.
+enum LeaseSetQueryStatus {
+    /// Remote lease set is not being quried.
+    Inactive {
+        /// How many times the remote lease set has been queried.
+        ///
+        /// Resets if the lease set is found and if it's not found after
+        /// [`MAX_LEASE_SET_QUERIES`] retries, [`RoutingPathHandle`] will exit, signaling to the
+        /// owner of that handle that the remote destination is unreachable.
+        num_retries: usize,
+    },
+
+    /// Remote lease set is actively being queried.
+    Pending {
+        /// How many times the remote lease set has been queried.
+        ///
+        /// Resets if the lease set is found and if it's not found after
+        /// [`MAX_LEASE_SET_QUERIES`] retries, [`RoutingPathHandle`] will exit, signaling to the
+        /// owner of that handle that the remote destination is unreachable.
+        num_retries: usize,
+
+        /// RX channel for receiving the query result.
+        rx: oneshot::Receiver<Result<(), QueryError>>,
+    },
+}
+
 /// Routing path handle.
 pub struct RoutingPathHandle<R: Runtime> {
+    /// TX channel for sending lease set requests to [`RoutingPathManager`].
+    cmd_tx: mpsc::Sender<RoutingPathCommand, RoutingPathCommandRecycle>,
+
     /// ID of the remote destination.
     destination_id: DestinationId,
 
-    /// Tunnels.
-    tunnels: HashMap<TunnelId, TunnelKind>,
+    /// RX channel for receiving [`RoutingPathEvent`]s.
+    event_rx: mpsc::Receiver<RoutingPathEvent>,
 
     /// Inbound tunnel expiration timer.
     inbound_expiration_timer: Option<BoxFuture<'static, ()>>,
 
+    /// Lease set query status.
+    lease_set_query_status: LeaseSetQueryStatus,
+
     /// Selected routing path, if any.
     routing_path: Option<RoutingPath>,
 
-    /// RX channel for receiving [`RoutingPathEvent`]s.
-    rx: mpsc::Receiver<RoutingPathEvent>,
+    /// Tunnels.
+    tunnels: HashMap<TunnelId, TunnelKind>,
 
     /// Marker for `Runtime`
     _runtime: PhantomData<R>,
@@ -559,7 +697,8 @@ impl<R: Runtime> RoutingPathHandle<R> {
     /// Create new [`RoutingPathHandle`].
     fn new(
         destination_id: DestinationId,
-        rx: mpsc::Receiver<RoutingPathEvent>,
+        event_rx: mpsc::Receiver<RoutingPathEvent>,
+        cmd_tx: mpsc::Sender<RoutingPathCommand, RoutingPathCommandRecycle>,
         inbound_tunnels: Vec<(TunnelId, Duration)>,
         outbound_tunnels: HashSet<TunnelId>,
         expiring_outbound_tunnels: Vec<(TunnelId, Duration)>,
@@ -583,11 +722,15 @@ impl<R: Runtime> RoutingPathHandle<R> {
             .collect::<HashMap<_, _>>();
 
         Self {
+            cmd_tx,
             destination_id,
+            event_rx,
             inbound_expiration_timer: None,
+            lease_set_query_status: LeaseSetQueryStatus::Inactive {
+                num_retries: 0usize,
+            },
             routing_path: None,
             tunnels,
-            rx,
             _runtime: Default::default(),
         }
     }
@@ -653,7 +796,7 @@ impl<R: Runtime> RoutingPathHandle<R> {
             return Some(failing[(R::rng().next_u32() as usize) % failing.len()]);
         }
 
-        tracing::warn!(
+        tracing::debug!(
             target: LOG_TARGET,
             destination_id = %self.destination_id,
             "no outbound tunnels",
@@ -666,7 +809,7 @@ impl<R: Runtime> RoutingPathHandle<R> {
     ///
     /// Select those inbound tunnels which won't expire for the next 30 seconds and from the set
     /// of non-expiring tunnels, select a random tunnel.
-    fn select_inbound_tunnel(&self) -> Option<(TunnelId, Duration)> {
+    fn select_inbound_tunnel(&mut self) -> Option<(TunnelId, Duration)> {
         let now = R::time_since_epoch();
 
         let (available, failing): (Vec<_>, Vec<_>) = self
@@ -703,11 +846,46 @@ impl<R: Runtime> RoutingPathHandle<R> {
             return Some(failing[(R::rng().next_u32() as usize) % failing.len()]);
         }
 
-        tracing::warn!(
-            target: LOG_TARGET,
-            destination_id = %self.destination_id,
-            "no inbound tunnels",
-        );
+        match self.lease_set_query_status {
+            LeaseSetQueryStatus::Inactive { num_retries } => {
+                let (tx, rx) = oneshot::channel();
+
+                match self.cmd_tx.try_send(RoutingPathCommand::RequestLeaseSet {
+                    destination_id: self.destination_id.clone(),
+                    tx,
+                }) {
+                    Ok(()) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            destination_id = %self.destination_id,
+                            ?num_retries,
+                            "no inbound tunnels, starting lease set query",
+                        );
+                        self.lease_set_query_status = LeaseSetQueryStatus::Pending {
+                            num_retries: num_retries + 1,
+                            rx,
+                        };
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            destination_id = %self.destination_id,
+                            ?num_retries,
+                            ?error,
+                            "no inbound tunnels and failed to start lease set query",
+                        );
+                    }
+                }
+            }
+            LeaseSetQueryStatus::Pending { num_retries, .. } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    destination_id = %self.destination_id,
+                    ?num_retries,
+                    "no inbound tunnels but lease set is being queried",
+                );
+            }
+        }
 
         None
     }
@@ -843,6 +1021,41 @@ impl<R: Runtime> Future for RoutingPathHandle<R> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let LeaseSetQueryStatus::Pending {
+            num_retries,
+            ref mut rx,
+        } = self.lease_set_query_status
+        {
+            match rx.poll_unpin(cx) {
+                Poll::Pending => {}
+                Poll::Ready(Ok(Ok(()))) => {
+                    self.lease_set_query_status = LeaseSetQueryStatus::Inactive { num_retries: 0 };
+                }
+                Poll::Ready(Ok(Err(error))) => {
+                    if num_retries == MAX_LEASE_SET_QUERIES {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            destination_id = %self.destination_id,
+                            ?num_retries,
+                            ?error,
+                            "failed to find remote lease set after multiple retries",
+                        );
+                        return Poll::Ready(());
+                    }
+
+                    self.lease_set_query_status = LeaseSetQueryStatus::Inactive { num_retries };
+                }
+                Poll::Ready(Err(_)) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        destination_id = %self.destination_id,
+                        "lease set query channel closed",
+                    );
+                    debug_assert!(false);
+                }
+            }
+        }
+
         if let Some(timer) = &mut self.inbound_expiration_timer {
             if timer.poll_unpin(cx).is_ready() {
                 tracing::debug!(
@@ -857,7 +1070,7 @@ impl<R: Runtime> Future for RoutingPathHandle<R> {
         }
 
         loop {
-            match futures::ready!(self.rx.poll_recv(cx)) {
+            match futures::ready!(self.event_rx.poll_recv(cx)) {
                 None => return Poll::Ready(()),
                 Some(event) => match event {
                     RoutingPathEvent::InboundTunnelBuilt { tunnels } => {
@@ -980,6 +1193,7 @@ impl<R: Runtime> Future for RoutingPathHandle<R> {
 mod tests {
     use super::*;
     use crate::{primitives::RouterId, runtime::mock::MockRuntime};
+    use futures::StreamExt;
 
     #[tokio::test]
     async fn make_routing_path() {
@@ -989,7 +1203,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1020,7 +1234,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1041,7 +1255,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1072,7 +1286,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1131,7 +1345,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1210,7 +1424,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1287,7 +1501,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1376,7 +1590,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1478,7 +1692,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
 
@@ -1521,7 +1735,7 @@ mod tests {
         }
 
         let new_inbound = Lease::random();
-        manager.register_inbound_tunnel(&remote, vec![new_inbound.clone()]);
+        manager.register_leases(&remote, Ok(vec![new_inbound.clone()]));
         assert!(tokio::time::timeout(Duration::from_secs(1), &mut handle).await.is_err());
         assert!(handle.routing_path.is_none());
         assert_eq!(
@@ -1570,7 +1784,7 @@ mod tests {
 
         let mut manager =
             RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
-        manager.register_inbound_tunnel(&remote, vec![lease.clone()]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
 
         let mut handle = manager.handle(remote.clone());
         let pending_handle = manager.pending_handle();
@@ -1596,7 +1810,7 @@ mod tests {
         let inbound2 = Lease::random();
 
         manager.register_outbound_tunnel_built(outbound1);
-        manager.register_inbound_tunnel(&remote, vec![inbound1]);
+        manager.register_leases(&remote, Ok(vec![inbound1]));
         assert!(tokio::time::timeout(Duration::from_secs(2), &mut handle).await.is_err());
 
         // verify that the routing path hasn't changed
@@ -1634,11 +1848,11 @@ mod tests {
         // spawn manager in the background so it can handle the bind request
         let remote_dest = remote.clone();
         tokio::spawn(async move {
-            assert!(tokio::time::timeout(Duration::from_secs(5), &mut manager).await.is_err());
+            assert!(tokio::time::timeout(Duration::from_secs(5), manager.next()).await.is_err());
 
             // register two more tunnels and verify that both handles get the updates
             manager.register_outbound_tunnel_built(outbound2);
-            manager.register_inbound_tunnel(&remote_dest, vec![inbound2]);
+            manager.register_leases(&remote_dest, Ok(vec![inbound2]));
 
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1708,5 +1922,139 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn lease_set_requested_through_routing_path() {
+        let remote = DestinationId::random();
+        let outbound = TunnelId::random();
+        let lease = Lease {
+            tunnel_id: TunnelId::random(),
+            router_id: RouterId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+
+        let mut manager =
+            RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
+
+        let mut handle = manager.handle(remote.clone());
+
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never().unwrap(), Some(remote.clone()));
+
+        // try to create routing path and verify that lease set query is not issued
+        // since one is already active
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never(), None);
+        assert!(std::matches!(
+            handle.lease_set_query_status,
+            LeaseSetQueryStatus::Pending { .. }
+        ));
+
+        // register query failure
+        manager.register_leases(&remote, Err(QueryError::Timeout));
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut handle).await.is_err());
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Inactive { num_retries } => assert_eq!(num_retries, 1),
+            _ => panic!("invalid status"),
+        }
+
+        // try to create routing path and verify it fails again and that new query is started
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never().unwrap(), Some(remote.clone()));
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Pending { num_retries, .. } => assert_eq!(num_retries, 2),
+            _ => panic!("invalid status"),
+        }
+
+        // register new inbound lease and verify routing path is created
+        manager.register_leases(
+            &remote,
+            Ok(vec![Lease {
+                tunnel_id: TunnelId::random(),
+                router_id: RouterId::random(),
+                expires: MockRuntime::time_since_epoch() + Duration::from_secs(9 * 60),
+            }]),
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut handle).await.is_err());
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Inactive { num_retries } => assert_eq!(num_retries, 0),
+            _ => panic!("invalid status"),
+        }
+
+        assert!(handle.make_routing_path().is_some());
+    }
+
+    #[tokio::test]
+    async fn multiple_consecutive_lease_set_query_errors() {
+        let remote = DestinationId::random();
+        let outbound = TunnelId::random();
+        let lease = Lease {
+            tunnel_id: TunnelId::random(),
+            router_id: RouterId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+
+        let mut manager =
+            RoutingPathManager::<MockRuntime>::new(DestinationId::random(), vec![outbound]);
+        manager.register_leases(&remote, Ok(vec![lease.clone()]));
+
+        let mut handle = manager.handle(remote.clone());
+
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never().unwrap(), Some(remote.clone()));
+
+        // try to create routing path and verify that lease set query is not issued
+        // since one is already active
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never(), None);
+        assert!(std::matches!(
+            handle.lease_set_query_status,
+            LeaseSetQueryStatus::Pending { .. }
+        ));
+
+        // register query failure
+        manager.register_leases(&remote, Err(QueryError::Timeout));
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut handle).await.is_err());
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Inactive { num_retries } => assert_eq!(num_retries, 1),
+            _ => panic!("invalid status"),
+        }
+
+        // try to create routing path and verify it fails again and that new query is started
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never().unwrap(), Some(remote.clone()));
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Pending { num_retries, .. } => assert_eq!(num_retries, 2),
+            _ => panic!("invalid status"),
+        }
+
+        // register query failure
+        manager.register_leases(&remote, Err(QueryError::Timeout));
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut handle).await.is_err());
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Inactive { num_retries } => assert_eq!(num_retries, 2),
+            _ => panic!("invalid status"),
+        }
+
+        // try to create routing path and verify it fails again and that new query is started
+        assert!(handle.make_routing_path().is_none());
+        assert_eq!(manager.next().now_or_never().unwrap(), Some(remote.clone()));
+
+        match handle.lease_set_query_status {
+            LeaseSetQueryStatus::Pending { num_retries, .. } => assert_eq!(num_retries, 3),
+            _ => panic!("invalid status"),
+        }
+
+        // register final query failure
+        manager.register_leases(&remote, Err(QueryError::Timeout));
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut handle).await.is_ok());
     }
 }

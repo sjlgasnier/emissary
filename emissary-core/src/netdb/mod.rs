@@ -4501,8 +4501,6 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_router_info_query() {
-        crate::util::init_logger();
-
         let (service, _rx, _tx, storage) = TransportService::new();
         let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
 

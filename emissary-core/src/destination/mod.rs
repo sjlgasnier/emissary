@@ -644,7 +644,7 @@ impl<R: Runtime> Destination<R> {
                             );
 
                             self.routing_path_manager
-                                .register_inbound_tunnel(&destination_id, lease_set.leases.clone());
+                                .register_leases(&destination_id, Ok(lease_set.leases.clone()));
 
                             match self.remote_destinations.get_mut(&destination_id) {
                                 Some(context) => {
@@ -804,73 +804,100 @@ impl<R: Runtime> Stream for Destination<R> {
         match self.query_futures.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((destination_id, result))) => match result {
-                Err(error) => {
-                    self.pending_queries.remove(&destination_id);
-                    return Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
-                        destination_id,
-                        error,
-                    }));
-                }
-                Ok(lease_set) => {
-                    self.pending_queries.remove(&destination_id);
-                    self.session_manager.add_remote_destination(
-                        destination_id.clone(),
-                        lease_set.public_keys[0].clone(),
-                    );
-                    self.routing_path_manager
-                        .register_inbound_tunnel(&destination_id, lease_set.leases.clone());
+            Poll::Ready(Some((destination_id, result))) => {
+                // always register lease set query result, regardless of its status as one or more
+                // routing paths might've initiated the query and need to know whether it succeeded
+                // or not
+                self.routing_path_manager.register_leases(
+                    &destination_id,
+                    result
+                        .as_ref()
+                        .map(|lease_set| lease_set.leases.clone())
+                        .map_err(|error| *error),
+                );
 
-                    // add new lease set for destination or create new destination of it didn't
-                    // exist
-                    //
-                    // if the destination has pending messages, sending those before returning the
-                    // lease set caller
-                    match self.remote_destinations.get_mut(&destination_id) {
-                        Some(context) => {
-                            context.lease_set = lease_set;
+                match result {
+                    Err(error) => {
+                        self.pending_queries.remove(&destination_id);
 
-                            mem::take(&mut context.pending_messages).into_iter().for_each(
-                                |message| {
-                                    if let Err(error) = self.send_message_inner(
-                                        DeliveryStyle::Unspecified {
-                                            destination_id: destination_id.clone(),
-                                        },
-                                        message,
-                                    ) {
-                                        tracing::debug!(
-                                            target: LOG_TARGET,
-                                            local = %self.destination_id,
-                                            remote = %destination_id,
-                                            ?error,
-                                            "failed to send pending message",
-                                        );
-                                    }
-                                },
-                            );
-                        }
-                        None => {
-                            self.remote_destinations.insert(
-                                destination_id.clone(),
-                                DestinationContext {
-                                    lease_set,
-                                    pending_messages: VecDeque::new(),
-                                    expiring_leases: HashMap::new(),
-                                },
-                            );
-                        }
+                        return Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
+                            destination_id,
+                            error,
+                        }));
                     }
+                    Ok(lease_set) => {
+                        self.pending_queries.remove(&destination_id);
+                        self.session_manager.add_remote_destination(
+                            destination_id.clone(),
+                            lease_set.public_keys[0].clone(),
+                        );
 
-                    return Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id }));
+                        // add new lease set for destination or create new destination of it didn't
+                        // exist
+                        //
+                        // if the destination has pending messages, sending those before returning
+                        // the lease set caller
+                        match self.remote_destinations.get_mut(&destination_id) {
+                            Some(context) => {
+                                context.lease_set = lease_set;
+
+                                mem::take(&mut context.pending_messages).into_iter().for_each(
+                                    |message| {
+                                        if let Err(error) = self.send_message_inner(
+                                            DeliveryStyle::Unspecified {
+                                                destination_id: destination_id.clone(),
+                                            },
+                                            message,
+                                        ) {
+                                            tracing::debug!(
+                                                target: LOG_TARGET,
+                                                local = %self.destination_id,
+                                                remote = %destination_id,
+                                                ?error,
+                                                "failed to send pending message",
+                                            );
+                                        }
+                                    },
+                                );
+                            }
+                            None => {
+                                self.remote_destinations.insert(
+                                    destination_id.clone(),
+                                    DestinationContext {
+                                        lease_set,
+                                        pending_messages: VecDeque::new(),
+                                        expiring_leases: HashMap::new(),
+                                    },
+                                );
+                            }
+                        }
+
+                        return Poll::Ready(Some(DestinationEvent::LeaseSetFound {
+                            destination_id,
+                        }));
+                    }
                 }
-            },
+            }
         }
 
-        if self.routing_path_manager.poll_unpin(cx).is_ready() {
-            tracing::debug!(
-                target: LOG_TARGET,
-                "routing path manager exited",
-            );
+        loop {
+            match self.routing_path_manager.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(destination_id)) => match self.query_lease_set(&destination_id) {
+                    LeaseSetStatus::Found => tracing::debug!(
+                        target: LOG_TARGET,
+                        %destination_id,
+                        "lease set requsted by routing path manager but it's available",
+                    ),
+                    status => tracing::trace!(
+                        target: LOG_TARGET,
+                        %destination_id,
+                        ?status,
+                        "lease set requested by routing path manager",
+                    ),
+                },
+            }
         }
 
         match self.lease_set_manager.poll_unpin(cx) {
