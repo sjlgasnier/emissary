@@ -191,9 +191,6 @@ pub struct Destination<R: Runtime> {
     /// Destination ID of the client.
     destination_id: DestinationId,
 
-    /// Active inbound tunnels.
-    inbound_tunnels: Vec<Lease>,
-
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
     #[allow(unused)]
     lease_set: Bytes,
@@ -206,9 +203,6 @@ pub struct Destination<R: Runtime> {
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
-
-    /// Active outbound tunnels.
-    outbound_tunnels: Vec<TunnelId>,
 
     // /// Inbound tunnels waiting to be published to `NetDb`.
     // pending_inbound: Vec<(Lease, R::Instant)>,
@@ -252,12 +246,12 @@ impl<R: Runtime> Destination<R> {
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
-            inbound_tunnels: inbound_tunnels.clone(),
             lease_set: lease_set.clone(),
             lease_set_manager: LeaseSetManager::new(
                 inbound_tunnels,
                 destination_id.clone(),
                 tunnel_pool_handle.sender(),
+                tunnel_pool_handle.config().num_inbound,
                 netdb_handle.clone(),
                 NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
                 profile_storage,
@@ -266,7 +260,6 @@ impl<R: Runtime> Destination<R> {
             ),
             lease_set_prune_timer: Box::pin(R::delay(LEASE_SET_PRUNE_INTERVAL)),
             netdb_handle,
-            outbound_tunnels: outbound_tunnels.clone(),
             pending_queries: HashSet::new(),
             query_futures: R::join_set(),
             remote_destinations: HashMap::new(),
@@ -538,17 +531,24 @@ impl<R: Runtime> Destination<R> {
                         Error::InvalidData
                     })?;
 
-                if core::matches!(payload, DatabaseStorePayload::RouterInfo { .. }) {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        "unexpected router info database store",
-                    );
-                    return Err(Error::InvalidData);
+                match payload {
+                    DatabaseStorePayload::LeaseSet2 { .. } => {
+                        // self.lease_set_manager.register_database_store(
+                        //     key.clone(),
+                        //     DatabaseStore::<R>::extract_raw_lease_set(&message.payload),
+                        // );
+                        self.lease_set_manager.register_database_store(key.clone());
+                        return Ok(Vec::new());
+                    }
+                    DatabaseStorePayload::RouterInfo { .. } => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "unexpected router info database store",
+                        );
+                        return Err(Error::InvalidData);
+                    }
                 }
-
-                self.lease_set_manager.register_database_store(key.clone());
-                return Ok(Vec::new());
             }
             MessageType::DatabaseSearchReply => {
                 let DatabaseSearchReply { key, routers, .. } =
@@ -741,22 +741,26 @@ impl<R: Runtime> Stream for Destination<R> {
                         "inbound tunnel built",
                     );
 
-                    self.inbound_tunnels.push(lease.clone());
-                    self.lease_set_manager.register_inbound_tunnel(lease.clone());
+                    // new lease set is always created using the inbound tunnel and given to any
+                    // active e2e sessions
+                    //
+                    // new lease set is published to netdb only when all tunnels have been built
+                    return Poll::Ready(Some(DestinationEvent::CreateLeaseSet {
+                        leases: self.lease_set_manager.register_inbound_tunnel(lease.clone()),
+                    }));
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
-                    self.outbound_tunnels.push(tunnel_id);
                     self.routing_path_manager.register_outbound_tunnel_built(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
-                    self.outbound_tunnels.retain(|tunnel| tunnel != &tunnel_id);
                     self.routing_path_manager.register_outbound_tunnel_expired(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
-                    self.inbound_tunnels.retain(|lease| lease.tunnel_id != tunnel_id);
                     self.lease_set_manager.register_expired_inbound_tunnel(tunnel_id);
                 }
-                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpiring { .. })) => {}
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpiring { tunnel_id })) => {
+                    self.lease_set_manager.register_expiring_inbound_tunnel(tunnel_id);
+                }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpiring { tunnel_id })) => {
                     self.routing_path_manager.register_outbound_tunnel_expiring(tunnel_id);
                 }
@@ -887,11 +891,13 @@ impl<R: Runtime> Stream for Destination<R> {
                 Poll::Ready(Some(destination_id)) => match self.query_lease_set(&destination_id) {
                     LeaseSetStatus::Found => tracing::debug!(
                         target: LOG_TARGET,
+                        local = %self.destination_id,
                         %destination_id,
                         "lease set requsted by routing path manager but it's available",
                     ),
                     status => tracing::trace!(
                         target: LOG_TARGET,
+                        local = %self.destination_id,
                         %destination_id,
                         ?status,
                         "lease set requested by routing path manager",
@@ -900,10 +906,13 @@ impl<R: Runtime> Stream for Destination<R> {
             }
         }
 
-        match self.lease_set_manager.poll_unpin(cx) {
-            Poll::Pending => {}
-            Poll::Ready(leases) =>
-                return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases })),
+        if self.lease_set_manager.poll_unpin(cx).is_ready() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "lease set manager exited"
+            );
+            return Poll::Ready(None);
         }
 
         if self.lease_set_prune_timer.poll_unpin(cx).is_ready() {
@@ -1185,54 +1194,6 @@ mod tests {
         .await;
 
         match tokio::time::timeout(Duration::from_secs(15), destination.next())
-            .await
-            .expect("no timeout")
-            .expect("to succeed")
-        {
-            DestinationEvent::CreateLeaseSet { .. } => {}
-            _ => panic!("invalid event"),
-        }
-    }
-
-    #[tokio::test]
-    async fn create_lease_set_after_timeout() {
-        let (netdb_handle, _rx) = NetDbHandle::create();
-        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
-            num_inbound: 3usize,
-            ..Default::default()
-        });
-        let mut destination = Destination::<MockRuntime>::new(
-            DestinationId::random(),
-            StaticPrivateKey::random(MockRuntime::rng()),
-            Bytes::new(),
-            netdb_handle.clone(),
-            tp_handle,
-            Vec::new(),
-            Vec::new(),
-            false,
-            ProfileStorage::new(&[], &[]),
-        );
-
-        // issue events for two new inbound tunnels
-        for _ in 0..2 {
-            tp_tx
-                .send(TunnelPoolEvent::InboundTunnelBuilt {
-                    tunnel_id: TunnelId::random(),
-                    lease: Lease {
-                        router_id: RouterId::random(),
-                        tunnel_id: TunnelId::random(),
-                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
-                    },
-                })
-                .await
-                .unwrap();
-        }
-
-        // verify that inbound tunnel is not built because 3 inbound tunnels are needed
-        assert!(destination.next().now_or_never().is_none());
-
-        // verify that that an event is emitted after the timer expires
-        match tokio::time::timeout(Duration::from_secs(20), destination.next())
             .await
             .expect("no timeout")
             .expect("to succeed")

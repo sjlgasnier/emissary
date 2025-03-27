@@ -180,6 +180,34 @@ impl<R: Runtime> Dht<R> {
 
         routers.pop_first().map(|(_, router_id)| router_id.clone())
     }
+
+    /// Get `limit` many routers closest to `key` from `routers`.
+    pub fn get_n_closest(
+        key: impl AsRef<[u8]>,
+        routers: &HashSet<RouterId>,
+        limit: usize,
+    ) -> HashSet<RouterId> {
+        if routers.is_empty() {
+            return HashSet::new();
+        }
+
+        let target =
+            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let routers = routers
+            .iter()
+            .map(|router_id| {
+                let distance = target.distance(&Key::from(router_id.clone()));
+
+                (distance, router_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        routers
+            .into_iter()
+            .take(limit)
+            .map(|(_, router_id)| router_id.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]

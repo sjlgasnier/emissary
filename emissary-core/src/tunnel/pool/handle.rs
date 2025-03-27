@@ -221,6 +221,7 @@ impl TunnelSender<'_> {
     /// closed
     ///
     /// The function blocks until there's enough capacity in the channel to send the message.
+    #[allow(unused)]
     pub async fn send(self) -> Result<(), ChannelError> {
         let message = match self.kind.expect("to exist") {
             DeliveryKind::TunnelDelivery {

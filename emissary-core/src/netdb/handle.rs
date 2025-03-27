@@ -158,25 +158,6 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
-    /// Send `DatabaseLookup` for a `RouterInfo` identified by `router_id`.
-    ///
-    /// On success returns a `oneshot::Receiver` the caller must poll for a reply poll for a reply.
-    /// If the query succeeded, `RouterInfo` is returned and if it failed, `QueryError` is returned.
-    ///
-    /// Panics if `NetDb` has shutdown and is unable to process the request.
-    pub async fn query_router_info(
-        &self,
-        router_id: RouterId,
-    ) -> oneshot::Receiver<Result<(), QueryError>> {
-        let (tx, rx) = oneshot::channel();
-
-        self.tx
-            .send(NetDbAction::QueryRouterInfo { router_id, tx })
-            .await
-            .map(|_| rx)
-            .expect("netdb to be active")
-    }
-
     /// Get `RouterId`'s and encryption public keys of the floodfills closest to `key`.
     ///
     /// Return channel is dropped by [`NetDb`] if there are no floodfills available.
