@@ -16,11 +16,18 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::certificates::PUBLIC_KEYS;
+
 use nom::{
     bytes::complete::{tag, take},
     error::{make_error, ErrorKind},
     number::complete::{be_u16, be_u64, be_u8},
     Err, IResult,
+};
+use rsa::{
+    pkcs1v15::{Signature, VerifyingKey},
+    sha2::Sha512,
+    signature::Verifier,
 };
 use tempfile::TempDir;
 
@@ -135,26 +142,29 @@ impl TryFrom<u8> for ContentKind {
 /// Software update.
 #[allow(unused)]
 pub struct Su3<'a> {
-    /// Signature kind.
-    signature_kind: SignatureKind,
-
-    /// Signature.
-    signature: &'a [u8],
-
-    /// File kind.
-    file_kind: FileKind,
+    /// Content.
+    content: &'a [u8],
 
     /// Content kind.
     content_kind: ContentKind,
 
-    /// Version.
-    version: &'a [u8],
+    /// File kind.
+    file_kind: FileKind,
+
+    /// Contents of SU3, excluding signature.
+    message: &'a [u8],
+
+    /// Signature.
+    signature: &'a [u8],
+
+    /// Signature kind.
+    signature_kind: SignatureKind,
 
     /// Signer ID.
     signer_id: &'a [u8],
 
-    /// Content.
-    content: &'a [u8],
+    /// Version.
+    version: &'a [u8],
 }
 
 impl<'a> Su3<'a> {
@@ -193,25 +203,57 @@ impl<'a> Su3<'a> {
         let (rest, version) = take(version_len)(rest)?;
         let (rest, signer_id) = take(signer_id_len)(rest)?;
         let (rest, content) = take(content_len)(rest)?;
+        let message = &input[..rest.len()];
         let (rest, signature) = take(signature_len)(rest)?;
 
         Ok((
             rest,
             Self {
-                signature_kind,
-                signature,
-                file_kind,
-                content_kind,
-                version,
-                signer_id,
                 content,
+                content_kind,
+                file_kind,
+                message,
+                signature,
+                signature_kind,
+                signer_id,
+                version,
             },
         ))
     }
 
     /// Attempt to parse reseed data from `input`.
-    pub fn parse_reseed(input: &'a [u8]) -> Option<Vec<ReseedRouterInfo>> {
+    pub fn parse_reseed(input: &'a [u8], verify: bool) -> Option<Vec<ReseedRouterInfo>> {
         let (_, su3) = Self::parse_inner(input).ok()?;
+
+        if verify {
+            match std::str::from_utf8(&su3.signer_id) {
+                Ok(signer_id) => match PUBLIC_KEYS.get(signer_id) {
+                    None => tracing::warn!(
+                        target: LOG_TARGET,
+                        ?signer_id,
+                        "public key for signer id not found",
+                    ),
+                    Some(key) =>
+                        if let Ok(signature) = Signature::try_from(su3.signature) {
+                            let verifying_key = VerifyingKey::<Sha512>::new(key.clone());
+
+                            if let Err(error) = verifying_key.verify(&su3.message, &signature) {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?signer_id,
+                                    ?error,
+                                    "failed to verify signature",
+                                )
+                            }
+                        },
+                },
+                Err(error) => tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "invalid signer id",
+                ),
+            }
+        }
 
         match (su3.file_kind, su3.content_kind) {
             (FileKind::Zip, ContentKind::ReseedData) => {}
@@ -269,6 +311,6 @@ mod tests {
     fn parse_su3() {
         const ROUTER_INFO: &'static [u8] = include_bytes!("../assets/i2pseeds.su3");
 
-        assert!(Su3::parse_reseed(ROUTER_INFO).is_some());
+        assert!(Su3::parse_reseed(ROUTER_INFO, false).is_some());
     }
 }

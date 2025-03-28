@@ -1214,6 +1214,12 @@ mod tests {
         Arguments {
             base_path: None,
             log: None,
+            #[cfg(feature = "router-ui")]
+            router_ui: crate::cli::RouterUiOptions {
+                disable_ui: None,
+                refresh_interval: None,
+                theme: None,
+            },
             floodfill: None,
             allow_local: None,
             caps: None,

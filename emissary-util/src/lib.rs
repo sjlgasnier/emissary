@@ -18,6 +18,8 @@
 
 #![allow(clippy::manual_async_fn)]
 
+mod certificates;
+
 pub mod reseeder;
 pub mod runtime;
 pub mod su3;
