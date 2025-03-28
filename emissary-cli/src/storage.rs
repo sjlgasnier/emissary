@@ -21,7 +21,11 @@ use crate::{config::Profile, error::Error};
 use emissary_core::runtime::Storage;
 use flate2::write::GzDecoder;
 
-use std::{fs::File, io::Write, path::PathBuf};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::router-storage";
@@ -60,10 +64,23 @@ impl RouterStorage {
         profile: emissary_core::Profile,
     ) -> crate::Result<()> {
         let dir = router_id.chars().next().ok_or(Error::Custom("invalid router id".to_string()))?;
-        let name = self.base_path.join(format!("peerProfiles/p{dir}/profile-{router_id}.toml"));
+
+        // don't store profile on disk if associated router info doesn't exist
+        if !Path::exists(&self.base_path.join(format!("netDb/r{dir}/routerInfo-{router_id}.dat"))) {
+            tracing::trace!(
+                target: LOG_TARGET,
+                %router_id,
+                "router info doesn't exist, skipping router profile store",
+            );
+
+            return Ok(());
+        }
+
+        let profile_name =
+            self.base_path.join(format!("peerProfiles/p{dir}/profile-{router_id}.toml"));
 
         let config = toml::to_string(&Profile::from(profile)).expect("to succeed");
-        let mut file = File::create(name)?;
+        let mut file = File::create(profile_name)?;
         file.write_all(config.as_bytes())?;
 
         Ok(())
@@ -84,6 +101,27 @@ impl Storage for RouterStorage {
 
         tokio::task::spawn_blocking(move || {
             for (router_id, router_info, profile) in routers {
+                if let Some(router_info) = router_info {
+                    match RouterStorage::decompress(router_info) {
+                        Some(router_info) =>
+                            if let Err(error) =
+                                storage_handle.store_router_info(router_id.clone(), router_info)
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?router_id,
+                                    ?error,
+                                    "failed to store router info to disk",
+                                );
+                            },
+                        None => tracing::warn!(
+                            target: LOG_TARGET,
+                            ?router_id,
+                            "failed to decompress router info",
+                        ),
+                    }
+                }
+
                 if let Err(error) = storage_handle.store_profile(router_id.clone(), profile) {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -91,29 +129,6 @@ impl Storage for RouterStorage {
                         ?error,
                         "failed to store router profile to disk",
                     );
-                }
-
-                let Some(router_info) = router_info else {
-                    continue;
-                };
-
-                match RouterStorage::decompress(router_info) {
-                    Some(router_info) =>
-                        if let Err(error) =
-                            storage_handle.store_router_info(router_id.clone(), router_info)
-                        {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?router_id,
-                                ?error,
-                                "failed to store router info to disk",
-                            );
-                        },
-                    None => tracing::warn!(
-                        target: LOG_TARGET,
-                        ?router_id,
-                        "failed to decompress router info",
-                    ),
                 }
             }
         });
