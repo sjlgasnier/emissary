@@ -1817,12 +1817,6 @@ impl<R: Runtime> NetDb<R> {
                         Ok(()) => {
                             query.queried.insert(floodfill.clone());
                             query.selected = Some(floodfill);
-
-                            self.active.insert(key.clone(), QueryKind::RouterInfo { query });
-                            self.query_timers.push(async move {
-                                R::delay(QUERY_TIMEOUT).await;
-                                key
-                            });
                         }
                         Err(error) => tracing::debug!(
                             target: LOG_TARGET,
@@ -1833,9 +1827,15 @@ impl<R: Runtime> NetDb<R> {
                     Err(error) => tracing::debug!(
                         target: LOG_TARGET,
                         ?error,
-                        "failed to database lookup message for router info",
+                        "failed to create database lookup message for router info",
                     ),
                 }
+
+                self.active.insert(key.clone(), QueryKind::RouterInfo { query });
+                self.query_timers.push(async move {
+                    R::delay(QUERY_TIMEOUT).await;
+                    key
+                });
             }
             kind => tracing::debug!(
                 target: LOG_TARGET,
