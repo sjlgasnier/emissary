@@ -83,7 +83,7 @@ const LEASE_SET_PUBLISH_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// If no messages has been sent within the last 8 minutes, the send tag set is considered inactive.
 ///
 /// If the receive tag set is also considered inactive, the active session is removed
-const ES_SEND_TAGSET_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const ES_SEND_TAGSET_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
 /// ES receive tag set timeout.
 ///
@@ -91,7 +91,7 @@ const ES_SEND_TAGSET_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// inactive.
 ///
 /// If the send tag set is also considered inactive, the active session is removed
-const ES_RECEIVE_TAGSET_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const ES_RECEIVE_TAGSET_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Session manager maintenance interval.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2 * 60);
