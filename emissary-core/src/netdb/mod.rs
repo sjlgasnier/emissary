@@ -1653,7 +1653,7 @@ impl<R: Runtime> NetDb<R> {
         };
 
         let Some(floodfill) = self.floodfill_dht.closest(&key, 1usize).next() else {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 "cannot perform router exploration, no floodfills",
             );

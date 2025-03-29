@@ -150,9 +150,9 @@ impl<R: Runtime> EventHandle<R> {
     /// [`AtomicUsize::fetch_add()`] is used because each tunnel pool keeps track of its own
     /// tunnel build success/failure rate.
     pub(crate) fn tunnel_status(&self, num_tunnels_built: usize, num_tunnel_build_failures: usize) {
-        self.num_tunnels_built.store(num_tunnels_built, Ordering::Release);
+        self.num_tunnels_built.fetch_add(num_tunnels_built, Ordering::Release);
         self.num_tunnel_build_failures
-            .store(num_tunnel_build_failures, Ordering::Release);
+            .fetch_add(num_tunnel_build_failures, Ordering::Release);
     }
 
     // TODO:

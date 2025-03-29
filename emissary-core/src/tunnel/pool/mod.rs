@@ -327,7 +327,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
     /// and sending a test message to the outbound tunnel and receiving the message back via the
     /// paired inbound tunnels.
     fn maintain_pool(&mut self) {
-        tracing::debug!(
+        tracing::trace!(
             target: LOG_TARGET,
             name = %self.config.name,
             num_outbound = ?self.outbound.len(),
@@ -854,7 +854,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         {
             match event {
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         ?error,
@@ -906,7 +906,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         while let Poll::Ready(Some((tunnel_id, event))) = self.pending_inbound.poll_next_unpin(cx) {
             match event {
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         target: LOG_TARGET,
                         name = %self.config.name,
                         %tunnel_id,
@@ -1291,7 +1291,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
                 None => return Poll::Ready(()),
                 Some((outbound, inbound, result)) => match result {
                     Err(error) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             target: LOG_TARGET,
                             name = %self.config.name,
                             %outbound,
@@ -1440,6 +1440,11 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> Future for TunnelPool<R, S> {
         if self.event_handle.poll_unpin(cx).is_ready() {
             self.event_handle
                 .tunnel_status(self.num_tunnels_built, self.num_tunnel_build_failures);
+
+            // reset counters to zero as the cumulative success/failure tate is tracked by the event
+            // system whereas each tunnel pool only  tracks the rate during each report period
+            self.num_tunnels_built = 0;
+            self.num_tunnel_build_failures = 0;
         }
 
         match self.maintenance_timer.poll_unpin(cx) {
