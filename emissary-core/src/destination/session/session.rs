@@ -959,7 +959,7 @@ impl<R: Runtime> Session<R> {
 
                                 // collect all tags of the current tag set into a separate storage
                                 // from which they're easy to expire once the tag set they belonged
-                                // to us expires
+                                // to expires
                                 let expiring_tags =
                                     self.tag_set_entries.keys().copied().collect::<HashSet<_>>();
                                 self.expiring.push_back((R::now(), expiring_tags));

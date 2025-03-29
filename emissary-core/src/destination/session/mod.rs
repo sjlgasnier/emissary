@@ -38,7 +38,7 @@ use crate::{
         Message, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     primitives::{DestinationId, MessageId},
-    runtime::{JoinSet, Runtime},
+    runtime::{Instant, JoinSet, Runtime},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -78,6 +78,21 @@ const SESSION_DH_RATCHET_THRESHOLD: usize = 20_000usize;
 /// remote to update remote destination's `NetDb` with our new lease set.
 const LEASE_SET_PUBLISH_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// ES send tag set timeout.
+///
+/// If no messages has been sent within the last 8 minutes, the send tag set is considered inactive.
+///
+/// If the receive tag set is also considered inactive, the active session is removed
+const ES_SEND_TAGSET_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+/// ES receive tag set timeout.
+///
+/// If no messages has been received within the last 10 minutes, the receive tag set is considered
+/// inactive.
+///
+/// If the send tag set is also considered inactive, the active session is removed
+const ES_RECEIVE_TAGSET_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
 /// Session manager maintenance interval.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2 * 60);
 
@@ -85,6 +100,12 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2 * 60);
 struct ActiveSession<R: Runtime> {
     /// Pending ACK requests received from remote.
     inbound_ack_requests: HashSet<(u16, u16)>,
+
+    /// Time when the last ES was received.
+    last_received: R::Instant,
+
+    /// Time when the last ES was sent.
+    last_sent: R::Instant,
 
     /// Lease set that must be sent to remote, if any.
     lease_set: Option<Bytes>,
@@ -100,6 +121,8 @@ impl<R: Runtime> ActiveSession<R> {
     pub fn new(session: Session<R>) -> Self {
         Self {
             inbound_ack_requests: HashSet::new(),
+            last_received: R::now(),
+            last_sent: R::now(),
             lease_set: None,
             outbound_ack_requests: HashSet::new(),
             session,
@@ -395,6 +418,7 @@ impl<R: Runtime> SessionManager<R> {
                             .encrypt(builder)
                             .map(|(tag_set_id, tag_index, message)| {
                                 session.insert_outbound_ack_request(tag_set_id, tag_index);
+                                session.last_sent = R::now();
 
                                 let mut out = BytesMut::with_capacity(message.len() + 4);
 
@@ -649,6 +673,8 @@ impl<R: Runtime> SessionManager<R> {
                     .session
                     .decrypt(garlic_tag, message.payload)
                     .map(|(tag_set_id, tag_index, message)| {
+                        session.last_received = R::now();
+
                         (tag_set_id, tag_index, destination_id.clone(), message)
                     })
                     .map_err(|error| match error {
@@ -808,8 +834,9 @@ impl<R: Runtime> SessionManager<R> {
 
     /// Perform periodic maintenance of active and pending sessions.
     ///
-    /// Removes all pending sessions that have expired and calls `Session::maintain()` for each
-    /// active session which removes expired tags of the active session.
+    /// Removes all pending sessions that have expired and all active sessions which haven't had
+    /// activity within the last 10 minutes, and calls `Session::maintain()` for each active session
+    /// which removes expired tags of the active session.
     fn maintain(&mut self) {
         self.pending
             .iter()
@@ -824,6 +851,27 @@ impl<R: Runtime> SessionManager<R> {
                     "purging expired pending session",
                 );
                 self.pending.remove(&remote);
+            });
+
+        self.active
+            .iter()
+            .filter_map(|(destination_id, session)| {
+                (session.last_received.elapsed() > ES_RECEIVE_TAGSET_TIMEOUT
+                    && session.last_sent.elapsed() > ES_SEND_TAGSET_TIMEOUT)
+                    .then_some(destination_id.clone())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|remote| {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    local = %self.destination_id,
+                    %remote,
+                    "removing inactive session",
+                );
+
+                // session must exist since it was deemed inactive
+                self.active.remove(&remote).expect("to exist").session.destroy();
             });
 
         self.active.values_mut().for_each(|session| session.session.maintain());
