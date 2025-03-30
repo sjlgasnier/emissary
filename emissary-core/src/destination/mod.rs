@@ -17,29 +17,31 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    crypto::{base32_encode, chachapoly::ChaChaPoly, EphemeralPrivateKey, StaticPrivateKey},
-    destination::session::{SessionManager, SessionManagerEvent},
+    crypto::StaticPrivateKey,
+    destination::{
+        lease_set::LeaseSetManager,
+        routing_path::{
+            PendingRoutingPathHandle, RoutingPath, RoutingPathHandle, RoutingPathManager,
+        },
+        session::{SessionManager, SessionManagerEvent},
+    },
     error::{Error, QueryError},
     i2np::{
         database::{
-            lookup::{DatabaseLookupBuilder, LookupType, ReplyType as LookupReplyType},
             search_reply::DatabaseSearchReply,
-            store::{
-                DatabaseStore, DatabaseStoreBuilder, DatabaseStoreKind, DatabaseStorePayload,
-                ReplyType,
-            },
+            store::{DatabaseStore, DatabaseStorePayload},
         },
         delivery_status::DeliveryStatus,
-        garlic::{DeliveryInstructions, GarlicMessageBuilder},
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::NetDbHandle,
-    primitives::{DestinationId, Lease, LeaseSet2, MessageId, RouterId, TunnelId},
-    runtime::{Instant, JoinSet, Runtime},
-    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle, TunnelSender},
+    primitives::{DestinationId, Lease, LeaseSet2, TunnelId},
+    profile::ProfileStorage,
+    runtime::{JoinSet, Runtime},
+    tunnel::{NoiseContext, TunnelPoolEvent, TunnelPoolHandle},
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
@@ -52,6 +54,9 @@ use core::{
     time::Duration,
 };
 
+mod lease_set;
+
+pub mod routing_path;
 pub mod session;
 
 /// Logging target for the file.
@@ -61,17 +66,44 @@ const LOG_TARGET: &str = "emissary::destination";
 /// after the previous call was rejected.
 const NETDB_BACKOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Local lease set expiration timeout.
-const LEASE_SET_EXPIRATION: Duration = Duration::from_secs(9 * 60);
-
-/// Local lease set expiration timeout.
-const LEASE_SET_MAX_AGE: Duration = Duration::from_secs(2 * 60);
-
 /// Number of retries before lease set query is aborted.
 ///
 /// This is the number retries made when trying to contact [`NetDb`] for a lease set query
 /// in case the channel used by [`NetDbHandle`] is clogged.
 const NUM_QUERY_RETRIES: usize = 3usize;
+
+/// Stale lease set prune interval.
+const LEASE_SET_PRUNE_INTERVAL: Duration = Duration::from_secs(2 * 60);
+
+/// How the message should be delivered to remote destination.
+#[derive(Default, Clone)]
+pub enum DeliveryStyle {
+    /// Deliver the message to remote using the explicitly specified routing path.
+    ViaRoute {
+        /// Routing path.
+        routing_path: RoutingPath,
+    },
+
+    /// Deliver the message to remote via any available route.
+    Unspecified {
+        /// ID of the remote destination.
+        destination_id: DestinationId,
+    },
+
+    #[default]
+    Dummy,
+}
+
+impl DeliveryStyle {
+    /// Get reference to [`DestinationId`].
+    pub fn destination_id(&self) -> &DestinationId {
+        match self {
+            Self::ViaRoute { routing_path } => &routing_path.destination_id,
+            Self::Unspecified { destination_id } => destination_id,
+            Self::Dummy => unreachable!(),
+        }
+    }
+}
 
 /// Events emitted by [`Destination`].
 #[derive(Debug)]
@@ -143,6 +175,15 @@ pub struct DestinationContext {
     /// Outbound messages are put on hold if remote lease set has expired
     /// and a new lease set is being queried.
     pending_messages: VecDeque<Vec<u8>>,
+
+    /// Expiring lease sets.
+    ///
+    /// Some routing paths may still use these lease sets if they haven't expired and since the
+    /// `RoutingPath` doesn't hold the `RouterId` of the lease set, these lease sets are stored
+    /// separately.
+    ///
+    /// The stale lease sets are periodically pruned at an interval of `LEASE_SET_PRUNE_INTERVAL`.
+    expiring_leases: HashMap<TunnelId, Lease>,
 }
 
 /// Client destination.
@@ -150,36 +191,23 @@ pub struct Destination<R: Runtime> {
     /// Destination ID of the client.
     destination_id: DestinationId,
 
-    /// Active inbound tunnels.
-    inbound_tunnels: Vec<Lease>,
-
     /// Serialized [`LeaseSet2`] for client's inbound tunnels.
     #[allow(unused)]
     lease_set: Bytes,
 
-    /// Timer which expires when a new lease set needs to be published
-    /// or an old lease set publish should be reattempted.
-    lease_set_publish_timer: LeaseSetPublishTimer,
+    /// Local lease set manager.
+    lease_set_manager: LeaseSetManager<R>,
+
+    /// Timer for periodic pruning of stale lease sets.
+    lease_set_prune_timer: BoxFuture<'static, ()>,
 
     /// Handle to [`NetDb`].
     netdb_handle: NetDbHandle,
 
-    /// Noise context.
-    noise: NoiseContext,
-
-    /// Active outbound tunnels.
-    outbound_tunnels: Vec<TunnelId>,
-
-    /// Inbound tunnels waiting to be published to `NetDb`.
-    pending_inbound: Vec<(Lease, R::Instant)>,
-
+    // /// Inbound tunnels waiting to be published to `NetDb`.
+    // pending_inbound: Vec<(Lease, R::Instant)>,
     /// Pending lease set queries:
     pending_queries: HashSet<DestinationId>,
-
-    /// Pending lease set storage verification(s).
-    ///
-    /// Realistically this has only one entry, unless the network is lagging.
-    pending_storage_verifications: HashMap<Bytes, R::Instant>,
 
     /// Pending `LeaseSet2` query futures.
     query_futures: R::JoinSet<(DestinationId, Result<LeaseSet2, QueryError>)>,
@@ -187,14 +215,14 @@ pub struct Destination<R: Runtime> {
     /// Known remote destinations.
     remote_destinations: HashMap<DestinationId, DestinationContext>,
 
+    /// Routing path manager.
+    routing_path_manager: RoutingPathManager<R>,
+
     /// Session manager.
     session_manager: SessionManager<R>,
 
     /// Handle to destination's [`TunnelPool`].
     tunnel_pool_handle: TunnelPoolHandle,
-
-    /// Is the destination unpublished, i.e., does the lease set get published to `NetDb`.
-    unpublished: bool,
 
     /// Waker.
     waker: Option<Waker>,
@@ -214,27 +242,30 @@ impl<R: Runtime> Destination<R> {
         outbound_tunnels: Vec<TunnelId>,
         inbound_tunnels: Vec<Lease>,
         unpublished: bool,
+        profile_storage: ProfileStorage<R>,
     ) -> Self {
         Self {
             destination_id: destination_id.clone(),
-            inbound_tunnels,
             lease_set: lease_set.clone(),
-            lease_set_publish_timer: if unpublished {
-                LeaseSetPublishTimer::Inactive
-            } else {
-                LeaseSetPublishTimer::new::<R>()
-            },
+            lease_set_manager: LeaseSetManager::new(
+                inbound_tunnels,
+                destination_id.clone(),
+                tunnel_pool_handle.sender(),
+                tunnel_pool_handle.config().num_inbound,
+                netdb_handle.clone(),
+                NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
+                profile_storage,
+                unpublished,
+                lease_set.clone(),
+            ),
+            lease_set_prune_timer: Box::pin(R::delay(LEASE_SET_PRUNE_INTERVAL)),
             netdb_handle,
-            noise: NoiseContext::new(private_key.clone(), Bytes::from(destination_id.to_vec())),
-            outbound_tunnels,
-            pending_inbound: Vec::new(),
             pending_queries: HashSet::new(),
-            pending_storage_verifications: HashMap::new(),
             query_futures: R::join_set(),
             remote_destinations: HashMap::new(),
+            routing_path_manager: RoutingPathManager::new(destination_id.clone(), outbound_tunnels),
             session_manager: SessionManager::new(destination_id, private_key, lease_set),
             tunnel_pool_handle,
-            unpublished,
             waker: None,
         }
     }
@@ -281,7 +312,7 @@ impl<R: Runtime> Destination<R> {
         self.pending_queries.insert(destination_id.clone());
         self.query_futures.push(async move {
             for _ in 0..NUM_QUERY_RETRIES {
-                let Ok(rx) = handle.query_leaseset(Bytes::from(destination_id.to_vec())) else {
+                let Ok(rx) = handle.query_lease_set(Bytes::from(destination_id.to_vec())) else {
                     R::delay(NETDB_BACKOFF_TIMEOUT).await;
                     continue;
                 };
@@ -329,14 +360,15 @@ impl<R: Runtime> Destination<R> {
     /// outbound tunnels of [`Destination`].
     fn send_message_inner(
         &mut self,
-        destination_id: &DestinationId,
+        delivery_style: DeliveryStyle,
         message: Vec<u8>,
     ) -> crate::Result<()> {
-        let Some(context) = self.remote_destinations.get_mut(destination_id) else {
+        let Some(context) = self.remote_destinations.get_mut(delivery_style.destination_id())
+        else {
             tracing::warn!(
                 target: LOG_TARGET,
                 local = %self.destination_id,
-                remote = %destination_id,
+                remote = %delivery_style.destination_id(),
                 "`Destination::encrypt()` called but lease set is missing",
             );
             debug_assert!(false);
@@ -348,12 +380,12 @@ impl<R: Runtime> Destination<R> {
             tracing::debug!(
                 target: LOG_TARGET,
                 local = %self.destination_id,
-                remote = %destination_id,
+                remote = %delivery_style.destination_id(),
                 "postpone outbound message, remote lease set is expired"
             );
 
             context.pending_messages.push_back(message);
-            self.query_lease_set(&destination_id);
+            self.query_lease_set(delivery_style.destination_id());
 
             return Ok(());
         }
@@ -367,21 +399,91 @@ impl<R: Runtime> Destination<R> {
             .with_payload(&message)
             .build();
 
-        // select random tunnel for delivery
-        let random_lease = R::rng().next_u32() as usize % context.lease_set.leases.len();
+        match delivery_style {
+            DeliveryStyle::ViaRoute {
+                routing_path:
+                    RoutingPath {
+                        destination_id,
+                        inbound,
+                        outbound,
+                    },
+            } => match context.lease_set.leases.iter().find(|lease| lease.tunnel_id == inbound) {
+                Some(Lease { router_id, .. }) => {
+                    if let Err(error) = self
+                        .tunnel_pool_handle
+                        .send_message(message)
+                        .tunnel_delivery(router_id.clone(), inbound)
+                        .via_outbound_tunnel(outbound)
+                        .try_send()
+                    {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            remote = %destination_id,
+                            %inbound,
+                            %router_id,
+                            %outbound,
+                            ?error,
+                            "failed to send message to tunnel via routing path",
+                        );
+                    }
+                }
+                None => match context.expiring_leases.get(&inbound) {
+                    Some(Lease { router_id, .. }) => {
+                        if let Err(error) = self
+                            .tunnel_pool_handle
+                            .send_message(message)
+                            .tunnel_delivery(router_id.clone(), inbound)
+                            .via_outbound_tunnel(outbound)
+                            .try_send()
+                        {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                local = %self.destination_id,
+                                remote = %destination_id,
+                                %inbound,
+                                %router_id,
+                                %outbound,
+                                ?error,
+                                "failed to send message to tunnel via routing path",
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            %destination_id,
+                            %inbound,
+                            %outbound,
+                            "lease set for selected ibgw doesn't exist",
+                        );
+                        debug_assert!(false);
+                    }
+                },
+            },
+            DeliveryStyle::Unspecified { destination_id } => {
+                // select random tunnel for delivery
+                let random_lease = R::rng().next_u32() as usize % context.lease_set.leases.len();
 
-        if let Err(error) = self.tunnel_pool_handle.sender().try_send_to_tunnel(
-            context.lease_set.leases[random_lease].router_id.clone(),
-            context.lease_set.leases[random_lease].tunnel_id,
-            message,
-        ) {
-            tracing::debug!(
-                target: LOG_TARGET,
-                local = %self.destination_id,
-                remote = %destination_id,
-                ?error,
-                "failed to send message to tunnel",
-            );
+                if let Err(error) = self
+                    .tunnel_pool_handle
+                    .send_message(message)
+                    .tunnel_delivery(
+                        context.lease_set.leases[random_lease].router_id.clone(),
+                        context.lease_set.leases[random_lease].tunnel_id,
+                    )
+                    .try_send()
+                {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        remote = %destination_id,
+                        ?error,
+                        "failed to send message to tunnel",
+                    );
+                }
+            }
+            DeliveryStyle::Dummy => unreachable!(),
         }
 
         Ok(())
@@ -392,11 +494,11 @@ impl<R: Runtime> Destination<R> {
     /// Session manager is expected to have public key of the remote destination.
     pub fn send_message(
         &mut self,
-        destination_id: &DestinationId,
+        delivery_style: DeliveryStyle,
         message: Vec<u8>,
     ) -> crate::Result<()> {
-        match self.session_manager.encrypt(destination_id, message) {
-            Ok(message) => self.send_message_inner(destination_id, message),
+        match self.session_manager.encrypt(delivery_style.destination_id(), message) {
+            Ok(message) => self.send_message_inner(delivery_style, message),
             Err(error) => Err(Error::Session(error)),
         }
     }
@@ -429,33 +531,27 @@ impl<R: Runtime> Destination<R> {
                         Error::InvalidData
                     })?;
 
-                if core::matches!(payload, DatabaseStorePayload::RouterInfo { .. }) {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        "unexpected router info database store",
-                    );
-                    return Err(Error::InvalidData);
+                match payload {
+                    DatabaseStorePayload::LeaseSet2 { .. } => {
+                        // self.lease_set_manager.register_database_store(
+                        //     key.clone(),
+                        //     DatabaseStore::<R>::extract_raw_lease_set(&message.payload),
+                        // );
+                        self.lease_set_manager.register_database_store(key.clone());
+                        return Ok(Vec::new());
+                    }
+                    DatabaseStorePayload::RouterInfo { .. } => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            "unexpected router info database store",
+                        );
+                        return Err(Error::InvalidData);
+                    }
                 }
-
-                match self.pending_storage_verifications.remove(&key) {
-                    None => tracing::warn!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        key = ?base32_encode(key),
-                        "unexpected lease set database store",
-                    ),
-                    Some(_) => tracing::info!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        "lease set storage verified",
-                    ),
-                }
-
-                return Ok(Vec::new());
             }
             MessageType::DatabaseSearchReply => {
-                let DatabaseSearchReply { from, key, .. } =
+                let DatabaseSearchReply { key, routers, .. } =
                     DatabaseSearchReply::parse(&message.payload).ok_or_else(|| {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -465,21 +561,7 @@ impl<R: Runtime> Destination<R> {
                         Error::InvalidData
                     })?;
 
-                match self.pending_storage_verifications.remove(&key) {
-                    None => tracing::debug!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        key = ?base32_encode(key),
-                        floodfill = %RouterId::from(from),
-                        "unexpected database search reply",
-                    ),
-                    Some(_) => tracing::debug!(
-                        target: LOG_TARGET,
-                        local = %self.destination_id,
-                        "lease set storage failed",
-                    ),
-                }
-
+                self.lease_set_manager.register_database_search_reply(key.clone(), routers);
                 return Ok(Vec::new());
             }
             MessageType::DeliveryStatus => {
@@ -561,9 +643,17 @@ impl<R: Runtime> Destination<R> {
                                 "store lease set for remote destination",
                             );
 
+                            self.routing_path_manager
+                                .register_leases(&destination_id, Ok(lease_set.leases.clone()));
+
                             match self.remote_destinations.get_mut(&destination_id) {
                                 Some(context) => {
-                                    context.lease_set = lease_set;
+                                    mem::replace(&mut context.lease_set, lease_set)
+                                        .leases
+                                        .into_iter()
+                                        .for_each(|lease| {
+                                            context.expiring_leases.insert(lease.tunnel_id, lease);
+                                        });
                                 }
                                 None => {
                                     self.remote_destinations.insert(
@@ -571,6 +661,7 @@ impl<R: Runtime> Destination<R> {
                                         DestinationContext {
                                             lease_set,
                                             pending_messages: VecDeque::new(),
+                                            expiring_leases: HashMap::new(),
                                         },
                                     );
                                 }
@@ -606,220 +697,26 @@ impl<R: Runtime> Destination<R> {
     }
 
     /// Attempt to publish new lease set to `NetDb`.
-    pub fn publish_lease_set(&mut self, key: Bytes, lease_set: Bytes) {
+    pub fn publish_lease_set(&mut self, lease_set: Bytes) {
         // store our new lease set proactively to `SessionManager` so it can be given to all active
         // session right away while publishing the new lease set to NetDb in the background
-        self.session_manager.set_local_leaseset(lease_set.clone());
-
-        if self.unpublished {
-            tracing::debug!(
-                target: LOG_TARGET,
-                local = %self.destination_id,
-                "destination is unpublished, skipping lease set store to netdb",
-            );
-            return;
-        }
-
-        let netdb_handle = self.netdb_handle.clone();
-        let tunnel_sender = self.tunnel_pool_handle.sender().clone();
-        let local = self.destination_id.clone();
-        let noise = self.noise.clone();
-
-        // attempt to get an outbound tunnel for sending the database store message
-        //
-        // while technically the destination should always have at least one outbound tunnel, it's
-        // possible that an outbound tunnel built has failed so many times that the previous
-        // outbound tunnels expired, leaving the destination with no outbound tunnel
-        //
-        // TODO: make tunnel selection more random
-        let gateway = match self.outbound_tunnels.first() {
-            Some(gateway) => *gateway,
-            None => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    local = %self.destination_id,
-                    "no outbound tunnel available for lease set publication",
-                );
-                debug_assert!(false);
-                return;
-            }
-        };
-
-        // attempt to get an IBGW for lease set storage verification
-        //
-        // see comment above why this check must be made
-        let Some(Lease {
-            router_id: gateway_router_id,
-            tunnel_id: gateway_tunnel_id,
-            ..
-        }) = self.inbound_tunnels.first().cloned()
-        else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                local = %self.destination_id,
-                "no inbound tunnel available for lease set storage verification",
-            );
-            debug_assert!(false);
-            return;
-        };
-
-        // mark the key as "pending", waiting for lease set storage verification to end
-        self.pending_storage_verifications.insert(key.clone(), R::now());
-
-        R::spawn(async move {
-            let floodfills = {
-                let mut floodfills = None;
-
-                for _ in 0..3 {
-                    match netdb_handle.get_closest_floodfills(key.clone()) {
-                        Ok(query_rx) => match query_rx.await {
-                            Ok(queried) => {
-                                floodfills = Some(queried);
-                                break;
-                            }
-                            Err(_) => R::delay(NETDB_BACKOFF_TIMEOUT).await,
-                        },
-                        Err(_) => R::delay(NETDB_BACKOFF_TIMEOUT).await,
-                    }
-                }
-
-                match floodfills {
-                    Some(floodfills) => floodfills,
-                    None => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            %local,
-                            "failed to contact netdb after three retries, aborting lease set publish",
-                        );
-                        debug_assert!(false);
-                        return;
-                    }
-                }
-            };
-
-            // create database store and send it to a floodfill router over
-            // one of the destination's outbound tunnels
-            let reply_token = R::rng().next_u32();
-
-            tracing::trace!(
-                target: LOG_TARGET,
-                %local,
-                %reply_token,
-                "publish local lease set",
-            );
-
-            let message =
-                DatabaseStoreBuilder::new(key.clone(), DatabaseStoreKind::LeaseSet2 { lease_set })
-                    .with_reply_type(ReplyType::Tunnel {
-                        reply_token,
-                        tunnel_id: gateway_tunnel_id,
-                        router_id: gateway_router_id.clone(),
-                    })
-                    .build();
-
-            let mut message = GarlicMessageBuilder::default()
-                .with_date_time(R::time_since_epoch().as_secs() as u32)
-                .with_garlic_clove(
-                    MessageType::DatabaseStore,
-                    MessageId::from(R::rng().next_u32()),
-                    R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                    DeliveryInstructions::Local,
-                    &message,
-                )
-                .build();
-
-            let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-            let ephemeral_public = ephemeral_secret.public();
-            let (garlic_key, garlic_tag) =
-                noise.derive_outbound_garlic_key(floodfills[0].1.clone(), ephemeral_secret);
-
-            // message length + poly13055 tg + ephemeral key + garlic message length
-            let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
-
-            // encryption must succeed since the parameters are managed by us
-            ChaChaPoly::new(&garlic_key)
-                .encrypt_with_ad_new(&garlic_tag, &mut message)
-                .expect("to succeed");
-
-            out.put_u32(message.len() as u32 + 32);
-            out.put_slice(&ephemeral_public.to_vec());
-            out.put_slice(&message);
-
-            let message = MessageBuilder::standard()
-                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::Garlic)
-                .with_message_id(R::rng().next_u32())
-                .with_payload(&out)
-                .build();
-
-            // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[0].0.clone(), message).await;
-
-            // verify there's at least one other floodfill before proceeding to storage verification
-            if floodfills.len() == 1 {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    %local,
-                    "not enough floodfills to verify lease set storage",
-                );
-                return;
-            }
-
-            // wait 10 seconds and verify the lease set has been flooded to other floodfill routers
-            //
-            // `LeaseSet Storage Verification` in https://geti2p.net/en/docs/how/network-database
-            R::delay(Duration::from_secs(10)).await;
-
-            let message = DatabaseLookupBuilder::new(key, LookupType::Leaseset)
-                .with_reply_type(LookupReplyType::Tunnel {
-                    tunnel_id: gateway_tunnel_id,
-                    router_id: gateway_router_id,
-                })
-                .build();
-
-            let mut message = GarlicMessageBuilder::default()
-                .with_date_time(R::time_since_epoch().as_secs() as u32)
-                .with_garlic_clove(
-                    MessageType::DatabaseLookup,
-                    MessageId::from(R::rng().next_u32()),
-                    R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                    DeliveryInstructions::Local,
-                    &message,
-                )
-                .build();
-
-            let ephemeral_secret = EphemeralPrivateKey::random(R::rng());
-            let ephemeral_public = ephemeral_secret.public();
-            let (garlic_key, garlic_tag) =
-                noise.derive_outbound_garlic_key(floodfills[1].1.clone(), ephemeral_secret);
-
-            // message length + poly13055 tg + ephemeral key + garlic message length
-            let mut out = BytesMut::with_capacity(message.len() + 16 + 32 + 4);
-
-            // encryption must succeed since the parameters are managed by us
-            ChaChaPoly::new(&garlic_key)
-                .encrypt_with_ad_new(&garlic_tag, &mut message)
-                .expect("to succeed");
-
-            out.put_u32(message.len() as u32 + 32);
-            out.put_slice(&ephemeral_public.to_vec());
-            out.put_slice(&message);
-
-            let message = MessageBuilder::standard()
-                .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
-                .with_message_type(MessageType::Garlic)
-                .with_message_id(R::rng().next_u32())
-                .with_payload(&out)
-                .build();
-
-            // this is a blocking call so the only way it'd fail is if the tunnel pool had shut down
-            let _ = tunnel_sender.send_to_router(gateway, floodfills[1].0.clone(), message).await;
-        })
+        self.session_manager.register_lease_set(lease_set.clone());
+        self.lease_set_manager.register_lease_set(lease_set.clone());
     }
 
     /// Shutdown session by shutting down the tunnel pool.
     pub fn shutdown(&mut self) {
         self.tunnel_pool_handle.shutdown();
+    }
+
+    /// Get [`RoutingPathHandle`].
+    pub fn routing_path_handle(&mut self, destination_id: DestinationId) -> RoutingPathHandle<R> {
+        self.routing_path_manager.handle(destination_id)
+    }
+
+    /// Get [`PendingRoutingPathHandle`].
+    pub fn pending_routing_path_handle(&self) -> PendingRoutingPathHandle {
+        self.routing_path_manager.pending_handle()
     }
 }
 
@@ -843,38 +740,29 @@ impl<R: Runtime> Stream for Destination<R> {
                         ?tunnel_id,
                         "inbound tunnel built",
                     );
-                    self.inbound_tunnels.push(lease.clone());
-                    self.pending_inbound.push((lease, R::now()));
 
-                    // return event before the publish timer expires if there are enough leases
-                    if self
-                        .pending_inbound
-                        .iter()
-                        .filter(|(_, created)| created.elapsed() < LEASE_SET_MAX_AGE)
-                        .count()
-                        == self.tunnel_pool_handle.config().num_inbound
-                    {
-                        // reset timer so it doesn't fire when the client is creating the lease set
-                        self.lease_set_publish_timer.deactivate();
-
-                        let leases = mem::take(&mut self.pending_inbound)
-                            .into_iter()
-                            .filter_map(|(lease, created)| {
-                                (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
-                            })
-                            .collect::<Vec<_>>();
-
-                        return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
-                    }
+                    // new lease set is always created using the inbound tunnel and given to any
+                    // active e2e sessions
+                    //
+                    // new lease set is published to netdb only when all tunnels have been built
+                    return Poll::Ready(Some(DestinationEvent::CreateLeaseSet {
+                        leases: self.lease_set_manager.register_inbound_tunnel(lease.clone()),
+                    }));
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
-                    self.outbound_tunnels.push(tunnel_id);
+                    self.routing_path_manager.register_outbound_tunnel_built(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
-                    self.outbound_tunnels.retain(|tunnel| tunnel != &tunnel_id);
+                    self.routing_path_manager.register_outbound_tunnel_expired(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
-                    self.inbound_tunnels.retain(|lease| lease.tunnel_id != tunnel_id);
+                    self.lease_set_manager.register_expired_inbound_tunnel(tunnel_id);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpiring { tunnel_id })) => {
+                    self.lease_set_manager.register_expiring_inbound_tunnel(tunnel_id);
+                }
+                Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpiring { tunnel_id })) => {
+                    self.routing_path_manager.register_outbound_tunnel_expiring(tunnel_id);
                 }
                 Poll::Ready(Some(TunnelPoolEvent::Message { message })) =>
                     match self.decrypt_message(message) {
@@ -904,7 +792,9 @@ impl<R: Runtime> Stream for Destination<R> {
                     destination_id,
                     message,
                 })) =>
-                    if let Err(error) = self.send_message_inner(&destination_id, message) {
+                    if let Err(error) = self
+                        .send_message_inner(DeliveryStyle::Unspecified { destination_id }, message)
+                    {
                         tracing::warn!(
                             target: LOG_TARGET,
                             local = %self.destination_id,
@@ -918,170 +808,130 @@ impl<R: Runtime> Stream for Destination<R> {
         match self.query_futures.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((destination_id, result))) => match result {
-                Err(error) => {
-                    self.pending_queries.remove(&destination_id);
-                    return Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
-                        destination_id,
-                        error,
-                    }));
-                }
-                Ok(lease_set) => {
-                    self.pending_queries.remove(&destination_id);
-                    self.session_manager.add_remote_destination(
-                        destination_id.clone(),
-                        lease_set.public_keys[0].clone(),
-                    );
+            Poll::Ready(Some((destination_id, result))) => {
+                // always register lease set query result, regardless of its status as one or more
+                // routing paths might've initiated the query and need to know whether it succeeded
+                // or not
+                self.routing_path_manager.register_leases(
+                    &destination_id,
+                    result
+                        .as_ref()
+                        .map(|lease_set| lease_set.leases.clone())
+                        .map_err(|error| *error),
+                );
 
-                    // add new lease set for destination or create new destination of it didn't
-                    // exist
-                    //
-                    // if the destination has pending messages, sending those before returning the
-                    // lease set caller
-                    match self.remote_destinations.get_mut(&destination_id) {
-                        Some(context) => {
-                            context.lease_set = lease_set;
+                match result {
+                    Err(error) => {
+                        self.pending_queries.remove(&destination_id);
 
-                            mem::replace(&mut context.pending_messages, VecDeque::new())
-                                .into_iter()
-                                .for_each(|message| {
-                                    if let Err(error) =
-                                        self.send_message_inner(&destination_id, message)
-                                    {
-                                        tracing::debug!(
-                                            target: LOG_TARGET,
-                                            local = %self.destination_id,
-                                            remote = %destination_id,
-                                            ?error,
-                                            "failed to send pending message",
-                                        );
-                                    }
-                                });
-                        }
-                        None => {
-                            self.remote_destinations.insert(
-                                destination_id.clone(),
-                                DestinationContext {
-                                    lease_set,
-                                    pending_messages: VecDeque::new(),
-                                },
-                            );
-                        }
+                        return Poll::Ready(Some(DestinationEvent::LeaseSetNotFound {
+                            destination_id,
+                            error,
+                        }));
                     }
+                    Ok(lease_set) => {
+                        self.pending_queries.remove(&destination_id);
+                        self.session_manager.add_remote_destination(
+                            destination_id.clone(),
+                            lease_set.public_keys[0].clone(),
+                        );
 
-                    return Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id }));
+                        // add new lease set for destination or create new destination of it didn't
+                        // exist
+                        //
+                        // if the destination has pending messages, sending those before returning
+                        // the lease set caller
+                        match self.remote_destinations.get_mut(&destination_id) {
+                            Some(context) => {
+                                context.lease_set = lease_set;
+
+                                mem::take(&mut context.pending_messages).into_iter().for_each(
+                                    |message| {
+                                        if let Err(error) = self.send_message_inner(
+                                            DeliveryStyle::Unspecified {
+                                                destination_id: destination_id.clone(),
+                                            },
+                                            message,
+                                        ) {
+                                            tracing::debug!(
+                                                target: LOG_TARGET,
+                                                local = %self.destination_id,
+                                                remote = %destination_id,
+                                                ?error,
+                                                "failed to send pending message",
+                                            );
+                                        }
+                                    },
+                                );
+                            }
+                            None => {
+                                self.remote_destinations.insert(
+                                    destination_id.clone(),
+                                    DestinationContext {
+                                        lease_set,
+                                        pending_messages: VecDeque::new(),
+                                        expiring_leases: HashMap::new(),
+                                    },
+                                );
+                            }
+                        }
+
+                        return Poll::Ready(Some(DestinationEvent::LeaseSetFound {
+                            destination_id,
+                        }));
+                    }
                 }
-            },
+            }
         }
 
-        match self.lease_set_publish_timer.poll_next_unpin(cx) {
-            Poll::Pending => {}
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew)) => {
-                let leases = mem::take(&mut self.pending_inbound)
-                    .into_iter()
-                    .filter_map(|(lease, created)| {
-                        (created.elapsed() < LEASE_SET_MAX_AGE).then_some(lease)
-                    })
-                    .collect::<Vec<_>>();
+        loop {
+            match self.routing_path_manager.poll_next_unpin(cx) {
+                Poll::Pending => break,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(destination_id)) => match self.query_lease_set(&destination_id) {
+                    LeaseSetStatus::Found => tracing::debug!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        %destination_id,
+                        "lease set requsted by routing path manager but it's available",
+                    ),
+                    status => tracing::trace!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        %destination_id,
+                        ?status,
+                        "lease set requested by routing path manager",
+                    ),
+                },
+            }
+        }
 
-                return Poll::Ready(Some(DestinationEvent::CreateLeaseSet { leases }));
-            }
-            Poll::Ready(Some(LeaseSetPublishTimerEvent::Republish { key, lease_set })) => {
-                self.publish_lease_set(key, lease_set);
-            }
+        if self.lease_set_manager.poll_unpin(cx).is_ready() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "lease set manager exited"
+            );
+            return Poll::Ready(None);
+        }
+
+        if self.lease_set_prune_timer.poll_unpin(cx).is_ready() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                "pruning stale lease sets",
+            );
+
+            let now = R::time_since_epoch();
+            self.remote_destinations.iter_mut().for_each(|(_, context)| {
+                context.expiring_leases.retain(|_, lease| lease.expires > now);
+            });
+
+            self.lease_set_prune_timer = Box::pin(R::delay(LEASE_SET_PRUNE_INTERVAL));
+            let _ = self.lease_set_prune_timer.poll_unpin(cx);
         }
 
         self.waker = Some(cx.waker().clone());
-        Poll::Pending
-    }
-}
-
-/// Events emitted by [`LeaseSetPublishTimer`].
-enum LeaseSetPublishTimerEvent {
-    /// Create new lease set.
-    CreateNew,
-
-    /// Attempt to republish old lease set.
-    Republish {
-        /// Key.
-        key: Bytes,
-        /// Lease set.
-        lease_set: Bytes,
-    },
-}
-
-/// Lease set publish timer.
-enum LeaseSetPublishTimer {
-    /// TImer is inactive.
-    Inactive,
-
-    /// Create new lease set.
-    CreateNew {
-        /// Timer.
-        timer: BoxFuture<'static, ()>,
-    },
-
-    /// Attempt to retry publishing an old lease set.
-    #[allow(unused)]
-    Republish {
-        // Timer.
-        timer: BoxFuture<'static, ()>,
-
-        /// Key.
-        key: Bytes,
-
-        /// Lease set.
-        lease_set: Bytes,
-    },
-}
-
-impl LeaseSetPublishTimer {
-    /// Create new [`LeaseSetPublishTimer`].
-    fn new<R: Runtime>() -> Self {
-        Self::CreateNew {
-            timer: Box::pin(R::delay(LEASE_SET_EXPIRATION)),
-        }
-    }
-
-    /// Set timer as inactive.
-    fn deactivate(&mut self) {
-        *self = Self::Inactive;
-    }
-}
-
-impl Stream for LeaseSetPublishTimer {
-    type Item = LeaseSetPublishTimerEvent;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut this = Pin::into_inner(self);
-
-        match &mut this {
-            LeaseSetPublishTimer::Inactive => {}
-            LeaseSetPublishTimer::CreateNew { ref mut timer } => {
-                if timer.poll_unpin(cx).is_ready() {
-                    *this = LeaseSetPublishTimer::Inactive;
-                    return Poll::Ready(Some(LeaseSetPublishTimerEvent::CreateNew));
-                }
-            }
-            LeaseSetPublishTimer::Republish {
-                timer,
-                key,
-                lease_set,
-            } =>
-                if timer.poll_unpin(cx).is_ready() {
-                    let key = key.clone();
-                    let lease_set = lease_set.clone();
-
-                    *this = LeaseSetPublishTimer::Inactive;
-
-                    return Poll::Ready(Some(LeaseSetPublishTimerEvent::Republish {
-                        key,
-                        lease_set,
-                    }));
-                },
-        }
-
         Poll::Pending
     }
 }
@@ -1091,14 +941,11 @@ mod tests {
     use super::*;
     use crate::{
         crypto::SigningPrivateKey,
-        i2np::database::lookup::DatabaseLookup,
+        i2np::garlic::GarlicClove,
         netdb::NetDbAction,
-        primitives::{Destination as Dest, LeaseSet2Header, RouterId, TunnelId},
+        primitives::{Destination as Dest, LeaseSet2Header, MessageId, RouterId, TunnelId},
         runtime::{mock::MockRuntime, Runtime},
-        tunnel::{
-            DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler, TunnelMessage,
-            TunnelPoolConfig,
-        },
+        tunnel::{TunnelMessage, TunnelPoolConfig},
     };
     use std::collections::VecDeque;
 
@@ -1115,6 +962,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
         // insert dummy lease set for `remote` into `Destination`
@@ -1125,6 +973,7 @@ mod tests {
             DestinationContext {
                 lease_set,
                 pending_messages: VecDeque::new(),
+                expiring_leases: HashMap::new(),
             },
         );
 
@@ -1145,6 +994,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
         // insert lease set which expired 10 seconds ago
@@ -1157,6 +1007,7 @@ mod tests {
             DestinationContext {
                 lease_set,
                 pending_messages: VecDeque::new(),
+                expiring_leases: HashMap::new(),
             },
         );
 
@@ -1182,6 +1033,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
         // query lease set and verify it's not found and that a query has been started
@@ -1209,6 +1061,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
         // query lease set and verify it's not found and that a query has been started
@@ -1242,11 +1095,12 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
         // spam the netdb handle full of queries
         loop {
-            if netdb_handle.query_leaseset(Bytes::new()).is_err() {
+            if netdb_handle.query_lease_set(Bytes::new()).is_err() {
                 break;
             }
         }
@@ -1287,9 +1141,17 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
-        destination.send_message(&DestinationId::random(), vec![1, 2, 3, 4]).unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: DestinationId::random(),
+                },
+                vec![1, 2, 3, 4],
+            )
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1308,6 +1170,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
+            ProfileStorage::new(&[], &[]),
         );
 
         // new inbound tunnel built
@@ -1324,70 +1187,12 @@ mod tests {
             .unwrap();
 
         // verify event is emitted even though the timer is still active
-        assert!(std::matches!(
-            destination.lease_set_publish_timer,
-            LeaseSetPublishTimer::CreateNew { .. }
-        ));
-        futures::future::poll_fn(|cx| {
-            match destination.lease_set_publish_timer.poll_next_unpin(cx) {
-                Poll::Pending => Poll::Ready(()),
-                _ => panic!("timer is ready"),
-            }
+        futures::future::poll_fn(|cx| match destination.lease_set_manager.poll_unpin(cx) {
+            Poll::Pending => Poll::Ready(()),
+            _ => panic!("timer is ready"),
         })
         .await;
 
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
-            .await
-            .expect("no timeout")
-            .expect("to succeed")
-        {
-            DestinationEvent::CreateLeaseSet { .. } => {}
-            _ => panic!("invalid event"),
-        }
-    }
-
-    #[tokio::test]
-    async fn create_lease_set_after_timeout() {
-        let (netdb_handle, _rx) = NetDbHandle::create();
-        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
-            num_inbound: 3usize,
-            ..Default::default()
-        });
-        let mut destination = Destination::<MockRuntime>::new(
-            DestinationId::random(),
-            StaticPrivateKey::random(MockRuntime::rng()),
-            Bytes::new(),
-            netdb_handle.clone(),
-            tp_handle,
-            Vec::new(),
-            Vec::new(),
-            false,
-        );
-
-        // set lease set timer to a more sensible value
-        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
-            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
-        };
-
-        // issue events for two new inbound tunnels
-        for _ in 0..2 {
-            tp_tx
-                .send(TunnelPoolEvent::InboundTunnelBuilt {
-                    tunnel_id: TunnelId::random(),
-                    lease: Lease {
-                        router_id: RouterId::random(),
-                        tunnel_id: TunnelId::random(),
-                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
-                    },
-                })
-                .await
-                .unwrap();
-        }
-
-        // verify that inbound tunnel is not built because 3 inbound tunnels are needed
-        assert!(destination.next().now_or_never().is_none());
-
-        // verify that that an event is emitted after the timer expires
         match tokio::time::timeout(Duration::from_secs(15), destination.next())
             .await
             .expect("no timeout")
@@ -1396,443 +1201,6 @@ mod tests {
             DestinationEvent::CreateLeaseSet { .. } => {}
             _ => panic!("invalid event"),
         }
-    }
-
-    #[tokio::test]
-    async fn lease_set_storage_verified() {
-        let (netdb_handle, rx) = NetDbHandle::create();
-        let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
-            num_inbound: 3usize,
-            ..Default::default()
-        });
-        let destination_id = DestinationId::random();
-        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
-        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
-        let dest = Dest::new::<MockRuntime>(signing_key.public());
-        let mut destination = Destination::<MockRuntime>::new(
-            destination_id.clone(),
-            encryption_key.clone(),
-            Bytes::new(),
-            netdb_handle.clone(),
-            tp_handle,
-            Vec::new(),
-            Vec::new(),
-            false,
-        );
-
-        // set lease set timer to a more sensible value
-        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
-            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
-        };
-
-        // add one outbound tunnel
-        tp_tx
-            .send(TunnelPoolEvent::OutboundTunnelBuilt {
-                tunnel_id: TunnelId::random(),
-            })
-            .await
-            .unwrap();
-
-        // issue events for three new inbound tunnels
-        for _ in 0..3 {
-            tp_tx
-                .send(TunnelPoolEvent::InboundTunnelBuilt {
-                    tunnel_id: TunnelId::random(),
-                    lease: Lease {
-                        router_id: RouterId::random(),
-                        tunnel_id: TunnelId::random(),
-                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
-                    },
-                })
-                .await
-                .unwrap();
-        }
-
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
-            .await
-            .expect("no timeout")
-            .expect("to succeed")
-        {
-            DestinationEvent::CreateLeaseSet { leases } => {
-                let lease_set = Bytes::from(
-                    LeaseSet2 {
-                        header: LeaseSet2Header {
-                            destination: dest.clone(),
-                            expires: Duration::from_secs(10 * 60).as_secs() as u32,
-                            offline_signature: None,
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
-                        },
-                        public_keys: vec![encryption_key.public()],
-                        leases,
-                    }
-                    .serialize(&signing_key),
-                );
-
-                destination.publish_lease_set(Bytes::from(destination_id.to_vec()), lease_set);
-            }
-            _ => panic!("invalid event"),
-        }
-
-        tokio::spawn(async move {
-            let (floodfills, mut garlics): (Vec<_>, HashMap<_, _>) = (0..3)
-                .map(|_| {
-                    let router_id = RouterId::random();
-                    let key = StaticPrivateKey::random(MockRuntime::rng());
-                    let garlic = GarlicHandler::<MockRuntime>::new(
-                        NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
-                        MockRuntime::register_metrics(vec![], None),
-                    );
-
-                    ((router_id.clone(), key.public()), (router_id, garlic))
-                })
-                .unzip();
-
-            let mut lease_set = Option::<Bytes>::None;
-            let mut key = Option::<Bytes>::None;
-
-            loop {
-                tokio::select! {
-                    event = rx.recv() => match event.unwrap() {
-                        NetDbAction::GetClosestFloodfills { tx, .. } => {
-                            tx.send(floodfills.clone()).unwrap();
-                        }
-                        _ => panic!("invalid event"),
-                    },
-                    message = tm_rx.recv() => match message.unwrap() {
-                        TunnelMessage::RouterDelivery { message, router_id, .. } => {
-                            let message = Message::parse_standard(&message).unwrap();
-                            assert_eq!(message.message_type, MessageType::Garlic);
-
-                            let GarlicDeliveryInstructions::Local { message } = garlics
-                                .get_mut(&router_id)
-                                .unwrap()
-                                .handle_message(message)
-                                .unwrap()
-                                .filter(|message| std::matches!(message, GarlicDeliveryInstructions::Local { .. }))
-                                .collect::<VecDeque<_>>()
-                                .pop_front()
-                                .expect("to exist") else {
-                                    panic!("invalid type");
-                                };
-
-                            match message.message_type {
-                                MessageType::DatabaseStore => {
-                                    let DatabaseStore {
-                                        reply,
-                                        key: store_key,
-                                        ..
-                                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
-
-                                    key = Some(store_key);
-                                    lease_set = Some(DatabaseStore::<MockRuntime>::extract_raw_lease_set(&message.payload));
-
-                                    match reply {
-                                        ReplyType::Tunnel { reply_token, .. } => {
-                                            tp_tx.send(TunnelPoolEvent::Message { message: Message {
-                                                    message_type: MessageType::DeliveryStatus,
-                                                    message_id: MockRuntime::rng().next_u32(),
-                                                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                                    payload: DeliveryStatus {
-                                                        message_id: reply_token,
-                                                        timestamp: MockRuntime::time_since_epoch(),
-                                                    }.serialize().to_vec()
-                                            }}).await.unwrap();
-                                        }
-                                        _ => panic!("invalid reply type"),
-                                    }
-                                }
-                                MessageType::DatabaseLookup => {
-                                    let DatabaseLookup {
-                                        key: lookup_key,
-                                        ..
-                                    } = DatabaseLookup::parse(&message.payload).unwrap();
-
-                                    assert_eq!(key.as_ref().unwrap(), &lookup_key);
-
-                                    let message =
-                                        DatabaseStoreBuilder::new(
-                                            key.clone().unwrap(),
-                                            DatabaseStoreKind::LeaseSet2 { lease_set: lease_set.clone().unwrap() })
-                                        .build();
-
-                                    tp_tx.send(TunnelPoolEvent::Message { message: Message {
-                                            message_type: MessageType::DatabaseStore,
-                                            message_id: MockRuntime::rng().next_u32(),
-                                            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                            payload: message.to_vec(),
-                                    }}).await.unwrap();
-                                }
-                                _ => panic!("invalid message type"),
-                            }
-                        }
-                        _ => panic!("invalid message type"),
-                    }
-                }
-            }
-        });
-
-        match tokio::time::timeout(Duration::from_secs(15), destination.next()).await {
-            Err(_) => {}
-            res => tracing::warn!("unexpected result = {res:?}"),
-        }
-        assert!(destination.pending_storage_verifications.is_empty());
-    }
-
-    #[tokio::test]
-    async fn lease_set_storage_verification_failure() {
-        let (netdb_handle, rx) = NetDbHandle::create();
-        let (tp_handle, tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
-            num_inbound: 3usize,
-            ..Default::default()
-        });
-        let destination_id = DestinationId::random();
-        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
-        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
-        let dest = Dest::new::<MockRuntime>(signing_key.public());
-        let mut destination = Destination::<MockRuntime>::new(
-            destination_id.clone(),
-            encryption_key.clone(),
-            Bytes::new(),
-            netdb_handle.clone(),
-            tp_handle,
-            Vec::new(),
-            Vec::new(),
-            false,
-        );
-
-        // set lease set timer to a more sensible value
-        destination.lease_set_publish_timer = LeaseSetPublishTimer::CreateNew {
-            timer: Box::pin(MockRuntime::delay(Duration::from_secs(5))),
-        };
-
-        // add one outbound tunnel
-        tp_tx
-            .send(TunnelPoolEvent::OutboundTunnelBuilt {
-                tunnel_id: TunnelId::random(),
-            })
-            .await
-            .unwrap();
-
-        // issue events for three new inbound tunnels
-        for _ in 0..3 {
-            tp_tx
-                .send(TunnelPoolEvent::InboundTunnelBuilt {
-                    tunnel_id: TunnelId::random(),
-                    lease: Lease {
-                        router_id: RouterId::random(),
-                        tunnel_id: TunnelId::random(),
-                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
-                    },
-                })
-                .await
-                .unwrap();
-        }
-
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
-            .await
-            .expect("no timeout")
-            .expect("to succeed")
-        {
-            DestinationEvent::CreateLeaseSet { leases } => {
-                let lease_set = Bytes::from(
-                    LeaseSet2 {
-                        header: LeaseSet2Header {
-                            destination: dest.clone(),
-                            expires: Duration::from_secs(10 * 60).as_secs() as u32,
-                            offline_signature: None,
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
-                        },
-                        public_keys: vec![encryption_key.public()],
-                        leases,
-                    }
-                    .serialize(&signing_key),
-                );
-
-                destination.publish_lease_set(Bytes::from(destination_id.to_vec()), lease_set);
-            }
-            _ => panic!("invalid event"),
-        }
-
-        tokio::spawn(async move {
-            let (floodfills, mut garlics): (Vec<_>, HashMap<_, _>) = (0..3)
-                .map(|_| {
-                    let router_id = RouterId::random();
-                    let key = StaticPrivateKey::random(MockRuntime::rng());
-                    let garlic = GarlicHandler::<MockRuntime>::new(
-                        NoiseContext::new(key.clone(), Bytes::from(router_id.to_vec())),
-                        MockRuntime::register_metrics(vec![], None),
-                    );
-
-                    ((router_id.clone(), key.public()), (router_id, garlic))
-                })
-                .unzip();
-            let mut key = Option::<Bytes>::None;
-
-            loop {
-                tokio::select! {
-                    event = rx.recv() => match event.unwrap() {
-                        NetDbAction::GetClosestFloodfills { tx, .. } => {
-                            tx.send(floodfills.clone()).unwrap();
-                        }
-                        _ => panic!("invalid event"),
-                    },
-                    message = tm_rx.recv() => match message.unwrap() {
-                        TunnelMessage::RouterDelivery { message, router_id, .. } => {
-                            let message = Message::parse_standard(&message).unwrap();
-                            assert_eq!(message.message_type, MessageType::Garlic);
-
-                            let GarlicDeliveryInstructions::Local { message } = garlics
-                                .get_mut(&router_id)
-                                .unwrap()
-                                .handle_message(message)
-                                .unwrap()
-                                .filter(|message| std::matches!(message, GarlicDeliveryInstructions::Local { .. }))
-                                .collect::<VecDeque<_>>()
-                                .pop_front()
-                                .expect("to exist") else {
-                                    panic!("invalid type");
-                                };
-
-
-                            match message.message_type {
-                                MessageType::DatabaseStore => {
-                                    let DatabaseStore {
-                                        reply,
-                                        key: store_key,
-                                        ..
-                                    } = DatabaseStore::<MockRuntime>::parse(&message.payload).unwrap();
-
-                                    key = Some(store_key);
-
-                                    match reply {
-                                        ReplyType::Tunnel { reply_token, .. } => {
-                                            tp_tx.send(TunnelPoolEvent::Message { message: Message {
-                                                    message_type: MessageType::DeliveryStatus,
-                                                    message_id: MockRuntime::rng().next_u32(),
-                                                    expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                                    payload: DeliveryStatus {
-                                                        message_id: reply_token,
-                                                        timestamp: MockRuntime::time_since_epoch(),
-                                                    }.serialize().to_vec()
-                                            }}).await.unwrap();
-                                        }
-                                        _ => panic!("invalid reply type"),
-                                    }
-                                }
-                                MessageType::DatabaseLookup => {
-                                    let DatabaseLookup {
-                                        key: lookup_key,
-                                        ..
-                                    } = DatabaseLookup::parse(&message.payload).unwrap();
-
-                                    assert_eq!(key.as_ref().unwrap(), &lookup_key);
-
-                                    let message = DatabaseSearchReply {
-                                        from: router_id.to_vec(),
-                                        key: lookup_key,
-                                        routers: vec![RouterId::random(), RouterId::random(), RouterId::random()],
-                                    }.serialize();
-
-                                    tp_tx.send(TunnelPoolEvent::Message { message: Message {
-                                            message_type: MessageType::DatabaseSearchReply,
-                                            message_id: MockRuntime::rng().next_u32(),
-                                            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
-                                            payload: message.to_vec(),
-                                    }}).await.unwrap();
-                                }
-                                _ => panic!("invalid message type"),
-                            }
-                        }
-                        _ => panic!("invalid message type"),
-                    }
-                }
-            }
-        });
-
-        match tokio::time::timeout(Duration::from_secs(15), destination.next()).await {
-            Err(_) => {}
-            res => tracing::warn!("unexpected result = {res:?}"),
-        }
-        assert!(destination.pending_storage_verifications.is_empty());
-    }
-
-    #[tokio::test]
-    async fn unpublished_destination() {
-        let (netdb_handle, _rx) = NetDbHandle::create();
-        let (tp_handle, _tm_rx, tp_tx, _srx) = TunnelPoolHandle::from_config(TunnelPoolConfig {
-            num_inbound: 3usize,
-            ..Default::default()
-        });
-        let destination_id = DestinationId::random();
-        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
-        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
-        let dest = Dest::new::<MockRuntime>(signing_key.public());
-        let mut destination = Destination::<MockRuntime>::new(
-            destination_id.clone(),
-            encryption_key.clone(),
-            Bytes::new(),
-            netdb_handle.clone(),
-            tp_handle,
-            Vec::new(),
-            Vec::new(),
-            true,
-        );
-
-        assert!(std::matches!(
-            destination.lease_set_publish_timer,
-            LeaseSetPublishTimer::Inactive
-        ));
-
-        // add one outbound tunnel
-        tp_tx
-            .send(TunnelPoolEvent::OutboundTunnelBuilt {
-                tunnel_id: TunnelId::random(),
-            })
-            .await
-            .unwrap();
-
-        // issue events for three new inbound tunnels
-        for _ in 0..3 {
-            tp_tx
-                .send(TunnelPoolEvent::InboundTunnelBuilt {
-                    tunnel_id: TunnelId::random(),
-                    lease: Lease {
-                        router_id: RouterId::random(),
-                        tunnel_id: TunnelId::random(),
-                        expires: MockRuntime::time_since_epoch() + Duration::from_secs(10 * 60),
-                    },
-                })
-                .await
-                .unwrap();
-        }
-
-        assert!(destination.pending_storage_verifications.is_empty());
-
-        match tokio::time::timeout(Duration::from_secs(5), destination.next())
-            .await
-            .expect("no timeout")
-            .expect("to succeed")
-        {
-            DestinationEvent::CreateLeaseSet { leases } => {
-                let lease_set = Bytes::from(
-                    LeaseSet2 {
-                        header: LeaseSet2Header {
-                            destination: dest.clone(),
-                            expires: Duration::from_secs(10 * 60).as_secs() as u32,
-                            offline_signature: None,
-                            published: MockRuntime::time_since_epoch().as_secs() as u32,
-                        },
-                        public_keys: vec![encryption_key.public()],
-                        leases,
-                    }
-                    .serialize(&signing_key),
-                );
-
-                destination.publish_lease_set(Bytes::from(destination_id.to_vec()), lease_set);
-            }
-            _ => panic!("invalid event"),
-        }
-        assert!(destination.pending_storage_verifications.is_empty());
     }
 
     #[tokio::test]
@@ -1847,7 +1215,8 @@ mod tests {
             tp_handle,
             Vec::new(),
             Vec::new(),
-            false,
+            true,
+            ProfileStorage::new(&[], &[]),
         );
 
         // insert lease set which expired 10 seconds ago
@@ -1865,6 +1234,7 @@ mod tests {
             DestinationContext {
                 lease_set: expired_lease_set,
                 pending_messages: VecDeque::new(),
+                expiring_leases: HashMap::new(),
             },
         );
 
@@ -1873,9 +1243,30 @@ mod tests {
             .add_remote_destination(remote.clone(), lease_set.public_keys[0].clone());
 
         // send three messages and verify they're all queried
-        destination.send_message(&remote, vec![1, 1, 1, 1]).unwrap();
-        destination.send_message(&remote, vec![2, 2, 2, 2]).unwrap();
-        destination.send_message(&remote, vec![3, 3, 3, 3]).unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: remote.clone(),
+                },
+                vec![1, 1, 1, 1],
+            )
+            .unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: remote.clone(),
+                },
+                vec![2, 2, 2, 2],
+            )
+            .unwrap();
+        destination
+            .send_message(
+                DeliveryStyle::Unspecified {
+                    destination_id: remote.clone(),
+                },
+                vec![3, 3, 3, 3],
+            )
+            .unwrap();
 
         assert!(destination.pending_queries.contains(&remote));
         assert_eq!(destination.query_futures.len(), 1);
@@ -1913,9 +1304,243 @@ mod tests {
                 .expect("no timeout")
                 .expect("to succeed")
             {
-                TunnelMessage::TunnelDelivery { .. } => {}
+                TunnelMessage::TunnelDeliveryViaRoute { .. } => {}
                 _ => panic!("invalid tunnel message type"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn new_lease_set_received() {
+        let (netdb_handle, _rx) = NetDbHandle::create();
+        let (tp_handle, _tm_rx, _tp_tx, _srx) = TunnelPoolHandle::create();
+        let private_key = StaticPrivateKey::random(MockRuntime::rng());
+        let destination_id = DestinationId::random();
+        let public_key = private_key.public();
+        let mut destination = Destination::<MockRuntime>::new(
+            destination_id.clone(),
+            private_key,
+            Bytes::new(),
+            netdb_handle,
+            tp_handle,
+            Vec::new(),
+            Vec::new(),
+            false,
+            ProfileStorage::new(&[], &[]),
+        );
+
+        // create remote destination and two leases for it
+        let signing_key = SigningPrivateKey::random(MockRuntime::rng());
+        let encryption_key = StaticPrivateKey::random(MockRuntime::rng());
+        let dest = Dest::new::<MockRuntime>(signing_key.public());
+        let remote_dest_id = dest.id();
+        let expiring_inbound1 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let expiring_inbound2 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let lease_set = Bytes::from(
+            LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination: dest.clone(),
+                    expires: Duration::from_secs(10).as_secs() as u32,
+                    is_unpublished: false,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
+                },
+                public_keys: vec![encryption_key.public()],
+                leases: vec![expiring_inbound1.clone(), expiring_inbound2.clone()],
+            }
+            .serialize(&signing_key),
+        );
+
+        // create session manager and an NS message
+        let mut session_manager = SessionManager::<MockRuntime>::new(
+            remote_dest_id.clone(),
+            encryption_key.clone(),
+            lease_set,
+        );
+        session_manager.add_remote_destination(destination_id.clone(), public_key);
+        let payload = session_manager.encrypt(&destination_id, vec![1, 3, 3, 7]).unwrap();
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload,
+        };
+
+        // verify that the remote destination isn't known to `destination`
+        assert!(destination.remote_destinations.get(&remote_dest_id).is_none());
+
+        // decrypt NS
+        let messages = destination.decrypt_message(message).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![1, 3, 3, 7]);
+
+        match destination.remote_destinations.get(&remote_dest_id) {
+            Some(context) => {
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == expiring_inbound1.tunnel_id
+                        && lease.router_id == expiring_inbound1.router_id)
+                    .is_some());
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == expiring_inbound2.tunnel_id
+                        && lease.router_id == expiring_inbound2.router_id)
+                    .is_some());
+                assert!(context.expiring_leases.is_empty())
+            }
+            None => panic!("expected to find context"),
+        }
+
+        // send NSR
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: destination
+                .session_manager
+                .encrypt(&remote_dest_id, vec![1, 3, 3, 8])
+                .unwrap(),
+        };
+
+        let Some(GarlicClove { message_body, .. }) = session_manager
+            .decrypt(message)
+            .unwrap()
+            .find(|message| message.message_type == MessageType::Data)
+        else {
+            panic!("data message not found");
+        };
+        assert_eq!(message_body, vec![0, 0, 0, 4, 1, 3, 3, 8]);
+
+        // send ES which starts a new session
+        let payload = session_manager.encrypt(&destination_id, vec![1, 3, 3, 9]).unwrap();
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload,
+        };
+
+        // decrypt NS
+        let messages = destination.decrypt_message(message).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![1, 3, 3, 9]);
+
+        // create new lease set for `session_manager`
+        let new_inbound1 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let new_inbound2 = Lease {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: MockRuntime::time_since_epoch() + Duration::from_secs(10),
+        };
+        let new_lease_set = Bytes::from(
+            LeaseSet2 {
+                header: LeaseSet2Header {
+                    destination: dest.clone(),
+                    expires: Duration::from_secs(10).as_secs() as u32,
+                    is_unpublished: false,
+                    offline_signature: None,
+                    published: MockRuntime::time_since_epoch().as_secs() as u32,
+                },
+                public_keys: vec![encryption_key.public()],
+                leases: vec![new_inbound1.clone(), new_inbound2.clone()],
+            }
+            .serialize(&signing_key),
+        );
+        session_manager.register_lease_set(new_lease_set);
+
+        // send ES with a bundled lease set
+        let payload = session_manager.encrypt(&destination_id, vec![1, 3, 4, 0]).unwrap();
+        let message = Message {
+            message_type: MessageType::Garlic,
+            message_id: *MessageId::random(),
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload,
+        };
+
+        // decrypt NS
+        let messages = destination.decrypt_message(message).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![1, 3, 4, 0]);
+
+        // verify that the old lease set is now `expiring_leases`
+        match destination.remote_destinations.get(&remote_dest_id) {
+            Some(context) => {
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound1.tunnel_id
+                        && lease.router_id == new_inbound1.router_id)
+                    .is_some());
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound2.tunnel_id
+                        && lease.router_id == new_inbound2.router_id)
+                    .is_some());
+
+                match context.expiring_leases.get(&expiring_inbound1.tunnel_id) {
+                    Some(lease) => {
+                        assert_eq!(lease.router_id, expiring_inbound1.router_id);
+                        assert_eq!(lease.expires.as_secs(), expiring_inbound1.expires.as_secs());
+                    }
+                    None => panic!("expected lease set to be found"),
+                }
+
+                match context.expiring_leases.get(&expiring_inbound2.tunnel_id) {
+                    Some(lease) => {
+                        assert_eq!(lease.router_id, expiring_inbound2.router_id);
+                        assert_eq!(lease.expires.as_secs(), expiring_inbound2.expires.as_secs());
+                    }
+                    None => panic!("expected lease set to be found"),
+                }
+            }
+            None => panic!("expected to find context"),
+        }
+
+        // set the lease set prune interval to a shorter timeout and poll `destination` until the
+        // timer expires
+        destination.lease_set_prune_timer = Box::pin(MockRuntime::delay(Duration::from_secs(11)));
+
+        assert!(tokio::time::timeout(Duration::from_secs(15), destination.next()).await.is_err());
+
+        // verify the old lease set has been pruned
+        match destination.remote_destinations.get(&remote_dest_id) {
+            Some(context) => {
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound1.tunnel_id
+                        && lease.router_id == new_inbound1.router_id)
+                    .is_some());
+                assert!(context
+                    .lease_set
+                    .leases
+                    .iter()
+                    .find(|lease| lease.tunnel_id == new_inbound2.tunnel_id
+                        && lease.router_id == new_inbound2.router_id)
+                    .is_some());
+                assert!(context.expiring_leases.is_empty());
+            }
+            None => panic!("expected to find context"),
         }
     }
 }

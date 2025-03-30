@@ -21,7 +21,7 @@ use core::{fmt, ops::Deref};
 pub use capabilities::Capabilities;
 pub use date::Date;
 pub use destination::{Destination, DestinationId};
-pub use leaseset2::{Lease, LeaseSet2, LeaseSet2Header};
+pub use lease_set::{Lease, LeaseSet2, LeaseSet2Header};
 pub use mapping::Mapping;
 pub use offline_signature::OfflineSignature;
 pub use router_address::{RouterAddress, TransportKind};
@@ -29,10 +29,13 @@ pub use router_identity::{RouterId, RouterIdentity};
 pub use router_info::RouterInfo;
 pub use string::Str;
 
+#[cfg(test)]
+pub use router_info::RouterInfoBuilder;
+
 mod capabilities;
 mod date;
 mod destination;
-mod leaseset2;
+mod lease_set;
 mod mapping;
 mod offline_signature;
 mod router_address;

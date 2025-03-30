@@ -32,7 +32,11 @@ use nom::{
     Err, IResult,
 };
 
-use alloc::vec::Vec;
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::{fmt, str};
 
 /// Minimum header size without NACKs or options data.
@@ -68,7 +72,7 @@ pub struct Flags<'a> {
     signature: Option<&'a [u8]>,
 }
 
-impl<'a> fmt::Display for Flags<'a> {
+impl fmt::Display for Flags<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut flags = Vec::<&'static str>::new();
 
@@ -163,21 +167,12 @@ impl<'a> Flags<'a> {
                     debug_assert!(false);
                     return Err(Err::Error(make_error(options, ErrorKind::Fail)));
                 }
-                Some(destination) => match destination.verifying_key() {
-                    None => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            "dsa-sha1 offline keys not supported",
-                        );
-                        return Err(Err::Error(make_error(options, ErrorKind::Fail)));
-                    }
-                    Some(verifying_key) => {
-                        let (rest, verifying_key) =
-                            OfflineSignature::parse_frame(rest, verifying_key)?;
+                Some(destination) => {
+                    let (rest, verifying_key) =
+                        OfflineSignature::parse_frame(rest, destination.verifying_key())?;
 
-                        (rest, Some(verifying_key))
-                    }
-                },
+                    (rest, Some(verifying_key))
+                }
             },
             false => (rest, None),
         };
@@ -190,14 +185,8 @@ impl<'a> Flags<'a> {
 
                     (rest, Some(rest))
                 }
-                Some(destination) => match destination.verifying_key() {
-                    None => {
-                        let (rest, signature) = take(DSA_SIGNATURE_LEN)(rest)?;
-                        (rest, Some(signature))
-                    }
-                    Some(verifying_key) => take(verifying_key.signature_len())(rest)
-                        .map(|(rest, signature)| (rest, Some(signature)))?,
-                },
+                Some(destination) => take(destination.verifying_key().signature_len())(rest)
+                    .map(|(rest, signature)| (rest, Some(signature)))?,
             },
             false => (rest, None),
         };
@@ -266,7 +255,7 @@ impl<'a> Flags<'a> {
     }
 }
 
-impl<'a> fmt::Debug for Flags<'a> {
+impl fmt::Debug for Flags<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Flags").field("flags", &self.flags).finish()
     }
@@ -354,7 +343,7 @@ pub struct Packet<'a> {
     pub payload: &'a [u8],
 }
 
-impl<'a> fmt::Debug for Packet<'a> {
+impl fmt::Debug for Packet<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let test = str::from_utf8(self.payload).unwrap_or("falure");
 
@@ -431,7 +420,7 @@ impl<'a> Packet<'a> {
         let (rest, seq_nro) = be_u32(rest)?;
         let (rest, _) = take(4usize)(rest)?;
         let (rest, nack_count) = be_u8(rest)?;
-        let (rest, _nacks) = take(4 * nack_count + 1)(rest)?;
+        let (rest, _nacks) = take(4 * nack_count as usize + 1)(rest)?;
         let (rest, flags) = be_u16(rest)?;
 
         Ok((
@@ -476,7 +465,7 @@ pub struct FlagsBuilder<'a> {
     signature: Option<&'a [u8]>,
 }
 
-impl<'a> FlagsBuilder<'a> {
+impl FlagsBuilder<'_> {
     /// Specify `SYNCHRONIZE` .
     pub fn with_synchronize(mut self) -> Self {
         self.flags |= 1;
@@ -856,10 +845,7 @@ mod tests {
 
         let dest = flags.from_included().as_ref().unwrap();
 
-        assert_eq!(
-            dest.verifying_key().unwrap().as_ref(),
-            signing_key.public().as_ref()
-        );
+        assert_eq!(dest.verifying_key().as_ref(), signing_key.public().as_ref());
         assert_eq!(dest.id(), destination.id());
     }
 
@@ -920,10 +906,7 @@ mod tests {
 
         let dest = flags.from_included().as_ref().unwrap();
 
-        assert_eq!(
-            dest.verifying_key().unwrap().as_ref(),
-            signing_key.public().as_ref()
-        );
+        assert_eq!(dest.verifying_key().as_ref(), signing_key.public().as_ref());
         assert_eq!(dest.id(), destination.id());
     }
 
@@ -972,7 +955,7 @@ mod tests {
         // verify signature
         {
             let destination = packet.flags.from_included().clone().unwrap();
-            let verifying_key = destination.verifying_key().clone().unwrap();
+            let verifying_key = destination.verifying_key().clone();
             let signature = packet.flags.signature().clone().unwrap();
             let signature_offset = serialized.len() - SIGNATURE_LEN - packet.payload.len();
 
@@ -1059,5 +1042,22 @@ mod tests {
             .with_from_included(destination.clone())
             .with_payload(&payload)
             .build();
+    }
+
+    #[test]
+    fn maximum_nacks() {
+        let nacks = (0..u8::MAX).map(|i| i as u32).collect::<Vec<_>>();
+        let serialized = PacketBuilder::new(13371338)
+            .with_send_stream_id(13351336)
+            .with_seq_nro(1337)
+            .with_nacks(nacks)
+            .with_synchronize()
+            .with_reset()
+            .build();
+
+        let info = Packet::peek(&serialized).unwrap();
+
+        assert!(info.synchronize());
+        assert!(info.reset());
     }
 }

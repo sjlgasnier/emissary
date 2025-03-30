@@ -28,6 +28,7 @@ use crate::{
         socket::I2cpSocket,
     },
     netdb::NetDbHandle,
+    profile::ProfileStorage,
     runtime::{AddressBook, JoinSet, Runtime, TcpListener},
     tunnel::TunnelManagerHandle,
     util::AsyncReadExt,
@@ -35,7 +36,7 @@ use crate::{
 
 use futures::StreamExt;
 
-use alloc::{sync::Arc, vec};
+use alloc::{string::String, sync::Arc, vec};
 use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -80,6 +81,9 @@ pub struct I2cpServer<R: Runtime> {
     /// Pending sessions.
     pending_session: R::JoinSet<Option<I2cpSessionContext<R>>>,
 
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
     /// Handle to `TunnelManager`.
     tunnel_manager_handle: TunnelManagerHandle,
 }
@@ -87,10 +91,12 @@ pub struct I2cpServer<R: Runtime> {
 impl<R: Runtime> I2cpServer<R> {
     /// Create new [`I2cpServer`].
     pub async fn new(
+        host: String,
         port: u16,
         netdb_handle: NetDbHandle,
         tunnel_manager_handle: TunnelManagerHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        profile_storage: ProfileStorage<R>,
     ) -> crate::Result<Self> {
         tracing::info!(
             target: LOG_TARGET,
@@ -98,7 +104,7 @@ impl<R: Runtime> I2cpServer<R> {
             "starting i2cp server",
         );
 
-        let address = SocketAddr::new("127.0.0.1".parse::<IpAddr>().expect("valid address"), port);
+        let address = SocketAddr::new(host.parse::<IpAddr>().expect("valid address"), port);
         let listener = R::TcpListener::bind(address)
             .await
             .ok_or(Error::Connection(ConnectionError::BindFailure))?;
@@ -110,6 +116,7 @@ impl<R: Runtime> I2cpServer<R> {
             next_session_id: 1u16,
             pending_connections: R::join_set(),
             pending_session: R::join_set(),
+            profile_storage,
             tunnel_manager_handle,
         })
     }
@@ -150,7 +157,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     self.pending_connections.push(async move {
                         let mut protocol_byte = vec![0u8; 1];
 
-                        stream.read_exact(&mut protocol_byte).await?;
+                        stream.read_exact::<R>(&mut protocol_byte).await?;
 
                         if protocol_byte[0] != I2CP_PROTOCOL_BYTE {
                             return Err(Error::I2cp(I2cpError::InvalidProtocolByte(
@@ -183,6 +190,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                     let session_id = self.next_session_id();
                     let tunnel_manager_handle = self.tunnel_manager_handle.clone();
                     let address_book = self.address_book.clone();
+                    let profile_storage = self.profile_storage.clone();
 
                     tracing::trace!(
                         target: LOG_TARGET,
@@ -195,6 +203,7 @@ impl<R: Runtime> Future for I2cpServer<R> {
                         I2cpSocket::new(stream),
                         tunnel_manager_handle,
                         address_book,
+                        profile_storage,
                     ));
                 }
             }

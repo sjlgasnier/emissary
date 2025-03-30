@@ -44,6 +44,15 @@ const LAST_DECLINE_THRESHOLD: Duration = Duration::from_secs(180);
 /// How long the router is considered unreachable after last dial failure.
 const UNREACHABILITY_THRESHOLD: Duration = Duration::from_secs(180);
 
+/// How often [`ProfileManager`] sorts profiles.
+const PROFILE_STORAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How many routers does the high capacity bucket hold.
+const NUM_HIGH_CAPACITY_ROUTERS: usize = 100usize;
+
+/// How many routers does the standard bucket hold.
+const NUM_STANDARD_ROUTERS: usize = 300usize;
+
 /// Router bucket.
 pub enum Bucket {
     /// Any bucket.
@@ -54,6 +63,9 @@ pub enum Bucket {
 
     /// Standard bucket.
     Standard,
+
+    /// Untracked bucket.
+    Untracked,
 }
 
 /// Router profile.
@@ -81,6 +93,15 @@ pub struct Profile {
     /// Number of dial failures.
     pub num_dial_failures: usize,
 
+    /// How many [`DatabaseSearchReply`]s have been received.
+    pub num_lookup_failures: usize,
+
+    /// How many [`DatabaseLookup`]s have gone unaswered.
+    pub num_lookup_no_responses: usize,
+
+    /// How many [`DatabaseStore`]s have been received.
+    pub num_lookup_successes: usize,
+
     /// Number of rejected tunnels.
     pub num_rejected: usize,
 
@@ -107,6 +128,9 @@ impl Profile {
             num_accepted: 0usize,
             num_connection: 0usize,
             num_dial_failures: 0usize,
+            num_lookup_failures: 0usize,
+            num_lookup_no_responses: 0usize,
+            num_lookup_successes: 0usize,
             num_rejected: 0usize,
             num_selected: 0usize,
             num_test_failures: 0usize,
@@ -128,6 +152,24 @@ impl Profile {
     /// Does the router have low participation rate.
     fn has_low_participation_rate(&self) -> bool {
         4 * self.num_accepted < self.num_rejected
+    }
+
+    /// Calculate participation rate for the router.
+    fn participation_rate(&self) -> Option<f64> {
+        if self.num_accepted + self.num_rejected + self.num_unaswered == 0 {
+            return None;
+        }
+
+        Some(
+            self.num_accepted as f64
+                / ((self.num_accepted + self.num_rejected + self.num_unaswered) as f64),
+        )
+    }
+
+    /// Calculate weighted participation rate for the router.
+    fn weighted_participation_rate(&self, avg: f64) -> f64 {
+        (self.num_accepted as f64 + 10f64 * avg)
+            / ((self.num_accepted + self.num_rejected + self.num_unaswered + 10) as f64)
     }
 
     /// Is the router considered unreachable.
@@ -152,6 +194,13 @@ impl Profile {
             || self.is_always_declining()
             || self.has_low_participation_rate()
     }
+
+    /// Calculate floodfill score from the profile.
+    pub fn floodfill_score(&self) -> isize {
+        self.num_lookup_failures as isize
+            + (self.num_lookup_no_responses as isize * -5isize)
+            + (self.num_lookup_successes as isize * 10isize)
+    }
 }
 
 /// Router info/profile reader.
@@ -160,13 +209,18 @@ pub struct Reader<'a> {
     router_infos: RwLockReadGuard<'a, HashMap<RouterId, RouterInfo>>,
 
     /// Read access to profiles.
-    _profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
+    profiles: RwLockReadGuard<'a, HashMap<RouterId, Profile>>,
 }
 
-impl<'a> Reader<'a> {
+impl Reader<'_> {
     /// Get reference to [`RouterInfo`].
     pub fn router_info(&self, router_id: &RouterId) -> Option<&RouterInfo> {
         self.router_infos.get(router_id)
+    }
+
+    /// Get reference to [`Profile`]
+    pub fn profile(&self, router_id: &RouterId) -> Option<&Profile> {
+        self.profiles.get(router_id)
     }
 }
 
@@ -175,6 +229,9 @@ impl<'a> Reader<'a> {
 pub struct ProfileStorage<R: Runtime> {
     /// Discovered routers.
     discovered_routers: Arc<RwLock<HashMap<RouterId, Vec<u8>>>>,
+
+    /// Untracked routers.
+    untracked: Arc<RwLock<HashSet<RouterId>>>,
 
     /// Fast routers.
     fast: Arc<RwLock<HashSet<RouterId>>>,
@@ -241,14 +298,127 @@ impl<R: Runtime> ProfileStorage<R> {
             })
             .unzip();
 
-        Self {
+        let (fast, untracked) = {
+            let (total, routers, untracked) = fast.iter().flatten().fold(
+                (0f64, HashSet::<RouterId>::new(), HashSet::<RouterId>::new()),
+                |(mut total, mut fast, mut untracked), router_id| {
+                    match profiles.get(router_id).expect("to exist").participation_rate() {
+                        Some(rate) => {
+                            total += rate;
+                            fast.insert(router_id.clone());
+                        }
+                        None => {
+                            untracked.insert(router_id.clone());
+                        }
+                    }
+
+                    (total, fast, untracked)
+                },
+            );
+
+            if routers.is_empty() {
+                (HashSet::new(), untracked)
+            } else {
+                let avg = total / routers.len() as f64;
+                let mut routers = routers
+                    .into_iter()
+                    .map(|router_id| {
+                        // profile must exist since the router's participation rate was calculated
+                        let rate = profiles
+                            .get(&router_id)
+                            .expect("to exist")
+                            .weighted_participation_rate(avg);
+
+                        (router_id, rate)
+                    })
+                    .collect::<Vec<_>>();
+
+                routers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let fast = routers
+                    .iter()
+                    .take(NUM_HIGH_CAPACITY_ROUTERS)
+                    .map(|(router_id, _)| router_id.clone())
+                    .collect::<HashSet<_>>();
+                let untracked = routers
+                    .into_iter()
+                    .filter_map(|(router_id, _)| (!fast.contains(&router_id)).then_some(router_id))
+                    .collect();
+
+                (fast, untracked)
+            }
+        };
+
+        let standard = standard
+            .into_iter()
+            .flatten()
+            .chain(untracked.into_iter())
+            .collect::<HashSet<_>>();
+
+        let (standard, untracked) = {
+            let (total, routers, untracked) = standard.iter().fold(
+                (0f64, HashSet::<RouterId>::new(), HashSet::<RouterId>::new()),
+                |(mut total, mut routers, mut untracked), router_id| {
+                    match profiles.get(router_id).expect("to exist").participation_rate() {
+                        Some(rate) => {
+                            total += rate;
+                            routers.insert(router_id.clone());
+                        }
+                        None => {
+                            untracked.insert(router_id.clone());
+                        }
+                    }
+
+                    (total, routers, untracked)
+                },
+            );
+
+            if routers.is_empty() {
+                (HashSet::new(), untracked)
+            } else {
+                let avg = total / routers.len() as f64;
+                let mut routers = routers
+                    .into_iter()
+                    .map(|router_id| {
+                        // profile must exist since the router's participation rate was calculated
+                        let rate = profiles
+                            .get(&router_id)
+                            .expect("to exist")
+                            .weighted_participation_rate(avg);
+
+                        (router_id, rate)
+                    })
+                    .collect::<Vec<_>>();
+
+                routers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let standard = routers
+                    .iter()
+                    .take(NUM_STANDARD_ROUTERS)
+                    .map(|(router_id, _)| router_id.clone())
+                    .collect::<HashSet<_>>();
+                let untracked = routers
+                    .into_iter()
+                    .filter_map(|(router_id, _)| {
+                        (!standard.contains(&router_id)).then_some(router_id)
+                    })
+                    .collect();
+
+                (standard, untracked)
+            }
+        };
+
+        let storage = Self {
             discovered_routers: Default::default(),
-            fast: Arc::new(RwLock::new(fast.into_iter().flatten().collect())),
+            fast: Arc::new(RwLock::new(fast)),
             profiles: Arc::new(RwLock::new(profiles)),
             routers: Arc::new(RwLock::new(routers)),
-            standard: Arc::new(RwLock::new(standard.into_iter().flatten().collect())),
+            standard: Arc::new(RwLock::new(standard)),
+            untracked: Arc::new(RwLock::new(untracked)),
             _runtime: Default::default(),
-        }
+        };
+
+        R::spawn(ProfileManager::<R>::new(storage.clone()).run());
+
+        storage
     }
 
     /// Insert `router` into [`ProfileStorage`].
@@ -310,7 +480,13 @@ impl<R: Runtime> ProfileStorage<R> {
         false
     }
 
+    /// Get the number of routers currently stored in [`ProfileStorage`].
+    pub fn num_routers(&self) -> usize {
+        self.routers.read().len()
+    }
+
     // TODO: remove
+    // TODO: why?
     pub fn get(&self, router: &RouterId) -> Option<RouterInfo> {
         self.routers.read().get(router).cloned()
     }
@@ -333,9 +509,25 @@ impl<R: Runtime> ProfileStorage<R> {
             Bucket::Any => {
                 let fast = self.fast.read();
                 let standard = self.standard.read();
+                let untracked = self.untracked.read();
 
                 fast.iter()
                     .chain(standard.iter())
+                    .chain(untracked.iter())
+                    .filter_map(|router_id| {
+                        // profile & router info must exist since they're managed by us
+                        let profile = profiles.get(router_id).expect("to exist");
+                        let router_info = routers.get(router_id).expect("to exist");
+
+                        filter(router_id, router_info, profile).then_some(router_id.clone())
+                    })
+                    .collect()
+            }
+            Bucket::Untracked => {
+                let untracked = self.untracked.read();
+
+                untracked
+                    .iter()
                     .filter_map(|router_id| {
                         // profile & router info must exist since they're managed by us
                         let profile = profiles.get(router_id).expect("to exist");
@@ -379,7 +571,7 @@ impl<R: Runtime> ProfileStorage<R> {
     pub fn reader(&self) -> Reader {
         Reader {
             router_infos: self.routers.read(),
-            _profiles: self.profiles.read(),
+            profiles: self.profiles.read(),
         }
     }
 
@@ -390,7 +582,7 @@ impl<R: Runtime> ProfileStorage<R> {
         self.routers
             .read()
             .get(router_id)
-            .map_or(false, |router_info| router_info.is_floodfill())
+            .is_some_and(|router_info| router_info.is_floodfill())
     }
 
     /// Record that `router_id` was selected for a tunnel.
@@ -518,6 +710,33 @@ impl<R: Runtime> ProfileStorage<R> {
         }
     }
 
+    /// Record a non-respone to a lease set/router info query.
+    pub fn database_lookup_no_response(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        if let Some(profile) = inner.get_mut(router_id) {
+            profile.num_lookup_no_responses += 1;
+        }
+    }
+
+    /// Record non-respones to a lease set/router info query.
+    pub fn database_lookup_success(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        if let Some(profile) = inner.get_mut(router_id) {
+            profile.num_lookup_successes += 1;
+        }
+    }
+
+    /// Record non-respones to a lease set/router
+    pub fn database_lookup_failure(&self, router_id: &RouterId) {
+        let mut inner = self.profiles.write();
+
+        if let Some(profile) = inner.get_mut(router_id) {
+            profile.num_lookup_failures += 1;
+        }
+    }
+
     /// Get backup of [`ProfileStorage`].
     pub fn backup(&self) -> Vec<(String, Option<Vec<u8>>, Profile)> {
         let profiles = self.profiles.read().clone();
@@ -527,20 +746,18 @@ impl<R: Runtime> ProfileStorage<R> {
             .into_iter()
             .map(|(router_id, profile)| {
                 (
-                    base64_encode(&router_id.to_vec()),
+                    base64_encode(router_id.to_vec()),
                     inner.remove(&router_id),
                     profile,
                 )
             })
             .collect::<Vec<_>>()
     }
-}
 
-#[cfg(test)]
-impl<R: Runtime> ProfileStorage<R> {
     /// Create new [`ProfileStorage`] from random `routers`.
     ///
     /// Only used in tests.
+    #[cfg(test)]
     pub fn from_random(routers: Vec<RouterInfo>) -> Self {
         let routers = routers
             .into_iter()
@@ -571,7 +788,111 @@ impl<R: Runtime> ProfileStorage<R> {
             profiles: Arc::new(RwLock::new(profiles)),
             routers: Arc::new(RwLock::new(routers)),
             standard: Arc::new(RwLock::new(standard.into_iter().flatten().collect())),
+            untracked: Default::default(),
             _runtime: Default::default(),
+        }
+    }
+}
+
+/// Profile manager.
+struct ProfileManager<R: Runtime> {
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+}
+
+impl<R: Runtime> ProfileManager<R> {
+    /// Create new [`ProfileManager`].
+    fn new(profile_storage: ProfileStorage<R>) -> Self {
+        Self { profile_storage }
+    }
+
+    /// Run the event loop of profile manager.
+    async fn run(self) {
+        loop {
+            R::delay(PROFILE_STORAGE_MAINTENANCE_INTERVAL).await;
+
+            let profiles = self.profile_storage.profiles.read();
+
+            let (total, routers, no_profile_routers) = {
+                let fast = self.profile_storage.fast.read();
+                let standard = self.profile_storage.standard.read();
+                let untracked = self.profile_storage.untracked.read();
+
+                fast.iter().chain(standard.iter()).chain(untracked.iter()).fold(
+                    (0f64, HashSet::<RouterId>::new(), HashSet::<RouterId>::new()),
+                    |(mut total, mut routers, mut untracked), router_id| {
+                        match profiles.get(router_id).expect("to exist").participation_rate() {
+                            Some(rate) => {
+                                total += rate;
+                                routers.insert(router_id.clone());
+                            }
+                            None => {
+                                untracked.insert(router_id.clone());
+                            }
+                        }
+                        (total, routers, untracked)
+                    },
+                )
+            };
+
+            // if there are no statistics yet, leave the groups unmodified
+            if routers.is_empty() {
+                continue;
+            }
+
+            // calculate weighted capacity for each router
+            let avg = total / routers.len() as f64;
+            let mut routers = routers
+                .into_iter()
+                .map(|router_id| {
+                    // profile must exist since the router's participation rate was calculated
+                    let rate = profiles
+                        .get(&router_id)
+                        .expect("to exist")
+                        .weighted_participation_rate(avg);
+
+                    (router_id, rate)
+                })
+                .collect::<Vec<_>>();
+
+            // sort by capacity in descending order
+            routers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+            // split routers into fast, standard and untracked buckets
+            let router_infos = self.profile_storage.routers.read();
+
+            let mut fast = HashSet::<RouterId>::new();
+            let mut standard = HashSet::<RouterId>::new();
+            let mut untracked = HashSet::<RouterId>::new();
+
+            for (router_id, _) in routers {
+                let Some(router_info) = router_infos.get(&router_id) else {
+                    continue;
+                };
+
+                if !router_info.is_reachable() {
+                    continue;
+                }
+
+                if router_info.capabilities.is_fast() && fast.len() < NUM_HIGH_CAPACITY_ROUTERS {
+                    fast.insert(router_id);
+                    continue;
+                }
+
+                if standard.len() < NUM_STANDARD_ROUTERS {
+                    standard.insert(router_id);
+                    continue;
+                }
+
+                untracked.insert(router_id);
+            }
+
+            untracked.extend(no_profile_routers);
+
+            // replace old groups with new groups
+            *self.profile_storage.fast.write() = fast;
+            *self.profile_storage.standard.write() = standard;
+            *self.profile_storage.untracked.write() = untracked;
         }
     }
 }
@@ -579,13 +900,13 @@ impl<R: Runtime> ProfileStorage<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{crypto::base64_encode, runtime::mock::MockRuntime};
+    use crate::{crypto::base64_encode, primitives::RouterInfoBuilder, runtime::mock::MockRuntime};
 
-    #[test]
-    fn initialize_with_infos_without_profiles() {
+    #[tokio::test]
+    async fn initialize_with_infos_without_profiles() {
         let (_, infos): (Vec<_>, Vec<_>) = (0..5)
             .map(|_| {
-                let (info, _, sgn_key) = RouterInfo::random_with_keys::<MockRuntime>();
+                let (info, _, sgn_key) = RouterInfoBuilder::default().build();
                 let router_id = info.identity.id();
 
                 (router_id, info.serialize(&sgn_key))
@@ -604,11 +925,11 @@ mod tests {
         assert!(profiles.profiles.read().values().all(|profile| profile == &Profile::new()));
     }
 
-    #[test]
-    fn initialize_with_infos_and_profiles() {
+    #[tokio::test]
+    async fn initialize_with_infos_and_profiles() {
         let (router_ids, infos): (Vec<_>, Vec<_>) = (0..5)
             .map(|_| {
-                let (info, _, sgn_key) = RouterInfo::random_with_keys::<MockRuntime>();
+                let (info, _, sgn_key) = RouterInfoBuilder::default().build();
                 let router_id = info.identity.id();
 
                 (router_id, info.serialize(&sgn_key))
@@ -628,6 +949,9 @@ mod tests {
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
+                        num_lookup_failures: i + 1,
+                        num_lookup_no_responses: i + 1,
+                        num_lookup_successes: i + 1,
                         num_rejected: i + 1,
                         num_selected: i + 1,
                         num_test_failures: i + 1,
@@ -663,8 +987,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn profile_without_router_info() {
+    #[tokio::test]
+    async fn profile_without_router_info() {
         let profiles = (0..3)
             .map(|i| {
                 let router_id = base64_encode(RouterId::random().to_vec());
@@ -678,6 +1002,9 @@ mod tests {
                         num_accepted: i + 1,
                         num_connection: i + 1,
                         num_dial_failures: i + 1,
+                        num_lookup_failures: i + 1,
+                        num_lookup_no_responses: i + 1,
+                        num_lookup_successes: i + 1,
                         num_rejected: i + 1,
                         num_selected: i + 1,
                         num_test_failures: i + 1,
@@ -694,8 +1021,8 @@ mod tests {
         assert!(profiles.profiles.read().is_empty());
     }
 
-    #[test]
-    fn create_profile_if_it_doesnt_exist() {
+    #[tokio::test]
+    async fn create_profile_if_it_doesnt_exist() {
         let profiles = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
         let router_id = RouterId::random();
 
@@ -706,7 +1033,7 @@ mod tests {
 
         let reader = profiles.reader();
         assert_eq!(
-            reader._profiles.get(&router_id).unwrap().num_connection,
+            reader.profiles.get(&router_id).unwrap().num_connection,
             1usize
         );
     }

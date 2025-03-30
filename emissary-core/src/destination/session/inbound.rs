@@ -23,7 +23,7 @@ use crate::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
     destination::session::{
-        tagset::{TagSet, TagSetEntry},
+        tag_set::{TagSet, TagSetEntry},
         KeyContext, NUM_TAGS_TO_GENERATE,
     },
     error::SessionError,

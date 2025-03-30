@@ -23,11 +23,10 @@
 
 use crate::{
     netdb::{
-        bucket::{KBucket, KBucketEntry},
-        types::{Distance, FloodFill, Key},
+        bucket::KBucket,
+        types::{Distance, Key},
     },
     primitives::RouterId,
-    runtime::Runtime,
 };
 
 use hashbrown::HashSet;
@@ -41,12 +40,12 @@ const LOG_TARGET: &str = "emissary::netdb::routing-table";
 /// Number of k-buckets.
 const NUM_BUCKETS: usize = 256;
 
-pub struct RoutingTable<R: Runtime> {
+pub struct RoutingTable {
     /// Local key.
     local_key: Key<RouterId>,
 
     /// K-buckets.
-    buckets: Vec<KBucket<R>>,
+    buckets: Vec<KBucket>,
 }
 
 /// A (type-safe) index into a `KBucketsTable`, i.e. a non-negative integer in the
@@ -75,7 +74,7 @@ impl BucketIndex {
     }
 }
 
-impl<R: Runtime> RoutingTable<R> {
+impl RoutingTable {
     /// Create new [`RoutingTable`].
     pub fn new(local_key: Key<RouterId>) -> Self {
         RoutingTable {
@@ -84,13 +83,20 @@ impl<R: Runtime> RoutingTable<R> {
         }
     }
 
-    /// Get an entry for `peer` into a k-bucket.
-    pub fn entry(&mut self, key: Key<RouterId>) -> KBucketEntry<'_, R> {
-        let Some(index) = BucketIndex::new(&self.local_key.distance(&key)) else {
-            return KBucketEntry::LocalNode;
-        };
-
-        self.buckets[*index].entry(key)
+    /// Get index into a k-bucket using `key`.
+    ///
+    /// Returns `None` if `key` is the local router's ID.
+    fn bucket_index(&self, key: &Key<RouterId>) -> Option<BucketIndex> {
+        match BucketIndex::new(&self.local_key.distance(&key)) {
+            Some(index) => Some(index),
+            None => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "tried to add local router to routing table",
+                );
+                None
+            }
+        }
     }
 
     /// Add router to [`RoutingTable`].
@@ -100,29 +106,27 @@ impl<R: Runtime> RoutingTable<R> {
             %router_id,
             "add router",
         );
+        let key = Key::from(router_id.clone());
 
-        match self.entry(Key::from(router_id.clone())) {
-            KBucketEntry::Occupied(entry) => {
-                entry.last_update = R::now();
+        if let Some(index) = self.bucket_index(&key) {
+            if !self.buckets[*index].try_insert(key) {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "failed to add floodfill to routing table",
+                );
             }
-            mut entry @ KBucketEntry::Vacant(_) => {
-                entry.insert(FloodFill::new(router_id));
-            }
-            KBucketEntry::LocalNode => tracing::warn!(
-                target: LOG_TARGET,
-                %router_id,
-                "tried to add local router to routing table",
-            ),
-            KBucketEntry::NoSlot => tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                "routing table full, cannot add new entry",
-            ),
         }
     }
 
-    /// Remove router from [`RoutingTable`].
-    pub fn remove_router(&mut self, _router_id: RouterId) {}
+    /// Adjust the score of a floodfill.
+    pub fn adjust_score(&mut self, router_id: &RouterId, adjustment: isize) {
+        let key = Key::from(router_id.clone());
+
+        if let Some(index) = BucketIndex::new(&self.local_key.distance(&key)) {
+            self.buckets[*index].adjust_score(key, adjustment);
+        }
+    }
 
     /// Get `limit` many floodfills closest to `target` from the k-buckets.
     pub fn closest<'a, K: Clone + 'a>(
@@ -138,7 +142,7 @@ impl<R: Runtime> RoutingTable<R> {
     /// Get `limit` many floodfills closest to `target` from the k-buckets, ignoring routers
     /// specified in `ignore`.
     pub fn closest_with_ignore<'a, 'b: 'a, K: Clone + 'a>(
-        &'a mut self,
+        &'a self,
         target: Key<K>,
         limit: usize,
         ignore: &'b HashSet<RouterId>,
@@ -241,20 +245,17 @@ impl Iterator for ClosestBucketsIter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{netdb::types::U256, runtime::mock::MockRuntime};
-    use core::time::Duration;
+    use crate::netdb::types::U256;
 
     #[test]
     fn closest_routers() {
         let own_router_id = RouterId::random();
         let own_key = Key::from(own_router_id);
-        let mut table = RoutingTable::<MockRuntime>::new(own_key.clone());
+        let mut table = RoutingTable::new(own_key.clone());
 
         for _ in 0..60 {
             let router_id = RouterId::random();
-            let key = Key::from(router_id.clone());
-            let mut entry = table.entry(key.clone());
-            entry.insert(FloodFill::new(router_id));
+            table.add_router(router_id);
         }
 
         let target = Key::from(RouterId::random());
@@ -271,37 +272,12 @@ mod tests {
     }
 
     #[test]
-    fn add_router_to_empty_table() {
+    fn cannot_add_own_router_id() {
         let own_router_id = RouterId::random();
         let own_key = Key::from(own_router_id);
-        let mut table = RoutingTable::<MockRuntime>::new(own_key.clone());
+        let table = RoutingTable::new(own_key.clone());
 
-        // verify that local router id resolves to special entry
-        assert_eq!(table.entry(own_key), KBucketEntry::LocalNode);
-
-        let router_id = RouterId::random();
-        let key = Key::from(router_id.clone());
-        let mut test = table.entry(key.clone());
-
-        assert!(std::matches!(test, KBucketEntry::Vacant(_)));
-        test.insert(FloodFill::new(router_id.clone()));
-
-        assert_eq!(
-            table.entry(key.clone()),
-            KBucketEntry::Occupied(&mut FloodFill::new(router_id.clone()))
-        );
-
-        match table.entry(key.clone()) {
-            KBucketEntry::Occupied(entry) => {
-                entry.last_update = MockRuntime::now().subtract(Duration::from_secs(20 * 60));
-            }
-            state => panic!("invalid state for `KBucketEntry`: {state:?}"),
-        }
-
-        assert_eq!(
-            table.entry(key.clone()),
-            KBucketEntry::Occupied(&mut FloodFill::new(router_id))
-        );
+        assert!(table.bucket_index(&own_key).is_none());
     }
 
     #[test]

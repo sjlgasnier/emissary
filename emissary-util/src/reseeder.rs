@@ -102,7 +102,7 @@ impl Reseeder {
             }
 
             match response.bytes().await {
-                Ok(bytes) => match Su3::parse_reseed(&bytes) {
+                Ok(bytes) => match Su3::parse_reseed(&bytes, false) {
                     None => continue,
                     Some(routers) => return Ok(routers),
                 },

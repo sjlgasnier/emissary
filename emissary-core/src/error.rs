@@ -110,6 +110,9 @@ pub enum ConnectionError {
 
     /// Keep-alive timeout.
     KeepAliveTimeout,
+
+    /// Read timeout.
+    ReadTimeout,
 }
 
 impl fmt::Display for ConnectionError {
@@ -118,6 +121,7 @@ impl fmt::Display for ConnectionError {
             Self::SocketClosed => write!(f, "socket closed"),
             Self::BindFailure => write!(f, "failed to bind to socket"),
             Self::KeepAliveTimeout => write!(f, "keep-alive timeout"),
+            Self::ReadTimeout => write!(f, "read timeout"),
         }
     }
 }
@@ -138,7 +142,7 @@ impl fmt::Display for I2cpError {
 }
 
 /// Query error.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum QueryError {
     /// No floodfills.
     NoFloodfills,

@@ -18,16 +18,26 @@
 
 use crate::{config::Profile, error::Error};
 
-use std::{fs::File, io::Write, path::PathBuf};
+use emissary_core::runtime::Storage;
+use flate2::write::GzDecoder;
 
-/// Storage.
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::router-storage";
+
+/// Router torage.
 #[derive(Clone)]
-pub struct Storage {
+pub struct RouterStorage {
     /// Base path.
     base_path: PathBuf,
 }
 
-impl Storage {
+impl RouterStorage {
     /// Create new [`Storage`].
     pub fn new(base_path: PathBuf) -> Self {
         Self { base_path }
@@ -41,25 +51,86 @@ impl Storage {
             false => self.base_path.join(format!("netDb/r{dir}/routerInfo-{router_id}.dat")),
         };
 
-        let mut file = File::create(self.base_path.join(name))?;
+        let mut file = File::create(name)?;
         file.write_all(&router_info)?;
 
         Ok(())
     }
 
     /// Store `profile` for `router_id` in `peerProfiles`.
-    pub fn store_profile(
+    fn store_profile(
         &self,
         router_id: String,
         profile: emissary_core::Profile,
     ) -> crate::Result<()> {
         let dir = router_id.chars().next().ok_or(Error::Custom("invalid router id".to_string()))?;
-        let name = self.base_path.join(format!("peerProfiles/p{dir}/profile-{router_id}.toml"));
+
+        // don't store profile on disk if associated router info doesn't exist
+        if !Path::exists(&self.base_path.join(format!("netDb/r{dir}/routerInfo-{router_id}.dat"))) {
+            tracing::trace!(
+                target: LOG_TARGET,
+                %router_id,
+                "router info doesn't exist, skipping router profile store",
+            );
+
+            return Ok(());
+        }
+
+        let profile_name =
+            self.base_path.join(format!("peerProfiles/p{dir}/profile-{router_id}.toml"));
 
         let config = toml::to_string(&Profile::from(profile)).expect("to succeed");
-        let mut file = File::create(name)?;
+        let mut file = File::create(profile_name)?;
         file.write_all(config.as_bytes())?;
 
         Ok(())
+    }
+
+    /// Decompress `bytes`.
+    fn decompress(bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let mut e = GzDecoder::new(Vec::new());
+        e.write_all(bytes.as_ref()).ok()?;
+
+        e.finish().ok()
+    }
+}
+
+impl Storage for RouterStorage {
+    fn save_to_disk(&self, routers: Vec<(String, Option<Vec<u8>>, emissary_core::Profile)>) {
+        let storage_handle = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            for (router_id, router_info, profile) in routers {
+                if let Some(router_info) = router_info {
+                    match RouterStorage::decompress(router_info) {
+                        Some(router_info) =>
+                            if let Err(error) =
+                                storage_handle.store_router_info(router_id.clone(), router_info)
+                            {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?router_id,
+                                    ?error,
+                                    "failed to store router info to disk",
+                                );
+                            },
+                        None => tracing::warn!(
+                            target: LOG_TARGET,
+                            ?router_id,
+                            "failed to decompress router info",
+                        ),
+                    }
+                }
+
+                if let Err(error) = storage_handle.store_profile(router_id.clone(), profile) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?router_id,
+                        ?error,
+                        "failed to store router profile to disk",
+                    );
+                }
+            }
+        });
     }
 }

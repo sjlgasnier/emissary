@@ -168,7 +168,7 @@ impl RouterIdentity {
         let (rest, pub_key_type) = be_u16(rest)?;
 
         let (KEY_CERTIFICATE, KEY_CERTIFICATE_LEN) = (cert_type, cert_len) else {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 ?cert_len,
                 ?cert_type,
@@ -180,7 +180,7 @@ impl RouterIdentity {
         let static_key = match pub_key_type {
             KEY_KIND_X25519 => StaticPublicKey::from_bytes(&initial_bytes[..32]),
             kind => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     ?kind,
                     "unsupported static key kind",

@@ -18,6 +18,7 @@
 
 use crate::{
     crypto::{SigningPrivateKey, StaticPrivateKey},
+    events::EventHandle,
     primitives::RouterId,
     profile::ProfileStorage,
     runtime::Runtime,
@@ -72,11 +73,14 @@ pub struct RouterContext<R: Runtime> {
 
     /// Profile storage.
     profile_storage: ProfileStorage<R>,
+
+    /// Event handle.
+    event_handle: EventHandle<R>,
 }
 
 impl<R: Runtime> RouterContext<R> {
     /// Create new [`RouterContext`].
-    pub fn new(
+    pub(crate) fn new(
         metrics_handle: R::MetricsHandle,
         profile_storage: ProfileStorage<R>,
         router_id: RouterId,
@@ -84,8 +88,10 @@ impl<R: Runtime> RouterContext<R> {
         static_key: StaticPrivateKey,
         signing_key: SigningPrivateKey,
         net_id: u8,
+        event_handle: EventHandle<R>,
     ) -> Self {
         Self {
+            event_handle,
             inner: Arc::new(InnerRouterContext {
                 metrics_handle,
                 net_id,
@@ -140,5 +146,10 @@ impl<R: Runtime> RouterContext<R> {
     /// Get reference to [`SigningPrivateKey`].
     pub fn signing_key(&self) -> &SigningPrivateKey {
         &self.inner.signing_key
+    }
+
+    /// Get reference to [`EventHandle`].
+    pub(crate) fn event_handle(&self) -> &EventHandle<R> {
+        &self.event_handle
     }
 }

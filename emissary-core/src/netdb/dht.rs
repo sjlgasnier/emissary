@@ -20,40 +20,88 @@ use crate::{
     crypto::sha256::Sha256,
     netdb::{routing_table::RoutingTable, types::Key},
     primitives::RouterId,
+    router::context::RouterContext,
     runtime::Runtime,
 };
 
 use chrono::DateTime;
 use hashbrown::HashSet;
 
-use alloc::string::{String, ToString};
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+};
+
+/// Score adjustment when floodfill doesn't answer to a query.
+const LOOKUP_REPLY_NOT_RECEIVED_SCORE: isize = -5isize;
+
+/// Score adjustment when a [`DatabaseStore`] is received from a floodfill as a response to a
+/// [`DatabaseLookUp`].
+const LOOKUP_SUCCEEDED_SCORE: isize = 10isize;
+
+/// Score adjustment when a [`DatabaseSearchReply`] is received from a floodfill as a response to a
+/// [`DatabaseLookUp`].
+///
+/// Note that this is a positive number even though the lookup failed. Reason for this is that even
+/// though the value was not found from the floodfill, receiving a response from them means that
+/// they're at least responsive.
+const LOOKUP_FAILED_SCORE: isize = 1isize;
 
 /// Kademlia DHT implementation.
 pub struct Dht<R: Runtime> {
     /// Kademlia routing table.
-    routing_table: RoutingTable<R>,
+    routing_table: RoutingTable,
 
-    /// Metrics handle.
-    #[allow(unused)]
-    metrics: R::MetricsHandle,
+    /// Router context.
+    router_ctx: RouterContext<R>,
 }
 
 impl<R: Runtime> Dht<R> {
     /// Create new [`Dht`].
-    pub fn new(
+    ///
+    /// `floodfill` denotes whether this is a [`Dht`] for floodfills or not.
+    pub(super) fn new(
         local_router_id: RouterId,
         routers: HashSet<RouterId>,
-        metrics: R::MetricsHandle,
+        router_ctx: RouterContext<R>,
+        floodfill: bool,
     ) -> Self {
-        let mut routing_table = RoutingTable::new(Key::from(local_router_id));
+        let routing_table = if floodfill {
+            let mut routing_table = RoutingTable::new(Key::from(local_router_id));
+            let reader = router_ctx.profile_storage().reader();
 
-        routers.into_iter().for_each(|router_id| {
-            routing_table.add_router(router_id);
-        });
+            // sort floodfills by their measured performance and insert them in the order of highest
+            // performance into the routing table
+            //
+            // the floodfills with lowest performance are left out, unless the bucket has space
+            let mut scores = routers
+                .into_iter()
+                .map(|router_id| match reader.profile(&router_id) {
+                    Some(profile) => (router_id, profile.floodfill_score()),
+                    None => (router_id, 0isize),
+                })
+                .collect::<Vec<_>>();
+
+            scores.sort_by(|(_, a), (_, b)| b.cmp(a));
+            scores.into_iter().for_each(|(router_id, _)| {
+                routing_table.add_router(router_id);
+            });
+
+            routing_table
+        } else {
+            let mut routing_table = RoutingTable::new(Key::from(local_router_id));
+
+            routers.into_iter().for_each(|router_id| {
+                routing_table.add_router(router_id);
+            });
+
+            routing_table
+        };
 
         Self {
             routing_table,
-            metrics,
+            router_ctx,
         }
     }
 
@@ -66,18 +114,30 @@ impl<R: Runtime> Dht<R> {
     }
 
     /// Insert new router into [`Dht`].
-    pub fn add_router(&mut self, router_id: RouterId) {
+    pub(super) fn add_router(&mut self, router_id: RouterId) {
         self.routing_table.add_router(router_id);
     }
 
-    /// Remove router from [`Dht`].
-    #[allow(unused)]
-    pub fn remove_router(&mut self, router_id: RouterId) {
-        self.routing_table.remove_router(router_id);
+    /// Register lookup success for `router_id`.
+    pub(super) fn register_lookup_success(&mut self, router_id: &RouterId) {
+        self.routing_table.adjust_score(router_id, LOOKUP_SUCCEEDED_SCORE);
+        self.router_ctx.profile_storage().database_lookup_success(router_id);
+    }
+
+    /// Register lookup failure for `router_id`.
+    pub(super) fn register_lookup_failure(&mut self, router_id: &RouterId) {
+        self.routing_table.adjust_score(router_id, LOOKUP_FAILED_SCORE);
+        self.router_ctx.profile_storage().database_lookup_failure(router_id);
+    }
+
+    /// Register lookup timeout for `router_id`.
+    pub(super) fn register_lookup_timeout(&mut self, router_id: &RouterId) {
+        self.routing_table.adjust_score(router_id, LOOKUP_REPLY_NOT_RECEIVED_SCORE);
+        self.router_ctx.profile_storage().database_lookup_no_response(router_id);
     }
 
     /// Get `limit` many routers clost to `key`.
-    pub fn closest(
+    pub(super) fn closest(
         &mut self,
         key: impl AsRef<[u8]>,
         limit: usize,
@@ -89,8 +149,8 @@ impl<R: Runtime> Dht<R> {
     }
 
     /// Get closest routers to `key`.
-    pub fn closest_with_ignore<'a>(
-        &'a mut self,
+    pub(super) fn closest_with_ignore<'a>(
+        &'a self,
         key: impl AsRef<[u8]>,
         limit: usize,
         ignore: &'a HashSet<RouterId>,
@@ -100,20 +160,70 @@ impl<R: Runtime> Dht<R> {
 
         self.routing_table.closest_with_ignore(target, limit, ignore)
     }
+
+    /// Get ID of the router from `routers` closest to `key`.
+    pub fn get_closest(key: impl AsRef<[u8]>, routers: &HashSet<RouterId>) -> Option<RouterId> {
+        if routers.is_empty() {
+            return None;
+        }
+
+        let target =
+            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let mut routers = routers
+            .iter()
+            .map(|router_id| {
+                let distance = target.distance(&Key::from(router_id.clone()));
+
+                (distance, router_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        routers.pop_first().map(|(_, router_id)| router_id.clone())
+    }
+
+    /// Get `limit` many routers closest to `key` from `routers`.
+    pub fn get_n_closest(
+        key: impl AsRef<[u8]>,
+        routers: &HashSet<RouterId>,
+        limit: usize,
+    ) -> HashSet<RouterId> {
+        if routers.is_empty() {
+            return HashSet::new();
+        }
+
+        let target =
+            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let routers = routers
+            .iter()
+            .map(|router_id| {
+                let distance = target.distance(&Key::from(router_id.clone()));
+
+                (distance, router_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        routers
+            .into_iter()
+            .take(limit)
+            .map(|(_, router_id)| router_id.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
     use crate::{
         crypto::{base32_decode, base64_decode},
+        events::EventManager,
+        primitives::RouterInfoBuilder,
+        profile::ProfileStorage,
         runtime::mock::MockRuntime,
     };
+    use bytes::Bytes;
 
-    #[test]
-    fn lookup() {
+    #[tokio::test]
+    async fn lookup() {
         let routers = HashSet::from_iter([
             RouterId::from(&base64_decode("4wlqrFG46mv7ujZi18KwEf9uJz2MgOIebdMMxDHsh~0=").unwrap()),
             RouterId::from(&base64_decode("909NkRdvZz4UnYKrEdkcPR0-nyjgIyXfcltdus3KbvI=").unwrap()),
@@ -131,10 +241,22 @@ mod tests {
             RouterId::from(&base64_decode("QVGqliH7Pdye7P7UAtM~fKQIfjKOzKbMVvhdKVSGlQ8=").unwrap()),
             RouterId::from(&base64_decode("x4Q9dpbvHfyUuIhK9xDiy1XL9lvrpe9Kmmy9Gg~wFeQ=").unwrap()),
         ]);
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let mut dht = Dht::<MockRuntime>::new(
-            RouterId::random(),
+            router_info.identity.id(),
             routers,
-            MockRuntime::register_metrics(Vec::new(), None),
+            RouterContext::new(
+                MockRuntime::register_metrics(vec![], None),
+                ProfileStorage::new(&[], &[]),
+                router_info.identity.id(),
+                Bytes::from(router_info.serialize(&signing_key)),
+                static_key,
+                signing_key,
+                2u8,
+                event_handle.clone(),
+            ),
+            true,
         );
 
         let key = Bytes::from(

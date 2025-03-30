@@ -90,7 +90,7 @@ pub struct Capabilities {
     floodfill: bool,
 
     /// Bandwidth.
-    bandwidth: Bandwidth,
+    bandwidth: Option<Bandwidth>,
 
     /// Is the router reachable.
     reachable: bool,
@@ -110,7 +110,7 @@ impl fmt::Display for Capabilities {
 impl Capabilities {
     /// Attempt to parse [`Capabilities`] from `caps`.
     pub fn parse(caps: &Str) -> Option<Self> {
-        let bandwidth = Bandwidth::parse(caps)?;
+        let bandwidth = Bandwidth::parse(caps);
         let floodfill = caps.contains("f");
         let usable = !(caps.contains("E") || caps.contains("G"));
         let reachable = !(caps.contains("U") || caps.contains("H"));
@@ -133,15 +133,19 @@ impl Capabilities {
     ///
     /// Router is considered fast if it's reachable and its capabilities specify either O, P or X.
     pub fn is_fast(&self) -> bool {
-        core::matches!(self.bandwidth, Bandwidth::O | Bandwidth::P | Bandwidth::X)
+        self.bandwidth.is_some_and(|bandwidth| {
+            core::matches!(bandwidth, Bandwidth::O | Bandwidth::P | Bandwidth::X)
+        })
     }
 
     /// Is the router considered to have "standard" bandwidth.
     pub fn is_standard(&self) -> bool {
-        core::matches!(
-            self.bandwidth,
-            Bandwidth::K | Bandwidth::L | Bandwidth::M | Bandwidth::N
-        )
+        self.bandwidth.is_some_and(|bandwidth| {
+            core::matches!(
+                bandwidth,
+                Bandwidth::K | Bandwidth::L | Bandwidth::M | Bandwidth::N
+            )
+        })
     }
 
     /// Is the router considered reachable.
@@ -175,7 +179,9 @@ mod tests {
 
     #[test]
     fn unrecognized_bandwidth() {
-        assert!(Capabilities::parse(&Str::from("Z")).is_none());
+        let caps = Capabilities::parse(&Str::from("Z")).unwrap();
+        assert!(caps.bandwidth.is_none());
+        assert!(!caps.floodfill);
     }
 
     #[test]

@@ -21,6 +21,7 @@ use crate::runtime::Runtime;
 use futures::{future::BoxFuture, FutureExt};
 use hashbrown::HashSet;
 
+use alloc::boxed::Box;
 use core::{
     future::Future,
     marker::PhantomData,

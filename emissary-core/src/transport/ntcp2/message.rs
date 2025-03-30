@@ -170,7 +170,7 @@ pub enum MessageBlock<'a> {
     },
 }
 
-impl<'a> fmt::Debug for MessageBlock<'a> {
+impl fmt::Debug for MessageBlock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Self::DateTime { timestamp } =>
@@ -224,7 +224,8 @@ impl<'a> fmt::Debug for MessageBlock<'a> {
 impl<'a> MessageBlock<'a> {
     /// Parse [`MessageBlock::DateTime`].
     fn parse_date_time(input: &'a [u8]) -> IResult<&'a [u8], MessageBlock<'a>> {
-        let (rest, timestamp) = be_u32(input)?;
+        let (rest, _size) = be_u16(input)?;
+        let (rest, timestamp) = be_u32(rest)?;
 
         Ok((rest, MessageBlock::DateTime { timestamp }))
     }

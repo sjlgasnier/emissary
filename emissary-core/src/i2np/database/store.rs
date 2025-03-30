@@ -264,7 +264,7 @@ impl<R: Runtime> DatabaseStore<R> {
                 })?;
 
                 let router_info = RouterInfo::parse(&data).ok_or_else(|| {
-                    tracing::warn!(
+                    tracing::debug!(
                         target: LOG_TARGET,
                         "failed to parse gzipped router info",
                     );

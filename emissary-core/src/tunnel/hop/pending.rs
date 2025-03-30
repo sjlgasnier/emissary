@@ -547,7 +547,9 @@ impl<T: Tunnel> PendingTunnel<T> {
 mod test {
     use super::*;
     use crate::{
+        config::TransitConfig,
         crypto::{EphemeralPublicKey, StaticPublicKey},
+        events::EventManager,
         i2np::{tunnel::gateway::TunnelGateway, MessageBuilder},
         primitives::MessageId,
         profile::ProfileStorage,
@@ -559,13 +561,13 @@ mod test {
             hop::inbound::InboundTunnel,
             noise::NoiseContext,
             pool::TunnelPoolBuildParameters,
-            routing_table::RoutingTable,
+            routing_table::{RoutingKindRecycle, RoutingTable},
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::channel;
+    use thingbuf::mpsc::{channel, with_recycle};
 
     #[tokio::test]
     async fn create_outbound_tunnel() {
@@ -609,7 +611,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );
@@ -629,6 +631,7 @@ mod test {
     #[tokio::test]
     async fn create_inbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -642,7 +645,7 @@ mod test {
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
                     let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
                     let routing_table =
@@ -653,6 +656,9 @@ mod test {
                         (
                             GarlicHandler::new(noise_context.clone(), handle.clone()),
                             TransitTunnelManager::new(
+                                Some(TransitConfig {
+                                    max_tunnels: Some(5000),
+                                }),
                                 RouterContext::new(
                                     handle.clone(),
                                     ProfileStorage::new(&[], &[]),
@@ -661,6 +667,7 @@ mod test {
                                     static_key,
                                     signing_key,
                                     2u8,
+                                    event_handle.clone(),
                                 ),
                                 routing_table,
                                 transit_rx,
@@ -715,7 +722,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );
@@ -969,7 +976,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );
@@ -1042,13 +1049,14 @@ mod test {
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         for _ in 0..3 {
             let (router_hash, static_key, signing_key, _noise_context, router_info) =
                 make_router(true);
 
             let (transit_tx, transit_rx) = channel(16);
-            let (manager_tx, _manager_rx) = channel(16);
+            let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
             let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
             let shutdown_handle = shutdown_ctx.handle();
 
@@ -1058,6 +1066,9 @@ mod test {
             hops.push((router_hash, static_key.public()));
             ctxs.push(shutdown_ctx);
             transit_managers.push(TransitTunnelManager::new(
+                Some(TransitConfig {
+                    max_tunnels: Some(5000),
+                }),
                 RouterContext::new(
                     handle.clone(),
                     ProfileStorage::new(&[], &[]),
@@ -1066,6 +1077,7 @@ mod test {
                     static_key,
                     signing_key,
                     2u8,
+                    event_handle.clone(),
                 ),
                 routing_table,
                 transit_rx,
@@ -1096,12 +1108,12 @@ mod test {
             .unwrap();
 
         let message = (0..transit_managers.len() - 1).fold(message, |message, i| {
-            let (_, msg) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
+            let (_, msg, _) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
 
             Message::parse_short(&msg).unwrap()
         });
 
-        let (_, msg) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
+        let (_, msg, _) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
 
         let Message {
             message_type,
@@ -1287,6 +1299,7 @@ mod test {
     #[tokio::test]
     async fn hop_record_decrypt_error() {
         let handle = MockRuntime::register_metrics(vec![], None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1300,7 +1313,7 @@ mod test {
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
                     let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = channel(16);
+                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
                     let routing_table =
@@ -1311,6 +1324,9 @@ mod test {
                         (
                             GarlicHandler::new(noise_context.clone(), handle.clone()),
                             TransitTunnelManager::new(
+                                Some(TransitConfig {
+                                    max_tunnels: Some(5000),
+                                }),
                                 RouterContext::new(
                                     handle.clone(),
                                     ProfileStorage::new(&[], &[]),
@@ -1319,6 +1335,7 @@ mod test {
                                     static_key,
                                     signing_key,
                                     2u8,
+                                    event_handle.clone(),
                                 ),
                                 routing_table,
                                 transit_rx,
@@ -1373,7 +1390,7 @@ mod test {
         let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message) = transit_manager.handle_short_tunnel_build(acc).unwrap();
+                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
                 Message::parse_short(&message).unwrap()
             },
         );

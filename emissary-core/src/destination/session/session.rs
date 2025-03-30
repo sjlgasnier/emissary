@@ -22,7 +22,7 @@ use crate::{
         context::KeyContext,
         inbound::InboundSession,
         outbound::OutboundSession,
-        tagset::{TagSet, TagSetEntry},
+        tag_set::{TagSet, TagSetEntry},
         LOG_TARGET, NUM_TAGS_TO_GENERATE,
     },
     error::SessionError,
@@ -62,6 +62,9 @@ const NSR_CONTEXT_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 
 /// Maximum age for a tag that belonged to a previous tag set.
 const PREV_TAG_MAX_AGE: Duration = Duration::from_secs(3 * 60);
+
+/// Number of extra tags to generate from the old tag set when it's about to expire.
+const NUM_EXTRA_TAGS_TO_GENERATE: usize = 128usize;
 
 /// Event emitted by [`PendingSession`].
 pub enum PendingSessionEvent<R: Runtime> {
@@ -846,7 +849,7 @@ impl<R: Runtime> Session<R> {
             "received ES",
         );
 
-        // tryto find a tag set entry from the tag sets generated for this session
+        // try to find a tag set entry from the tag sets generated for this session
         //
         // if no entry is found, try to decrypt the message using one of the tags generated for NSR
         // messages in case this is a late and/or retransmitted NSR message received after an ES
@@ -913,7 +916,7 @@ impl<R: Runtime> Session<R> {
         // forward keys are handled by the receive tag set and reverse keys by the send tag set
         message.blocks.iter().try_for_each(|block| match block {
             GarlicMessageBlock::NextKey { kind } => {
-                tracing::trace!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
@@ -923,34 +926,92 @@ impl<R: Runtime> Session<R> {
 
                 match **kind {
                     NextKeyKind::ForwardKey { .. } => {
-                        // collect all tags of the current tag set into a separate storage from
-                        // which they're easy to expire once the tag set they belonged to us expires
-                        let expiring_tags =
-                            self.tag_set_entries.keys().copied().collect::<HashSet<_>>();
-                        self.expiring.push_back((R::now(), expiring_tags));
-
-                        // handle `NextKey` block which does a DH ratchet and creates a new
-                        // `TagSet`, replacing the old one
-                        self.pending_next_key = self.recv_tag_set.handle_next_key::<R>(kind)?;
-
-                        // generate tag set entries for the new tag set
+                        // `recv_tag_set` can ratchet using `kind`, meaning this is the first
+                        // occurrence of an expected `NextKey` block
                         //
-                        // associate `self.remote` with the new tags in the global tag storage
-                        // and store the `TagSetEntry` objects into
-                        // `Session`'s own storage
-                        {
-                            let mut inner = self.garlic_tags.write();
+                        // whether the ratchet can be performed must be checked before performing it
+                        // because the tags of the previouis tag set are set to expire and a new set
+                        // of tags is generated from the fresh tag set
+                        //
+                        // if this check is not performed and a duplicate `NextKey` block is
+                        // received, tags from the current tag set are marked as expiring which is
+                        // not what we want
+                        self.pending_next_key = if self.recv_tag_set.can_ratchet(kind) {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.local,
+                                remote = %self.remote,
+                                ?kind,
+                                "ratchet receive tag set",
+                            );
 
-                            // `next_entry()` must succeed as `recv_tag_set` is a fresh `TagSet`
-                            (0..NUM_TAGS_TO_GENERATE).for_each(|_| {
-                                let entry = self.recv_tag_set.next_entry().expect("to succeed");
+                            {
+                                // generate some extra tags from the old tag set in case the ratchet
+                                // takes long time to perform (due to missed packets)
+                                let mut inner = self.garlic_tags.write();
 
-                                inner.insert(entry.tag, self.remote.clone());
-                                self.tag_set_entries.insert(entry.tag, entry);
-                            });
-                        }
+                                for _ in 0..NUM_EXTRA_TAGS_TO_GENERATE {
+                                    if let Some(entry) = self.recv_tag_set.next_entry() {
+                                        inner.insert(entry.tag, self.remote.clone());
+                                        self.tag_set_entries.insert(entry.tag, entry);
+                                    }
+                                }
+
+                                // collect all tags of the current tag set into a separate storage
+                                // from which they're easy to expire once the tag set they belonged
+                                // to expires
+                                let expiring_tags =
+                                    self.tag_set_entries.keys().copied().collect::<HashSet<_>>();
+                                self.expiring.push_back((R::now(), expiring_tags));
+                            }
+
+                            // handle `NextKey` block which does a DH ratchet and creates a new
+                            // `TagSet`, replacing the old one
+                            let next_key = self.recv_tag_set.handle_next_key::<R>(kind)?;
+
+                            // generate tag set entries for the new tag set
+                            //
+                            // associate `self.remote` with the new tags in the global tag storage
+                            // and store the `TagSetEntry` objects into
+                            // `Session`'s own storage
+                            {
+                                let mut inner = self.garlic_tags.write();
+
+                                // `next_entry()` must succeed as `recv_tag_set` is a fresh `TagSet`
+                                (0..NUM_TAGS_TO_GENERATE).for_each(|_| {
+                                    let entry = self.recv_tag_set.next_entry().expect("to succeed");
+
+                                    inner.insert(entry.tag, self.remote.clone());
+                                    self.tag_set_entries.insert(entry.tag, entry);
+                                });
+                            }
+
+                            next_key
+                        } else {
+                            // duplicate `ForwardKey` was received
+                            //
+                            // return `NextKey` block which is sent when the next ES is sent to
+                            // remote but don't modify the active tags since they've already been
+                            // modified by the first `NextKey` block
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                local = %self.local,
+                                remote = %self.remote,
+                                ?kind,
+                                "receive tag set already ratcheted",
+                            );
+                            self.recv_tag_set.handle_next_key::<R>(kind)?
+                        };
                     }
                     NextKeyKind::ReverseKey { .. } => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            local = %self.local,
+                            remote = %self.remote,
+                            ?kind,
+                            "handle reverse key",
+                        );
+
                         self.pending_next_key = self.send_tag_set.handle_next_key::<R>(kind)?;
                     }
                 }
@@ -1003,7 +1064,8 @@ impl<R: Runtime> Session<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
-                    "send forward key",
+                    ?kind,
+                    "send forward `NextKey` block",
                 );
 
                 message_builder.with_next_key(kind)
@@ -1018,6 +1080,7 @@ impl<R: Runtime> Session<R> {
                     target: LOG_TARGET,
                     local = %self.local,
                     remote = %self.remote,
+                    ?kind,
                     "send reverse `NextKey` block",
                 );
 

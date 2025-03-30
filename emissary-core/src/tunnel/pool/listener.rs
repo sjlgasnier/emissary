@@ -40,7 +40,11 @@ use alloc::boxed::Box;
 use core::{
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
+
+/// Logging target for the file.
+const LOG_TARGET: &str = "emissary::tunnel::pool::listener";
 
 /// Receive kind.
 pub enum ReceiveKind {
@@ -96,11 +100,36 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
         tunnel: PendingTunnel<T>,
         receive_kind: ReceiveKind,
         message_rx: oneshot::Receiver<Message>,
+        dial_rx: oneshot::Receiver<()>,
     ) {
         let routing_table = self.routing_table.clone();
         let profile = self.profile.clone();
 
         self.pending.push(async move {
+            match select(dial_rx, Box::pin(R::delay(Duration::from_secs(2 * 60)))).await {
+                Either::Left((Ok(_), _)) => {}
+                Either::Left((Err(_), _)) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        direction = ?T::direction(),
+                        tunnel_id = %tunnel.tunnel_id(),
+                        "failed to dial next hop",
+                    );
+
+                    return (*tunnel.tunnel_id(), Err(Error::DialFailure));
+                }
+                Either::Right(_) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        direction = ?T::direction(),
+                        tunnel_id = %tunnel.tunnel_id(),
+                        "failed to receive dial result after 2 minutes",
+                    );
+                    debug_assert!(false);
+                    return (*tunnel.tunnel_id(), Err(Error::DialFailure));
+                }
+            }
+
             match select(message_rx, Box::pin(R::delay(TUNNEL_BUILD_EXPIRATION))).await {
                 Either::Right((_, _)) => {
                     match receive_kind {
@@ -198,6 +227,7 @@ mod tests {
                 outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
                 TunnelBuildParameters, TunnelInfo,
             },
+            routing_table::RoutingKindRecycle,
             tests::make_router,
             NoiseContext,
         },
@@ -242,13 +272,15 @@ mod tests {
             )
             .unwrap();
 
-        let (manager_tx, _manager_rx) = mpsc::channel(64);
+        let (manager_tx, _manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
         let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
 
         let (tx, rx) = oneshot::channel();
-        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx);
+        let (dial_tx, dial_rx) = oneshot::channel();
+        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx, dial_rx);
+        dial_tx.send(()).unwrap();
         drop(tx);
 
         match tokio::time::timeout(Duration::from_secs(2), listener.next())
@@ -295,13 +327,15 @@ mod tests {
             )
             .unwrap();
 
-        let (manager_tx, _manager_rx) = mpsc::channel(64);
+        let (manager_tx, _manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = mpsc::channel(64);
         let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
         let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
 
         let (tx, rx) = oneshot::channel();
-        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx);
+        let (dial_tx, dial_rx) = oneshot::channel();
+        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx, dial_rx);
+        dial_tx.send(()).unwrap();
         drop(tx);
 
         match tokio::time::timeout(Duration::from_secs(2), listener.next())
@@ -309,6 +343,60 @@ mod tests {
             .expect("no timeout")
         {
             Some((_, Err(Error::Channel(ChannelError::Closed)))) => {}
+            _ => panic!("invalid return value"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_build_dial_failure() {
+        let profile_storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (hops, _noise_contexts): (Vec<(Bytes, StaticPublicKey)>, Vec<NoiseContext>) = (0..3)
+            .map(|i| make_router(if i % 2 == 0 { true } else { false }))
+            .into_iter()
+            .map(|(router_hash, sk, _, noise_context, router_info)| {
+                profile_storage.add_router(router_info);
+
+                ((router_hash, sk.public()), noise_context)
+            })
+            .unzip();
+
+        let (local_hash, _local_sk, _, local_noise, _) = make_router(true);
+        let message_id = MessageId::from(MockRuntime::rng().next_u32());
+        let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+        let gateway = TunnelId::from(MockRuntime::rng().next_u32());
+
+        let (pending_tunnel, _next_router, _message) =
+            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
+                TunnelBuildParameters {
+                    hops: hops.clone(),
+                    name: Str::from("tunnel-pool"),
+                    noise: local_noise,
+                    message_id,
+                    tunnel_info: TunnelInfo::Outbound {
+                        gateway,
+                        tunnel_id,
+                        router_id: local_hash,
+                    },
+                    receiver: ReceiverKind::Outbound,
+                },
+            )
+            .unwrap();
+
+        let (manager_tx, _manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
+        let (transit_tx, _transit_rx) = mpsc::channel(64);
+        let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
+        let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
+
+        let (_tx, rx) = oneshot::channel();
+        let (dial_tx, dial_rx) = oneshot::channel();
+        listener.add_pending_tunnel(pending_tunnel, ReceiveKind::ZeroHop, rx, dial_rx);
+        drop(dial_tx);
+
+        match tokio::time::timeout(Duration::from_secs(2), listener.next())
+            .await
+            .expect("no timeout")
+        {
+            Some((_, Err(Error::DialFailure))) => {}
             _ => panic!("invalid return value"),
         }
     }

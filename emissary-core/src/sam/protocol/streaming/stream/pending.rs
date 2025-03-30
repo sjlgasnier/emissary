@@ -71,16 +71,16 @@ pub struct PendingStream<R: Runtime> {
     /// When was the stream established.
     pub established: R::Instant,
 
+    /// Pending packets.
+    ///
+    /// Packets that have been received and ACKed while the stream was pending.
+    pub packets: VecDeque<Vec<u8>>,
+
     /// Receive stream ID.
     pub recv_stream_id: u32,
 
     /// Send stream ID.
     pub send_stream_id: u32,
-
-    /// Pending packets.
-    ///
-    /// Packets that have been received and ACKed while the stream was pending.
-    pub packets: VecDeque<Vec<u8>>,
 
     /// Current sequnce number of the remote peer.
     pub seq_nro: u32,
@@ -116,7 +116,7 @@ impl<R: Runtime> PendingStream<R> {
                     false => VecDeque::from_iter([syn_payload]),
                 },
                 recv_stream_id,
-                send_stream_id: R::rng().next_u32(),
+                send_stream_id,
                 seq_nro: 0u32,
             },
             packet,

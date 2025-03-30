@@ -34,6 +34,7 @@ use crate::{
 use futures::{future::BoxFuture, FutureExt};
 use thingbuf::mpsc::{Receiver, Sender};
 
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     marker::PhantomData,
@@ -188,11 +189,10 @@ impl<R: Runtime> TerminatingSsu2Session<R> {
         ChaChaPoly::with_nonce(&self.recv_key_ctx.k_data, pkt_num as u64)
             .decrypt_with_ad(&pkt[..16], &mut payload)?;
 
-        if Block::parse(&payload)
+        if !Block::parse(&payload)
             .ok_or(Ssu2Error::Malformed)?
             .iter()
-            .find(|message| core::matches!(message, Block::Termination { .. }))
-            .is_none()
+            .any(|message| core::matches!(message, Block::Termination { .. }))
         {
             if let Err(error) = self.tx.try_send(Packet {
                 pkt: self.pkt.clone(),

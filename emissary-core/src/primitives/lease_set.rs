@@ -31,12 +31,17 @@ use nom::{
 };
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::{iter, time::Duration};
+use core::{fmt, iter, time::Duration};
+
+/// [`LeaseSet2`] is unpublished.
+///
+/// <https://geti2p.net/spec/common-structures#leaseset2header>
+const UNPUBLISHED: u16 = 1u16 << 1;
 
 /// Header for [`LeaseSet2`].
 ///
 /// https://geti2p.net/spec/common-structures#leaseset2header
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LeaseSet2Header {
     /// Destination for [`LeaseSet2`].
     pub destination: Destination,
@@ -49,6 +54,9 @@ pub struct LeaseSet2Header {
 
     /// When [`LeaseSet2`] was published.
     pub published: u32,
+
+    /// Should the [`LeaseSet2`] stay unpublished.
+    pub is_unpublished: bool,
 }
 
 impl LeaseSet2Header {
@@ -68,28 +76,23 @@ impl LeaseSet2Header {
                 Self {
                     destination,
                     expires: published.saturating_add(expires as u32),
+                    is_unpublished: (flags >> 1) & 1 == 1,
                     offline_signature: None,
                     published,
                 },
             ));
         }
 
-        let Some(verifying_key) = destination.verifying_key() else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "no verifying key specified, cannot verify offline signature",
-            );
-            return Err(Err::Error(make_error(input, ErrorKind::Fail)));
-        };
-
         // parse and verify offline signature and get key for verifying the lease set's signature
-        let (rest, verifying_key) = OfflineSignature::parse_frame(rest, verifying_key)?;
+        let (rest, verifying_key) =
+            OfflineSignature::parse_frame(rest, destination.verifying_key())?;
 
         Ok((
             rest,
             Self {
                 destination,
                 expires: published.saturating_add(expires as u32),
+                is_unpublished: (flags >> 1) & 1 == 1,
                 offline_signature: Some(verifying_key),
                 published,
             },
@@ -109,7 +112,11 @@ impl LeaseSet2Header {
         out.put_slice(&self.destination.serialize());
         out.put_u32(self.published);
         out.put_u16(self.expires as u16);
-        out.put_u16(0u16); // flags
+        out.put_u16(if self.is_unpublished {
+            UNPUBLISHED
+        } else {
+            0u16
+        });
 
         out
     }
@@ -122,7 +129,7 @@ impl LeaseSet2Header {
 ///
 /// [1] https://geti2p.net/spec/common-structures#struct-lease
 /// [2] https://geti2p.net/spec/common-structures#struct-lease2
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Lease {
     /// ID of the gateway router.
     pub router_id: RouterId,
@@ -132,6 +139,16 @@ pub struct Lease {
 
     /// When the lease expires.
     pub expires: Duration,
+}
+
+impl fmt::Debug for Lease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Lease")
+            .field("router_id", &format_args!("{}", self.router_id))
+            .field("tunnel_id", &self.tunnel_id)
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 impl Lease {
@@ -203,6 +220,21 @@ impl Lease {
         out.put_u32(self.expires.as_secs() as u32);
 
         out.freeze().to_vec()
+    }
+}
+
+#[cfg(test)]
+impl Lease {
+    /// Create random [`Lease`].
+    pub fn random() -> Self {
+        Self {
+            router_id: RouterId::random(),
+            tunnel_id: TunnelId::random(),
+            expires: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("to succeed")
+                + Duration::from_secs(10 * 60),
+        }
     }
 }
 
@@ -318,58 +350,41 @@ impl LeaseSet2 {
             return Err(Err::Error(make_error(input, ErrorKind::Fail)));
         }
 
-        let rest = match header.destination.verifying_key() {
+        // verify signature
+        //
+        // TODO: optimize?
+        let (rest, signature) = take(header.destination.verifying_key().signature_len())(rest)?;
+
+        let mut bytes = BytesMut::with_capacity(input.len());
+        bytes.put_u8(3u8);
+        bytes.put_slice(
+            &input[..input.len() - rest.len() - header.destination.verifying_key().signature_len()],
+        );
+
+        match &header.offline_signature {
             None => {
-                // TODO: DSA?
-                let (rest, _signature) = take(40usize)(rest)?;
+                header.destination.verifying_key().verify(&bytes, signature).map_err(|error| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "invalid signature for lease set",
+                    );
 
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    id = %header.destination.id(),
-                    "no signing key in destination, cannot verify signature",
-                );
-
-                rest
-                // return Err(Err::Error(make_error(input, ErrorKind::Fail)));
+                    Err::Error(make_error(input, ErrorKind::Fail))
+                })?;
             }
             Some(verifying_key) => {
-                // verify signature
-                //
-                // TODO: optimize?
-                let (rest, signature) = take(verifying_key.signature_len())(rest)?;
+                verifying_key.verify(&bytes, signature).map_err(|error| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "invalid signature for lease set with offline key",
+                    );
 
-                let mut bytes = BytesMut::with_capacity(input.len());
-                bytes.put_u8(3u8);
-                bytes.put_slice(&input[..input.len() - rest.len() - verifying_key.signature_len()]);
-
-                match &header.offline_signature {
-                    None => {
-                        verifying_key.verify(&bytes, signature).map_err(|error| {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "invalid signature for lease set",
-                            );
-
-                            Err::Error(make_error(input, ErrorKind::Fail))
-                        })?;
-                    }
-                    Some(verifying_key) => {
-                        verifying_key.verify(&bytes, signature).map_err(|error| {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                ?error,
-                                "invalid signature for lease set with offline key",
-                            );
-
-                            Err::Error(make_error(input, ErrorKind::Fail))
-                        })?;
-                    }
-                }
-
-                rest
+                    Err::Error(make_error(input, ErrorKind::Fail))
+                })?;
             }
-        };
+        }
 
         Ok((
             rest,
@@ -494,6 +509,7 @@ impl LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
                     expires: (published + Duration::from_secs(8 * 60)).as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: published.as_secs() as u32,
                 },
@@ -561,6 +577,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -577,6 +594,7 @@ mod tests {
         assert_eq!(leaseset.leases[0], lease1);
         assert_eq!(leaseset.leases[1], lease2);
         assert_eq!(leaseset.header.destination.id(), id);
+        assert!(!leaseset.header.is_unpublished);
     }
 
     #[test]
@@ -591,6 +609,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -647,6 +666,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -684,6 +704,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -780,6 +801,7 @@ mod tests {
             let lease_set = LeaseSet2 {
                 header: LeaseSet2Header {
                     destination,
+                    is_unpublished: false,
                     expires: Duration::from_secs(60).as_secs() as u32,
                     offline_signature: None,
                     published: (now - Duration::from_secs(5 * 60)).as_secs() as u32,
@@ -795,6 +817,7 @@ mod tests {
                 lease_set.expires().as_secs(),
                 (now - Duration::from_secs(4 * 60)).as_secs()
             );
+            assert!(!lease_set.header.is_unpublished);
         }
 
         // all of the leases are expired
@@ -821,6 +844,7 @@ mod tests {
                 header: LeaseSet2Header {
                     destination,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: (now - Duration::from_secs(60)).as_secs() as u32,
                 },
@@ -835,6 +859,7 @@ mod tests {
                 lease_set.expires().as_secs(),
                 (now - Duration::from_secs(80)).as_secs()
             );
+            assert!(!lease_set.header.is_unpublished);
         }
 
         // non-expired leaset
@@ -859,6 +884,7 @@ mod tests {
                 header: LeaseSet2Header {
                     destination,
                     expires: (Duration::from_secs(5 * 60)).as_secs() as u32,
+                    is_unpublished: false,
                     offline_signature: None,
                     published: (now).as_secs() as u32,
                 },
@@ -873,6 +899,7 @@ mod tests {
                 lease_set.expires().as_secs(),
                 (now + Duration::from_secs(60)).as_secs()
             );
+            assert!(!lease_set.header.is_unpublished);
         }
     }
 
@@ -922,6 +949,7 @@ mod tests {
             header: LeaseSet2Header {
                 destination,
                 expires: 2 * 1337,
+                is_unpublished: false,
                 offline_signature: None,
                 published: 1337,
             },
@@ -1028,6 +1056,111 @@ mod tests {
             82, 37, 199, 31, 103, 111, 110, 151, 44, 204, 145, 204, 134, 61, 81, 45, 239, 98, 43,
             255, 143, 72, 186, 230, 83, 179, 172, 49, 63, 148, 215, 219, 175, 57, 175, 212, 122,
             41, 207, 20, 11,
+        ];
+
+        let _ = LeaseSet2::parse(&input).unwrap();
+    }
+
+    #[test]
+    fn unpublished_lease_set() {
+        let sk = StaticPrivateKey::random(MockRuntime::rng());
+        let sgk = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let destination = Destination::new::<MockRuntime>(
+            SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap().public(),
+        );
+        let id = destination.id();
+
+        let (_router1, _tunnel1, _expires1, lease1) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let (_router2, _tunnel2, _expires2, lease2) = {
+            let router_id = RouterId::random();
+            let tunnel_id = TunnelId::from(MockRuntime::rng().next_u32());
+            let expires = Duration::from_secs(MockRuntime::rng().next_u32() as u64);
+
+            (
+                router_id.clone(),
+                tunnel_id,
+                expires,
+                Lease {
+                    router_id,
+                    tunnel_id,
+                    expires,
+                },
+            )
+        };
+
+        let serialized = LeaseSet2 {
+            header: LeaseSet2Header {
+                destination,
+                expires: 2 * 1337,
+                is_unpublished: true,
+                offline_signature: None,
+                published: 1337,
+            },
+            public_keys: vec![sk.public()],
+            leases: vec![lease1.clone(), lease2.clone()],
+        }
+        .serialize(&sgk);
+
+        let leaseset = LeaseSet2::parse(&serialized).unwrap();
+
+        assert_eq!(leaseset.public_keys.len(), 1);
+        assert_eq!(leaseset.public_keys[0].to_vec(), sk.public().to_vec());
+        assert_eq!(leaseset.leases.len(), 2);
+        assert_eq!(leaseset.leases[0], lease1);
+        assert_eq!(leaseset.leases[1], lease2);
+        assert_eq!(leaseset.header.destination.id(), id);
+        assert!(leaseset.header.is_unpublished);
+    }
+
+    #[test]
+    fn lease_set_dsa_sha1() {
+        let input = vec![
+            18, 16, 215, 62, 194, 45, 30, 46, 195, 127, 31, 63, 255, 72, 135, 63, 57, 35, 136, 173,
+            121, 235, 204, 42, 18, 39, 192, 69, 58, 254, 158, 2, 51, 159, 5, 90, 6, 103, 132, 157,
+            33, 215, 124, 185, 0, 251, 177, 127, 54, 186, 176, 247, 156, 144, 46, 86, 105, 141,
+            174, 141, 212, 60, 144, 54, 210, 87, 63, 31, 131, 111, 118, 169, 94, 226, 176, 178,
+            228, 205, 72, 104, 25, 153, 237, 164, 20, 117, 207, 135, 179, 194, 177, 252, 192, 71,
+            12, 103, 225, 221, 190, 55, 30, 249, 87, 128, 82, 10, 4, 43, 210, 4, 99, 13, 175, 203,
+            252, 153, 173, 196, 244, 84, 165, 149, 246, 55, 32, 111, 15, 76, 57, 49, 38, 131, 255,
+            219, 120, 70, 224, 145, 67, 104, 21, 14, 149, 20, 13, 196, 225, 218, 57, 38, 217, 181,
+            254, 71, 219, 209, 32, 120, 66, 100, 182, 172, 31, 16, 209, 238, 178, 66, 247, 237,
+            252, 184, 203, 16, 235, 44, 29, 226, 233, 80, 65, 130, 44, 210, 64, 117, 176, 74, 31,
+            117, 117, 50, 167, 42, 169, 133, 5, 61, 196, 140, 115, 237, 172, 224, 204, 162, 105,
+            253, 209, 231, 38, 146, 122, 74, 150, 135, 237, 74, 195, 55, 230, 31, 58, 64, 47, 24,
+            80, 91, 147, 217, 62, 187, 115, 70, 151, 158, 245, 99, 109, 57, 117, 1, 127, 151, 117,
+            199, 189, 82, 159, 232, 212, 189, 252, 155, 237, 86, 29, 9, 137, 188, 16, 218, 162,
+            213, 63, 45, 216, 253, 59, 85, 137, 247, 239, 166, 233, 205, 24, 234, 223, 157, 90,
+            211, 231, 237, 92, 222, 85, 141, 31, 31, 32, 77, 169, 88, 221, 31, 175, 83, 154, 195,
+            119, 192, 115, 220, 8, 77, 51, 162, 150, 146, 214, 106, 240, 184, 135, 30, 18, 84, 196,
+            137, 30, 109, 118, 108, 137, 223, 159, 218, 15, 208, 129, 20, 114, 195, 17, 187, 146,
+            194, 37, 42, 192, 140, 18, 125, 59, 233, 253, 55, 47, 234, 22, 36, 137, 107, 2, 14, 76,
+            117, 7, 126, 170, 88, 53, 6, 205, 72, 134, 180, 124, 97, 63, 35, 53, 138, 215, 213,
+            177, 157, 150, 99, 235, 36, 58, 98, 0, 0, 0, 103, 195, 21, 13, 2, 87, 0, 0, 0, 0, 1, 0,
+            4, 0, 32, 20, 91, 61, 174, 160, 33, 209, 163, 0, 150, 8, 154, 29, 232, 174, 235, 192,
+            96, 123, 3, 213, 16, 79, 84, 246, 158, 47, 220, 205, 31, 196, 47, 2, 46, 219, 116, 45,
+            193, 31, 34, 103, 83, 102, 5, 254, 119, 73, 16, 178, 45, 213, 8, 127, 24, 7, 25, 87,
+            97, 6, 81, 159, 52, 5, 111, 111, 249, 172, 240, 204, 103, 195, 23, 100, 189, 90, 21,
+            96, 216, 171, 118, 150, 8, 39, 190, 58, 100, 216, 116, 180, 166, 184, 249, 155, 7, 131,
+            54, 78, 57, 235, 80, 246, 138, 58, 94, 188, 12, 33, 155, 125, 103, 195, 21, 171, 110,
+            233, 119, 62, 189, 223, 229, 10, 12, 49, 4, 85, 149, 49, 0, 43, 186, 186, 233, 216, 12,
+            17, 20, 213, 252, 108, 42, 129, 123, 41, 151, 182, 156, 111, 238, 193, 184, 219, 35,
+            94,
         ];
 
         let _ = LeaseSet2::parse(&input).unwrap();

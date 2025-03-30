@@ -78,7 +78,7 @@ pub enum InnerSubsystemEvent {
     /// I2NP message.
     I2Np {
         /// Raw, unparsed I2NP messages
-        messages: Vec<Message>,
+        messages: Vec<(RouterId, Message)>,
     },
 
     Dummy,
@@ -114,7 +114,7 @@ pub enum SubsystemEvent {
     /// I2NP message.
     I2Np {
         /// Raw, unparsed I2NP messages
-        messages: Vec<Message>,
+        messages: Vec<(RouterId, Message)>,
     },
 
     Dummy,
@@ -181,12 +181,16 @@ impl SubsystemHandle {
     }
 
     // TODO: fix error
-    pub fn dispatch_messages(&mut self, messages: Vec<Message>) -> crate::Result<()> {
+    pub fn dispatch_messages(
+        &mut self,
+        router_id: RouterId,
+        messages: Vec<Message>,
+    ) -> crate::Result<()> {
         let (tunnel_messages, netdb_messages): (Vec<_>, Vec<_>) = messages
             .into_iter()
             .map(|message| match message.destination() {
-                SubsystemKind::NetDb => (None, Some(message)),
-                SubsystemKind::Tunnel => (Some(message), None),
+                SubsystemKind::NetDb => (None, Some((router_id.clone(), message))),
+                SubsystemKind::Tunnel => (Some((router_id.clone(), message)), None),
             })
             .unzip();
 

@@ -84,6 +84,19 @@ pub enum NetDbAction {
         router_info: Bytes,
     },
 
+    /// Wait for [`NetDb`] to be ready.
+    ///
+    /// Exploratory tunnel is owned by the [`NetDb`] and the pool is built alongside any client
+    /// tunnel pools when the router is starting. Tunnel pool for a client destination may get
+    /// built before the exploratory tunnel pool and if the client destination sends a lease set
+    /// query as soon as it's ready, the query might fail simply because the exploratory tunnel
+    /// pool doesn't have enough tunnels to perform the query.
+    ///
+    /// [`NetDbAction::WaitUntilReady`] returns a oneshot receiver which allows the client
+    /// destination to wait for [`NetDb`] to be ready before it sends any lease set queries to
+    /// prevent these tunnel-related issues from happening.
+    WaitUntilReady { tx: oneshot::Sender<()> },
+
     /// Dummy value.
     Dummy,
 }
@@ -114,7 +127,7 @@ impl NetDbHandle {
     ///
     /// If the channel towards `NetDb` is full, `ChannelError::Full` is returned and the caller must
     /// retry later.
-    pub fn query_leaseset(
+    pub fn query_lease_set(
         &self,
         key: Bytes,
     ) -> Result<oneshot::Receiver<Result<LeaseSet2, QueryError>>, ChannelError> {
@@ -126,14 +139,14 @@ impl NetDbHandle {
             .map_err(From::from)
     }
 
-    /// Send `DatabaseLookup` for a `RouterInf` identified by `router_id`.
+    /// Send `DatabaseLookup` for a `RouterInfo` identified by `router_id`.
     ///
     /// On success returns a `oneshot::Receiver` the caller must poll for a reply poll for a reply.
-    /// If the query succeeded, `RouterInfo` is returned and if ti failed, `QueryError` is returned.
+    /// If the query succeeded, `RouterInfo` is returned and if it failed, `QueryError` is returned.
     ///
     /// If the channel towards `NetDb` is full, `ChannelError::Full` is returned and the caller must
     /// retry later.
-    pub fn query_router_info(
+    pub fn try_query_router_info(
         &self,
         router_id: RouterId,
     ) -> Result<oneshot::Receiver<Result<(), QueryError>>, ChannelError> {
@@ -174,6 +187,16 @@ impl NetDbHandle {
         }
     }
 
+    /// Send request to [`NetDb`] to inform the caller when it's ready.
+    pub fn wait_until_ready(&self) -> Result<oneshot::Receiver<()>, ChannelError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx
+            .try_send(NetDbAction::WaitUntilReady { tx })
+            .map(|_| rx)
+            .map_err(From::from)
+    }
+
     #[cfg(test)]
     /// Create new [`NetDbHandle`] for testing.
     pub fn create() -> (Self, mpsc::Receiver<NetDbAction, NetDbActionRecycle>) {
@@ -186,19 +209,14 @@ impl NetDbHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        crypto::SigningPrivateKey,
-        primitives::RouterInfo,
-        runtime::{mock::MockRuntime, Runtime},
-    };
-    use rand_core::RngCore;
+    use crate::primitives::{RouterInfo, RouterInfoBuilder};
 
     #[test]
     fn send_leaseset_query() {
         let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
 
-        assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
+        assert!(handle.query_lease_set(Bytes::from(vec![1, 2, 3, 4])).is_ok());
 
         match rx.try_recv() {
             Ok(NetDbAction::QueryLeaseSet2 { key, .. }) => {
@@ -214,7 +232,7 @@ mod tests {
         let handle = NetDbHandle::new(tx);
         let remote = RouterId::random();
 
-        assert!(handle.query_router_info(remote.clone()).is_ok());
+        assert!(handle.try_query_router_info(remote.clone()).is_ok());
 
         match rx.try_recv() {
             Ok(NetDbAction::QueryRouterInfo { router_id, .. }) => {
@@ -229,16 +247,7 @@ mod tests {
         let (tx, rx) = mpsc::with_recycle(5, NetDbActionRecycle(()));
         let handle = NetDbHandle::new(tx);
         let (router_id, router_info) = {
-            let mut static_key_bytes = vec![0u8; 32];
-            let mut signing_key_bytes = vec![0u8; 32];
-
-            MockRuntime::rng().fill_bytes(&mut static_key_bytes);
-            MockRuntime::rng().fill_bytes(&mut signing_key_bytes);
-
-            let signing_key = SigningPrivateKey::from_bytes(&signing_key_bytes).unwrap();
-
-            let router_info =
-                RouterInfo::from_keys::<MockRuntime>(static_key_bytes, signing_key_bytes);
+            let (router_info, _, signing_key) = RouterInfoBuilder::default().build();
             let router_id = router_info.identity.id();
 
             (router_id, Bytes::from(router_info.serialize(&signing_key)))
@@ -263,11 +272,11 @@ mod tests {
         let handle = NetDbHandle::new(tx);
 
         for _ in 0..5 {
-            assert!(handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).is_ok());
+            assert!(handle.query_lease_set(Bytes::from(vec![1, 2, 3, 4])).is_ok());
         }
 
         // try to send one more element and ensure the call fails
-        match handle.query_leaseset(Bytes::from(vec![1, 2, 3, 4])).unwrap_err() {
+        match handle.query_lease_set(Bytes::from(vec![1, 2, 3, 4])).unwrap_err() {
             ChannelError::Full => {}
             error => panic!("invalid error: {error}"),
         }

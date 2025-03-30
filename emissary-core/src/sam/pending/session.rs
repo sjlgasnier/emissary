@@ -18,48 +18,63 @@
 
 use crate::{
     error::Error,
+    events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Lease, TunnelId},
+    profile::ProfileStorage,
     runtime::{AddressBook, Runtime},
     sam::{
-        parser::{DestinationContext, SamVersion, SessionKind},
+        parser::{DestinationContext, SessionKind},
         session::{SamSessionCommand, SamSessionCommandRecycle},
         socket::SamSocket,
     },
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
 };
 
-use futures::{future::BoxFuture, FutureExt, StreamExt};
+use futures::{future::BoxFuture, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{Receiver, Sender};
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::{
-    future::Future,
-    mem,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use core::time::Duration;
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::sam::pending::session";
+
+/// Retry duration.
+const RETRY_DURATION: Duration = Duration::from_secs(5);
 
 /// SAMv3 client session context.
 pub struct SamSessionContext<R: Runtime> {
     /// Address book, if specified.
     pub address_book: Option<Arc<dyn AddressBook>>,
 
-    /// Active inbound tunnels and their leases.
-    pub inbound: HashMap<TunnelId, Lease>,
-
-    /// Session options.
-    pub options: HashMap<String, String>,
+    /// TX channel which can be used to send datagrams to clients.
+    pub datagram_tx: Sender<(u16, Vec<u8>)>,
 
     /// Destination context.
     pub destination: DestinationContext,
 
+    /// Event handle.
+    pub event_handle: EventHandle<R>,
+
+    /// Active inbound tunnels and their leases.
+    pub inbound: HashMap<TunnelId, Lease>,
+
+    /// Handle to `NetDb`.
+    pub netdb_handle: NetDbHandle,
+
+    /// Session options.
+    pub options: HashMap<String, String>,
+
     /// Active outbound tunnels.
     pub outbound: HashSet<TunnelId>,
+
+    /// Profile storage.
+    pub profile_storage: ProfileStorage<R>,
+
+    /// RX channel for receiving commands to an active session.
+    pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
 
     /// Session ID.
     pub session_id: Arc<str>,
@@ -72,101 +87,6 @@ pub struct SamSessionContext<R: Runtime> {
 
     /// Tunnel pool handle.
     pub tunnel_pool_handle: TunnelPoolHandle,
-
-    /// Handle to `NetDb`.
-    pub netdb_handle: NetDbHandle,
-
-    /// RX channel for receiving commands to an active session.
-    pub receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
-
-    /// TX channel which can be used to send datagrams to clients.
-    pub datagram_tx: Sender<(u16, Vec<u8>)>,
-}
-
-/// State of the pending I2CP client session.
-enum PendingSessionState<R: Runtime> {
-    /// Building tunnel pool.
-    BuildingTunnelPool {
-        /// Address book.
-        address_book: Option<Arc<dyn AddressBook>>,
-
-        /// SAMv3 socket associated with the session.
-        socket: SamSocket<R>,
-
-        /// ID of the client session.
-        session_id: Arc<str>,
-
-        /// Session kind.
-        session_kind: SessionKind,
-
-        /// Session options.
-        options: HashMap<String, String>,
-
-        /// Destination context.
-        destination: DestinationContext,
-
-        /// Negotiated version.
-        version: SamVersion,
-
-        /// Handle to `NetDb`.
-        netdb_handle: NetDbHandle,
-
-        /// Tunnel pool build future.
-        ///
-        /// Resolves to a `TunnelPoolHandle` once the pool has been built.
-        tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
-
-        /// RX channel for receiving commands to an active session.
-        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
-
-        /// TX channel which can be used to send datagrams to clients.
-        datagram_tx: Sender<(u16, Vec<u8>)>,
-    },
-
-    /// Building tunnels.
-    BuildingTunnels {
-        /// Address book.
-        address_book: Option<Arc<dyn AddressBook>>,
-
-        /// SAMv3 socket associated with the session.
-        socket: SamSocket<R>,
-
-        /// Session ID.
-        session_id: Arc<str>,
-
-        /// Session kind.
-        session_kind: SessionKind,
-
-        /// Session options.
-        options: HashMap<String, String>,
-
-        /// Destination context.
-        destination: DestinationContext,
-
-        /// Negotiated version.
-        version: SamVersion,
-
-        /// Handle to `NetDb`.
-        netdb_handle: NetDbHandle,
-
-        /// Handle to the built tunnel pool.
-        handle: TunnelPoolHandle,
-
-        /// RX channel for receiving commands to an active session.
-        receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
-
-        /// TX channel which can be used to send datagrams to clients.
-        datagram_tx: Sender<(u16, Vec<u8>)>,
-
-        /// Active inbound tunnels and their leases.
-        inbound: HashMap<TunnelId, Lease>,
-
-        /// Active outbound tunnels.
-        outbound: HashSet<TunnelId>,
-    },
-
-    /// Pending connection state has been poisoned.
-    Poisoned,
 }
 
 /// Pending SAMv3 sessions.
@@ -175,8 +95,49 @@ enum PendingSessionState<R: Runtime> {
 /// returning to [`SamSessionContext`] to `SamServer`, allowing it to start a `Destination`
 /// for the connected client.
 pub struct PendingSamSession<R: Runtime> {
-    /// Session state.
-    state: PendingSessionState<R>,
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
+
+    /// TX channel which can be used to send datagrams to clients.
+    datagram_tx: Sender<(u16, Vec<u8>)>,
+
+    /// Destination context.
+    destination: DestinationContext,
+
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
+    /// Active inbound tunnels and their leases.
+    inbound: HashMap<TunnelId, Lease>,
+
+    /// Handle to `NetDb`.
+    netdb_handle: NetDbHandle,
+
+    /// Session options.
+    options: HashMap<String, String>,
+
+    /// Active outbound tunnels.
+    outbound: HashSet<TunnelId>,
+
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
+
+    /// RX channel for receiving commands to an active session.
+    receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
+
+    /// ID of the client session.
+    session_id: Arc<str>,
+
+    /// Session kind.
+    session_kind: SessionKind,
+
+    /// SAMv3 socket associated with the session.
+    socket: SamSocket<R>,
+
+    /// Tunnel pool build future.
+    ///
+    /// Resolves to a `TunnelPoolHandle` once the pool has been built.
+    tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
 }
 
 impl<R: Runtime> PendingSamSession<R> {
@@ -187,320 +148,126 @@ impl<R: Runtime> PendingSamSession<R> {
         session_id: Arc<str>,
         session_kind: SessionKind,
         options: HashMap<String, String>,
-        version: SamVersion,
         receiver: Receiver<SamSessionCommand<R>, SamSessionCommandRecycle>,
         datagram_tx: Sender<(u16, Vec<u8>)>,
         tunnel_pool_future: BoxFuture<'static, TunnelPoolHandle>,
         netdb_handle: NetDbHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        event_handle: EventHandle<R>,
+        profile_storage: ProfileStorage<R>,
     ) -> Self {
         Self {
-            state: PendingSessionState::BuildingTunnelPool {
-                address_book,
-                datagram_tx,
-                socket,
-                session_id,
-                session_kind,
-                options,
-                version,
-                receiver,
-                destination,
-                tunnel_pool_future,
-                netdb_handle,
-            },
+            address_book,
+            datagram_tx,
+            destination,
+            event_handle,
+            inbound: HashMap::new(),
+            netdb_handle,
+            options,
+            outbound: HashSet::new(),
+            profile_storage,
+            receiver,
+            session_id,
+            session_kind,
+            socket,
+            tunnel_pool_future,
         }
     }
-}
 
-impl<R: Runtime> Future for PendingSamSession<R> {
-    type Output = crate::Result<SamSessionContext<R>>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    /// Run the event loop of [`PendingSamSession`].
+    ///
+    /// First the event loop waits until `NetDb` is ready, meaning it has at least one inbound and
+    /// one outbound tunnel. After that a tunnel pool build request is sent to `TunnelManager` and
+    /// after a tunnel pool handle is built, the event loop waits until at least one inbound and one
+    /// outbound tunnel has been built for the tunnel pool before it returns [`SamSessionContext`].
+    pub async fn run(mut self) -> crate::Result<SamSessionContext<R>> {
         loop {
-            match mem::replace(&mut self.state, PendingSessionState::Poisoned) {
-                PendingSessionState::BuildingTunnelPool {
-                    address_book,
-                    socket,
-                    session_id,
-                    session_kind,
-                    options,
-                    destination,
-                    version,
-                    receiver,
-                    datagram_tx,
-                    netdb_handle,
-                    mut tunnel_pool_future,
-                } => match tunnel_pool_future.poll_unpin(cx) {
-                    Poll::Ready(handle) => {
-                        tracing::trace!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            "tunnel pool for the session has been built",
-                        );
-
-                        self.state = PendingSessionState::BuildingTunnels {
-                            address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
-                            inbound: HashMap::new(),
-                            outbound: HashSet::new(),
-                        };
-                    }
-                    Poll::Pending => {
-                        self.state = PendingSessionState::BuildingTunnelPool {
-                            address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
-                            tunnel_pool_future,
-                        };
+            match self.netdb_handle.wait_until_ready() {
+                Ok(rx) =>
+                    if rx.await.is_ok() {
                         break;
-                    }
-                },
-                PendingSessionState::BuildingTunnels {
-                    address_book,
-                    socket,
-                    session_id,
-                    session_kind,
-                    options,
-                    destination,
-                    version,
-                    receiver,
-                    datagram_tx,
-                    netdb_handle,
-                    mut handle,
-                    mut inbound,
-                    mut outbound,
-                } => match handle.poll_next_unpin(cx) {
-                    Poll::Pending => {
-                        self.state = PendingSessionState::BuildingTunnels {
-                            address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            netdb_handle,
-                            receiver,
-                            datagram_tx,
-                            handle,
-                            inbound,
-                            outbound,
-                        };
-                        break;
-                    }
-                    Poll::Ready(None) => return Poll::Ready(Err(Error::EssentialTaskClosed)),
-                    Poll::Ready(Some(TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease })) => {
-                        tracing::trace!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            %tunnel_id,
-                            "inbound tunnel built for pending session",
-                        );
-                        inbound.insert(tunnel_id, lease);
-
-                        // `SESSION STATUS` shall not be sent until there is
-                        // at least one inbound and outbound tunnel built
-                        if inbound.len() != handle.config().num_inbound
-                            || outbound.len() != handle.config().num_outbound
-                        {
-                            self.state = PendingSessionState::BuildingTunnels {
-                                address_book,
-                                socket,
-                                session_id,
-                                session_kind,
-                                options,
-                                destination,
-                                version,
-                                netdb_handle,
-                                handle,
-                                receiver,
-                                datagram_tx,
-                                inbound,
-                                outbound,
-                            };
-                            continue;
-                        }
-
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            num_inbound = ?inbound.len(),
-                            num_outbound = ?outbound.len(),
-                            "publish destination's lease set",
-                        );
-
-                        return Poll::Ready(Ok(SamSessionContext {
-                            address_book,
-                            inbound,
-                            options,
-                            destination,
-                            outbound,
-                            session_id,
-                            session_kind,
-                            socket,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
-                            tunnel_pool_handle: handle,
-                        }));
-                    }
-                    Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id })) => {
-                        tracing::trace!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            %tunnel_id,
-                            "outbound tunnel built for pending session",
-                        );
-                        outbound.insert(tunnel_id);
-
-                        // `SESSION STATUS` shall not be sent until there is
-                        // at least one inbound and outbound tunnel built
-                        if inbound.len() != handle.config().num_inbound
-                            || outbound.len() != handle.config().num_outbound
-                        {
-                            self.state = PendingSessionState::BuildingTunnels {
-                                address_book,
-                                socket,
-                                session_id,
-                                session_kind,
-                                options,
-                                destination,
-                                version,
-                                netdb_handle,
-                                handle,
-                                receiver,
-                                datagram_tx,
-                                inbound,
-                                outbound,
-                            };
-                            continue;
-                        }
-
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            num_inbound = ?inbound.len(),
-                            num_outbound = ?outbound.len(),
-                            "publish destination's lease set",
-                        );
-
-                        return Poll::Ready(Ok(SamSessionContext {
-                            address_book,
-                            inbound,
-                            options,
-                            destination,
-                            outbound,
-                            session_id,
-                            session_kind,
-                            socket,
-                            receiver,
-                            datagram_tx,
-                            netdb_handle,
-                            tunnel_pool_handle: handle,
-                        }));
-                    }
-                    Poll::Ready(Some(TunnelPoolEvent::InboundTunnelExpired { tunnel_id })) => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            %tunnel_id,
-                            "inbound tunnel expired for pending session",
-                        );
-                        inbound.remove(&tunnel_id);
-
-                        self.state = PendingSessionState::BuildingTunnels {
-                            address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            netdb_handle,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            inbound,
-                            outbound,
-                        };
-                    }
-                    Poll::Ready(Some(TunnelPoolEvent::OutboundTunnelExpired { tunnel_id })) => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            %tunnel_id,
-                            "outbound tunnel expired for pending session",
-                        );
-                        outbound.remove(&tunnel_id);
-
-                        self.state = PendingSessionState::BuildingTunnels {
-                            address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            netdb_handle,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            inbound,
-                            outbound,
-                        };
-                    }
-                    Poll::Ready(Some(event)) => {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            %session_id,
-                            ?event,
-                            "unexpected event",
-                        );
-
-                        self.state = PendingSessionState::BuildingTunnels {
-                            address_book,
-                            socket,
-                            session_id,
-                            session_kind,
-                            options,
-                            destination,
-                            version,
-                            netdb_handle,
-                            handle,
-                            receiver,
-                            datagram_tx,
-                            inbound,
-                            outbound,
-                        };
-                    }
-                },
-                PendingSessionState::Poisoned => {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        "pending session state has been poisoned",
-                    );
-                    debug_assert!(false);
-                    return Poll::Ready(Err(Error::InvalidState));
-                }
+                    },
+                Err(_) => R::delay(RETRY_DURATION).await,
             }
         }
 
-        Poll::Pending
+        let mut tunnel_pool_handle = self.tunnel_pool_future.await;
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            session_id = %self.session_id,
+            "tunnel pool for the session has been built",
+        );
+
+        loop {
+            match tunnel_pool_handle.next().await.ok_or(Error::EssentialTaskClosed)? {
+                TunnelPoolEvent::InboundTunnelBuilt { tunnel_id, lease } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        %tunnel_id,
+                        "inbound tunnel built for pending session",
+                    );
+                    self.inbound.insert(tunnel_id, lease);
+
+                    // `SESSION STATUS` shall not be sent until there is at least one inbound
+                    // and outbound tunnel built
+                    if !self.inbound.is_empty() && !self.outbound.is_empty() {
+                        break;
+                    }
+                }
+                TunnelPoolEvent::OutboundTunnelBuilt { tunnel_id } => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        %tunnel_id,
+                        "outbound tunnel built for pending session",
+                    );
+                    self.outbound.insert(tunnel_id);
+
+                    // `SESSION STATUS` shall not be sent until there is at least one inbound
+                    // and outbound tunnel built
+                    if !self.inbound.is_empty() && !self.outbound.is_empty() {
+                        break;
+                    }
+                }
+                TunnelPoolEvent::InboundTunnelExpired { tunnel_id } => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        %tunnel_id,
+                        "inbound tunnel expired for pending session",
+                    );
+                    self.inbound.remove(&tunnel_id);
+                }
+                TunnelPoolEvent::OutboundTunnelExpired { tunnel_id } => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        session_id = %self.session_id,
+                        %tunnel_id,
+                        "outbound tunnel expired for pending session",
+                    );
+                    self.outbound.remove(&tunnel_id);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(SamSessionContext {
+            address_book: self.address_book,
+            datagram_tx: self.datagram_tx,
+            destination: self.destination,
+            event_handle: self.event_handle,
+            inbound: self.inbound,
+            netdb_handle: self.netdb_handle,
+            options: self.options,
+            outbound: self.outbound,
+            profile_storage: self.profile_storage,
+            receiver: self.receiver,
+            session_id: self.session_id,
+            session_kind: self.session_kind,
+            socket: self.socket,
+            tunnel_pool_handle,
+        })
     }
 }

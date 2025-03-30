@@ -597,11 +597,10 @@ impl<R: Runtime> Future for OutboundSsu2Session<R> {
 
                 Poll::Pending
             }
-            PacketRetransmitterEvent::Timeout =>
-                return Poll::Ready(PendingSsu2SessionStatus::Timeout {
-                    connection_id: self.src_id,
-                    router_id: Some(self.router_id.clone()),
-                }),
+            PacketRetransmitterEvent::Timeout => Poll::Ready(PendingSsu2SessionStatus::Timeout {
+                connection_id: self.src_id,
+                router_id: Some(self.router_id.clone()),
+            }),
         }
     }
 }

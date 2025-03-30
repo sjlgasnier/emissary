@@ -20,12 +20,13 @@ use crate::{
     config::{Config, I2cpConfig, MetricsConfig, SamConfig},
     crypto::{SigningPrivateKey, StaticPrivateKey},
     error::Error,
+    events::{EventManager, EventSubscriber},
     i2cp::I2cpServer,
     netdb::NetDb,
     primitives::RouterInfo,
-    profile::{Profile, ProfileStorage},
+    profile::ProfileStorage,
     router::context::RouterContext,
-    runtime::{AddressBook, Runtime},
+    runtime::{AddressBook, Runtime, Storage},
     sam::SamServer,
     shutdown::ShutdownContext,
     subsystem::SubsystemKind,
@@ -34,12 +35,14 @@ use crate::{
 };
 
 use bytes::Bytes;
-use futures::{future::BoxFuture, FutureExt, Stream};
+use futures::FutureExt;
 use rand_core::RngCore;
 
 use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::{
-    net::SocketAddr,
+    future::Future,
+    marker::PhantomData,
+    net::{Ipv4Addr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -66,29 +69,62 @@ const PROFILE_STORAGE_BACKUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Protocol address information.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ProtocolAddressInfo {
+    /// NTCP2 port.
+    pub ntcp2_port: Option<u16>,
+
     /// Socket address of the SAMv3 TCP listener.
     pub sam_tcp: Option<SocketAddr>,
 
     /// Socket address of the SAMv3 UDP socket.
     pub sam_udp: Option<SocketAddr>,
+
+    /// SSU2 port.
+    pub ssu2_port: Option<u16>,
 }
 
-/// Events emitted by [`Router`].
-#[derive(Debug)]
-pub enum RouterEvent {
-    /// Router has been shut down.
-    Shutdown,
+/// Router builder.
+#[derive(Default)]
+pub struct RouterBuilder<R> {
+    /// Object providing [`AddressBook`] service for [`Router`], if enabled.
+    address_book: Option<Arc<dyn AddressBook>>,
 
-    /// Save backup of the contents of [`ProfileStorage`].
-    ProfileStorageBackup {
-        /// Backup of [`ProfileStorage`].
-        ///
-        /// First element is serialized [`RouterId`], second element is serialized [`RouterInfo`]
-        /// and the third element is unserialized [`Profile`].
-        ///
-        /// [`RouterInfo`] may be `None` if there has been no chance to it since the last backup.
-        routers: Vec<(String, Option<Vec<u8>>, Profile)>,
-    },
+    /// Router configuration.
+    config: Config,
+
+    /// Object providing storage access for [`Router`], if enabled.
+    storage: Option<Arc<dyn Storage>>,
+
+    /// Marker for `Runtime`.
+    _runtime: PhantomData<R>,
+}
+
+impl<R: Runtime> RouterBuilder<R> {
+    /// Create new [`RouterBuilder`].
+    pub fn new(config: Config) -> Self {
+        Self {
+            address_book: None,
+            config,
+            storage: None,
+            _runtime: Default::default(),
+        }
+    }
+
+    /// Provide [`AddressBook`] for [`Router`].
+    pub fn with_address_book(mut self, address_book: Arc<dyn AddressBook>) -> Self {
+        self.address_book = Some(address_book);
+        self
+    }
+
+    /// Provide [`StorageHandle`] for [`Router`].
+    pub fn with_storage(mut self, storage: Arc<dyn Storage>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Build [`Router`]
+    pub async fn build(self) -> crate::Result<(Router<R>, EventSubscriber, Vec<u8>)> {
+        Router::new(self.config, self.address_book, self.storage).await
+    }
 }
 
 /// Router.
@@ -96,11 +132,8 @@ pub struct Router<R: Runtime> {
     /// Protocol address information.
     address_info: ProtocolAddressInfo,
 
-    /// Profile storage.
-    profile_storage: ProfileStorage<R>,
-
-    /// Profile storage backup timer.
-    profile_storage_backup_timer: BoxFuture<'static, ()>,
+    /// Event manager
+    event_manager: EventManager<R>,
 
     /// Shutdown context.
     shutdown_context: ShutdownContext<R>,
@@ -118,25 +151,13 @@ pub struct Router<R: Runtime> {
 }
 
 impl<R: Runtime> Router<R> {
-    /// Create new [`Router`] from `config`
-    pub async fn new(config: Config) -> crate::Result<(Self, Vec<u8>)> {
-        Self::make_router(config, None).await
-    }
-
-    /// Create new [`Router`] from `config` and pass `address_book` to SAM and I2CP.
-    pub async fn with_address_book(
-        config: Config,
-        address_book: Arc<dyn AddressBook>,
-    ) -> crate::Result<(Self, Vec<u8>)> {
-        Self::make_router(config, Some(address_book)).await
-    }
-
     /// Create new [`Router`] from `config` and pass `address_book` to [`SamServer`] and
     /// [`I2cpServer`] if address book support was enabled.
-    async fn make_router(
+    pub async fn new(
         mut config: Config,
         address_book: Option<Arc<dyn AddressBook>>,
-    ) -> crate::Result<(Self, Vec<u8>)> {
+        storage: Option<Arc<dyn Storage>>,
+    ) -> crate::Result<(Self, EventSubscriber, Vec<u8>)> {
         // attempt to initialize the ntcp2 transport from provided config
         //
         // this is done prior to constructing local router info in case ntcp2 config contained an
@@ -177,6 +198,7 @@ impl<R: Runtime> Router<R> {
             ssu2_address,
             &local_static_key,
             &local_signing_key,
+            config.transit.is_none(),
         );
         let Config {
             i2cp_config,
@@ -188,11 +210,9 @@ impl<R: Runtime> Router<R> {
             routers,
             profiles,
             allow_local,
-            metrics:
-                MetricsConfig {
-                    disable_metrics,
-                    metrics_server_port,
-                },
+            metrics,
+            transit,
+            refresh_interval,
             ..
         } = config;
 
@@ -200,6 +220,18 @@ impl<R: Runtime> Router<R> {
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
         let mut address_info = ProtocolAddressInfo::default();
+        let (event_manager, event_subscriber, event_handle) =
+            EventManager::<R>::new(refresh_interval.and_then(|refresh_interval| {
+                if refresh_interval == 0 {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "invalid refresh interval, using default value"
+                    );
+                    return None;
+                }
+
+                Some(Duration::from_secs(refresh_interval as u64))
+            }));
 
         // create router shutdown context and allocate handle `TransitTunnelManager`
         //
@@ -220,14 +252,14 @@ impl<R: Runtime> Router<R> {
         // if metrics are disabled, call `R::register_metrics()` with an empty vector which makes
         // the runtime not start the metrics server and return a handle which doesn't update any
         // metirics
-        let metrics_handle = match disable_metrics {
-            true => R::register_metrics(Vec::new(), None),
-            false => {
+        let metrics_handle = match metrics {
+            None => R::register_metrics(Vec::new(), None),
+            Some(MetricsConfig { port }) => {
                 let metrics = TransportManager::<R>::metrics(Vec::new());
                 let metrics = TunnelManager::<R>::metrics(metrics);
                 let metrics = NetDb::<R>::metrics(metrics);
 
-                R::register_metrics(metrics, metrics_server_port)
+                R::register_metrics(metrics, Some(port))
             }
         };
 
@@ -241,13 +273,20 @@ impl<R: Runtime> Router<R> {
             local_static_key.clone(),
             local_signing_key.clone(),
             net_id.unwrap_or(NET_ID),
+            event_handle,
         );
+        let sam_event_handle = router_ctx.event_handle().clone();
 
         // create transport manager builder and initialize & start enabled transports
         //
         // note: order of initialization is important
         let mut transport_manager_builder =
             TransportManagerBuilder::new(router_ctx.clone(), local_router_info, allow_local);
+
+        // specify if transit tunnels are disabled
+        //
+        // if they are, the router will always publish an RI with `G` flag
+        transport_manager_builder.with_transit_tunnels_disabled(transit.is_none());
 
         // initialize and start tunnel manager
         //
@@ -261,6 +300,7 @@ impl<R: Runtime> Router<R> {
                     router_ctx.clone(),
                     exploratory.into(),
                     insecure_tunnels,
+                    transit,
                     transit_shutdown_handle,
                 );
 
@@ -293,12 +333,14 @@ impl<R: Runtime> Router<R> {
         transport_manager_builder.register_netdb_handle(netdb_handle.clone());
 
         // initialize i2cp server if it was enabled
-        if let Some(I2cpConfig { port }) = i2cp_config {
+        if let Some(I2cpConfig { host, port }) = i2cp_config {
             let i2cp_server = I2cpServer::<R>::new(
+                host,
                 port,
                 netdb_handle.clone(),
                 tunnel_manager_handle.clone(),
                 address_book.clone(),
+                profile_storage.clone(),
             )
             .await?;
 
@@ -319,6 +361,8 @@ impl<R: Runtime> Router<R> {
                 tunnel_manager_handle.clone(),
                 metrics_handle,
                 address_book,
+                sam_event_handle,
+                profile_storage.clone(),
             )
             .await?;
 
@@ -328,24 +372,49 @@ impl<R: Runtime> Router<R> {
             R::spawn(sam_server)
         }
 
+        // start profile storage task in the background if it was enabled
+        //
+        // all this task does is periodically backup router infos and profiles to disk
+        if let Some(storage) = storage {
+            R::spawn(async move {
+                loop {
+                    let _ = R::delay(PROFILE_STORAGE_BACKUP_INTERVAL).await;
+
+                    let routers = profile_storage.backup();
+
+                    if !routers.is_empty() {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            num_routers = ?routers.len(),
+                            "taking backup of profile storage",
+                        );
+
+                        storage.save_to_disk(routers);
+                    }
+                }
+            });
+        }
+
         if let Some(context) = ntcp2_context {
+            address_info.ntcp2_port = Some(context.port());
             transport_manager_builder.register_ntcp2(context);
         }
 
         if let Some(context) = ssu2_context {
+            address_info.ssu2_port = Some(context.port());
             transport_manager_builder.register_ssu2(context);
         }
 
         Ok((
             Self {
                 address_info,
-                profile_storage,
-                profile_storage_backup_timer: Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL)),
+                event_manager,
                 shutdown_context,
                 shutdown_count: 0usize,
                 transport_manager: transport_manager_builder.build(),
                 _tunnel_manager_handle: tunnel_manager_handle,
             },
+            event_subscriber,
             serialized_router_info,
         ))
     }
@@ -361,7 +430,10 @@ impl<R: Runtime> Router<R> {
                 target: LOG_TARGET,
                 "starting graceful shutdown",
             );
+
             self.shutdown_context.shutdown();
+            self.transport_manager.shutdown();
+            self.event_manager.shutdown();
         } else {
             tracing::info!(
                 target: LOG_TARGET,
@@ -374,42 +446,42 @@ impl<R: Runtime> Router<R> {
     pub fn protocol_address_info(&self) -> &ProtocolAddressInfo {
         &self.address_info
     }
+
+    /// Add external address for [`Router`].
+    ///
+    /// This address will be added to the [`RouterInfo`] that is published in `NetDb`. If the user
+    /// specified an address manually in the router configuration, `address` is ignored.
+    ///
+    /// If `address` differs from the address that was specified the router configuration,
+    /// a warning is logged.
+    pub fn add_external_address(&mut self, address: Ipv4Addr) {
+        self.transport_manager.add_external_address(address);
+    }
 }
 
-impl<R: Runtime> Stream for Router<R> {
-    type Item = RouterEvent;
+impl<R: Runtime> Future for Router<R> {
+    type Output = ();
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.shutdown_count >= IMMEDIATE_SHUTDOWN_COUNT {
-            return Poll::Ready(Some(RouterEvent::Shutdown));
+            return Poll::Ready(());
         }
 
         if self.shutdown_context.poll_unpin(cx).is_ready() {
-            return Poll::Ready(Some(RouterEvent::Shutdown));
+            return Poll::Ready(());
+        }
+
+        if self.event_manager.poll_unpin(cx).is_ready() {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "event manager crashed",
+            );
+            return Poll::Ready(());
         }
 
         match self.transport_manager.poll_unpin(cx) {
             Poll::Pending => {}
-            Poll::Ready(()) => return Poll::Ready(None),
-        }
-
-        if self.profile_storage_backup_timer.poll_unpin(cx).is_ready() {
-            let routers = self.profile_storage.backup();
-
-            if !routers.is_empty() {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    num_routers = ?routers.len(),
-                    "taking backup of profile storage",
-                );
-
-                // reset timer and register it to the executor
-                self.profile_storage_backup_timer =
-                    Box::pin(R::delay(PROFILE_STORAGE_BACKUP_INTERVAL));
-                let _ = self.profile_storage_backup_timer.poll_unpin(cx);
-
-                return Poll::Ready(Some(RouterEvent::ProfileStorageBackup { routers }));
-            }
+            Poll::Ready(()) => return Poll::Ready(()),
         }
 
         Poll::Pending

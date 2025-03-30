@@ -22,6 +22,7 @@
 
 use crate::{
     crypto::{chachapoly::ChaChaPoly, siphash::SipHash},
+    events::EventHandle,
     primitives::{RouterId, RouterInfo},
     runtime::{AsyncRead, AsyncWrite, Runtime},
     subsystem::SubsystemCommand,
@@ -30,10 +31,11 @@ use crate::{
             message::MessageBlock,
             session::{KeyContext, Role},
         },
-        SubsystemHandle, TerminationReason,
+        Direction, SubsystemHandle, TerminationReason,
     },
 };
 
+use futures::FutureExt;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
 use alloc::{vec, vec::Vec};
@@ -103,6 +105,15 @@ pub struct Ntcp2Session<R: Runtime> {
     /// TX channel for sending commands for this connection.
     cmd_tx: Sender<SubsystemCommand>,
 
+    /// Direction of the session.
+    direction: Direction,
+
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
+    /// Total bandwidth.
+    bandwidth: usize,
+
     /// Read buffer.
     read_buffer: Vec<u8>,
 
@@ -145,6 +156,8 @@ impl<R: Runtime> Ntcp2Session<R> {
         stream: R::TcpStream,
         key_context: KeyContext,
         subsystem_handle: SubsystemHandle,
+        direction: Direction,
+        event_handle: EventHandle<R>,
     ) -> Self {
         let KeyContext {
             send_key,
@@ -152,11 +165,14 @@ impl<R: Runtime> Ntcp2Session<R> {
             sip,
         } = key_context;
 
-        let (cmd_tx, cmd_rx) = channel(128);
+        let (cmd_tx, cmd_rx) = channel(512);
 
         Self {
             cmd_rx,
             cmd_tx,
+            direction,
+            event_handle,
+            bandwidth: 0usize,
             read_buffer: vec![0u8; 0xffff],
             read_state: ReadState::ReadSize { offset: 0usize },
             recv_cipher: ChaChaPoly::new(&recv_key),
@@ -169,6 +185,11 @@ impl<R: Runtime> Ntcp2Session<R> {
             subsystem_handle,
             write_state: WriteState::GetMessage,
         }
+    }
+
+    /// Get [`Direction`] of the session.
+    pub fn direction(&self) -> Direction {
+        self.direction
     }
 
     /// Get role of the session.
@@ -236,7 +257,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 continue;
                             }
 
-                            let size = (this.read_buffer[0] as u16) << 8
+                            let size = ((this.read_buffer[0] as u16) << 8)
                                 | (this.read_buffer[1] as u16) & 0xff;
 
                             this.read_state = ReadState::ReadFrame {
@@ -263,6 +284,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 };
                                 continue;
                             }
+                            this.bandwidth += this.read_buffer[..size].len();
 
                             let data_block =
                                 match this.recv_cipher.decrypt(this.read_buffer[..size].to_vec()) {
@@ -274,6 +296,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     router_id = %this.router,
+                                    ?data_block,
                                     "failed to parse message(s)",
                                 );
                                 continue;
@@ -284,7 +307,7 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 router_id = %this.router,
                                 ?size,
                                 num_messages = ?messages.len(),
-                                "read ntc2 frame",
+                                "read ntcp2 frame",
                             );
 
                             if let Some(MessageBlock::Termination { reason, .. }) =
@@ -331,7 +354,10 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                                 })
                                 .collect::<Vec<_>>();
 
-                            if let Err(error) = this.subsystem_handle.dispatch_messages(messages) {
+                            if let Err(error) = this
+                                .subsystem_handle
+                                .dispatch_messages(this.router.clone(), messages)
+                            {
                                 tracing::warn!(
                                     target: LOG_TARGET,
                                     router_id = %this.router,
@@ -387,21 +413,25 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     }
                     Poll::Ready(Err(_)) => return Poll::Ready(TerminationReason::IoError),
                     Poll::Ready(Ok(0)) => return Poll::Ready(TerminationReason::IoError),
-                    Poll::Ready(Ok(nwritten)) => match nwritten + offset == size.len() {
-                        true => {
-                            this.write_state = WriteState::SendMessage {
-                                offset: 0usize,
-                                message,
-                            };
+                    Poll::Ready(Ok(nwritten)) => {
+                        this.bandwidth += nwritten;
+
+                        match nwritten + offset == size.len() {
+                            true => {
+                                this.write_state = WriteState::SendMessage {
+                                    offset: 0usize,
+                                    message,
+                                };
+                            }
+                            false => {
+                                this.write_state = WriteState::SendSize {
+                                    size,
+                                    offset: offset + nwritten,
+                                    message,
+                                };
+                            }
                         }
-                        false => {
-                            this.write_state = WriteState::SendSize {
-                                size,
-                                offset: offset + nwritten,
-                                message,
-                            };
-                        }
-                    },
+                    }
                 },
                 WriteState::SendMessage { offset, message } =>
                     match stream.as_mut().poll_write(cx, &message[offset..]) {
@@ -411,17 +441,21 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                         }
                         Poll::Ready(Err(_)) => return Poll::Ready(TerminationReason::IoError),
                         Poll::Ready(Ok(0)) => return Poll::Ready(TerminationReason::IoError),
-                        Poll::Ready(Ok(nwritten)) => match nwritten + offset == message.len() {
-                            true => {
-                                this.write_state = WriteState::GetMessage;
+                        Poll::Ready(Ok(nwritten)) => {
+                            this.bandwidth += nwritten;
+
+                            match nwritten + offset == message.len() {
+                                true => {
+                                    this.write_state = WriteState::GetMessage;
+                                }
+                                false => {
+                                    this.write_state = WriteState::SendMessage {
+                                        offset: offset + nwritten,
+                                        message,
+                                    };
+                                }
                             }
-                            false => {
-                                this.write_state = WriteState::SendMessage {
-                                    offset: offset + nwritten,
-                                    message,
-                                };
-                            }
-                        },
+                        }
                     },
                 WriteState::Poisoned => {
                     tracing::warn!(
@@ -433,6 +467,11 @@ impl<R: Runtime> Future for Ntcp2Session<R> {
                     return Poll::Ready(TerminationReason::Unspecified);
                 }
             }
+        }
+
+        if this.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle.transport_bandwidth(self.bandwidth);
+            self.bandwidth = 0;
         }
 
         Poll::Pending

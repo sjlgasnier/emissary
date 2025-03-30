@@ -21,15 +21,15 @@ pub enum Status {
     /// HTTP 400 bad request.
     BadRequest,
 
-    /// HTTP 502 bad gateway.
-    BadGateway,
+    /// HTTP 500 internal server error.
+    InternalServerError,
 }
 
 impl ToString for Status {
     fn to_string(&self) -> String {
         match self {
             Status::BadRequest => "400 Bad Request".to_string(),
-            Self::BadGateway => "502 Bad Gateway".to_string(),
+            Self::InternalServerError => "500 Internal Server Error".to_string(),
         }
     }
 }

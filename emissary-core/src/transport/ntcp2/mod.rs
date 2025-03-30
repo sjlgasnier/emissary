@@ -63,6 +63,18 @@ pub struct Ntcp2Context<R: Runtime> {
     socket_address: SocketAddr,
 }
 
+impl<R: Runtime> Ntcp2Context<R> {
+    /// Get the port where [`Ntcp2Listener`] is bound to.
+    pub fn port(&self) -> u16 {
+        self.socket_address.port()
+    }
+
+    /// Get copy of [`Ntcp2Config`].
+    pub fn config(&self) -> Ntcp2Config {
+        self.config.clone()
+    }
+}
+
 /// NTCP2 transport.
 pub struct Ntcp2Transport<R: Runtime> {
     /// NTCP2 connection listener.
@@ -173,7 +185,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
                 host,
             ),
             (true, None) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     "ntcp2 requested to be published but no host provided",
                 );
@@ -263,8 +275,6 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
     type Item = TransportEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.waker = Some(cx.waker().clone());
-
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
@@ -288,8 +298,9 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         }
 
         if !self.pending_handshakes.is_empty() {
-            match futures::ready!(self.pending_handshakes.poll_next_unpin(cx)) {
-                Some(Ok(session)) => {
+            match self.pending_handshakes.poll_next_unpin(cx) {
+                Poll::Pending => {}
+                Poll::Ready(Some(Ok(session))) => {
                     tracing::debug!(
                         target: LOG_TARGET,
                         role = ?session.role(),
@@ -304,12 +315,16 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                     // `TransportManager` will either accept or reject the session
                     let router_info = session.router();
                     let router_id = router_info.identity.id();
+                    let direction = session.direction();
 
                     self.pending_connections.insert(router_id.clone(), session);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
+                        direction,
+                        router_id,
+                    }));
                 }
-                Some(Err((router_id, error))) => match router_id {
+                Poll::Ready(Some(Err((router_id, error)))) => match router_id {
                     Some(router_id) => {
                         tracing::trace!(
                             target: LOG_TARGET,
@@ -325,10 +340,11 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         "failed to accept inbound connection",
                     ),
                 },
-                None => return Poll::Ready(None),
+                Poll::Ready(None) => return Poll::Ready(None),
             }
         }
 
+        self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
 }

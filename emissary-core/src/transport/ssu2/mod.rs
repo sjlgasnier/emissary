@@ -73,6 +73,18 @@ pub struct Ssu2Context<R: Runtime> {
     socket_address: SocketAddr,
 }
 
+impl<R: Runtime> Ssu2Context<R> {
+    /// Get the port where [`Ssu2Socket`] is bound to.
+    pub fn port(&self) -> u16 {
+        self.socket_address.port()
+    }
+
+    /// Get copy of [`Ssu2Config`].
+    pub fn config(&self) -> Ssu2Config {
+        self.config.clone()
+    }
+}
+
 /// SSU2 transport.
 pub struct Ssu2Transport<R: Runtime> {
     /// SSU2 server socket.
@@ -143,7 +155,7 @@ impl<R: Runtime> Ssu2Transport<R> {
         let socket_address = socket.local_address().ok_or_else(|| {
             tracing::warn!(
                 target: LOG_TARGET,
-                "failed to get local address of the ntcp2 listener",
+                "failed to get local address of the ssu2 listener",
             );
 
             Error::Connection(ConnectionError::BindFailure)
@@ -157,9 +169,9 @@ impl<R: Runtime> Ssu2Transport<R> {
                 host,
             ),
             (true, None) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
-                    "ntcp2 requested to be published but no host provided",
+                    "ssu2 requested to be published but no host provided",
                 );
                 RouterAddress::new_unpublished_ssu2(
                     config.static_key,
@@ -210,12 +222,16 @@ impl<R: Runtime> Stream for Ssu2Transport<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{crypto::SigningPrivateKey, profile::ProfileStorage, runtime::mock::MockRuntime};
+    use crate::{
+        crypto::SigningPrivateKey, events::EventManager, profile::ProfileStorage,
+        runtime::mock::MockRuntime,
+    };
     use bytes::Bytes;
     use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn connect_ssu2() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let (ctx1, address1) = Ssu2Transport::<MockRuntime>::initialize(Some(Ssu2Config {
             port: 0u16,
             host: Some("127.0.0.1".parse().unwrap()),
@@ -249,6 +265,7 @@ mod tests {
             address1,
             &static1,
             &signing1,
+            false,
         );
         let router_info2 = RouterInfo::new::<MockRuntime>(
             &Default::default(),
@@ -256,6 +273,7 @@ mod tests {
             address2,
             &static2,
             &signing2,
+            false,
         );
         let (handle1, _event_rx1) = {
             let (tx, rx) = channel(64);
@@ -283,6 +301,7 @@ mod tests {
                 static1,
                 signing1,
                 2u8,
+                event_handle.clone(),
             ),
             handle1,
         );
@@ -297,13 +316,14 @@ mod tests {
                 static2,
                 signing2,
                 2u8,
+                event_handle.clone(),
             ),
             handle2,
         );
         tokio::spawn(async move {
             loop {
                 match transport2.next().await.unwrap() {
-                    TransportEvent::ConnectionEstablished { router_id } =>
+                    TransportEvent::ConnectionEstablished { router_id, .. } =>
                         transport2.accept(&router_id),
                     _ => {}
                 }
@@ -313,7 +333,7 @@ mod tests {
         transport1.connect(router_info2);
         loop {
             match transport1.next().await.unwrap() {
-                TransportEvent::ConnectionEstablished { router_id } => {
+                TransportEvent::ConnectionEstablished { router_id, .. } => {
                     transport1.accept(&router_id);
                     break;
                 }

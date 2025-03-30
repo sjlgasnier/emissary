@@ -22,7 +22,7 @@ use crate::{
     crypto::{
         chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256, StaticPrivateKey, StaticPublicKey,
     },
-    destination::session::tagset::{TagSet, TagSetEntry},
+    destination::session::tag_set::{TagSet, TagSetEntry},
     error::SessionError,
     primitives::DestinationId,
     runtime::Runtime,

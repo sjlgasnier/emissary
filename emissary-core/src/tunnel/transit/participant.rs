@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
+    events::EventHandle,
     i2np::{tunnel::data::EncryptedTunnelData, Message, MessageBuilder, MessageType},
     primitives::{RouterId, TunnelId},
     runtime::Runtime,
@@ -48,8 +49,14 @@ const LOG_TARGET: &str = "emissary::tunnel::transit::participant";
 /// Only accepts and handles `TunnelData` messages,
 /// all other message types are rejected as invalid.
 pub struct Participant<R: Runtime> {
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
     /// Tunnel expiration timer.
     expiration_timer: BoxFuture<'static, ()>,
+
+    /// Used bandwidth.
+    bandwidth: usize,
 
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
@@ -119,9 +126,12 @@ impl<R: Runtime> TransitTunnel<R> for Participant<R> {
         routing_table: RoutingTable,
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
+        event_handle: EventHandle<R>,
     ) -> Self {
         Participant {
+            event_handle,
             expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
+            bandwidth: 0usize,
             message_rx,
             metrics_handle,
             next_router,
@@ -147,37 +157,53 @@ impl<R: Runtime> Future for Participant<R> {
                     );
                     return Poll::Ready(self.tunnel_id);
                 }
-                Some(message) => match message.message_type {
-                    MessageType::TunnelData => match EncryptedTunnelData::parse(&message.payload) {
-                        Some(message) => match self.handle_tunnel_data(&message) {
-                            Ok((router, message)) => {
-                                if let Err(error) = self.routing_table.send_message(router, message)
-                                {
-                                    tracing::error!(
+                Some(message) => {
+                    self.bandwidth += message.serialized_len_short();
+
+                    match message.message_type {
+                        MessageType::TunnelData =>
+                            match EncryptedTunnelData::parse(&message.payload) {
+                                Some(message) => match self.handle_tunnel_data(&message) {
+                                    Ok((router, message)) => {
+                                        self.bandwidth += message.len();
+
+                                        if let Err(error) =
+                                            self.routing_table.send_message(router, message)
+                                        {
+                                            tracing::error!(
+                                                target: LOG_TARGET,
+                                                tunnel_id = %self.tunnel_id,
+                                                ?error,
+                                                "failed to send message",
+                                            )
+                                        }
+                                    }
+                                    Err(error) => tracing::warn!(
                                         target: LOG_TARGET,
                                         tunnel_id = %self.tunnel_id,
                                         ?error,
-                                        "failed to send message",
-                                    )
-                                }
-                            }
-                            Err(error) => tracing::warn!(
-                                target: LOG_TARGET,
-                                tunnel_id = %self.tunnel_id,
-                                ?error,
-                                "failed to handle tunnel data",
-                            ),
-                        },
-                        None => todo!(),
-                    },
-                    message_type => tracing::warn!(
-                        target: LOG_TARGET,
-                        tunnel_id = %self.tunnel_id,
-                        ?message_type,
-                        "unsupported message",
-                    ),
-                },
+                                        "failed to handle tunnel data",
+                                    ),
+                                },
+                                None => tracing::warn!(
+                                    target: LOG_TARGET,
+                                    "failed to parse message",
+                                ),
+                            },
+                        message_type => tracing::warn!(
+                            target: LOG_TARGET,
+                            tunnel_id = %self.tunnel_id,
+                            ?message_type,
+                            "unsupported message",
+                        ),
+                    }
+                }
             }
+        }
+
+        if self.event_handle.poll_unpin(cx).is_ready() {
+            self.event_handle.transit_tunnel_bandwidth(self.bandwidth);
+            self.bandwidth = 0;
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {

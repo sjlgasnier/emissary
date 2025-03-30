@@ -17,68 +17,109 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    address_book::AddressBookManager, cli::Arguments, config::Config, error::Error,
-    proxy::http::HttpProxy, signal::SignalHandler, storage::Storage, tunnel::Tunnel,
+    address_book::AddressBookManager,
+    cli::Arguments,
+    config::{Config, ReseedConfig, RouterUiConfig},
+    error::Error,
+    port_mapper::PortMapper,
+    proxy::http::HttpProxy,
+    signal::SignalHandler,
+    storage::RouterStorage,
+    tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
 };
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::{
-    router::{Router, RouterEvent},
-    runtime::Runtime as _,
-};
+use emissary_core::{events::EventSubscriber, router::Router};
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
-use futures::StreamExt;
+use futures::{channel::oneshot, StreamExt};
+use tokio::sync::mpsc::{channel, Receiver};
 
-use std::{fs::File, io::Write, mem};
+use std::{fs::File, io::Write, mem, sync::Arc};
 
 mod address_book;
 mod cli;
 mod config;
 mod error;
 mod logger;
+mod port_mapper;
 mod proxy;
 mod signal;
 mod storage;
 mod tunnel;
 
+#[cfg(feature = "router-ui")]
+mod ui;
+
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
-
-/// Reseeding threshold.
-const RESEED_THRESHOLD: usize = 25usize;
 
 /// Result type for the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Router context.
+struct RouterContext {
+    /// Router.
+    router: Router<Runtime>,
+
+    /// Event subscriber.
+    ///
+    /// Passed onto a router UI if it has been enabled.
+    #[allow(unused)]
+    events: EventSubscriber,
+
+    /// Port mapper for NAT-PMP and UPnP.
+    port_mapper: PortMapper,
+
+    /// Signal handler for `SIGINT`.
+    signal_handler: SignalHandler,
+
+    /// Router UI config, if enabled.
+    #[allow(unused)]
+    router_ui_config: Option<RouterUiConfig>,
+}
+
+/// Setup router and related subsystems.
+async fn setup_router() -> anyhow::Result<RouterContext> {
     let arguments = Arguments::parse();
-    let mut handler = SignalHandler::new();
+    let signal_handler = SignalHandler::new();
 
     // initialize logger with any logging directive given as a cli argument
     let handle = init_logger!(arguments.log.clone());
 
     // parse router config and merge it with cli options
-    let mut config = Config::try_from(arguments.base_path.clone())?.merge(&arguments);
-    let storage = Storage::new(config.base_path.clone());
+    let mut config = Config::parse(arguments.base_path.clone(), &arguments).map_err(|error| {
+        tracing::warn!(
+            target: LOG_TARGET,
+            ?error,
+            "invalid router config, pass `--overwrite-config` to create new config",
+        );
+
+        error
+    })?;
+    let storage = RouterStorage::new(config.base_path.clone());
 
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
 
-    // try to reseed the router if there aren't enough known routers
-    if (config.routers.len() < RESEED_THRESHOLD && !config.reseed.disable)
-        || arguments.reseed.force_reseed.unwrap_or(false)
-    {
+    // is the # of known routers less than reseed threshold or is reseed forced
+    let should_reseed = config.reseed.as_ref().map_or(
+        false,
+        |ReseedConfig {
+             reseed_threshold, ..
+         }| reseed_threshold > &config.routers.len(),
+    ) || arguments.reseed.force_reseed.unwrap_or(false);
+
+    if should_reseed {
         tracing::info!(
             target: LOG_TARGET,
             num_routers = ?config.routers.len(),
-            num_needed = ?RESEED_THRESHOLD,
             forced_reseed = ?arguments.reseed.force_reseed.unwrap_or(false),
             "reseed router"
         );
 
-        match Reseeder::reseed(config.reseed.hosts.clone()).await {
+        match Reseeder::reseed(config.reseed.as_ref().and_then(|config| config.hosts.clone())).await
+        {
             Ok(routers) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -127,25 +168,35 @@ async fn main() -> anyhow::Result<()> {
 
     let path = config.base_path.clone();
     let http = config.http_proxy.take();
-    let client_tunnels = mem::take(&mut config.tunnels);
+    let port_forwarding = config.port_forwarding.take();
+    let client_tunnels = mem::take(&mut config.client_tunnels);
+    let server_tunnels = mem::take(&mut config.server_tunnels);
+    let router_ui_config = config.router_ui.clone();
 
-    let (mut router, local_router_info, address_book_manager) = match config.address_book.take() {
-        None => Router::<Runtime>::new(config.into())
-            .await
-            .map(|(router, info)| (router, info, None)),
-
-        Some(address_book_config) => {
-            // create address book, allocate address book handle and pass it to `Router`
-            let address_book_manager =
-                AddressBookManager::new(config.base_path.clone(), address_book_config);
-            let address_book_handle = address_book_manager.handle();
-
-            Router::<Runtime>::with_address_book(config.into(), address_book_handle)
+    let (router, events, local_router_info, address_book_manager) =
+        match config.address_book.take() {
+            None => Router::<Runtime>::new(config.into(), None, Some(Arc::new(storage)))
                 .await
-                .map(|(router, info)| (router, info, Some(address_book_manager)))
+                .map(|(router, event_subscriber, info)| (router, event_subscriber, info, None)),
+
+            Some(address_book_config) => {
+                // create address book, allocate address book handle and pass it to `Router`
+                let address_book_manager =
+                    AddressBookManager::new(config.base_path.clone(), address_book_config);
+                let address_book_handle = address_book_manager.handle();
+
+                Router::<Runtime>::new(
+                    config.into(),
+                    Some(address_book_handle),
+                    Some(Arc::new(storage)),
+                )
+                .await
+                .map(|(router, event_subscriber, info)| {
+                    (router, event_subscriber, info, Some(address_book_manager))
+                })
+            }
         }
-    }
-    .map_err(|error| anyhow!(error))?;
+        .map_err(|error| anyhow!(error))?;
 
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
@@ -157,13 +208,20 @@ async fn main() -> anyhow::Result<()> {
             // start event loop of address book manager if address book was enabled
             //
             // address book depends on the http proxy as it downloads hosts.txt from inside i2p
-            if let Some(address_book_manager) = address_book_manager {
-                tokio::spawn(address_book_manager.start(config.port, config.host.clone()));
-            }
+            //
+            // if address book is enabled, create oneshot channel pair, pass the receiver to address
+            // book and sender to http proxy and once the http proxy is ready (its tunnel pool has
+            // been built), it'll signal the address book that it can start download hosts file(s)
+            let http_proxy_ready_tx = address_book_manager.map(|address_book_manager| {
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(address_book_manager.run(config.port, config.host.clone(), rx));
+
+                tx
+            });
 
             // start event loop of http proxy
             tokio::spawn(async move {
-                match HttpProxy::new(config, address.port()).await {
+                match HttpProxy::new(config, address.port(), http_proxy_ready_tx).await {
                     Ok(proxy) => {
                         tokio::spawn(async move {
                             if let Err(error) = proxy.run().await {
@@ -184,64 +242,130 @@ async fn main() -> anyhow::Result<()> {
             });
         }
 
-        // start client tunnels
-        for config in client_tunnels {
-            tokio::spawn(Tunnel::start(config, address.port()));
-        }
+        // start client and server tunnels
+        tokio::spawn(ClientTunnelManager::new(client_tunnels, address.port()).run());
+        tokio::spawn(
+            ServerTunnelManager::new(server_tunnels, address.port(), path.clone())
+                .await
+                .run(),
+        );
     }
 
+    // create port mapper from config and transport protocol info
+    //
+    // `PortMapper` can be polled for external address discoveries
+    let port_mapper = PortMapper::new(
+        port_forwarding,
+        router.protocol_address_info().ntcp2_port,
+        router.protocol_address_info().ssu2_port,
+    );
+
+    Ok(RouterContext {
+        router,
+        events,
+        port_mapper,
+        signal_handler,
+        router_ui_config,
+    })
+}
+
+/// Run the event loop of `emissary-cli`
+///
+/// Start a loop which polls:
+///  * `SIGINT` signal handler
+///  * `Router`'s event loop
+///  * [`PortMapper`]'s event loop
+///  * RX channel for receiving a shutdown signal from router UI
+async fn router_event_loop(
+    mut router: Router<Runtime>,
+    mut port_mapper: PortMapper,
+    mut handler: SignalHandler,
+    mut shutdown_rx: Receiver<()>,
+) {
     loop {
         tokio::select! {
             _ = handler.next() => {
+                port_mapper.shutdown().await;
                 router.shutdown();
             }
-            event = router.next() => match event {
-                None => return Ok(()),
-                Some(RouterEvent::Shutdown) => {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        "emissary shut down",
-                    );
-                    return Ok(());
-                }
-                Some(RouterEvent::ProfileStorageBackup { routers }) => {
-                    let storage_handle = storage.clone();
-
-                    tokio::task::spawn_blocking(move || {
-                        for (router_id, router_info, profile) in routers {
-                            if let Err(error) = storage_handle.store_profile(router_id.clone(), profile) {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?router_id,
-                                    ?error,
-                                    "failed to store router profile to disk",
-                                );
-                            }
-
-                            let Some(router_info) = router_info else {
-                                continue;
-                            };
-
-                            match Runtime::gzip_decompress(router_info) {
-                                Some(router_info) =>
-                                    if let Err(error) = storage_handle.store_router_info(router_id.clone(), router_info) {
-                                        tracing::warn!(
-                                            target: LOG_TARGET,
-                                            ?router_id,
-                                            ?error,
-                                            "failed to store router info to disk",
-                                        );
-                                    },
-                                None => tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?router_id,
-                                    "failed to decompress router info",
-                                ),
-                            }
-                        }
-                    });
-                }
+            _ = shutdown_rx.recv() => {
+                port_mapper.shutdown().await;
+                router.shutdown();
             }
+            address = port_mapper.next() => {
+                // the value must exist since the stream never terminates
+                router.add_external_address(address.expect("value"));
+            },
+            _ = &mut router => {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "emissary shut down",
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "router-ui"))]
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (_tx, shutdown_rx) = channel(1);
+    let RouterContext {
+        port_mapper,
+        router,
+        signal_handler,
+        ..
+    } = runtime.block_on(setup_router())?;
+
+    runtime.block_on(router_event_loop(
+        router,
+        port_mapper,
+        signal_handler,
+        shutdown_rx,
+    ));
+
+    Ok(())
+}
+
+#[cfg(feature = "router-ui")]
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (shutdown_tx, shutdown_rx) = channel(1);
+    let RouterContext {
+        router,
+        port_mapper,
+        signal_handler,
+        events,
+        router_ui_config,
+    } = runtime.block_on(setup_router())?;
+
+    match router_ui_config {
+        None => {
+            runtime.block_on(router_event_loop(
+                router,
+                port_mapper,
+                signal_handler,
+                shutdown_rx,
+            ));
+
+            Ok(())
+        }
+        Some(RouterUiConfig {
+            theme,
+            refresh_interval,
+        }) => {
+            std::thread::spawn(move || {
+                runtime.block_on(router_event_loop(
+                    router,
+                    port_mapper,
+                    signal_handler,
+                    shutdown_rx,
+                ));
+                std::process::exit(0);
+            });
+
+            ui::RouterUi::start(events, theme, refresh_interval, shutdown_tx)
         }
     }
 }

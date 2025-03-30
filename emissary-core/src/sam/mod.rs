@@ -23,8 +23,10 @@
 use crate::{
     crypto::base64_decode,
     error::{ChannelError, ConnectionError, Error},
+    events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Destination, DestinationId, Str},
+    profile::ProfileStorage,
     runtime::{AddressBook, JoinSet, Runtime, TcpListener, UdpSocket},
     sam::{
         parser::{Datagram, HostKind},
@@ -42,7 +44,13 @@ use futures::{Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use thingbuf::mpsc::{channel, with_recycle, Receiver, Sender};
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 use core::{
     future::Future,
     mem,
@@ -148,14 +156,14 @@ enum DatagramWriterState {
 
 /// SAMv3 server.
 pub struct SamServer<R: Runtime> {
-    /// Address book.
-    address_book: Option<Arc<dyn AddressBook>>,
-
     /// Active destinations.
     active_destinations: HashSet<DestinationId>,
 
     /// Active SAMV3 sessions.
     active_sessions: SessionContext<R, Arc<str>>,
+
+    /// Address book.
+    address_book: Option<Arc<dyn AddressBook>>,
 
     /// RX channel for receiving datagrams that should be to clients.
     datagram_rx: Receiver<(u16, Vec<u8>)>,
@@ -166,15 +174,15 @@ pub struct SamServer<R: Runtime> {
     /// Datagra writer state.
     datagram_writer_state: DatagramWriterState,
 
+    /// Event handle.
+    event_handle: EventHandle<R>,
+
     /// Pending host lookups.
-    host_lookups: R::JoinSet<
-        Option<(
-            Arc<str>,
-            SamSocket<R>,
-            DestinationId,
-            HashMap<String, String>,
-        )>,
-    >,
+    host_lookups: R::JoinSet<(
+        Arc<str>,
+        SamSocket<R>,
+        Option<(DestinationId, HashMap<String, String>)>,
+    )>,
 
     /// TCP listener.
     listener: R::TcpListener,
@@ -195,6 +203,9 @@ pub struct SamServer<R: Runtime> {
 
     /// Pending SAMv3 sessions that are in the process of building a tunnel pool.
     pending_sessions: SessionContext<R, crate::Result<SamSessionContext<R>>>,
+
+    /// Profile storage.
+    profile_storage: ProfileStorage<R>,
 
     /// Datagram read buffer.
     read_buffer: Vec<u8>,
@@ -219,6 +230,8 @@ impl<R: Runtime> SamServer<R> {
         tunnel_manager_handle: TunnelManagerHandle,
         metrics: R::MetricsHandle,
         address_book: Option<Arc<dyn AddressBook>>,
+        event_handle: EventHandle<R>,
+        profile_storage: ProfileStorage<R>,
     ) -> crate::Result<Self> {
         let listener = R::TcpListener::bind(SocketAddr::new(
             host.parse::<IpAddr>().expect("valid address"),
@@ -245,18 +258,20 @@ impl<R: Runtime> SamServer<R> {
         let (datagram_tx, datagram_rx) = channel(1024);
 
         Ok(Self {
-            address_book,
             active_destinations: HashSet::new(),
             active_sessions: SessionContext::new(),
+            address_book,
             datagram_rx,
             datagram_tx,
             datagram_writer_state: DatagramWriterState::GetMessage,
+            event_handle,
             host_lookups: R::join_set(),
             listener,
             metrics,
             netdb_handle,
             pending_inbound_connections: R::join_set(),
             pending_sessions: SessionContext::new(),
+            profile_storage,
             read_buffer: vec![0u8; 0xfff],
             session_id_destinations: HashMap::new(),
             socket,
@@ -462,13 +477,15 @@ impl<R: Runtime> Future for SamServer<R> {
                                 Arc::clone(&session_id),
                                 session_kind,
                                 options,
-                                version,
                                 rx,
                                 this.datagram_tx.clone(),
                                 Box::pin(tunnel_pool_future),
                                 netdb_handle,
                                 this.address_book.clone(),
-                            ),
+                                this.event_handle.clone(),
+                                this.profile_storage.clone(),
+                            )
+                            .run(),
                         );
                         this.active_destinations.insert(destination_id.clone());
                         this.session_id_destinations.insert(session_id, destination_id);
@@ -533,14 +550,17 @@ impl<R: Runtime> Future for SamServer<R> {
                                 );
 
                                 // attempt to resolve `host` into a `DestinationId`
-                                let address_book = Arc::clone(&address_book);
+                                let address_book = Arc::clone(address_book);
 
                                 this.host_lookups.push(async move {
-                                    let destination = address_book.resolve(host).await?;
-                                    let destination = base64_decode(destination)?;
-                                    let destination = Destination::parse(&destination)?;
+                                    let result = address_book
+                                        .resolve(host)
+                                        .await
+                                        .and_then(base64_decode)
+                                        .and_then(|destination| Destination::parse(&destination))
+                                        .map(|destination| (destination.id(), options));
 
-                                    Some((session_id, socket, destination.id(), options))
+                                    (session_id, socket, result)
                                 });
                             }
                         },
@@ -654,12 +674,22 @@ impl<R: Runtime> Future for SamServer<R> {
             match this.host_lookups.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                // TODO: better error reporting
-                Poll::Ready(Some(None)) => tracing::debug!(
-                    target: LOG_TARGET,
-                    "failed to resolve host",
-                ),
-                Poll::Ready(Some(Some((session_id, socket, destination_id, options)))) =>
+                Poll::Ready(Some((session_id, mut socket, None))) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        "failed to resolve host",
+                    );
+
+                    R::spawn(async move {
+                        let _ = socket
+                            .send_message_blocking(
+                                "STREAM STATUS RESULT=I2P_ERROR\n".to_string().as_bytes().to_vec(),
+                            )
+                            .await;
+                    });
+                }
+                Poll::Ready(Some((session_id, socket, Some((destination_id, options))))) =>
                     if let Err(error) = this.active_sessions.send_command(
                         &session_id,
                         SamSessionCommand::Connect {

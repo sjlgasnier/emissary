@@ -18,7 +18,7 @@
 
 use crate::{
     crypto::base64_decode,
-    destination::{Destination, DestinationEvent, LeaseSetStatus},
+    destination::{DeliveryStyle, Destination, DestinationEvent, LeaseSetStatus},
     i2cp::{
         message::{
             BandwidthLimits, HostReply, HostReplyKind, Message, MessagePayload, RequestKind,
@@ -37,7 +37,7 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use hashbrown::HashMap;
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -73,7 +73,7 @@ pub struct I2cpSession<R: Runtime> {
     destination: Destination<R>,
 
     /// Pending host lookups.
-    host_lookups: R::JoinSet<Option<(SessionId, u32, Bytes)>>,
+    host_lookups: R::JoinSet<(SessionId, u32, Option<Bytes>)>,
 
     /// Next message ID.
     next_message_id: u32,
@@ -100,15 +100,16 @@ impl<R: Runtime> I2cpSession<R> {
     pub fn new(netdb_handle: NetDbHandle, context: I2cpSessionContext<R>) -> Self {
         let I2cpSessionContext {
             address_book,
+            destination_id,
             inbound,
+            leaseset,
+            options,
             outbound,
+            private_keys,
+            profile_storage,
             session_id,
             socket,
-            options,
             tunnel_pool_handle,
-            private_keys,
-            leaseset,
-            destination_id,
         } = context;
 
         tracing::info!(
@@ -136,8 +137,9 @@ impl<R: Runtime> I2cpSession<R> {
                 .get(&Str::from("i2cp.dontPublishLeaseSet"))
                 .map(|value| value.parse::<bool>().unwrap_or(true))
                 .unwrap_or(true),
+            profile_storage,
         );
-        destination.publish_lease_set(Bytes::from(destination_id.to_vec()), leaseset);
+        destination.publish_lease_set(leaseset);
 
         Self {
             address_book,
@@ -235,13 +237,17 @@ impl<R: Runtime> I2cpSession<R> {
                 match (self.address_book.clone(), kind) {
                     (Some(address_book), RequestKind::HostName { host_name }) => {
                         self.host_lookups.push(async move {
-                            let destination = address_book.resolve(host_name.to_string()).await?;
+                            let destination = address_book
+                                .resolve(host_name.to_string())
+                                .await
+                                .and_then(base64_decode);
 
-                            Some((
+                            (
                                 session_id,
                                 request_id,
-                                BytesMut::from(&base64_decode(destination)?[..]).freeze(),
-                            ))
+                                destination
+                                    .map(|destination| BytesMut::from(&destination[..]).freeze()),
+                            )
                         });
                     }
                     (None, kind) => {
@@ -296,9 +302,9 @@ impl<R: Runtime> I2cpSession<R> {
             }
             Message::CreateLeaseSet2 {
                 session_id,
-                key,
                 leaseset,
                 private_keys,
+                ..
             } => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -307,7 +313,7 @@ impl<R: Runtime> I2cpSession<R> {
                     "store lease set",
                 );
 
-                self.destination.publish_lease_set(key, leaseset);
+                self.destination.publish_lease_set(leaseset);
             }
             Message::SendMessageExpires {
                 session_id,
@@ -333,9 +339,12 @@ impl<R: Runtime> I2cpSession<R> {
                             "send message with expiration",
                         );
 
-                        if let Err(error) =
-                            self.destination.send_message(&destination.id(), payload)
-                        {
+                        if let Err(error) = self.destination.send_message(
+                            DeliveryStyle::Unspecified {
+                                destination_id: destination.id(),
+                            },
+                            payload,
+                        ) {
                             tracing::error!(
                                 target: LOG_TARGET,
                                 session_id = ?self.session_id,
@@ -425,9 +434,12 @@ impl<R: Runtime> Future for I2cpSession<R> {
                 Poll::Ready(Some(DestinationEvent::LeaseSetFound { destination_id })) =>
                     match self.pending_connections.remove(&destination_id) {
                         Some(messages) => messages.into_iter().for_each(|message| {
-                            if let Err(error) =
-                                self.destination.send_message(&destination_id, message.payload)
-                            {
+                            if let Err(error) = self.destination.send_message(
+                                DeliveryStyle::Unspecified {
+                                    destination_id: destination_id.clone(),
+                                },
+                                message.payload,
+                            ) {
                                 tracing::error!(
                                     target: LOG_TARGET,
                                     session_id = ?self.session_id,
@@ -527,12 +539,20 @@ impl<R: Runtime> Future for I2cpSession<R> {
             match self.host_lookups.poll_next_unpin(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                // TODO: better error reporting
-                Poll::Ready(Some(None)) => tracing::debug!(
-                    target: LOG_TARGET,
-                    "failed to resolve host",
-                ),
-                Poll::Ready(Some(Some((session_id, request_id, destination)))) => {
+                Poll::Ready(Some((session_id, request_id, None))) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?session_id,
+                        ?request_id,
+                        "host lookup failed",
+                    );
+                    self.socket.send_message(HostReply::new(
+                        session_id.as_u16(),
+                        request_id,
+                        HostReplyKind::Failure,
+                    ));
+                }
+                Poll::Ready(Some((session_id, request_id, Some(destination)))) => {
                     self.socket.send_message(HostReply::new(
                         session_id.as_u16(),
                         request_id,

@@ -98,6 +98,9 @@ pub struct Ssu2Config {
 pub struct I2cpConfig {
     /// I2CP server listen port.
     pub port: u16,
+
+    /// Host where the I2CP server shoud be bound to.
+    pub host: String,
 }
 
 /// SAMv3 configuration.
@@ -109,18 +112,24 @@ pub struct SamConfig {
     /// SAMv3 UDP server listen port.
     pub udp_port: u16,
 
-    /// Host where the sockets shoud be bound to.
+    /// Host where the SAM server shoud be bound to.
     pub host: String,
 }
 
 /// Metrics configuration.
 #[derive(Default, Debug, Clone)]
 pub struct MetricsConfig {
-    /// Disable metrics server.
-    pub disable_metrics: bool,
-
     /// Port where the metrics server should be bound to.
-    pub metrics_server_port: Option<u16>,
+    pub port: u16,
+}
+
+/// Metrics configuration.
+#[derive(Default, Debug, Clone)]
+pub struct TransitConfig {
+    /// Maximum number of transit tunnels.
+    ///
+    /// If `None`, there are no limit on transit tunnels.
+    pub max_tunnels: Option<usize>,
 }
 
 /// Router configuration.
@@ -131,6 +140,9 @@ pub struct Config {
 
     /// Router capabilities.
     pub caps: Option<String>,
+
+    /// Event refresh interval in seconds.
+    pub refresh_interval: Option<usize>,
 
     /// Exploratory tunnel pool config.
     pub exploratory: Option<ExploratoryConfig>,
@@ -147,7 +159,7 @@ pub struct Config {
     pub insecure_tunnels: bool,
 
     /// Metrics configuration.
-    pub metrics: MetricsConfig,
+    pub metrics: Option<MetricsConfig>,
 
     /// Network ID.
     pub net_id: Option<u8>,
@@ -171,6 +183,11 @@ pub struct Config {
     ///
     /// `None` if SAMv3 is disabled.
     pub samv3_config: Option<SamConfig>,
+
+    /// Transit tunnel configuration.
+    ///
+    /// `None` if transit tunnels are disabled.
+    pub transit: Option<TransitConfig>,
 
     /// Router signing key.
     pub signing_key: Option<[u8; 32]>,

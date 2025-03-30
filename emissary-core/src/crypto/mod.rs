@@ -16,7 +16,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::error::Error;
+use crate::{
+    crypto::dsa::{DsaPublicKey, DsaSignature},
+    error::Error,
+};
 
 use data_encoding::{Encoding, Specification};
 use ed25519_dalek::Signer;
@@ -30,6 +33,7 @@ use core::convert::TryInto;
 
 pub mod aes;
 pub mod chachapoly;
+pub mod dsa;
 pub mod hmac;
 pub mod noise;
 pub mod sha256;
@@ -335,6 +339,13 @@ pub enum SigningPublicKey {
     //
     // Credits to str4d
     P256(p256::EncodedPoint, p256::ecdsa::VerifyingKey),
+
+    /// DSA-SHA1.
+    //
+    // Taken from `ire` which is licensed under MIT
+    //
+    // Credits to str4d
+    DsaSha1(DsaPublicKey),
 }
 
 impl SigningPublicKey {
@@ -347,7 +358,7 @@ impl SigningPublicKey {
         ))
     }
 
-    /// Attempt to construct `SigningPublicKey::P256` from `key`.
+    /// Attempt to construct `SigningPublicKey::P256` from `data`.
     pub fn p256(data: &[u8]) -> Option<Self> {
         let encoded = p256::EncodedPoint::from_untagged_bytes(data.into());
 
@@ -355,6 +366,11 @@ impl SigningPublicKey {
             encoded,
             p256::ecdsa::VerifyingKey::from_encoded_point(&encoded).ok()?,
         ))
+    }
+
+    /// Attempt to construct `SigningPublicKey::P256` from `data`.
+    pub fn dsa_sha1(data: &[u8]) -> Option<Self> {
+        DsaPublicKey::from_bytes(data).map(Self::DsaSha1)
     }
 
     /// Verify `signature` of `message`.
@@ -372,6 +388,14 @@ impl SigningPublicKey {
 
                 vk.verify(message, &signature).map_err(|_| Error::InvalidData)
             }
+            Self::DsaSha1(public_key) => {
+                let signature = DsaSignature::from_bytes(signature).ok_or(Error::InvalidData)?;
+
+                match public_key.verify(message, &signature) {
+                    true => Ok(()),
+                    false => Err(Error::InvalidData),
+                }
+            }
         }
     }
 
@@ -380,6 +404,7 @@ impl SigningPublicKey {
         match self {
             Self::Ed25519(_) => 64usize,
             Self::P256(_, _) => 64usize,
+            Self::DsaSha1(_) => 40usize,
         }
     }
 }
@@ -389,6 +414,7 @@ impl AsRef<[u8]> for SigningPublicKey {
         match self {
             Self::Ed25519(key) => key.as_bytes(),
             Self::P256(pk, _) => &pk.as_bytes()[1..],
+            Self::DsaSha1(key) => key.as_bytes(),
         }
     }
 }

@@ -17,15 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 use emissary_core::{
-    router::Router, runtime::AddressBook, Config, MetricsConfig, Ntcp2Config, SamConfig,
+    events::EventSubscriber, router::Router, runtime::AddressBook, Config, Ntcp2Config, SamConfig,
+    TransitConfig,
 };
 use emissary_util::runtime::tokio::Runtime;
-use futures::StreamExt;
 use rand::{thread_rng, RngCore};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    task::JoinSet,
 };
 use yosemite::{
     style::{Anonymous, Repliable, Stream},
@@ -38,16 +39,13 @@ async fn make_router(
     floodfill: bool,
     net_id: u8,
     routers: Vec<Vec<u8>>,
-) -> (Router<Runtime>, Vec<u8>) {
+) -> (Router<Runtime>, EventSubscriber, Vec<u8>) {
     let config = Config {
         net_id: Some(net_id),
         floodfill,
         insecure_tunnels: true,
         allow_local: true,
-        metrics: MetricsConfig {
-            disable_metrics: true,
-            ..Default::default()
-        },
+        metrics: None,
         ntcp2: Some(Ntcp2Config {
             port: 0u16,
             iv: {
@@ -69,10 +67,13 @@ async fn make_router(
             udp_port: 0u16,
             host: "127.0.0.1".to_string(),
         }),
+        transit: Some(TransitConfig {
+            max_tunnels: Some(5000),
+        }),
         ..Default::default()
     };
 
-    Router::<Runtime>::new(config).await.unwrap()
+    Router::<Runtime>::new(config, None, None).await.unwrap()
 }
 
 #[tokio::test]
@@ -85,18 +86,18 @@ async fn generate_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create the sam router and fetch the random sam tcp port from the router
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_tcp = router.protocol_address_info().sam_tcp.unwrap().port();
 
     // spawn the router inte background and wait a moment for the network to boot
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // generate new destination and create new session using the destination
@@ -131,24 +132,24 @@ async fn streaming_works() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -216,28 +217,28 @@ async fn repliable_datagrams_work() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _event, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp/udp ports and spawn them in the background
     let mut ports = Vec::<(u16, u16)>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
         let addr_info = router.protocol_address_info();
 
         ports.push((
             addr_info.sam_tcp.unwrap().port(),
             addr_info.sam_udp.unwrap().port(),
         ));
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -304,28 +305,28 @@ async fn anonymous_datagrams_work() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp/udp ports and spawn them in the background
     let mut ports = Vec::<(u16, u16)>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
         let addr_info = router.protocol_address_info();
 
         ports.push((
             addr_info.sam_tcp.unwrap().port(),
             addr_info.sam_udp.unwrap().port(),
         ));
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(60),
@@ -391,18 +392,18 @@ async fn open_stream_to_self() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create the sam router and fetch the random sam tcp port from the router
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_tcp = router.protocol_address_info().sam_tcp.unwrap().port();
 
     // spawn the router inte background and wait a moment for the network to boot
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let mut session = tokio::time::timeout(
@@ -436,18 +437,18 @@ async fn create_same_session_twice_transient() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create the sam router and fetch the random sam tcp port from the router
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_tcp = router.protocol_address_info().sam_tcp.unwrap().port();
 
     // spawn the router inte background and wait a moment for the network to boot
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let session = tokio::time::timeout(
@@ -488,18 +489,18 @@ async fn create_same_session_twice_persistent() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create the sam router and fetch the random sam tcp port from the router
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_tcp = router.protocol_address_info().sam_tcp.unwrap().port();
 
     // spawn the router inte background and wait a moment for the network to boot
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // generate new destination and create new session using the destination
@@ -551,18 +552,18 @@ async fn duplicate_session_id() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create the sam router and fetch the random sam tcp port from the router
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_tcp = router.protocol_address_info().sam_tcp.unwrap().port();
 
     // spawn the router inte background and wait a moment for the network to boot
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let _session = tokio::time::timeout(
@@ -603,24 +604,24 @@ async fn stream_lots_of_data() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -691,24 +692,24 @@ async fn forward_stream() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -776,18 +777,18 @@ async fn connect_to_inactive_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create the sam router and fetch the random sam tcp port from the router
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_tcp = router.protocol_address_info().sam_tcp.unwrap().port();
 
     // spawn the router inte background and wait a moment for the network to boot
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // generate new destination and create new session using the destination
@@ -829,24 +830,24 @@ async fn closed_stream_detected() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -923,24 +924,24 @@ async fn close_and_reconnect() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1021,18 +1022,18 @@ async fn create_multiple_sessions() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..6 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let port = router.protocol_address_info().sam_tcp.unwrap().port();
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let stream = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1083,20 +1084,20 @@ async fn send_data_to_destroyed_session() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
@@ -1175,20 +1176,20 @@ async fn connect_using_b32_i2p() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     let private_key = {
@@ -1201,7 +1202,7 @@ async fn connect_using_b32_i2p() {
     };
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1272,24 +1273,24 @@ async fn unpublished_destination() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..4 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create two more routers, fetch their sam tcp ports and spawn them in the background
     let mut ports = Vec::<u16>::new();
 
     for _ in 0..2 {
-        let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
 
         ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1343,19 +1344,19 @@ async fn host_lookup() {
     let net_id = (thread_rng().next_u32() % 255) as u8;
 
     for i in 0..6 {
-        let (mut router, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
 
         router_infos.push(router_info);
-        tokio::spawn(async move { while let Some(_) = router.next().await {} });
+        tokio::spawn(router);
     }
 
     // create router for the sam server
-    let mut router = make_router(false, net_id, router_infos.clone()).await.0;
+    let router = make_router(false, net_id, router_infos.clone()).await.0;
     let sam_port = router.protocol_address_info().sam_tcp.unwrap().port();
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
 
     // let the network boot up
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     let mut session1 = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1392,10 +1393,7 @@ async fn host_lookup() {
         floodfill: false,
         insecure_tunnels: true,
         allow_local: true,
-        metrics: MetricsConfig {
-            disable_metrics: true,
-            ..Default::default()
-        },
+        metrics: None,
         ntcp2: Some(Ntcp2Config {
             port: 0u16,
             iv: {
@@ -1431,12 +1429,12 @@ async fn host_lookup() {
         }
     }
 
-    let (mut router, _) =
-        Router::<Runtime>::with_address_book(config, Arc::new(AddressBookImpl { dest }))
+    let (router, _events, _) =
+        Router::<Runtime>::new(config, Some(Arc::new(AddressBookImpl { dest })), None)
             .await
             .unwrap();
     let sam_port = router.protocol_address_info().sam_tcp.unwrap().port();
-    tokio::spawn(async move { while let Some(_) = router.next().await {} });
+    tokio::spawn(router);
 
     tokio::time::sleep(Duration::from_secs(30)).await;
 
@@ -1464,4 +1462,112 @@ async fn host_lookup() {
     stream.write_all(b"goodbye, world!\n").await.unwrap();
 
     assert!(handle.await.is_ok());
+}
+
+#[tokio::test]
+async fn open_parallel_streams() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
+    let mut router_infos = Vec::<Vec<u8>>::new();
+    let net_id = (thread_rng().next_u32() % 255) as u8;
+
+    for i in 0..4 {
+        let (router, _events, router_info) = make_router(i < 2, net_id, router_infos.clone()).await;
+
+        router_infos.push(router_info);
+        tokio::spawn(router);
+    }
+
+    // create two more routers, fetch their sam tcp ports and spawn them in the background
+    let mut ports = Vec::<u16>::new();
+
+    for _ in 0..2 {
+        let router = make_router(false, net_id, router_infos.clone()).await.0;
+
+        ports.push(router.protocol_address_info().sam_tcp.unwrap().port());
+        tokio::spawn(router);
+    }
+
+    // let the network boot up
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let mut session1 = tokio::time::timeout(
+        Duration::from_secs(30),
+        Session::<Stream>::new(SessionOptions {
+            samv3_tcp_port: ports[0],
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("no timeout")
+    .expect("to succeed");
+    let dest = session1.destination().to_owned();
+
+    let handle1 = tokio::spawn(async move {
+        for _ in 0..2 {
+            let mut stream = tokio::time::timeout(Duration::from_secs(15), session1.accept())
+                .await
+                .expect("no timeout")
+                .expect("to succeed");
+
+            stream.write_all(b"hello, world!\n").await.unwrap();
+
+            let mut buffer = vec![0u8; 64];
+            let nread = stream.read(&mut buffer).await.unwrap();
+            assert_eq!(
+                std::str::from_utf8(&buffer[..nread]),
+                Ok("goodbye, world!\n")
+            );
+        }
+    });
+
+    let mut session2 = tokio::time::timeout(
+        Duration::from_secs(30),
+        Session::<Stream>::new(SessionOptions {
+            samv3_tcp_port: ports[1],
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("no timeout")
+    .expect("to succeed");
+
+    let fut1 = session2.connect_detached(&dest);
+    let fut2 = session2.connect_detached(&dest);
+
+    let handle2 = tokio::spawn(async move {
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), fut1)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let mut buffer = vec![0u8; 64];
+        let nread = stream.read(&mut buffer).await.unwrap();
+        assert_eq!(std::str::from_utf8(&buffer[..nread]), Ok("hello, world!\n"));
+
+        stream.write_all(b"goodbye, world!\n").await.unwrap();
+    });
+
+    let handle3 = tokio::spawn(async move {
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), fut2)
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        let mut buffer = vec![0u8; 64];
+        let nread = stream.read(&mut buffer).await.unwrap();
+        assert_eq!(std::str::from_utf8(&buffer[..nread]), Ok("hello, world!\n"));
+
+        stream.write_all(b"goodbye, world!\n").await.unwrap();
+    });
+
+    let mut futures = JoinSet::new();
+    futures.spawn(handle1);
+    futures.spawn(handle2);
+    futures.spawn(handle3);
+
+    let values = tokio::time::timeout(Duration::from_secs(30), futures.join_all()).await.unwrap();
+    assert!(values.into_iter().all(|value| value.is_ok()));
 }

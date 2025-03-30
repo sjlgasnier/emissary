@@ -32,7 +32,7 @@ tokio = { version = "1.38.0", features = ["full"] }
 tracing-subscriber = { version = "0.3.18", features = ["chrono", "env-filter", "time"] }
 tracing = { version = "0.1.40", default-features = false }
 x25519-dalek = { version = "2.0.1", default-features = false }
-yosemite = "0.4.0"
+yosemite = { version = "0.4.2", features = ["async-extra"] }
 
 [profile.testnet]
 inherits = "release"

@@ -31,15 +31,16 @@
 //! and responder can be found from `initiator.rs` and `responder.rs`.
 
 use crate::{
-    crypto::{sha256::Sha256, siphash::SipHash, StaticPrivateKey},
+    crypto::{noise::NoiseContext, sha256::Sha256, siphash::SipHash, StaticPrivateKey},
     error::Error,
+    events::EventHandle,
     primitives::{RouterId, RouterInfo, TransportKind},
     profile::ProfileStorage,
     router::context::RouterContext,
     runtime::{Runtime, TcpStream},
     transport::{
         ntcp2::session::{initiator::Initiator, responder::Responder},
-        SubsystemHandle,
+        Direction, SubsystemHandle,
     },
     util::{is_global, AsyncReadExt, AsyncWriteExt},
 };
@@ -102,10 +103,10 @@ pub struct SessionManager<R: Runtime> {
     allow_local: bool,
 
     /// Chaining key.
-    chaining_key: Bytes,
+    chaining_key: [u8; 32],
 
     /// State that is common for all inbound connections.
-    inbound_initial_state: Bytes,
+    inbound_initial_state: [u8; 32],
 
     /// Local NTCP2 IV.
     local_iv: [u8; 16],
@@ -114,7 +115,7 @@ pub struct SessionManager<R: Runtime> {
     local_key: StaticPrivateKey,
 
     /// State that is common for all outbound connections.
-    outbound_initial_state: Bytes,
+    outbound_initial_state: [u8; 32],
 
     /// Router context.
     router_ctx: RouterContext<R>,
@@ -139,21 +140,21 @@ impl<R: Runtime> SessionManager<R> {
         allow_local: bool,
     ) -> Self {
         let local_key = StaticPrivateKey::from(local_key);
-        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
-        let chaining_key = state.clone();
-        let outbound_initial_state = Sha256::new().update(&state).finalize();
+        let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize_new();
+        let chaining_key = state;
+        let outbound_initial_state = Sha256::new().update(state).finalize_new();
         let inbound_initial_state = Sha256::new()
-            .update(&outbound_initial_state)
+            .update(outbound_initial_state)
             .update(local_key.public().to_vec())
-            .finalize();
+            .finalize_new();
 
         Self {
             allow_local,
-            chaining_key: Bytes::from(chaining_key),
-            inbound_initial_state: Bytes::from(inbound_initial_state),
+            chaining_key,
+            inbound_initial_state,
             local_iv,
             local_key,
-            outbound_initial_state: Bytes::from(outbound_initial_state),
+            outbound_initial_state,
             router_ctx,
             subsystem_handle,
         }
@@ -165,10 +166,10 @@ impl<R: Runtime> SessionManager<R> {
         net_id: u8,
         local_info: Bytes,
         local_key: StaticPrivateKey,
-        outbound_initial_state: Bytes,
-        chaining_key: Bytes,
+        noise_ctx: NoiseContext,
         allow_local: bool,
-        mut subsystem_handle: SubsystemHandle,
+        subsystem_handle: SubsystemHandle,
+        event_handle: EventHandle<R>,
     ) -> crate::Result<Ntcp2Session<R>> {
         let router_id = router.identity.id();
 
@@ -210,6 +211,7 @@ impl<R: Runtime> SessionManager<R> {
 
         tracing::trace!(
             target: LOG_TARGET,
+            %router_id,
             ?socket_address,
             "start dialing remote peer",
         );
@@ -220,15 +222,13 @@ impl<R: Runtime> SessionManager<R> {
                 %router_id,
                 "failed to dial router",
             );
-            subsystem_handle.report_connection_failure(router_id).await;
             return Err(Error::DialFailure);
         };
         let router_hash = router.identity.hash().to_vec();
 
         // create `SessionRequest` message and send it remote peer
         let (mut initiator, message) = Initiator::new::<R>(
-            &outbound_initial_state,
-            &chaining_key,
+            noise_ctx,
             local_info,
             local_key,
             &remote_key,
@@ -238,15 +238,27 @@ impl<R: Runtime> SessionManager<R> {
         )?;
         stream.write_all(&message).await?;
 
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            "`SessionRequest` sent, read `SessonCreated`",
+        );
+
         // read `SessionCreated` and decrypt & parse it to find padding length
         let mut reply = alloc::vec![0u8; 64];
-        stream.read_exact(&mut reply).await?;
+        stream.read_exact::<R>(&mut reply).await?;
 
-        let padding_len = initiator.register_session_confirmed(&reply)?;
+        let padding_len = initiator.register_session_created(&reply)?;
 
         // read padding and finalize session by sending `SessionConfirmed`
         let mut reply = alloc::vec![0u8; padding_len];
-        stream.read_exact(&mut reply).await?;
+        stream.read_exact::<R>(&mut reply).await?;
+
+        tracing::trace!(
+            target: LOG_TARGET,
+            %router_id,
+            "padding for `SessionCreated` read, create and send `SessionConfirmed`",
+        );
 
         let (key_context, message) = initiator.finalize(&reply)?;
         stream.write_all(&message).await?;
@@ -257,6 +269,8 @@ impl<R: Runtime> SessionManager<R> {
             stream,
             key_context,
             subsystem_handle,
+            Direction::Outbound,
+            event_handle,
         ))
     }
 
@@ -274,25 +288,39 @@ impl<R: Runtime> SessionManager<R> {
         let net_id = self.router_ctx.net_id();
         let local_info = self.router_ctx.router_info();
         let local_key = self.local_key.clone();
-        let outbound_initial_state = self.outbound_initial_state.clone();
-        let chaining_key = self.chaining_key.clone();
+        let outbound_initial_state = self.outbound_initial_state;
+        let chaining_key = self.chaining_key;
         let allow_local = self.allow_local;
-        let subsystem_handle = self.subsystem_handle.clone();
+        let mut subsystem_handle = self.subsystem_handle.clone();
+        let event_handle = self.router_ctx.event_handle().clone();
         let router_id = router.identity.id();
 
         async move {
-            Self::create_session_inner(
+            match Self::create_session_inner(
                 router,
                 net_id,
                 local_info,
                 local_key,
-                outbound_initial_state,
-                chaining_key,
+                NoiseContext::new(chaining_key, outbound_initial_state),
                 allow_local,
-                subsystem_handle,
+                subsystem_handle.clone(),
+                event_handle,
             )
             .await
-            .map_err(|error| (Some(router_id), error))
+            {
+                Ok(session) => Ok(session),
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        ?error,
+                        "failed to handshake with remote router",
+                    );
+                    let _ = subsystem_handle.report_connection_failure(router_id.clone()).await;
+
+                    Err((Some(router_id), error))
+                }
+            }
         }
     }
 
@@ -301,12 +329,12 @@ impl<R: Runtime> SessionManager<R> {
         mut stream: R::TcpStream,
         net_id: u8,
         local_router_hash: Vec<u8>,
-        inbound_initial_state: Bytes,
-        chaining_key: Bytes,
+        noise_ctx: NoiseContext,
         subsystem_handle: SubsystemHandle,
         local_key: StaticPrivateKey,
         iv: [u8; 16],
         profile_storage: ProfileStorage<R>,
+        event_handle: EventHandle<R>,
     ) -> crate::Result<Ntcp2Session<R>> {
         tracing::trace!(
             target: LOG_TARGET,
@@ -315,11 +343,10 @@ impl<R: Runtime> SessionManager<R> {
 
         // read first part of `SessionRequest` which has fixed length
         let mut message = vec![0u8; 64];
-        stream.read_exact(&mut message).await?;
+        stream.read_exact::<R>(&mut message).await?;
 
         let (mut responder, padding_len) = Responder::new(
-            &inbound_initial_state,
-            &chaining_key,
+            noise_ctx,
             local_router_hash,
             local_key.clone(),
             iv,
@@ -329,14 +356,14 @@ impl<R: Runtime> SessionManager<R> {
 
         // read padding and create session if the peer is accepted
         let mut padding = alloc::vec![0u8; padding_len];
-        stream.read_exact(&mut padding).await?;
+        stream.read_exact::<R>(&mut padding).await?;
 
         let (message, message_len) = responder.create_session::<R>(padding)?;
         stream.write_all(&message).await?;
 
         // read `SessionConfirmed` message and finalize session
         let mut message = alloc::vec![0u8; message_len];
-        stream.read_exact(&mut message).await?;
+        stream.read_exact::<R>(&mut message).await?;
 
         match responder.finalize(message) {
             Ok((key_context, router)) => {
@@ -360,6 +387,8 @@ impl<R: Runtime> SessionManager<R> {
                     stream,
                     key_context,
                     subsystem_handle,
+                    Direction::Inbound,
+                    event_handle,
                 ))
             }
             Err(error) => {
@@ -382,24 +411,25 @@ impl<R: Runtime> SessionManager<R> {
     ) -> impl Future<Output = Result<Ntcp2Session<R>, (Option<RouterId>, Error)>> {
         let net_id = self.router_ctx.net_id();
         let local_router_hash = self.router_ctx.router_id().to_vec();
-        let inbound_initial_state = self.inbound_initial_state.clone();
-        let chaining_key = self.chaining_key.clone();
+        let inbound_initial_state = self.inbound_initial_state;
+        let chaining_key = self.chaining_key;
         let subsystem_handle = self.subsystem_handle.clone();
         let local_key = self.local_key.clone();
         let iv = self.local_iv;
         let profile_storage = self.router_ctx.profile_storage().clone();
+        let event_handle = self.router_ctx.event_handle().clone();
 
         async move {
             Self::accept_session_inner(
                 stream,
                 net_id,
                 local_router_hash,
-                inbound_initial_state,
-                chaining_key,
+                NoiseContext::new(chaining_key, inbound_initial_state),
                 subsystem_handle,
                 local_key,
                 iv,
                 profile_storage,
+                event_handle,
             )
             .await
             .map_err(|error| (None, error))
@@ -412,6 +442,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{SigningPrivateKey, StaticPrivateKey},
+        events::EventManager,
         i2np::{MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION},
         primitives::{
             Capabilities, Date, RouterAddress, RouterIdentity, RouterInfo, Str, TransportKind,
@@ -521,6 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_succeeds() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -533,6 +565,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -553,6 +586,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -578,6 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_network_id_initiator() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().with_net_id(128).build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -590,6 +625,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 128,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -610,6 +646,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -632,6 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_network_id_responder() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -644,6 +682,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -665,6 +704,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 128u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -687,6 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn dialer_local_addresses_disabled() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -699,6 +740,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             false,
@@ -720,6 +762,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -741,6 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_local_addresses_disabled() {
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
         let local = Ntcp2Builder::new().build();
         let local_manager = SessionManager::new(
             local.ntcp2_key,
@@ -753,6 +797,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             SubsystemHandle::new(),
             true,
@@ -774,6 +819,7 @@ mod tests {
     async fn received_expired_message() {
         let local = Ntcp2Builder::new().build();
         let mut local_handle = SubsystemHandle::new();
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
 
         let (_local_tunnel_tx, _local_tunnel_rx) = channel(64);
         local_handle.register_subsystem(_local_tunnel_tx);
@@ -792,6 +838,7 @@ mod tests {
                 local.static_key,
                 local.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             local_handle,
             true,
@@ -821,6 +868,7 @@ mod tests {
                 remote.static_key,
                 remote.signing_key,
                 2u8,
+                event_handle.clone(),
             ),
             remote_handle.clone(),
             true,
@@ -879,7 +927,7 @@ mod tests {
             match local_rx.recv().await {
                 Some(InnerSubsystemEvent::I2Np { mut messages }) => {
                     assert_eq!(messages.len(), 1);
-                    let message = messages.pop().unwrap();
+                    let (_, message) = messages.pop().unwrap();
 
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
                     assert_eq!(message.message_id, 1337u32);
@@ -930,7 +978,7 @@ mod tests {
             match local_rx.recv().await {
                 Some(InnerSubsystemEvent::I2Np { mut messages }) => {
                     assert_eq!(messages.len(), 1);
-                    let message = messages.pop().unwrap();
+                    let (_, message) = messages.pop().unwrap();
 
                     assert_eq!(message.message_type, MessageType::DatabaseStore);
                     assert_eq!(message.message_id, 1339u32);

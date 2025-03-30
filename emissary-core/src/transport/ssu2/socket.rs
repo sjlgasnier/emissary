@@ -37,7 +37,7 @@ use crate::{
             },
             Packet,
         },
-        TransportEvent,
+        Direction, TransportEvent,
     },
 };
 
@@ -453,7 +453,10 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                     this.pending_pkts.push_back((pkt, target));
                     this.unvalidated_sessions.insert(router_id.clone(), context);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
+                        direction: Direction::Inbound,
+                        router_id,
+                    }));
                 }
                 Poll::Ready(Some(PendingSsu2SessionStatus::NewOutboundSession { context })) => {
                     let router_id = context.router_id.clone();
@@ -466,7 +469,10 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
 
                     this.unvalidated_sessions.insert(router_id.clone(), context);
 
-                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished { router_id }));
+                    return Poll::Ready(Some(TransportEvent::ConnectionEstablished {
+                        direction: Direction::Outbound,
+                        router_id,
+                    }));
                 }
                 Poll::Ready(Some(PendingSsu2SessionStatus::SessionTermianted {
                     connection_id,

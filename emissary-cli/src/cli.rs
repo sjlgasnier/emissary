@@ -18,7 +18,7 @@
 
 use clap::{Args, Parser};
 
-use std::path::PathBuf;
+use crate::config::Theme;
 
 #[derive(Args)]
 pub struct TunnelOptions {
@@ -48,6 +48,17 @@ pub struct TunnelOptions {
 }
 
 #[derive(Args)]
+pub struct TransitOptions {
+    /// Maximum number of transit tunnels.
+    #[arg(long, value_name = "MAX_TUNNELS")]
+    pub max_transit_tunnels: Option<usize>,
+
+    /// Disable transit tunnel manager.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_transit_tunnels: Option<bool>,
+}
+
+#[derive(Args)]
 pub struct ReseedOptions {
     /// Comma-separated list of reseed hosts
     ///
@@ -59,6 +70,10 @@ pub struct ReseedOptions {
     /// Don't reseed the router even if there aren't enough routers
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub disable_reseed: Option<bool>,
+
+    /// Reseed threshold.
+    #[arg(long, value_name = "RESEED_THRESHOLD")]
+    pub reseed_threshold: Option<usize>,
 
     /// Forcibly reseed the router even if there are enough routers
     #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -91,6 +106,40 @@ pub struct HttpProxyOptions {
     pub http_proxy_host: Option<String>,
 }
 
+#[derive(Args)]
+pub struct PortForwardingOptions {
+    /// Disable UPnP.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_upnp: Option<bool>,
+
+    /// Disable NAT-PMP.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_nat_pmp: Option<bool>,
+
+    /// Name for the UPnP client.
+    #[arg(long, value_name = "NAME")]
+    pub upnp_name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct RouterUiOptions {
+    /// Disable router UI
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub disable_ui: Option<bool>,
+
+    /// Router UI refresh interval
+    ///
+    /// How often are events gathered from different subsystem and redrawn in the UI
+    ///
+    /// Unit is seconds and must be at least 1
+    #[arg(long, value_name = "REFRESH_INTERVAL")]
+    pub refresh_interval: Option<usize>,
+
+    /// Router UI theme
+    #[arg(long, value_name = "THEME")]
+    pub theme: Option<Theme>,
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Arguments {
@@ -99,7 +148,7 @@ pub struct Arguments {
     /// Defaults to $HOME/.emissary/ and if it doesn't exist,
     /// new directory is created
     #[arg(short, long, value_name = "PATH")]
-    pub base_path: Option<PathBuf>,
+    pub base_path: Option<std::path::PathBuf>,
 
     /// Logging targets
     ///
@@ -129,6 +178,10 @@ pub struct Arguments {
     #[arg(long)]
     pub net_id: Option<u8>,
 
+    /// Overwrite configuration.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub overwrite_config: Option<bool>,
+
     /// Tunnel options.
     #[clap(flatten)]
     pub tunnel: TunnelOptions,
@@ -144,4 +197,16 @@ pub struct Arguments {
     /// HTTP proxy options.
     #[clap(flatten)]
     pub http_proxy: HttpProxyOptions,
+
+    /// Transit tunnel options.
+    #[clap(flatten)]
+    pub transit: TransitOptions,
+
+    /// Port forwarding options.
+    #[clap(flatten)]
+    pub port_forwarding: PortForwardingOptions,
+
+    /// Port forwarding options.
+    #[clap(flatten)]
+    pub router_ui: RouterUiOptions,
 }

@@ -23,7 +23,7 @@ use crate::{
 use bytes::BytesMut;
 use futures::{future::BoxFuture, FutureExt};
 
-use alloc::collections::VecDeque;
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     future::{pending, Future},
     marker::PhantomData,

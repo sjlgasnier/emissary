@@ -21,7 +21,7 @@
 use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
     fmt,
     future::Future,
@@ -95,7 +95,7 @@ pub trait JoinSet<T>: Stream<Item = T> + Unpin + Send {
         F::Output: Send;
 }
 
-pub trait Instant: fmt::Debug + Copy + Clone + Send + Unpin {
+pub trait Instant: fmt::Debug + Copy + Clone + Send + Unpin + Sync {
     /// Return much time has passed since an `Instant` was created.
     fn elapsed(&self) -> Duration;
 }
@@ -201,4 +201,9 @@ pub trait Runtime: Clone + Unpin + Send + 'static {
 pub trait AddressBook: Unpin + Send + Sync + 'static {
     /// Attempt to resolve `host` into a base64-encoded `Destination`.
     fn resolve(&self, host: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
+}
+
+pub trait Storage: Unpin + Send + Sync + 'static {
+    /// Save routers and their profiles to disk.
+    fn save_to_disk(&self, routers: Vec<(String, Option<Vec<u8>>, crate::Profile)>);
 }

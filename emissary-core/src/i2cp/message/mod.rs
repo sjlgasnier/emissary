@@ -34,14 +34,14 @@ use core::{fmt, time::Duration};
 
 pub use bandwidth::BandwidthLimits;
 pub use host_reply::{HostReply, HostReplyKind};
-pub use leaseset::RequestVariableLeaseSet;
+pub use lease_set::RequestVariableLeaseSet;
 pub use payload::MessagePayload;
 pub use session_status::{SessionStatus, SessionStatusKind};
 pub use set_date::SetDate;
 
 mod bandwidth;
 mod host_reply;
-mod leaseset;
+mod lease_set;
 mod payload;
 mod session_status;
 mod set_date;
@@ -468,25 +468,17 @@ impl Message {
         let (rest, date) = Date::parse_frame(rest).ok()?;
         let (_rest, signature) = take::<_, _, ()>(SIGNATURE_LEN)(rest).ok()?;
 
-        match destination.verifying_key() {
-            None => tracing::debug!(
+        if let Err(error) = destination.verifying_key().verify(
+            &input.as_ref()[..input.as_ref().len() - SIGNATURE_LEN],
+            signature,
+        ) {
+            tracing::warn!(
                 target: LOG_TARGET,
-                id = %destination.id(),
-                "no verifying key in destination, cannot verify signature",
-            ),
-            Some(signing_key) =>
-                if let Err(error) = signing_key.verify(
-                    &input.as_ref()[..input.as_ref().len() - SIGNATURE_LEN],
-                    signature,
-                ) {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        ?error,
-                        "failed to verify `CreateSession` signature",
-                    );
+                ?error,
+                "failed to verify `CreateSession` signature",
+            );
 
-                    return None;
-                },
+            return None;
         }
 
         Some(Message::CreateSession {

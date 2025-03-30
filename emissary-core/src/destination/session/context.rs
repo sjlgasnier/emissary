@@ -350,7 +350,15 @@ impl<R: Runtime> KeyContext<R> {
         // decrypt remote's static key and calculate new state
         let (static_key, state) = {
             let mut static_key = message[NS_STATIC_PUBKEY_OFFSET].to_vec();
-            ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut static_key)?;
+            ChaChaPoly::with_nonce(&cipher_key, 0u64)
+                .decrypt_with_ad(&state, &mut static_key)
+                .inspect(|error| {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed decrypt static key section",
+                    );
+                })?;
 
             cipher_key.zeroize();
 
@@ -372,7 +380,15 @@ impl<R: Runtime> KeyContext<R> {
                 Hmac::new(&temp_key).update(&chaining_key).update(b"").update([0x02]).finalize();
 
             let mut payload = message[NS_PAYLOAD_OFFSET].to_vec();
-            ChaChaPoly::with_nonce(&cipher_key, 0u64).decrypt_with_ad(&state, &mut payload)?;
+            ChaChaPoly::with_nonce(&cipher_key, 0u64)
+                .decrypt_with_ad(&state, &mut payload)
+                .inspect(|error| {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "failed decrypt payload section",
+                    );
+                })?;
 
             shared.zeroize();
             temp_key.zeroize();

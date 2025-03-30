@@ -24,7 +24,7 @@
 
 use crate::{
     crypto::{
-        aes::cbc::Aes, base64_encode, chachapoly::ChaChaPoly, hmac::Hmac, sha256::Sha256,
+        aes::cbc::Aes, base64_encode, chachapoly::ChaChaPoly, hmac::Hmac, noise::NoiseContext,
         siphash::SipHash, EphemeralPrivateKey, StaticPrivateKey, StaticPublicKey,
     },
     runtime::Runtime,
@@ -51,8 +51,8 @@ enum InitiatorState {
     /// Initiator has sent `SessionCreated` message to remote
     /// and is waitint to hear a response.
     SessionRequested {
-        /// State.
-        state: Vec<u8>,
+        /// Ephemeral private key.
+        ephemeral_key: EphemeralPrivateKey,
 
         /// AES IV.
         iv: [u8; 16],
@@ -60,42 +60,36 @@ enum InitiatorState {
         /// Local router info.
         local_info: Bytes,
 
-        /// Ephemeral private key.
-        ephemeral_key: EphemeralPrivateKey,
-
         /// Static private key.
         local_static_key: StaticPrivateKey,
 
+        /// Noise context.
+        noise_ctx: NoiseContext,
+
         /// Router hash.
         router_hash: Vec<u8>,
-
-        /// Chaining key.
-        chaining_key: Vec<u8>,
     },
 
     /// Responder has accepted the session request and is waiting for initiator to confirm the
     /// session
     SessionCreated {
-        /// State.
-        state: Vec<u8>,
-
-        /// Router hash.
-        router_hash: Vec<u8>,
-
         /// Local router info.
         local_info: Bytes,
 
         /// Static private key.
         local_static_key: StaticPrivateKey,
 
-        /// Chaining key.
-        chaining_key: Vec<u8>,
+        /// Noise context.
+        noise_ctx: NoiseContext,
 
         /// Remote key.
         remote_key: Vec<u8>,
 
         // Responder's public key.
         responder_public: Box<StaticPublicKey>,
+
+        /// Router hash.
+        router_hash: Vec<u8>,
     },
 
     /// Initiator state has been poisoned.
@@ -132,10 +126,9 @@ impl Initiator {
     /// together with an [`Initiator`] object which allows the call to drive progress on the
     /// opening connection.
     ///
-    /// [1]: [KDF part 1](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1)
+    /// [1]: <https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-1>
     pub fn new<R: Runtime>(
-        state: &[u8],
-        chaining_key: &[u8],
+        mut noise_ctx: NoiseContext,
         local_info: Bytes,
         local_static_key: StaticPrivateKey,
         remote_static_key: &StaticPublicKey,
@@ -150,23 +143,14 @@ impl Initiator {
         );
 
         // generate ephemeral key pair and apply MixHash(epub)
-        let state = Sha256::new().update(state).update(remote_static_key.to_vec()).finalize();
         let sk = EphemeralPrivateKey::random(R::rng());
         let pk = sk.public();
-        let state = Sha256::new().update(&state).update(&pk).finalize();
 
-        // perform dh and return chaining & local key
-        let (chaining_key, mut local_key) = {
-            let mut shared = sk.diffie_hellman(remote_static_key);
-            let mut temp_key = Hmac::new(chaining_key).update(&shared).finalize();
-            let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-            let local_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        // MixHash(rs), MixHash(e.pubkey)
+        noise_ctx.mix_hash(remote_static_key).mix_hash(&pk);
 
-            shared.zeroize();
-            temp_key.zeroize();
-
-            (chaining_key, local_key)
-        };
+        // MixKey(DH())
+        let mut local_key = noise_ctx.mix_key(&sk, remote_static_key);
 
         // encrypt X
         let mut aes = Aes::new_encryptor(&router_hash, &remote_iv);
@@ -188,55 +172,47 @@ impl Initiator {
             timestamp: R::time_since_epoch().as_secs() as u32,
             m3_p2_len: local_info.len() as u16 + 20u16,
         }
-        .serialize();
-        let tag = ChaChaPoly::new(&local_key).encrypt_with_ad(&state, &mut options)?;
+        .serialize()
+        .to_vec();
 
+        ChaChaPoly::new(&local_key).encrypt_with_ad_new(noise_ctx.state(), &mut options)?;
         local_key.zeroize();
 
         out.put_slice(&encrypted_x);
         out.put_slice(&options);
-        out.put_slice(&tag);
         out.put_slice(&padding);
 
-        // https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-2-and-message-3-part-1
-        let state = {
-            // MixHash(encrypted payload)
-            let state = Sha256::new().update(&state).update(&out[32..64]).finalize();
-
-            // MixHash(padding)
-            Sha256::new().update(&state).update(&out[64..96]).finalize()
-        };
+        // MixHash(encrypted payload), MixHash(padding)
+        noise_ctx.mix_hash(&out[32..64]).mix_hash(&out[64..96]);
 
         Ok((
             Self {
                 state: InitiatorState::SessionRequested {
-                    state,
-                    router_hash,
-                    local_info,
-                    chaining_key,
-                    iv: aes.iv(),
                     ephemeral_key: sk,
+                    iv: aes.iv(),
+                    local_info,
                     local_static_key,
+                    noise_ctx,
+                    router_hash,
                 },
             },
             out,
         ))
     }
 
-    /// Register `SessionConfirmed` message from responder (Bob).
+    /// Register `SessionCreated` message from responder (Bob).
     ///
     /// Decrypt `Y` and perform KDF for messages 2 and 3 part 1
     ///
-    /// [KDF part 2](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-2-and-message-3-part-1)
-    pub fn register_session_confirmed(&mut self, bytes: &[u8]) -> crate::Result<usize> {
+    /// <https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-handshake-message-2-and-message-3-part-1>
+    pub fn register_session_created(&mut self, bytes: &[u8]) -> crate::Result<usize> {
         let InitiatorState::SessionRequested {
-            mut state,
+            ephemeral_key,
             iv,
             local_info,
-            ephemeral_key,
             local_static_key,
+            mut noise_ctx,
             router_hash,
-            chaining_key,
         } = core::mem::take(&mut self.state)
         else {
             return Err(Error::InvalidState);
@@ -253,46 +229,33 @@ impl Initiator {
         let y = aes.decrypt(&bytes[..32]);
 
         // MixHash(e.pubkey)
-        state = Sha256::new().update(&state).update(&y).finalize();
+        noise_ctx.mix_hash(&y);
 
-        // perform dh between local and remote ephemeral public keys
-        // and generate new chaining key & remote key
-        let (chaining_key, remote_key, responder_public) = {
-            let responder_public = StaticPublicKey::from_bytes(&y).ok_or(Error::InvalidData)?;
-            let mut shared = ephemeral_key.diffie_hellman(&responder_public);
-            let mut temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-            let remote_key = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+        // MixKey(DH())
+        let responder_public = StaticPublicKey::from_bytes(&y).ok_or(Error::InvalidData)?;
+        let remote_key = noise_ctx.mix_key(&ephemeral_key, &responder_public);
 
-            ephemeral_key.zeroize();
-            shared.zeroize();
-            temp_key.zeroize();
-
-            (chaining_key, remote_key, responder_public)
-        };
-
-        // create new state by hashing the encrypted contents of `SessionCreated` but
-        // don't save it to `self.state` as associated data for `bytes` (decrypted below)
-        // refers to state before these payload bytes
-        let new_state = Sha256::new().update(&state).update(&bytes[32..64]).finalize();
-
-        // decrypt the chacha20poly1305 frame with generated remote key,
-        // deserialize `ResponderOptions` and extract the padding length
+        // decrypt the chacha20poly1305 frame with generated remote key, deserialize
+        // `ResponderOptions` and extract the padding length
         let padding = {
             let mut options = bytes[32..64].to_vec();
-            ChaChaPoly::new(&remote_key).decrypt_with_ad(&state, &mut options)?;
+            ChaChaPoly::new(&remote_key).decrypt_with_ad(noise_ctx.state(), &mut options)?;
 
             ResponderOptions::parse(&options).ok_or(Error::InvalidData)?.padding_length as usize
         };
 
+        // MixHash(ciphertext)
+        //
+        // https://geti2p.net/spec/ntcp2#encryption-for-for-handshake-message-3-part-1-using-message-2-kdf
+        noise_ctx.mix_hash(&bytes[32..64]);
+
         self.state = InitiatorState::SessionCreated {
-            state: new_state,
             local_info,
             local_static_key,
-            router_hash,
-            chaining_key,
-            remote_key,
+            noise_ctx,
+            remote_key: remote_key.to_vec(),
             responder_public: Box::new(responder_public),
+            router_hash,
         };
 
         Ok(padding)
@@ -305,16 +268,15 @@ impl Initiator {
     /// message which contains local public key & router info and finally derive keys
     /// for the data phase.
     ///
-    /// [KDF for data phase](https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-data-phase)
+    /// <https://geti2p.net/spec/ntcp2#key-derivation-function-kdf-for-data-phase>
     pub fn finalize(&mut self, padding: &[u8]) -> crate::Result<(KeyContext, BytesMut)> {
         let InitiatorState::SessionCreated {
-            mut state,
             local_info,
             local_static_key,
-            chaining_key,
-            router_hash,
+            mut noise_ctx,
             remote_key,
             responder_public,
+            router_hash,
         } = core::mem::take(&mut self.state)
         else {
             return Err(Error::InvalidState);
@@ -327,55 +289,43 @@ impl Initiator {
         );
 
         // MixHash(padding)
-        state = Sha256::new().update(&state).update(padding).finalize();
+        noise_ctx.mix_hash(padding);
 
         // encrypt local public key
         let mut s_p_bytes = local_static_key.public().to_vec();
         let mut cipher = ChaChaPoly::with_nonce(&remote_key, 1);
-        let tag1 = cipher.encrypt_with_ad(&state, &mut s_p_bytes)?;
+        cipher.encrypt_with_ad_new(noise_ctx.state(), &mut s_p_bytes)?;
 
         // MixHash(ciphertext)
-        state = Sha256::new().update(&state).update(&s_p_bytes).update(&tag1).finalize();
+        noise_ctx.mix_hash(&s_p_bytes);
 
         // perform diffie-hellman key exchange and derive keys for data phase
         let (key_context, message) = {
-            let mut shared = local_static_key.diffie_hellman(&*responder_public);
-
             // MixKey(DH())
-            //
-            // Generate a temp key from the chaining key and DH result
-            // ck is the chaining key, from the KDF for handshake message 1
-            let temp_key = Hmac::new(&chaining_key).update(&shared).finalize();
-            let mut chaining_key = Hmac::new(&temp_key).update([0x01]).finalize();
-            let k = Hmac::new(&temp_key).update(&chaining_key).update([0x02]).finalize();
+            let mut k = noise_ctx.mix_key(&local_static_key, &*responder_public);
 
             // h from message 3 part 1 is used as the associated data
             // for the AEAD in message 3 part 2
             let mut message = MessageBlock::new_router_info(&local_info);
-
-            let mut cipher = ChaChaPoly::with_nonce(&k, 0);
-            let tag2 = cipher.encrypt_with_ad(&state, &mut message)?;
+            ChaChaPoly::with_nonce(&k, 0).encrypt_with_ad_new(noise_ctx.state(), &mut message)?;
 
             // MixHash(ciphertext)
-            let state = Sha256::new().update(&state).update(&message).update(&tag2).finalize();
+            noise_ctx.mix_hash(&message);
 
             // create `SessionConfirmed` message
             let mut out = BytesMut::with_capacity(local_info.len() + 20 + 48);
             out.put_slice(&s_p_bytes);
-            out.put_slice(&tag1);
             out.put_slice(&message);
-            out.put_slice(&tag2);
 
             // create send and receive keys
-            let temp_key = Hmac::new(&chaining_key).update([]).finalize();
+            let temp_key = Hmac::new(noise_ctx.chaining_key()).update([]).finalize();
             let send_key = Hmac::new(&temp_key).update([0x01]).finalize();
             let receive_key = Hmac::new(&temp_key).update(&send_key).update([0x02]).finalize();
 
             // siphash context for (de)obfuscating message sizes
-            let sip = SipHash::new_initiator(&temp_key, &state);
+            let sip = SipHash::new_initiator(&temp_key, noise_ctx.state());
 
-            chaining_key.zeroize();
-            shared.zeroize();
+            k.zeroize();
 
             (KeyContext::new(send_key, receive_key, sip), out)
         };

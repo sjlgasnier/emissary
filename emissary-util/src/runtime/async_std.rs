@@ -122,18 +122,28 @@ impl AsyncWrite for AsyncStdTcpStream {
 
 impl TcpStream for AsyncStdTcpStream {
     async fn connect(address: SocketAddr) -> Option<Self> {
-        net::TcpStream::connect(address)
+        match async_std::future::timeout(Duration::from_secs(10), net::TcpStream::connect(address))
             .await
-            .map_err(|error| {
+        {
+            Err(_) => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     ?address,
-                    ?error,
+                    "timeout while dialing address",
+                );
+                None
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    ?address,
+                    error = ?error.kind(),
                     "failed to connect"
                 );
-            })
-            .ok()
-            .map(|stream| Self::new(stream))
+                None
+            }
+            Ok(Ok(stream)) => Some(Self::new(stream)),
+        }
     }
 }
 
