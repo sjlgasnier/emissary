@@ -182,7 +182,7 @@ pub struct RouterUiConfig {
     pub refresh_interval: usize,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(rename = "address-book")]
     address_book: Option<AddressBookConfig>,
@@ -213,6 +213,64 @@ struct EmissaryConfig {
     server_tunnels: Option<Vec<ServerTunnelConfig>>,
     #[serde(rename = "router-ui")]
     router_ui: Option<RouterUiConfig>,
+}
+
+impl Default for EmissaryConfig {
+    fn default() -> Self {
+        Self {
+            address_book: Some(AddressBookConfig {
+                default: Some(String::from(
+                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
+                )),
+                subscriptions: None,
+            }),
+            caps: Some(String::from("XR")),
+            http_proxy: Some(HttpProxyConfig {
+                host: "127.0.0.1".to_string(),
+                port: 4444u16,
+            }),
+            i2cp: Some(I2cpConfig {
+                port: 7654,
+                host: None,
+            }),
+            metrics: Some(MetricsConfig { port: 7788 }),
+            ntcp2: Some(Ntcp2Config {
+                port: 25115u16,
+                host: None,
+                publish: Some(true),
+            }),
+            port_forwarding: Some(PortForwardingConfig {
+                nat_pmp: true,
+                upnp: true,
+                name: String::from("emissary"),
+            }),
+            reseed: Some(ReseedConfig {
+                reseed_threshold: 25usize,
+                hosts: None,
+            }),
+            router_ui: Some(RouterUiConfig {
+                theme: Theme::Dark,
+                refresh_interval: 5usize,
+            }),
+            sam: Some(SamConfig {
+                tcp_port: 7656,
+                udp_port: 7655,
+                host: None,
+            }),
+            transit: Some(TransitConfig {
+                max_tunnels: Some(1000),
+            }),
+            allow_local: false,
+            exploratory: None,
+            floodfill: false,
+            insecure_tunnels: false,
+            log: None,
+            net_id: None,
+            ssu2: None,
+            client_tunnels: None,
+            server_tunnels: None,
+        }
+    }
 }
 
 /// Router configuration.
@@ -620,46 +678,12 @@ impl Config {
         let static_key = Self::create_static_key(base_path.clone())?;
         let signing_key = Self::create_signing_key(base_path.clone())?;
         let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
-        let (ssu2_static_key, ssu2_intro_key) = Self::create_ssu2_keys(base_path.clone())?;
+        let (_ssu2_static_key, _ssu2_intro_key) = Self::create_ssu2_keys(base_path.clone())?;
 
-        let config = EmissaryConfig {
-            address_book: Some(AddressBookConfig {
-                default: Some(String::from(
-                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                )),
-                subscriptions: None,
-            }),
-            http_proxy: Some(HttpProxyConfig {
-                host: "127.0.0.1".to_string(),
-                port: 4444u16,
-            }),
-            i2cp: Some(I2cpConfig {
-                port: 7654,
-                host: None,
-            }),
-            metrics: Some(MetricsConfig { port: 7788 }),
-            reseed: Some(ReseedConfig {
-                reseed_threshold: 25usize,
-                hosts: None,
-            }),
-            ntcp2: Some(Ntcp2Config {
-                port: 8888u16,
-                host: None,
-                publish: Some(false),
-            }),
-            sam: Some(SamConfig {
-                tcp_port: 7656,
-                udp_port: 7655,
-                host: None,
-            }),
-            transit: Some(TransitConfig {
-                max_tunnels: Some(5000),
-            }),
-            ..Default::default()
-        };
-        let config = toml::to_string(&config).expect("to succeed");
+        let config = EmissaryConfig::default();
+        let serialized = toml::to_string(&config).expect("to succeed");
         let mut file = fs::File::create(base_path.join("router.toml"))?;
-        file.write_all(config.as_bytes())?;
+        file.write_all(serialized.as_bytes())?;
 
         tracing::info!(
             target: LOG_TARGET,
@@ -668,70 +692,53 @@ impl Config {
         );
 
         Ok(Self {
-            address_book: Some(AddressBookConfig {
-                default: Some(String::from(
-                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                )),
-                subscriptions: None,
-            }),
-            allow_local: false,
+            address_book: config.address_book,
+            allow_local: config.allow_local,
             base_path,
-            caps: None,
-            client_tunnels: Vec::new(),
-            exploratory: None,
-            floodfill: false,
-            http_proxy: Some(HttpProxyConfig {
-                host: "127.0.0.1".to_string(),
-                port: 4444u16,
+            caps: config.caps,
+            client_tunnels: config.client_tunnels.unwrap_or(Vec::new()),
+            exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
+                inbound_len: config.inbound_len,
+                inbound_count: config.inbound_count,
+                outbound_len: config.outbound_len,
+                outbound_count: config.outbound_count,
             }),
-            i2cp_config: Some(emissary_core::I2cpConfig {
-                port: 7654u16,
-                host: String::from("127.0.0.1"),
+            floodfill: config.floodfill,
+            http_proxy: config.http_proxy,
+            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig {
+                port: config.port,
+                host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
-            insecure_tunnels: false,
-            log: None,
-            metrics: Some(emissary_core::MetricsConfig { port: 7788 }),
-            net_id: None,
+            insecure_tunnels: config.insecure_tunnels,
+            log: config.log,
+            metrics: config
+                .metrics
+                .map(|config| emissary_core::MetricsConfig { port: config.port }),
+            net_id: config.net_id,
             ntcp2_config: Some(emissary_core::Ntcp2Config {
-                port: 8888u16,
-                host: Some("127.0.0.1".parse().expect("valid address")),
+                port: config.ntcp2.as_ref().expect("ntcp").port,
+                host: None,
                 key: ntcp2_key,
                 iv: ntcp2_iv,
-                publish: false,
+                publish: true,
             }),
-            port_forwarding: Some(PortForwardingConfig {
-                nat_pmp: true,
-                upnp: true,
-                name: String::from("emissary"),
-            }),
+            port_forwarding: config.port_forwarding,
             profiles: Vec::new(),
-            reseed: Some(ReseedConfig {
-                reseed_threshold: 25usize,
-                hosts: None,
-            }),
+            reseed: config.reseed,
             router_info: None,
-            router_ui: Some(RouterUiConfig {
-                theme: Theme::Dark,
-                refresh_interval: 5,
-            }),
+            router_ui: config.router_ui,
             routers: Vec::new(),
-            sam_config: Some(emissary_core::SamConfig {
-                tcp_port: 7656u16,
-                udp_port: 7655u16,
-                host: String::from("127.0.0.1"),
+            sam_config: config.sam.map(|config| emissary_core::SamConfig {
+                tcp_port: config.tcp_port,
+                udp_port: config.udp_port,
+                host: config.host.unwrap_or(String::from("127.0.0.1")),
             }),
-            server_tunnels: Vec::new(),
+            server_tunnels: config.server_tunnels.unwrap_or(Vec::new()),
             signing_key,
-            ssu2_config: Some(emissary_core::Ssu2Config {
-                port: 8888u16,
-                host: Some("127.0.0.1".parse().expect("valid address")),
-                static_key: ssu2_static_key,
-                intro_key: ssu2_intro_key,
-                publish: false,
-            }),
+            ssu2_config: None,
             static_key,
-            transit: Some(emissary_core::TransitConfig {
-                max_tunnels: Some(5000),
+            transit: config.transit.map(|config| emissary_core::TransitConfig {
+                max_tunnels: config.max_tunnels,
             }),
         })
     }
@@ -751,37 +758,7 @@ impl Config {
         let config = match config {
             Some(config) => config,
             None => {
-                let config = EmissaryConfig {
-                    address_book: Some(AddressBookConfig {
-                        default: Some(String::from(
-                            "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                        )),
-                        subscriptions: None,
-                    }),
-                    http_proxy: Some(HttpProxyConfig {
-                        host: "127.0.0.1".to_string(),
-                        port: 4444u16,
-                    }),
-                    i2cp: Some(I2cpConfig { port: 7654, host: None, }),
-                    metrics: Some(MetricsConfig {
-                        port: 7788
-                    }),
-                    ntcp2: Some(Ntcp2Config {
-                        port: 8888u16,
-                        host: None,
-                        publish: Some(false),
-                    }),
-                    sam: Some(SamConfig {
-                        tcp_port: 7656,
-                        udp_port: 7655,
-                        host: None,
-                    }),
-                    transit: Some(TransitConfig {
-                        max_tunnels: Some(5000),
-                    }),
-                    ..Default::default()
-                };
-
+                let config = EmissaryConfig::default();
                 let toml_config = toml::to_string(&config).expect("to succeed");
                 let mut file = fs::File::create(base_path.join("router.toml"))?;
                 file.write_all(toml_config.as_bytes())?;
