@@ -522,6 +522,7 @@ impl<R: Runtime> LeaseSetManager<R> {
             target: LOG_TARGET,
             local = %self.destination_id,
             %floodfill,
+            num_floodfills = ?self.floodfills.len(),
             "publish lease set",
         );
 

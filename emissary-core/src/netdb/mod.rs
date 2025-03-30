@@ -1542,7 +1542,7 @@ impl<R: Runtime> NetDb<R> {
     ) {
         let floodfills = self
             .floodfill_dht
-            .closest(&key, 3usize)
+            .closest(&key, 10usize)
             .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|router_id| {
@@ -1669,7 +1669,7 @@ impl<R: Runtime> NetDb<R> {
         let Ok((message, outbound_tunnel)) =
             self.message_builder.create_router_exploration(key.clone())
         else {
-            tracing::warn!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 "cannot perform router exploration, no inbound/outbound tunnels",
             );
