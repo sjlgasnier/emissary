@@ -292,7 +292,7 @@ impl RouterUi {
                         Self::calculate_bandwidth(self.bandwidth as f64 / uptime as f64);
 
                     Text::new(format!(
-                        "Total bandwidth: {:.1} {} ({:.1} {}/s)",
+                        "Total bandwidth: {:.2} {} ({:.2} {}/s)",
                         total, total_unit, per_second, per_second_unit,
                     ))
                 };
@@ -320,7 +320,7 @@ impl RouterUi {
                         Self::calculate_bandwidth(self.transit_bandwidth as f64 / uptime as f64);
 
                     Text::new(format!(
-                        "Transit bandwidth: {:.1} {} ({:.1} {}/s)",
+                        "Transit bandwidth: {:.2} {} ({:.2} {}/s)",
                         total, total_unit, per_second, per_second_unit,
                     ))
                 };

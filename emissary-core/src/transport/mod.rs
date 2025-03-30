@@ -774,13 +774,12 @@ impl<R: Runtime> TransportManager<R> {
                                 // instead dropped the channel which shouldn't happen unless there
                                 // is a bug in router info query logic
                                 Err(error) => {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         target: LOG_TARGET,
                                         %router_id,
                                         ?error,
                                         "netdb didn't properly finish the router info lookup",
                                     );
-                                    debug_assert!(false);
 
                                     (router_id, Err(QueryError::Timeout))
                                 }

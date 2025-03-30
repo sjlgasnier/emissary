@@ -390,18 +390,52 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             shuffle(&mut router_ids, &mut R::rng());
 
             if router_ids.len() < num_hops {
-                let mut fast_router_ids =
+                let mut extra_router_ids =
                     self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
                         !profile.is_failing::<R>() && router_info.is_reachable()
                     });
 
+                // if there aren't enough routers in the fast bucket,
+                // attempt to use untracked routers
                 let num_needed = num_hops - router_ids.len();
-                if num_needed > fast_router_ids.len() {
+
+                if num_needed > extra_router_ids.len() {
+                    let untracked = self.profile_storage.get_router_ids(
+                        Bucket::Untracked,
+                        |_, router_info, profile| {
+                            !profile.is_failing::<R>() && router_info.is_reachable()
+                        },
+                    );
+
+                    extra_router_ids.extend(untracked);
+                    extra_router_ids = extra_router_ids
+                        .into_iter()
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                }
+
+                // if there aren't enough routers, use failing routers
+                if num_needed > extra_router_ids.len() {
+                    let failing =
+                        self.profile_storage.get_router_ids(Bucket::Any, |_, router_info, _| {
+                            router_info.is_reachable()
+                        });
+
+                    extra_router_ids.extend(failing);
+                    extra_router_ids = extra_router_ids
+                        .into_iter()
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                }
+
+                if num_needed > extra_router_ids.len() {
                     return None;
                 }
 
-                shuffle(&mut fast_router_ids, &mut R::rng());
-                router_ids.extend(fast_router_ids.into_iter().take(num_needed));
+                shuffle(&mut extra_router_ids, &mut R::rng());
+                router_ids.extend(extra_router_ids.into_iter().take(num_needed));
             }
 
             router_ids.iter().take(num_hops).for_each(|router_id| {
@@ -445,7 +479,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 |router_id, router_info, profile| {
                     !profile.is_failing::<R>()
                         && router_info.is_reachable()
-                        && (self.insecure || self.can_participate(router_id))
+                        && self.can_participate(router_id)
                 },
             );
 
@@ -455,17 +489,69 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 .group_by_subnet(fast_router_ids)
                 .into_iter()
                 .filter_map(|(subnet, fast_routers)| {
-                    (!routers.contains_key(&subnet)).then_some(fast_routers)
+                    (!routers.contains_key(&subnet)).then_some((subnet, fast_routers))
                 })
-                .collect::<Vec<_>>();
+                .collect::<HashMap<_, _>>();
 
-            if routers.len() + fast_router_addresses.len() < num_hops {
+            let untracked = (routers.len() + fast_router_addresses.len() < num_hops).then(|| {
+                let untracked_router_ids = self.profile_storage.get_router_ids(
+                    Bucket::Untracked,
+                    |router_id, router_info, profile| {
+                        !profile.is_failing::<R>()
+                            && router_info.is_reachable()
+                            && self.can_participate(router_id)
+                    },
+                );
+
+                // group untracked routers by subnet and filter out subnets which the
+                // already-selected routers are part of
+                self.group_by_subnet(untracked_router_ids)
+                    .into_iter()
+                    .filter_map(|(subnet, untracked_routers)| {
+                        (!routers.contains_key(&subnet)
+                            && !fast_router_addresses.contains_key(&subnet))
+                        .then_some((subnet, untracked_routers))
+                    })
+                    .collect::<HashMap<_, _>>()
+            });
+
+            let failing = (routers.len()
+                + fast_router_addresses.len()
+                + untracked.as_ref().map_or(0usize, |untracked| untracked.len())
+                < num_hops)
+                .then(|| {
+                    let failing_router_ids = self.profile_storage.get_router_ids(
+                        Bucket::Any,
+                        |router_id, router_info, _| {
+                            router_info.is_reachable() && self.can_participate(router_id)
+                        },
+                    );
+
+                    // group routers by subnet and filter out subnets which the
+                    // already-selected routers are part of
+                    self.group_by_subnet(failing_router_ids)
+                        .into_iter()
+                        .filter_map(|(subnet, failing_routers)| {
+                            (!routers.contains_key(&subnet)
+                                && !fast_router_addresses.contains_key(&subnet)
+                                && !untracked.as_ref().expect("to exist").contains_key(&subnet))
+                            .then_some((subnet, failing_routers))
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+
+            if routers.len()
+                + fast_router_addresses.len()
+                + untracked.as_ref().map_or(0usize, |untracked| untracked.len())
+                + failing.as_ref().map_or(0usize, |failing| failing.len())
+                < num_hops
+            {
                 return None;
             }
 
             let mut fast_router_addresses: Vec<RouterId> = fast_router_addresses
                 .into_iter()
-                .map(|mut routers| routers.pop().expect("to exist"))
+                .map(|(_, mut routers)| routers.pop().expect("to exist"))
                 .collect::<Vec<_>>();
             let mut routers = routers.into_iter().map(|(_, router)| router).collect::<Vec<_>>();
 
@@ -473,6 +559,27 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             shuffle(&mut fast_router_addresses, &mut R::rng());
 
             routers.extend(fast_router_addresses);
+
+            if let Some(untracked) = untracked {
+                let mut untracked: Vec<RouterId> = untracked
+                    .into_iter()
+                    .map(|(_, mut routers)| routers.pop().expect("to exist"))
+                    .collect::<Vec<_>>();
+
+                shuffle(&mut untracked, &mut R::rng());
+                routers.extend(untracked);
+            }
+
+            if let Some(failing) = failing {
+                let mut failing: Vec<RouterId> = failing
+                    .into_iter()
+                    .map(|(_, mut routers)| routers.pop().expect("to exist"))
+                    .collect::<Vec<_>>();
+
+                shuffle(&mut failing, &mut R::rng());
+                routers.extend(failing);
+            }
+
             routers
         } else {
             // select random router from each subnet and shuffle selected routers
@@ -669,20 +776,55 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             shuffle(&mut router_ids, &mut R::rng());
 
             if router_ids.len() < num_hops {
-                let mut standard_router_ids = self.exploratory.profile_storage.get_router_ids(
+                let mut extra_router_ids = self.exploratory.profile_storage.get_router_ids(
                     Bucket::Standard,
                     |_, router_info, profile| {
                         !profile.is_failing::<R>() && router_info.is_reachable()
                     },
                 );
 
+                // if there aren't enough routers in the fast bucket,
+                // attempt to use untracked routers
                 let num_needed = num_hops - router_ids.len();
-                if num_needed > standard_router_ids.len() {
+
+                if num_needed > extra_router_ids.len() {
+                    let untracked = self.exploratory.profile_storage.get_router_ids(
+                        Bucket::Untracked,
+                        |_, router_info, profile| {
+                            !profile.is_failing::<R>() && router_info.is_reachable()
+                        },
+                    );
+
+                    extra_router_ids.extend(untracked);
+                    extra_router_ids = extra_router_ids
+                        .into_iter()
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                }
+
+                // if there aren't enough routers, use failing routers
+                if num_needed > extra_router_ids.len() {
+                    let failing = self
+                        .exploratory
+                        .profile_storage
+                        .get_router_ids(Bucket::Any, |_, router_info, _| {
+                            router_info.is_reachable()
+                        });
+
+                    extra_router_ids.extend(failing);
+                    extra_router_ids = extra_router_ids
+                        .into_iter()
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                }
+
+                if num_needed > extra_router_ids.len() {
                     return None;
                 }
 
-                shuffle(&mut standard_router_ids, &mut R::rng());
-                router_ids.extend(standard_router_ids.into_iter().take(num_needed));
+                router_ids.extend(extra_router_ids.into_iter().take(num_needed));
             }
 
             router_ids.iter().take(num_hops).for_each(|router_id| {
@@ -725,8 +867,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 |router_id, router_info, profile| {
                     !profile.is_failing::<R>()
                         && router_info.is_reachable()
-                        && (self.exploratory.insecure
-                            || self.exploratory.can_participate(router_id))
+                        && self.exploratory.can_participate(router_id)
                 },
             );
 
@@ -737,17 +878,73 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 .group_by_subnet(standard_router_ids)
                 .into_iter()
                 .filter_map(|(subnet, standard_routers)| {
-                    (!routers.contains_key(&subnet)).then_some(standard_routers)
+                    (!routers.contains_key(&subnet)).then_some((subnet, standard_routers))
                 })
-                .collect::<Vec<_>>();
+                .collect::<HashMap<_, _>>();
 
-            if routers.len() + standard_router_addresses.len() < num_hops {
+            let untracked =
+                (routers.len() + standard_router_addresses.len() < num_hops).then(|| {
+                    let untracked_router_ids = self.exploratory.profile_storage.get_router_ids(
+                        Bucket::Untracked,
+                        |router_id, router_info, profile| {
+                            !profile.is_failing::<R>()
+                                && router_info.is_reachable()
+                                && self.exploratory.can_participate(router_id)
+                        },
+                    );
+
+                    // group untracked routers by subnet and filter out subnets which the
+                    // already-selected routers are part of
+                    self.exploratory
+                        .group_by_subnet(untracked_router_ids)
+                        .into_iter()
+                        .filter_map(|(subnet, untracked_routers)| {
+                            (!routers.contains_key(&subnet)
+                                && !standard_router_addresses.contains_key(&subnet))
+                            .then_some((subnet, untracked_routers))
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+
+            let failing = (routers.len()
+                + standard_router_addresses.len()
+                + untracked.as_ref().map_or(0usize, |untracked| untracked.len())
+                < num_hops)
+                .then(|| {
+                    let failing_router_ids = self.exploratory.profile_storage.get_router_ids(
+                        Bucket::Any,
+                        |router_id, router_info, _| {
+                            router_info.is_reachable()
+                                && self.exploratory.can_participate(router_id)
+                        },
+                    );
+
+                    // group routers by subnet and filter out subnets which the
+                    // already-selected routers are part of
+                    self.exploratory
+                        .group_by_subnet(failing_router_ids)
+                        .into_iter()
+                        .filter_map(|(subnet, failing_routers)| {
+                            (!routers.contains_key(&subnet)
+                                && !standard_router_addresses.contains_key(&subnet)
+                                && !untracked.as_ref().expect("to exist").contains_key(&subnet))
+                            .then_some((subnet, failing_routers))
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+
+            if routers.len()
+                + standard_router_addresses.len()
+                + untracked.as_ref().map_or(0usize, |untracked| untracked.len())
+                + failing.as_ref().map_or(0usize, |failing| failing.len())
+                < num_hops
+            {
                 return None;
             }
 
             let mut standard_router_addresses: Vec<RouterId> = standard_router_addresses
                 .into_iter()
-                .map(|mut routers| routers.pop().expect("to exist"))
+                .map(|(_, mut routers)| routers.pop().expect("to exist"))
                 .collect::<Vec<_>>();
             let mut routers = routers.into_iter().map(|(_, router)| router).collect::<Vec<_>>();
 
@@ -755,6 +952,27 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             shuffle(&mut standard_router_addresses, &mut R::rng());
 
             routers.extend(standard_router_addresses);
+
+            if let Some(untracked) = untracked {
+                let mut untracked: Vec<RouterId> = untracked
+                    .into_iter()
+                    .map(|(_, mut routers)| routers.pop().expect("to exist"))
+                    .collect::<Vec<_>>();
+
+                shuffle(&mut untracked, &mut R::rng());
+                routers.extend(untracked);
+            }
+
+            if let Some(failing) = failing {
+                let mut failing: Vec<RouterId> = failing
+                    .into_iter()
+                    .map(|(_, mut routers)| routers.pop().expect("to exist"))
+                    .collect::<Vec<_>>();
+
+                shuffle(&mut failing, &mut R::rng());
+                routers.extend(failing);
+            }
+
             routers
         } else {
             // select random router from each subnet and shuffle selected routers
@@ -803,8 +1021,8 @@ mod tests {
         tunnel::pool::TunnelPoolBuildParameters,
     };
 
-    #[test]
-    fn not_enough_routers_for_exploratory_tunnel() {
+    #[tokio::test]
+    async fn not_enough_routers_for_exploratory_tunnel() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -824,8 +1042,8 @@ mod tests {
         assert!(selector.select_hops(5).is_none());
     }
 
-    #[test]
-    fn select_exploratory_hops() {
+    #[tokio::test]
+    async fn select_exploratory_hops() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -861,8 +1079,8 @@ mod tests {
         assert_ne!(num_same, 5);
     }
 
-    #[test]
-    fn use_fast_routers_as_fallback() {
+    #[tokio::test]
+    async fn use_fast_routers_as_fallback() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -926,8 +1144,8 @@ mod tests {
         assert_eq!(fast, 2);
     }
 
-    #[test]
-    fn not_enough_routers_for_client_tunnel() {
+    #[tokio::test]
+    async fn not_enough_routers_for_client_tunnel() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -950,8 +1168,8 @@ mod tests {
         assert!(selector.select_hops(5).is_none());
     }
 
-    #[test]
-    fn select_client_hops() {
+    #[tokio::test]
+    async fn select_client_hops() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -990,8 +1208,8 @@ mod tests {
         assert_ne!(num_same, 5);
     }
 
-    #[test]
-    fn use_standard_routers_as_fallback() {
+    #[tokio::test]
+    async fn use_standard_routers_as_fallback() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1040,8 +1258,8 @@ mod tests {
         assert_eq!(fast, 3);
     }
 
-    #[test]
-    fn exploratory_not_enough_routers_in_distinct_subnets() {
+    #[tokio::test]
+    async fn exploratory_not_enough_routers_in_distinct_subnets() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1092,8 +1310,8 @@ mod tests {
         assert!(selector.select_hops(3).is_none());
     }
 
-    #[test]
-    fn client_not_enough_routers_in_distinct_subnets() {
+    #[tokio::test]
+    async fn client_not_enough_routers_in_distinct_subnets() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1147,8 +1365,8 @@ mod tests {
         assert!(selector.select_hops(3).is_none());
     }
 
-    #[test]
-    fn exploratory_not_enough_reachable_routers() {
+    #[tokio::test]
+    async fn exploratory_not_enough_reachable_routers() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1184,8 +1402,8 @@ mod tests {
         assert!(selector.select_hops(5).is_none());
     }
 
-    #[test]
-    fn client_not_enough_standard_or_fast_routers() {
+    #[tokio::test]
+    async fn client_not_enough_standard_or_fast_routers() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1224,8 +1442,8 @@ mod tests {
         assert!(selector.select_hops(5).is_none());
     }
 
-    #[test]
-    fn exploratory_insecure_tunnels_not_enough_distinct_subnets() {
+    #[tokio::test]
+    async fn exploratory_insecure_tunnels_not_enough_distinct_subnets() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1280,8 +1498,8 @@ mod tests {
             .is_standard()));
     }
 
-    #[test]
-    fn client_insecure_tunnels_not_enough_distinct_subnets() {
+    #[tokio::test]
+    async fn client_insecure_tunnels_not_enough_distinct_subnets() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1339,8 +1557,8 @@ mod tests {
             .is_fast()));
     }
 
-    #[test]
-    fn exploratory_insecure_tunnels_not_enough_distinct_subnets_or_standard_peers() {
+    #[tokio::test]
+    async fn exploratory_insecure_tunnels_not_enough_distinct_subnets_or_standard_peers() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1419,8 +1637,8 @@ mod tests {
         assert_ne!(num_same, 5);
     }
 
-    #[test]
-    fn client_insecure_tunnels_not_enough_distinct_subnets_or_fast_peers() {
+    #[tokio::test]
+    async fn client_insecure_tunnels_not_enough_distinct_subnets_or_fast_peers() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1502,8 +1720,8 @@ mod tests {
         assert_ne!(num_same, 5);
     }
 
-    #[test]
-    fn router_participation() {
+    #[tokio::test]
+    async fn router_participation() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
         let routers = (0..11).map(|_| RouterId::random()).collect::<Vec<_>>();
@@ -1581,8 +1799,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn exploratory_enforce_max_participation() {
+    #[tokio::test]
+    async fn exploratory_enforce_max_participation() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1620,8 +1838,8 @@ mod tests {
         assert!(selector.select_hops(3).is_none());
     }
 
-    #[test]
-    fn exploratory_ignore_max_participation_for_insecure_tunnels() {
+    #[tokio::test]
+    async fn exploratory_ignore_max_participation_for_insecure_tunnels() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1658,8 +1876,8 @@ mod tests {
         assert!(selector.select_hops(3).is_some());
     }
 
-    #[test]
-    fn exploratory_enforce_max_participation_with_fast_fallbacks() {
+    #[tokio::test]
+    async fn exploratory_enforce_max_participation_with_fast_fallbacks() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
 
@@ -1732,8 +1950,8 @@ mod tests {
         assert!(selector.select_hops(3).is_none());
     }
 
-    #[test]
-    fn client_enforce_max_participation() {
+    #[tokio::test]
+    async fn client_enforce_max_participation() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1774,8 +1992,8 @@ mod tests {
         assert!(selector.select_hops(3).is_none());
     }
 
-    #[test]
-    fn client_ignore_max_participation_for_insecure_tunnels() {
+    #[tokio::test]
+    async fn client_ignore_max_participation_for_insecure_tunnels() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
@@ -1815,8 +2033,8 @@ mod tests {
         assert!(selector.select_hops(3).is_some());
     }
 
-    #[test]
-    fn client_enforce_max_participation_with_fast_fallbacks() {
+    #[tokio::test]
+    async fn client_enforce_max_participation_with_fast_fallbacks() {
         let exploratory_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let client_build_parameters = TunnelPoolBuildParameters::new(Default::default());
         let profile_storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
