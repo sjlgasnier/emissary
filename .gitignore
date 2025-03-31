@@ -2,5 +2,4 @@ target/
 emissary-core/fuzz/target
 emissary-core/fuzz/artifacts
 emissary-core/fuzz/corpus
-eepnet/node_modules
-eepnet/data
+docs/node_modules
