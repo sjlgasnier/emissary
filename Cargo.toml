@@ -2,6 +2,7 @@
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/altonen/emissary"
+description = "Rust implementation of the I2P protocol stack"
 readme = "README.md"
 authors = []
 keywords = ["i2p", "network", "privacy"]
