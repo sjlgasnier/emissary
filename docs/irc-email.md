@@ -11,7 +11,7 @@ The `[[client-tunnels]]` directive specified in `router.toml` provides [I2PTunne
 A client tunnel must be specified for each network.
 
 * `port` is the port in localhost the IRC client should connect to
-* `destination_port` is the port that IRC the server is listening on
+* `destination_port` is the port that the IRC server is listening on
 * `destination` is the hostname of the IRC server and can be either a `.b32.i2p` or `.i2p` address
 
 If a `.i2p` address is used, the host must exist in your address book.

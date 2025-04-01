@@ -16,4 +16,4 @@ Under `Tools > Preferences > Connection`, enable I2P:
 
 ## I2PSnark
 
-Standalone I2PSnark maintained by the [I2P+](https://i2pplus.github.io/) project can also be used for torrenting. The installer is found under `Download I2P+ > I2PSnark Standalone` at the bottom of the page.
+Standalone I2PSnark maintained by the [I2P+](https://i2pplus.github.io/) project can also be used for torrenting. The installer is found under `Download I2P+ > I2PSnark Standalone` at the bottom of the page. The default port for I2CP is `7654`.

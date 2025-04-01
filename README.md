@@ -26,4 +26,4 @@
 1) Install from [crates.io](https://crates.io/crates/emissary-cli): `cargo install emissary-cli`
 2) Build from sources: `cargo build --release`
 
-Router installs its files under `$HOME/.emissary`, automatically reseeds over HTTPS on first boot and creates a default configuration. For instructions on how to browse and host eepsites, use torrents, or chat on Irc2P, visit [documentation](https://altonen.github.com/emissary/).
+Router installs its files under `$HOME/.emissary`, automatically reseeds over HTTPS on first boot and creates a default configuration. For instructions on how to browse and host eepsites, use torrents, or chat on Irc2P, visit [documentation](https://altonen.github.io/emissary/).

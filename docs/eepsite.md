@@ -14,7 +14,7 @@ Under `Edit > Settings > Network Settings`, specify `emissary-cli` as the HTTP p
 
 ![Proxy](img/proxy.png)
 
-Alternatively, you can usethe [I2P in Private Browsing extension](https://github.com/eyedeekay/I2P-in-Private-Browsing-Mode-Firefox).
+Alternatively, you can use the [I2P in Private Browsing extension](https://github.com/eyedeekay/I2P-in-Private-Browsing-Mode-Firefox).
 
  ### Chromium
 

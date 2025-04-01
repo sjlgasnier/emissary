@@ -64,10 +64,7 @@ impl ClientTunnelManager {
         .await?;
 
         let (mut tcp_stream, _) = listener.accept().await?;
-        tracing::error!(target: LOG_TARGET, "tcp connection received");
-
         let mut i2p_stream = future.await?;
-        tracing::error!(target: LOG_TARGET, "i2p stream ready, wait for tcp connection");
 
         tokio::io::copy_bidirectional(&mut i2p_stream, &mut tcp_stream).await?;
 
@@ -176,7 +173,5 @@ impl ClientTunnelManager {
                 }
             }
         }
-
-        tracing::error!(target: LOG_TARGET, "exiting from tunnel manager");
     }
 }

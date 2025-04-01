@@ -4,7 +4,7 @@ license = "MIT"
 repository = "https://github.com/altonen/emissary"
 readme = "README.md"
 authors = []
-keywords = []
+keywords = ["i2p", "network", "privacy"]
 categories = []
 
 [workspace]
