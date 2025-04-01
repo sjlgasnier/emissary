@@ -1,6 +1,6 @@
 ## emissary
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/altonen/emissary/blob/master/LICENSE) [![Crates.io](https://img.shields.io/crates/v/emissary-core.svg)](https://crates.io/crates/emissary-core) [![docs.rs](https://img.shields.io/docsrs/emissary-core.svg)](https://docs.rs/emissary-core/latest/emissary-core/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/altonen/emissary/blob/master/LICENSE) [![Crates.io](https://img.shields.io/crates/v/emissary-core.svg)](https://crates.io/crates/emissary-core) [![docs.rs](https://img.shields.io/docsrs/emissary-core.svg)](https://docs.rs/emissary-core/latest/emissary_core/)
 
 `emissary` is a lightweight and embeddable [I2P](https://geti2p.net/) router
 
