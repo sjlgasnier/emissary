@@ -1487,8 +1487,8 @@ dependencies = [
  "clap",
  "ctrlc",
  "ed25519-dalek",
- "emissary-core 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "emissary-util 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "emissary-core",
+ "emissary-util",
  "flate2",
  "futures",
  "home",
@@ -1529,7 +1529,7 @@ dependencies = [
  "data-encoding",
  "ecb",
  "ed25519-dalek",
- "emissary-util 0.1.0",
+ "emissary-util",
  "ethbloom",
  "flate2",
  "futures-channel",
@@ -1562,77 +1562,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "emissary-core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d7e0250173830bb7a68dad41d246230c43bc346a6d7803796d56f26769fe32b"
-dependencies = [
- "aes",
- "bytes",
- "cbc",
- "chacha20",
- "chacha20poly1305",
- "chrono",
- "curve25519-elligator2",
- "data-encoding",
- "ecb",
- "ed25519-dalek",
- "ethbloom",
- "futures-channel",
- "futures-util",
- "hashbrown 0.14.5",
- "hmac",
- "lazy_static",
- "nom",
- "num-bigint",
- "num-traits",
- "p256",
- "parking_lot 0.12.3",
- "rand_core",
- "sha1",
- "sha2",
- "siphasher",
- "subtle",
- "thingbuf",
- "tracing",
- "uint",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "emissary-util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-std",
- "emissary-core 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "flate2",
- "futures",
- "metrics",
- "metrics-exporter-prometheus",
- "nom",
- "pem",
- "rand",
- "rand_core",
- "reqwest",
- "rsa",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "x509-parser",
- "zip",
-]
-
-[[package]]
-name = "emissary-util"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02a3008ebe572f3c4cee6b9e837fce9d98654242e1e73a4e2f0c34252d74a2c9"
-dependencies = [
- "anyhow",
- "emissary-core 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "emissary-core",
  "flate2",
  "futures",
  "metrics",
