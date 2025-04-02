@@ -528,7 +528,7 @@ mod tests {
         crypto::StaticPrivateKey,
         runtime::{mock::MockRuntime, Runtime},
     };
-    use rand::RngCore;
+    use rand_core::RngCore;
 
     #[test]
     fn serialize_and_parse_leaset() {
