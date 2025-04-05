@@ -252,9 +252,17 @@ impl<R: Runtime> Future for PendingSamConnection<R> {
                         return Poll::Ready(Err(Error::Connection(ConnectionError::SocketClosed)));
                     }
                     Poll::Ready(Some(SamCommand::Hello { max, .. })) => {
-                        // default to client's maximum supported version and if they didn't provide
-                        // a version, default to server's maximum supported version which is SAMv3.3
-                        let version = max.unwrap_or(SamVersion::V33);
+                        let version = match max {
+                            Some(SamVersion::V33) => {
+                                tracing::debug!(
+                                    target: LOG_TARGET,
+                                    "v3.3 not supported",
+                                );
+                                SamVersion::V32
+                            }
+                            Some(max) => max,
+                            None => SamVersion::V32,
+                        };
 
                         tracing::debug!(
                             target: LOG_TARGET,
@@ -521,7 +529,7 @@ mod tests {
 
             match connection.state {
                 PendingConnectionState::Handshaked {
-                    version: SamVersion::V33,
+                    version: SamVersion::V32,
                     ..
                 } => break,
                 _ => {}
@@ -535,7 +543,7 @@ mod tests {
         let mut response = String::new();
         reader.read_line(&mut response).await.unwrap();
 
-        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.3\n");
+        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.2\n");
 
         // verify connection times out
         match connection.await {
@@ -566,7 +574,7 @@ mod tests {
 
             match connection.state {
                 PendingConnectionState::Handshaked {
-                    version: SamVersion::V33,
+                    version: SamVersion::V32,
                     ..
                 } => break,
                 _ => {}
@@ -580,7 +588,7 @@ mod tests {
         let mut response = String::new();
         reader.read_line(&mut response).await.unwrap();
 
-        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.3\n");
+        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.2\n");
     }
 
     #[tokio::test]
@@ -593,7 +601,46 @@ mod tests {
         let mut stream = stream1.unwrap().0;
 
         // send handshake
-        stream.write_all(b"HELLO VERSION MAX=3.2\n").await.unwrap();
+        stream.write_all(b"HELLO VERSION MAX=3.1\n").await.unwrap();
+
+        // poll pending connection until it's handshaked
+        loop {
+            futures::future::poll_fn(|cx| match connection.poll_unpin(cx) {
+                Poll::Pending => Poll::Ready(()),
+                _ => panic!("invalid return value"),
+            })
+            .await;
+
+            match connection.state {
+                PendingConnectionState::Handshaked {
+                    version: SamVersion::V31,
+                    ..
+                } => break,
+                _ => {}
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        // read and validate handshake response
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        reader.read_line(&mut response).await.unwrap();
+
+        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.1\n");
+    }
+
+    #[tokio::test]
+    async fn client_requests_min_version() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
+
+        let mut connection = PendingSamConnection::<MockRuntime>::new(stream2.unwrap());
+        let mut stream = stream1.unwrap().0;
+
+        // send handshake
+        stream.write_all(b"HELLO VERSION MIN=3.1\n").await.unwrap();
 
         // poll pending connection until it's handshaked
         loop {
@@ -623,45 +670,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_requests_min_version() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-
-        let mut connection = PendingSamConnection::<MockRuntime>::new(stream2.unwrap());
-        let mut stream = stream1.unwrap().0;
-
-        // send handshake
-        stream.write_all(b"HELLO VERSION MIN=3.1\n").await.unwrap();
-
-        // poll pending connection until it's handshaked
-        loop {
-            futures::future::poll_fn(|cx| match connection.poll_unpin(cx) {
-                Poll::Pending => Poll::Ready(()),
-                _ => panic!("invalid return value"),
-            })
-            .await;
-
-            match connection.state {
-                PendingConnectionState::Handshaked {
-                    version: SamVersion::V33,
-                    ..
-                } => break,
-                _ => {}
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        // read and validate handshake response
-        let mut reader = BufReader::new(stream);
-        let mut response = String::new();
-        reader.read_line(&mut response).await.unwrap();
-
-        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.3\n");
-    }
-
-    #[tokio::test]
     async fn session_create() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -683,7 +691,7 @@ mod tests {
 
             match connection.state {
                 PendingConnectionState::Handshaked {
-                    version: SamVersion::V33,
+                    version: SamVersion::V32,
                     ..
                 } => break,
                 _ => {}
@@ -697,7 +705,7 @@ mod tests {
         let mut response = String::new();
         reader.read_line(&mut response).await.unwrap();
 
-        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.3\n");
+        assert_eq!(response, "HELLO REPLY RESULT=OK VERSION=3.2\n");
 
         // send handshake
         let mut stream = reader.into_inner();
@@ -709,7 +717,7 @@ mod tests {
         match tokio::time::timeout(Duration::from_secs(5), connection).await.unwrap() {
             Ok(ConnectionKind::Session {
                 session_id,
-                version: SamVersion::V33,
+                version: SamVersion::V32,
                 session_kind: SessionKind::Stream,
                 ..
             }) => {
