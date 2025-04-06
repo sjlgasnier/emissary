@@ -409,6 +409,16 @@ impl<R: Runtime> Destination<R> {
                     },
             } => match context.lease_set.leases.iter().find(|lease| lease.tunnel_id == inbound) {
                 Some(Lease { router_id, .. }) => {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        remote = %destination_id,
+                        ibgw_tunnel_id = %inbound,
+                        ibgw_router_id = %router_id,
+                        obgw_tunnel_id = %outbound,
+                        "send message via route",
+                    );
+
                     if let Err(error) = self
                         .tunnel_pool_handle
                         .send_message(message)
@@ -430,6 +440,16 @@ impl<R: Runtime> Destination<R> {
                 }
                 None => match context.expiring_leases.get(&inbound) {
                     Some(Lease { router_id, .. }) => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            local = %self.destination_id,
+                            remote = %destination_id,
+                            ibgw_tunnel_id = %inbound,
+                            ibgw_router_id = %router_id,
+                            obgw_tunnel_id = %outbound,
+                            "send message via route",
+                        );
+
                         if let Err(error) = self
                             .tunnel_pool_handle
                             .send_message(message)
@@ -691,7 +711,14 @@ impl<R: Runtime> Destination<R> {
 
                     Some(clove.message_body[4..].to_vec())
                 }
-                _ => None,
+                msg_type => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        ?msg_type,
+                        "unhandled message type"
+                    );
+                    None
+                }
             })
             .collect::<Vec<_>>())
     }

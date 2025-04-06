@@ -819,13 +819,21 @@ impl<R: Runtime> SessionManager<R> {
                             target: LOG_TARGET,
                             local = %self.destination_id,
                             remote = %destination_id,
-                            "ack request for non-active session",
+                            "test: ack request for non-active session",
                         );
                         debug_assert!(false);
                         None
                     }
                 },
-                _ => None,
+                msg_type => {
+                    tracing::trace!(
+                        local = %self.destination_id,
+                        remote = %destination_id,
+                        ?msg_type,
+                        "unhandled message type",
+                    );
+                    None
+                }
             })
             .collect::<Vec<_>>();
 

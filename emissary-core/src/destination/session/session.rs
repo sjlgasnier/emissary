@@ -846,6 +846,7 @@ impl<R: Runtime> Session<R> {
             local = %self.local,
             remote = %self.remote,
             ?garlic_tag,
+            len = ?message.len(),
             "received ES",
         );
 
