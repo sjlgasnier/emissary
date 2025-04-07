@@ -374,6 +374,7 @@ impl<R: Runtime> TunnelSelector for ExploratorySelector<R> {
 }
 
 impl<R: Runtime> HopSelector for ExploratorySelector<R> {
+    // TODO: refactor
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
         let mut router_ids = self.profile_storage.get_router_ids(
             Bucket::Standard,
@@ -392,7 +393,9 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             if router_ids.len() < num_hops {
                 let mut extra_router_ids =
                     self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
-                        !profile.is_failing::<R>() && router_info.is_reachable()
+                        !profile.is_failing::<R>()
+                            && router_info.is_reachable()
+                            && router_info.is_usable()
                     });
 
                 // if there aren't enough routers in the fast bucket,
@@ -403,7 +406,9 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     let untracked = self.profile_storage.get_router_ids(
                         Bucket::Untracked,
                         |_, router_info, profile| {
-                            !profile.is_failing::<R>() && router_info.is_reachable()
+                            !profile.is_failing::<R>()
+                                && router_info.is_reachable()
+                                && router_info.is_usable()
                         },
                     );
 
@@ -479,6 +484,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 |router_id, router_info, profile| {
                     !profile.is_failing::<R>()
                         && router_info.is_reachable()
+                        && router_info.is_usable()
                         && self.can_participate(router_id)
                 },
             );
@@ -499,6 +505,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     |router_id, router_info, profile| {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
+                            && router_info.is_usable()
                             && self.can_participate(router_id)
                     },
                 );
@@ -779,7 +786,9 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 let mut extra_router_ids = self.exploratory.profile_storage.get_router_ids(
                     Bucket::Standard,
                     |_, router_info, profile| {
-                        !profile.is_failing::<R>() && router_info.is_reachable()
+                        !profile.is_failing::<R>()
+                            && router_info.is_reachable()
+                            && router_info.is_usable()
                     },
                 );
 
@@ -791,7 +800,9 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                     let untracked = self.exploratory.profile_storage.get_router_ids(
                         Bucket::Untracked,
                         |_, router_info, profile| {
-                            !profile.is_failing::<R>() && router_info.is_reachable()
+                            !profile.is_failing::<R>()
+                                && router_info.is_reachable()
+                                && router_info.is_usable()
                         },
                     );
 
@@ -867,6 +878,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 |router_id, router_info, profile| {
                     !profile.is_failing::<R>()
                         && router_info.is_reachable()
+                        && router_info.is_usable()
                         && self.exploratory.can_participate(router_id)
                 },
             );
@@ -889,6 +901,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         |router_id, router_info, profile| {
                             !profile.is_failing::<R>()
                                 && router_info.is_reachable()
+                                && router_info.is_usable()
                                 && self.exploratory.can_participate(router_id)
                         },
                     );

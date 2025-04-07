@@ -425,17 +425,6 @@ impl<R: Runtime> ProfileStorage<R> {
     pub fn add_router(&self, router_info: RouterInfo) -> bool {
         let router_id = router_info.identity.id();
 
-        // TODO: `E` routers should be accepted
-        if !router_info.is_reachable() || !router_info.capabilities.is_usable() {
-            tracing::trace!(
-                target: LOG_TARGET,
-                %router_id,
-                caps = %router_info.capabilities,
-                "ignoring unreachable/unusable router",
-            );
-            return false;
-        }
-
         if !router_info.is_reachable_ntcp2() {
             tracing::debug!(
                 target: LOG_TARGET,
