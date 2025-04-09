@@ -138,6 +138,12 @@ pub struct RouterUiOptions {
     /// Router UI theme
     #[arg(long, value_name = "THEME")]
     pub theme: Option<Theme>,
+
+    /// Router UI port.
+    ///
+    /// Has an effect only if web UI was enabled during compilation.
+    #[arg(long, value_name = "PORT")]
+    pub web_ui_port: Option<u16>,
 }
 
 #[derive(Parser)]

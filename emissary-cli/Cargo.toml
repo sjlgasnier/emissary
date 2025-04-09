@@ -11,6 +11,7 @@ categories.workspace = true
 readme.workspace = true
 
 [dependencies]
+axum = { version = "0.8.3", features = ["ws", "macros"], optional = true }
 clap = { version = "4.5.35", features = ["derive"] }
 ctrlc = "3.4.5"
 emissary-core = { path = "../emissary-core", version = "0.1.0", features = ["std"] }
@@ -25,8 +26,10 @@ metrics-exporter-prometheus = "0.16.2"
 natpmp = "0.5.0"
 netdev = { version = "0.33.0", default-features = false }
 reqwest = { version = "0.12.15", default-features = false, features = ["rustls-tls"] }
+serde_json = { version = "1.0.140", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 thiserror = "2.0.12"
+tokio-tungstenite = { version = "0.26.2", optional = true }
 toml = "0.8.20"
 url = "2.5.4"
 
@@ -47,5 +50,6 @@ yosemite = { workspace = true }
 tempfile = "3.19.1"
 
 [features]
-default = ["router-ui"]
-router-ui = ["iced"]
+default = ["native-ui"]
+native-ui = ["iced"]
+web-ui = ["axum", "serde_json", "tokio-tungstenite"]

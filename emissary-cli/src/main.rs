@@ -47,9 +47,10 @@ mod proxy;
 mod signal;
 mod storage;
 mod tunnel;
-
-#[cfg(feature = "router-ui")]
 mod ui;
+
+#[cfg(all(feature = "native-ui", feature = "web-ui"))]
+compile_error!("native and web ui cannot be enabled at the same time");
 
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary";
@@ -307,7 +308,7 @@ async fn router_event_loop(
     }
 }
 
-#[cfg(not(feature = "router-ui"))]
+#[cfg(not(any(feature = "native-ui", feature = "web-ui")))]
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let (_tx, shutdown_rx) = channel(1);
@@ -328,7 +329,49 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "router-ui")]
+#[cfg(feature = "web-ui")]
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (shutdown_tx, shutdown_rx) = channel(1);
+    let RouterContext {
+        events,
+        port_mapper,
+        router,
+        router_ui_config,
+        signal_handler,
+        ..
+    } = runtime.block_on(setup_router())?;
+
+    match router_ui_config {
+        None => {
+            runtime.block_on(router_event_loop(
+                router,
+                port_mapper,
+                signal_handler,
+                shutdown_rx,
+            ));
+        }
+        Some(RouterUiConfig {
+            refresh_interval,
+            port,
+            ..
+        }) => {
+            runtime.spawn(async move {
+                ui::web::RouterUi::new(events, port, refresh_interval, shutdown_tx).run().await;
+            });
+            runtime.block_on(router_event_loop(
+                router,
+                port_mapper,
+                signal_handler,
+                shutdown_rx,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "native-ui")]
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let (shutdown_tx, shutdown_rx) = channel(1);
@@ -354,6 +397,7 @@ fn main() -> anyhow::Result<()> {
         Some(RouterUiConfig {
             theme,
             refresh_interval,
+            ..
         }) => {
             std::thread::spawn(move || {
                 runtime.block_on(router_event_loop(
@@ -365,7 +409,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(0);
             });
 
-            ui::RouterUi::start(events, theme, refresh_interval, shutdown_tx)
+            ui::native::RouterUi::start(events, theme, refresh_interval, shutdown_tx)
         }
     }
 }

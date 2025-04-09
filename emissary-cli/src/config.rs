@@ -180,6 +180,7 @@ impl Default for Theme {
 pub struct RouterUiConfig {
     pub theme: Theme,
     pub refresh_interval: usize,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -251,6 +252,7 @@ impl Default for EmissaryConfig {
             router_ui: Some(RouterUiConfig {
                 theme: Theme::Dark,
                 refresh_interval: 5usize,
+                port: None,
             }),
             sam: Some(SamConfig {
                 tcp_port: 7656,
@@ -1158,6 +1160,7 @@ impl Config {
         if let Some(RouterUiConfig {
             theme,
             refresh_interval,
+            port,
         }) = &mut self.router_ui
         {
             if let Some(selected) = arguments.router_ui.theme {
@@ -1166,6 +1169,10 @@ impl Config {
 
             if let Some(selected) = arguments.router_ui.refresh_interval {
                 *refresh_interval = selected;
+            }
+
+            if let Some(selected) = arguments.router_ui.web_ui_port {
+                *port = Some(selected);
             }
 
             if let Some(true) = arguments.router_ui.disable_ui {
@@ -1191,11 +1198,15 @@ mod tests {
         Arguments {
             base_path: None,
             log: None,
-            #[cfg(feature = "router-ui")]
+            #[cfg(any(
+                all(feature = "native-ui", not(feature = "web-ui")),
+                all(not(feature = "native-ui"), feature = "web-ui")
+            ))]
             router_ui: crate::cli::RouterUiOptions {
                 disable_ui: None,
                 refresh_interval: None,
                 theme: None,
+                web_ui_port: None,
             },
             floodfill: None,
             allow_local: None,

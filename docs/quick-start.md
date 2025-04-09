@@ -28,10 +28,10 @@ cargo install --locked emissary-cli
 
 #### Building `emissary-cli` for Headless Mode
 
-The router UI can be disabled entirely during compliation, meaning `emissary-cli` will run in headless mode: 
+The native UI can be disabled entirely during compilation, meaning `emissary-cli` will run in headless mode. In headless mode, a web UI is available and the default port of the UI is `7657`
 
 ```bash
-cargo install --locked --no-default-features emissary-cli
+cargo install --locked --no-default-features --features web-ui emissary-cli
 ```
 
 ### Running `emissary-cli`
@@ -59,6 +59,7 @@ Default listening ports:
 |   SAMv3 UDP   |   7655   |
 |      I2CP     |   7654   |
 |      HTTP     |   4444   |
+|     Web UI    |   7675   |
 
 ### Graceful shutdown
 
