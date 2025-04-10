@@ -34,9 +34,11 @@ use crate::{
         outbound::OutboundTunnel, ReceiverKind, Tunnel, TunnelBuildParameters, TunnelBuilder,
         TunnelDirection, TunnelHop, TunnelInfo,
     },
+    util::shuffle,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
+use hashbrown::HashSet;
 use rand_core::RngCore;
 
 use alloc::{collections::VecDeque, vec::Vec};
@@ -146,8 +148,8 @@ impl<T: Tunnel> PendingTunnel<T> {
         // records are added to each tunnel build message
         //
         // if the number of requested records is less than [`UNFRAGMENTED_MAX_RECORDS`], i.e., the
-        // message would fit inside one `TunnelData` message, the number of records is clamed down
-        // to 4. If more than 4 hops were requested the upper bound for clamp is set to 8 which is
+        // message would fit inside one `TunnelData` message, the number of records is clamped down
+        // to 4. If more than 4 hops were requested, the upper bound for clamp is set to 8 which is
         // the maximum amount of records a `ShortTunnelBuild` message can hold
         let num_records = if hops.len() < UNFRAGMENTED_MAX_RECORDS {
             (hops.len() + (R::rng().next_u32() % 3) as usize).clamp(0, UNFRAGMENTED_MAX_RECORDS)
@@ -183,9 +185,10 @@ impl<T: Tunnel> PendingTunnel<T> {
                 )| {
                     (
                         TunnelHop {
-                            tunnel_id: *tunnel_id,
-                            router: RouterId::from(router_hash),
                             key_context: noise.create_outbound_session::<R>(key, hop_role),
+                            record_idx: None,
+                            router: RouterId::from(router_hash),
+                            tunnel_id: *tunnel_id,
                         },
                         short::TunnelBuildRecordBuilder::default()
                             .with_tunnel_id(*tunnel_id)
@@ -207,7 +210,7 @@ impl<T: Tunnel> PendingTunnel<T> {
         //
         // additionally, append fake records at the end so that the length of the tunnel build
         // request message is `NUM_BUILD_RECORDS` records long
-        let mut encrypted_records = router_hashes
+        let encrypted_records = router_hashes
             .iter()
             .zip(build_records.iter_mut())
             .zip(tunnel_hops.iter_mut())
@@ -238,17 +241,49 @@ impl<T: Tunnel> PendingTunnel<T> {
             )
             .collect::<Vec<_>>();
 
-        // double encrypt records
-        tunnel_hops.iter().enumerate().for_each(|(hop_idx, hop)| {
-            encrypted_records.iter_mut().skip(hop_idx + 1).enumerate().for_each(
-                |(record_idx, record)| {
-                    ChaCha::with_nonce(
-                        hop.key_context.reply_key(),
-                        (hop_idx + record_idx + 1) as u64,
-                    )
-                    .decrypt_ref(record);
-                },
-            )
+        // shuffle records and assign record index for each hop
+        let mut encrypted_records = {
+            let mut records = encrypted_records.into_iter().enumerate().collect::<Vec<_>>();
+            shuffle(&mut records, &mut R::rng());
+
+            records
+                .into_iter()
+                .enumerate()
+                .map(|(record_idx, (hop, record))| {
+                    // `record_idx` denotes the hop's record's index in the TBRM
+                    //
+                    // `hop` is the index of the hop inside `tunnel_hops` and denotes hop's order
+                    // in the tunnel
+                    //
+                    // note that `TunnelHop` for `hop` does not exist if `record` is a fake record
+                    if let Some(tunnel_hop) = tunnel_hops.get_mut(hop) {
+                        tunnel_hop.set_record_index(record_idx);
+                    }
+
+                    record
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // double-encrypt build records
+        //
+        // note that the number of the times the record is encrypted is tied to the hop's position
+        // in the tunnel: 1st hop is not encrypted, 2nd is encrypted once, 3rd hop twice and so on
+        let mut record_indexes =
+            tunnel_hops.iter().map(|hop| hop.record_index()).collect::<HashSet<_>>();
+
+        tunnel_hops.iter().for_each(|hop| {
+            encrypted_records.iter_mut().enumerate().for_each(|(record_idx, record)| {
+                // don't encrypt hop's own record or records preceeding this record
+                if record_indexes.contains(&record_idx) && record_idx != hop.record_index() {
+                    ChaCha::with_nonce(hop.key_context.reply_key(), record_idx as u64)
+                        .decrypt_ref(record);
+                }
+            });
+
+            // mark hop as "encrypted" by removing it from `record_indexes` so hops that follow this
+            // hop won't encrypt the hop's record with their key
+            record_indexes.remove(&hop.record_index());
         });
 
         Ok((
@@ -463,12 +498,13 @@ impl<T: Tunnel> PendingTunnel<T> {
         let num_hops = self.hops.len();
 
         for (hop_idx, hop) in self.hops.into_iter().enumerate().rev() {
-            let mut record = payload
-                [1 + (hop_idx * SHORT_RECORD_LEN)..1 + ((1 + hop_idx) * SHORT_RECORD_LEN)]
+            let mut record = payload[1 + (hop.record_index() * SHORT_RECORD_LEN)
+                ..1 + ((1 + hop.record_index()) * SHORT_RECORD_LEN)]
                 .to_vec();
 
-            if let Err(error) = ChaChaPoly::with_nonce(hop.key_context.reply_key(), hop_idx as u64)
-                .decrypt_with_ad(hop.key_context.state(), &mut record)
+            if let Err(error) =
+                ChaChaPoly::with_nonce(hop.key_context.reply_key(), hop.record_index() as u64)
+                    .decrypt_with_ad(hop.key_context.state(), &mut record)
             {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -489,7 +525,7 @@ impl<T: Tunnel> PendingTunnel<T> {
             payload[1..]
                 .chunks_mut(218)
                 .enumerate()
-                .filter(|(index, _)| index != &hop_idx)
+                .filter(|(index, _)| index != &hop.record_index())
                 .for_each(|(index, record)| {
                     ChaCha::with_nonce(hop.key_context.reply_key(), index as u64)
                         .encrypt_ref(record);
@@ -787,7 +823,7 @@ mod test {
                 .find(|(_, chunk)| &chunk[..16] == &hash[..16])
         }
 
-        for ((router_hash, _), noise) in hops.iter().zip(noise_contexts.iter()) {
+        for (i, ((router_hash, _), noise)) in hops.iter().zip(noise_contexts.iter()).enumerate() {
             let (record_idx, record) = find_own_record(&router_hash, &mut payload[1..]).unwrap();
 
             let new_record = record[..].to_vec();
@@ -802,7 +838,7 @@ mod test {
                 (record.tunnel_id(), record.role())
             };
 
-            if record_idx % 2 == 0 {
+            if i % 2 == 0 {
                 record[201] = 30;
             } else {
                 record[201] = 0x00;
@@ -934,7 +970,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn create_long_outobound_tunnel() {
+    async fn create_long_outbound_tunnel() {
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey)>,
             Vec<TestTransitTunnelManager>,
@@ -1399,7 +1435,7 @@ mod test {
 
         // write garbage into first build record
         for i in 1..20 {
-            message.payload[i] = 0u8;
+            message.payload[i + SHORT_RECORD_LEN * pending_tunnel.hops[0].record_index()] = 0u8;
         }
 
         match pending_tunnel.try_build_tunnel::<MockRuntime>(message) {

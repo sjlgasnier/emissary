@@ -44,6 +44,9 @@ pub struct TunnelHop {
     /// Key context.
     key_context: OutboundSession,
 
+    /// Record index in the tunnel build record.
+    record_idx: Option<usize>,
+
     /// Router ID.
     router: RouterId,
 
@@ -61,6 +64,18 @@ impl TunnelHop {
     /// Get reference to [`TunnelHop`]'s `RouterId`.
     pub fn router_id(&self) -> &RouterId {
         &self.router
+    }
+
+    /// Set record index for the tunnel hop.
+    pub fn set_record_index(&mut self, record_idx: usize) {
+        self.record_idx = Some(record_idx);
+    }
+
+    /// Get record index.
+    ///
+    /// Panics if a record index has not been assigned for the tunnel hop.
+    pub fn record_index(&self) -> usize {
+        self.record_idx.expect("to exist")
     }
 }
 
