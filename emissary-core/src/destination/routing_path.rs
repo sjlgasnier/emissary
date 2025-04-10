@@ -434,13 +434,21 @@ impl<R: Runtime> RoutingPathManager<R> {
             }
         };
 
-        tracing::trace!(
-            target: LOG_TARGET,
-            local = %self.destination_id,
-            remote = %destination_id,
-            num_tunnels = ?leases.len(),
-            "received lease set from remote destination",
-        );
+        for Lease {
+            router_id,
+            tunnel_id,
+            ..
+        } in &leases
+        {
+            tracing::trace!(
+                target: LOG_TARGET,
+                local = %self.destination_id,
+                remote = %destination_id,
+                ibgw_router_id = %router_id,
+                ibgw_tunnel_id = %tunnel_id,
+                "register new lease"
+            );
+        }
 
         // extend the current set of `destination_id`'s leases and prune all expired leases
         current_leases.extend(leases.clone());

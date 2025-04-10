@@ -370,6 +370,14 @@ impl<R: Runtime> SessionManager<R> {
 
                 // send acks for all inbound ack requests
                 if !session.inbound_ack_requests.is_empty() {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        local = %self.destination_id,
+                        remote = %destination_id,
+                        acks = ?session.inbound_ack_requests,
+                        "add pending acks",
+                    );
+
                     let acks = mem::replace(&mut session.inbound_ack_requests, HashSet::new());
                     builder = builder.with_ack(acks.into_iter().collect());
                 }
@@ -819,7 +827,7 @@ impl<R: Runtime> SessionManager<R> {
                             target: LOG_TARGET,
                             local = %self.destination_id,
                             remote = %destination_id,
-                            "test: ack request for non-active session",
+                            "ack request for non-active session",
                         );
                         debug_assert!(false);
                         None
