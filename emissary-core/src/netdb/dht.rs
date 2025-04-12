@@ -24,14 +24,9 @@ use crate::{
     runtime::Runtime,
 };
 
-use chrono::DateTime;
 use hashbrown::HashSet;
 
-use alloc::{
-    collections::BTreeMap,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Score adjustment when floodfill doesn't answer to a query.
 const LOOKUP_REPLY_NOT_RECEIVED_SCORE: isize = -5isize;
@@ -105,12 +100,79 @@ impl<R: Runtime> Dht<R> {
         }
     }
 
-    /// Get today's UTC date.
-    fn utc_date() -> String {
-        DateTime::from_timestamp(R::time_since_epoch().as_secs() as i64, 0u32)
-            .expect("to succeed")
-            .format("%Y%m%d")
-            .to_string()
+    /// Get UTC date from the unix timestamp.
+    fn utc_date(unix_timestamp: u64) -> String {
+        const DAYS_PER_YEAR: u64 = 365;
+        const DAYS_PER_4_YEARS: u64 = 4 * DAYS_PER_YEAR + 1;
+        const DAYS_PER_100_YEARS: u64 = 25 * DAYS_PER_4_YEARS - 1;
+        const DAYS_PER_400_YEARS: u64 = 4 * DAYS_PER_100_YEARS + 1;
+        const SECONDS_PER_DAY: u64 = 86_400;
+        const CUMUL_NORMAL: [u16; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        const CUMUL_LEAP: [u16; 12] = [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335];
+
+        let mut days = unix_timestamp / SECONDS_PER_DAY;
+        let mut year = 1970;
+
+        // Advance by 400-year chunks
+        {
+            let num_400_years = days / DAYS_PER_400_YEARS;
+            year += num_400_years * 400;
+            days -= num_400_years * DAYS_PER_400_YEARS;
+        }
+
+        // Advance by 100-year chunks (up to 3 to avoid leap overcount)
+        while days >= DAYS_PER_100_YEARS {
+            if (year % 400) / 100 == 3 {
+                break;
+            }
+
+            year += 100;
+            days -= DAYS_PER_100_YEARS;
+        }
+
+        // Advance by 4-year chunks (up to 24 to avoid century years overcount)
+        while days >= DAYS_PER_4_YEARS {
+            if (year % 100) / 4 == 24 && (year % 400) / 100 != 3 {
+                break;
+            }
+
+            year += 4;
+            days -= DAYS_PER_4_YEARS;
+        }
+
+        let is_leap_year =
+            |year: u64| -> bool { (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) };
+
+        // Advance by single year
+        loop {
+            let days_in_year = if is_leap_year(year) {
+                DAYS_PER_YEAR + 1
+            } else {
+                DAYS_PER_YEAR
+            };
+
+            if days < days_in_year {
+                break;
+            }
+
+            days -= days_in_year;
+            year += 1;
+        }
+
+        let cumul_days = if is_leap_year(year) {
+            &CUMUL_LEAP
+        } else {
+            &CUMUL_NORMAL
+        };
+
+        let month = (0..11).find(|&m| cumul_days[m + 1] > days as u16).unwrap_or(11);
+
+        alloc::format!(
+            "{:04}{:02}{:02}",
+            year,
+            month + 1,
+            days as u16 - cumul_days[month] + 1
+        )
     }
 
     /// Insert new router into [`Dht`].
@@ -142,8 +204,12 @@ impl<R: Runtime> Dht<R> {
         key: impl AsRef<[u8]>,
         limit: usize,
     ) -> impl Iterator<Item = RouterId> + '_ {
-        let target =
-            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let target = Key::from(
+            Sha256::new()
+                .update(&key)
+                .update(Self::utc_date(R::time_since_epoch().as_secs()).as_str())
+                .finalize(),
+        );
 
         self.routing_table.closest(target, limit)
     }
@@ -155,8 +221,12 @@ impl<R: Runtime> Dht<R> {
         limit: usize,
         ignore: &'a HashSet<RouterId>,
     ) -> impl Iterator<Item = RouterId> + 'a {
-        let target =
-            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let target = Key::from(
+            Sha256::new()
+                .update(&key)
+                .update(Self::utc_date(R::time_since_epoch().as_secs()).as_str())
+                .finalize(),
+        );
 
         self.routing_table.closest_with_ignore(target, limit, ignore)
     }
@@ -167,8 +237,12 @@ impl<R: Runtime> Dht<R> {
             return None;
         }
 
-        let target =
-            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let target = Key::from(
+            Sha256::new()
+                .update(&key)
+                .update(Self::utc_date(R::time_since_epoch().as_secs()).as_str())
+                .finalize(),
+        );
         let mut routers = routers
             .iter()
             .map(|router_id| {
@@ -191,8 +265,12 @@ impl<R: Runtime> Dht<R> {
             return HashSet::new();
         }
 
-        let target =
-            Key::from(Sha256::new().update(&key).update(Self::utc_date().as_str()).finalize());
+        let target = Key::from(
+            Sha256::new()
+                .update(&key)
+                .update(Self::utc_date(R::time_since_epoch().as_secs()).as_str())
+                .finalize(),
+        );
         let routers = routers
             .iter()
             .map(|router_id| {
@@ -277,5 +355,37 @@ mod tests {
             closest[2],
             RouterId::from(&base64_decode("o8qvvGZroVu1Jlo-9ICTamn5t8XlnNq49oJ2QywLVUQ=").unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn utc_date() {
+        type D = Dht<MockRuntime>;
+
+        assert_eq!("19700101", D::utc_date(0));
+        assert_eq!("19700101", D::utc_date(1));
+        assert_eq!("19700101", D::utc_date(59));
+        assert_eq!("19700101", D::utc_date(86399));
+        assert_eq!("19700102", D::utc_date(86400));
+
+        assert_eq!("5845540512231109", D::utc_date(u64::MAX));
+        assert_eq!("2922770265961204", D::utc_date(i64::MAX as u64));
+
+        assert_eq!("20290724", D::utc_date(1879574397));
+        assert_eq!("20250531", D::utc_date(1748652952));
+        assert_eq!("19801231", D::utc_date(347081248));
+
+        assert_eq!("20231130", D::utc_date(1701388799));
+        assert_eq!("20231201", D::utc_date(1701388800));
+        assert_eq!("20241212", D::utc_date(1733998283));
+
+        assert_eq!("20240228", D::utc_date(1709164799));
+        assert_eq!("20240229", D::utc_date(1709164800));
+        assert_eq!("20000228", D::utc_date(951782399));
+        assert_eq!("20000229", D::utc_date(951782400));
+        assert_eq!("20230228", D::utc_date(1677628799));
+        assert_eq!("20230301", D::utc_date(1677628800));
+
+        assert_eq!("20991231", D::utc_date(4102444799));
+        assert_eq!("21000101", D::utc_date(4102444800));
     }
 }
