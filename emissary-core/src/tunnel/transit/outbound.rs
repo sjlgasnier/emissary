@@ -37,10 +37,10 @@ use crate::{
     },
 };
 
-use futures::{future::BoxFuture, FutureExt};
+use futures::FutureExt;
 use rand_core::RngCore;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     future::Future,
     pin::Pin,
@@ -58,7 +58,7 @@ pub struct OutboundEndpoint<R: Runtime> {
     event_handle: EventHandle<R>,
 
     /// Tunnel expiration timer.
-    expiration_timer: BoxFuture<'static, ()>,
+    expiration_timer: R::Timer,
 
     /// Fragment handler.
     fragment: FragmentHandler<R>,
@@ -300,7 +300,7 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
     ) -> Self {
         OutboundEndpoint {
             event_handle,
-            expiration_timer: Box::pin(R::delay(TRANSIT_TUNNEL_EXPIRATION)),
+            expiration_timer: R::timer(TRANSIT_TUNNEL_EXPIRATION),
             fragment: FragmentHandler::new(),
             bandwidth: 0usize,
             message_rx,

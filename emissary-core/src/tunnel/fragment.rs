@@ -22,14 +22,13 @@ use crate::{
     runtime::{Instant, Runtime},
 };
 
-use futures::future::{BoxFuture, FutureExt};
+use futures::future::FutureExt;
 use hashbrown::{
     hash_map::{Entry, OccupiedEntry},
     HashMap,
 };
 
 use alloc::{
-    boxed::Box,
     collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
@@ -176,7 +175,7 @@ pub struct FragmentHandler<R: Runtime> {
     message_first_seen_queue: VecDeque<MessageId>,
 
     /// Timer for when the earliest expiring message expires
-    next_expiration_timer: Option<BoxFuture<'static, ()>>,
+    next_expiration_timer: Option<R::Timer>,
 }
 
 impl<R: Runtime> FragmentHandler<R> {
@@ -288,9 +287,9 @@ impl<R: Runtime> Future for FragmentHandler<R> {
             let next_fragment_elapsed =
                 self.messages.get(message_id).expect("to exist").created.elapsed();
 
-            self.next_expiration_timer = Some(Box::pin(R::delay(
+            self.next_expiration_timer = Some(R::timer(
                 MSG_EXPIRATION_THRESHOLD.saturating_sub(next_fragment_elapsed),
-            )));
+            ));
         } else {
             self.next_expiration_timer = None;
         }
