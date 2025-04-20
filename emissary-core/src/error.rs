@@ -48,6 +48,12 @@ pub enum Ssu2Error {
 
     /// Unexpected message.
     UnexpectedMessage,
+
+    /// Token mismatch.
+    TokenMismatch,
+
+    /// Network mismatch.
+    NetworkMismatch,
 }
 
 impl fmt::Display for Ssu2Error {
@@ -60,6 +66,8 @@ impl fmt::Display for Ssu2Error {
             Self::NotEnoughBytes => write!(f, "packet is too short"),
             Self::SessionTerminated(reason) => write!(f, "session forcibly terminated: {reason:?}"),
             Self::UnexpectedMessage => write!(f, "unexpected message"),
+            Self::TokenMismatch => write!(f, "token mismatch"),
+            Self::NetworkMismatch => write!(f, "network mismatch"),
         }
     }
 }
