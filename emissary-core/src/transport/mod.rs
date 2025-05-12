@@ -747,6 +747,7 @@ impl<R: Runtime> TransportManager<R> {
                         caps = %router_info.capabilities,
                         "cannot dial router, ntcp2 address is not reachable",
                     );
+                    self.pending_connections.remove(&router_id);
 
                     // report connection failure to subsystems
                     let mut handle = self.subsystem_handle.clone();
@@ -2034,6 +2035,117 @@ mod tests {
             .expect("to succeed")
         {
             SubsystemEvent::ConnectionFailure { router } => assert_eq!(router, router_id),
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_without_ntcp2_support_dialed() {
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let (remote_router_info, _, _) = RouterInfoBuilder::default()
+            .with_ssu2(Ssu2Config {
+                port: 888u16,
+                host: Some("127.0.0.1".parse().unwrap()),
+                publish: true,
+                static_key: [1u8; 32],
+                intro_key: [2u8; 32],
+            })
+            .build();
+        let remote_router_id = remote_router_info.identity.id();
+        storage.add_router(remote_router_info);
+
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (handle, _netdb_rx) = NetDbHandle::create();
+        let ctx = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage.clone(),
+            router_info.identity.id(),
+            serialized.clone(),
+            static_key,
+            signing_key,
+            2u8,
+            event_handle.clone(),
+        );
+
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        builder.register_netdb_handle(handle);
+        let mut handle = builder.register_subsystem(SubsystemKind::NetDb);
+        let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
+            port: 0,
+            host: Some("192.168.0.1".parse().unwrap()),
+            publish: true,
+            key: [0u8; 32],
+            iv: [0u8; 16],
+        }))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+        builder.register_ntcp2(context);
+        let mut manager = builder.build();
+
+        #[derive(Clone, Default)]
+        enum Command {
+            #[default]
+            Dummy,
+        }
+
+        pub struct MockTransport {
+            _tx: mpsc::Sender<Command>,
+            event_rx: mpsc::Receiver<TransportEvent>,
+        }
+
+        impl Transport for MockTransport {
+            fn connect(&mut self, _: RouterInfo) {}
+            fn accept(&mut self, _: &RouterId) {}
+            fn reject(&mut self, _: &RouterId) {}
+        }
+
+        impl Stream for MockTransport {
+            type Item = TransportEvent;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                self.event_rx.poll_recv(cx)
+            }
+        }
+
+        let (_tx, _rx) = mpsc::channel(64);
+        let (_event_tx, event_rx) = mpsc::channel(64);
+
+        manager.transports.push(Box::new(MockTransport { event_rx, _tx }));
+        tokio::spawn(manager);
+
+        // attempt to connect to remote router but since they don't have an ntcp2 address,
+        // the dial fails
+        handle.connect(&remote_router_id).unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(5), handle.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            SubsystemEvent::ConnectionFailure { router } => assert_eq!(router, remote_router_id),
+            _ => panic!("invalid event"),
+        }
+
+        // attempt to connect again and verify that a dial failure is reported
+        //
+        // this is a fix for a regression where the outbound connection was left in a pending state
+        // and all subsequent dials to the remote peer timed out in in `TransitTunnelManager`
+        // because the dial attempt didn't proceed as it was erroneously in the pending state
+        handle.connect(&remote_router_id).unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(5), handle.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            SubsystemEvent::ConnectionFailure { router } => assert_eq!(router, remote_router_id),
             _ => panic!("invalid event"),
         }
     }
