@@ -35,7 +35,7 @@ use curve25519_elligator2::{MapToPointVariant, Randomized};
 use hashbrown::HashMap;
 use zeroize::Zeroize;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, marker::PhantomData, mem};
 
 /// Logging target for the file.
@@ -77,7 +77,7 @@ enum InboundSessionState {
         tag_set_mappings: HashMap<u64, usize>,
 
         /// `NewSessionReply` tag set.
-        nsr_tag_set: TagSet,
+        nsr_tag_set: Box<TagSet>,
 
         /// Ephemeral public key of remote destination.
         remote_ephemeral_public_key: StaticPublicKey,
@@ -283,7 +283,7 @@ impl<R: Runtime> InboundSession<R> {
                 self.state = InboundSessionState::NewSessionReplySent {
                     tag_sets: HashMap::from_iter([(0usize, (send_tag_set, recv_tag_set))]),
                     tag_set_mappings,
-                    nsr_tag_set,
+                    nsr_tag_set: Box::new(nsr_tag_set),
                     remote_ephemeral_public_key,
                     remote_static_public_key,
                     state: ns_state,

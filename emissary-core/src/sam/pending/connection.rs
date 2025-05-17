@@ -31,7 +31,7 @@ use bytes::{BufMut, BytesMut};
 use futures::{FutureExt, StreamExt};
 use hashbrown::HashMap;
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{boxed::Box, format, string::String, sync::Arc};
 use core::{
     fmt,
     future::Future,
@@ -58,7 +58,7 @@ pub enum ConnectionKind<R: Runtime> {
         socket: SamSocket<R>,
 
         /// Destination context.
-        destination: DestinationContext,
+        destination: Box<DestinationContext>,
 
         /// Negotiated version.
         version: SamVersion,
