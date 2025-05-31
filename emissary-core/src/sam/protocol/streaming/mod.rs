@@ -1151,25 +1151,6 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         continue;
                     };
 
-                    // poll routing path to get any tunnel updates
-                    let _ = routing_path_handle.poll_unpin(cx);
-
-                    let Some(routing_path) = routing_path_handle.recreate_routing_path() else {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            %destination_id,
-                            %num_sent,
-                            "unable to resend `SYN`, no routing path available",
-                        );
-
-                        self.outbound_timers.push(async move {
-                            R::delay(SYN_RETRY_TIMEOUT).await;
-                            stream_id
-                        });
-
-                        continue;
-                    };
-
                     // pending stream still exists, check if the packet should be resent
                     // or if the stream should be destroyed
                     if *num_sent < MAX_SYN_RETRIES {
@@ -1177,6 +1158,25 @@ impl<R: Runtime> futures::Stream for StreamManager<R> {
                         let src_port = *src_port;
                         let packet = packet.clone();
                         *num_sent += 1;
+
+                        // poll routing path to get any tunnel updates
+                        let _ = routing_path_handle.poll_unpin(cx);
+
+                        let Some(routing_path) = routing_path_handle.recreate_routing_path() else {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                %destination_id,
+                                %num_sent,
+                                "unable to resend `SYN`, no routing path available",
+                            );
+
+                            self.outbound_timers.push(async move {
+                                R::delay(SYN_RETRY_TIMEOUT).await;
+                                stream_id
+                            });
+
+                            continue;
+                        };
 
                         tracing::debug!(
                             target: LOG_TARGET,
@@ -3083,5 +3083,50 @@ mod tests {
             }
             _ => panic!("invalid event"),
         }
+    }
+
+    #[tokio::test]
+    async fn outbound_stream_no_routing_path() {
+        let socket_factory = SocketFactory::new().await;
+        let remote = DestinationId::random();
+
+        let mut manager2 = {
+            let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+            let destination = Destination::new::<MockRuntime>(signing_key.public());
+            StreamManager::<MockRuntime>::new(destination, signing_key)
+        };
+
+        let mut path_manager = RoutingPathManager::<MockRuntime>::new(
+            manager2.destination_id.clone(),
+            vec![TunnelId::random()],
+        );
+
+        // create new outbound stream to random destination for which we don't have a lease set
+        let (socket, client_stream) = socket_factory.socket().await;
+        let _ = manager2.create_stream(
+            remote.clone(),
+            path_manager.handle(remote.clone()),
+            socket,
+            HashMap::new(),
+        );
+
+        // verify that stream rejection is emitted
+        match tokio::time::timeout(Duration::from_secs(60), manager2.next())
+            .await
+            .expect("no timeout")
+            .expect("to succeed")
+        {
+            StreamManagerEvent::StreamRejected { destination_id } if destination_id == remote => {}
+            _ => panic!("invalid event"),
+        }
+
+        let mut reader = BufReader::new(client_stream);
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(15), reader.read_line(&mut response))
+            .await
+            .expect("no timeout")
+            .expect("to succeed");
+
+        assert_eq!(response, "STREAM STATUS RESULT=CANT_REACH_PEER\n");
     }
 }
