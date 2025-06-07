@@ -319,6 +319,37 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     .and_then(|value| SamVersion::try_from(*value).ok()),
             }),
             ("SESSION", Some("CREATE")) => {
+                // checks if the inbound tunnel length is valid
+                if let Some(inbound_len) = value.key_value_pairs.get("inbound.length") {
+                    match inbound_len.parse::<u8>() {
+                        Ok(inbound_len) =>
+                            if inbound_len == 0 || inbound_len > 7 {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?inbound_len,
+                                    "invalid inbound tunnel length, 0-hop is not supported and 7 is the maximum length"
+                                );
+                                return Err(());
+                            },
+                        _ => return Err(()),
+                    }
+                }
+                // checks if the outbound tunnel length is valid
+                if let Some(outbound_len) = value.key_value_pairs.get("outbound.length") {
+                    match outbound_len.parse::<u8>() {
+                        Ok(outbound_len) =>
+                            if outbound_len == 0 || outbound_len > 8 {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    ?outbound_len,
+                                    "invalid outbound tunnel length, 0-hop is not supported and 8 is the maximum length"
+                                );
+                                return Err(());
+                            },
+                        _ => return Err(()),
+                    }
+                }
+
                 let session_id = value
                     .key_value_pairs
                     .remove("ID")
@@ -804,6 +835,58 @@ mod tests {
             "SESSION CREATE STYLE=DATAGRAM DESTINATION=TRANSIENT i2cp.leaseSetEncType=4,0",
         )
         .is_none());
+    }
+
+    #[test]
+    fn reject_invalid_inbound_tunnel_length() {
+        let test_cases = [("0"), ("8"), ("abc"), ("-1"), ("1.1")];
+        for invalid_in_len in test_cases {
+            let invalid_cmd = ParsedCommand::<MockRuntime> {
+                command: "SESSION",
+                subcommand: Some("CREATE"),
+                key_value_pairs: HashMap::from([
+                    ("STYLE", "STREAM"),
+                    ("ID", "test"),
+                    ("DESTINATION", "TRANSIENT"),
+                    ("inbound.length", invalid_in_len),
+                ]),
+                _runtime: Default::default(),
+            };
+
+            match SamCommand::try_from(invalid_cmd) {
+                Ok(_) => panic!(
+                    "Failed to reject the invalid inbound tunnel length {:?}",
+                    (invalid_in_len)
+                ),
+                Err(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn reject_invalid_outbound_tunnel_length() {
+        let test_cases = [("0"), ("9"), ("abc"), ("-1"), ("1.1")];
+        for invalid_out_len in test_cases {
+            let invalid_cmd = ParsedCommand::<MockRuntime> {
+                command: "SESSION",
+                subcommand: Some("CREATE"),
+                key_value_pairs: HashMap::from([
+                    ("STYLE", "STREAM"),
+                    ("ID", "test"),
+                    ("DESTINATION", "TRANSIENT"),
+                    ("outbound.length", invalid_out_len),
+                ]),
+                _runtime: Default::default(),
+            };
+
+            match SamCommand::try_from(invalid_cmd) {
+                Ok(_) => panic!(
+                    "Failed to reject the invalid outbound tunnel length {:?}",
+                    (invalid_out_len)
+                ),
+                Err(_) => {}
+            }
+        }
     }
 
     #[test]
