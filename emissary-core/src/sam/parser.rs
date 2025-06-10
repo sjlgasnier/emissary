@@ -319,34 +319,24 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     .and_then(|value| SamVersion::try_from(*value).ok()),
             }),
             ("SESSION", Some("CREATE")) => {
-                // checks if the inbound tunnel length is valid
-                if let Some(inbound_len) = value.key_value_pairs.get("inbound.length") {
-                    match inbound_len.parse::<u8>() {
-                        Ok(inbound_len) =>
-                            if inbound_len == 0 || inbound_len > 7 {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?inbound_len,
-                                    "invalid inbound tunnel length, 0-hop is not supported and 7 is the maximum length"
-                                );
-                                return Err(());
-                            },
-                        _ => return Err(()),
-                    }
-                }
-                // checks if the outbound tunnel length is valid
-                if let Some(outbound_len) = value.key_value_pairs.get("outbound.length") {
-                    match outbound_len.parse::<u8>() {
-                        Ok(outbound_len) =>
-                            if outbound_len == 0 || outbound_len > 8 {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?outbound_len,
-                                    "invalid outbound tunnel length, 0-hop is not supported and 8 is the maximum length"
-                                );
-                                return Err(());
-                            },
-                        _ => return Err(()),
+                // checking that the options have valid values
+                let data_for_options_check:[(&'static str, u8,u8,&'static str);4] = [("inbound.quantity",1,16,"invalid inbound tunnel quantity, 16 is the maximum quantity"),
+("outbound.quantity",1,16,"invalid outbound tunnel quantity, 16 is the maximum quantity"), 
+("inbound.length",1,7,"invalid inbound tunnel length, 0-hop is not supported and 7 is the maximum length"), 
+("outbound.length",1,8,"invalid outbound tunnel length, 0-hop is not supported and 8 is the maximum length")];
+                for (option, min, max, error_msg) in data_for_options_check {
+                    if let Some(x) = value.key_value_pairs.get(option) {
+                        match x.parse::<u8>() {
+                            Ok(x_u8) =>
+                                if x_u8 > max || x_u8 < min {
+                                    tracing::warn!(
+                                        target: LOG_TARGET,
+                                        ?x_u8,
+                                        error_msg);
+                                    return Err(());
+                                },
+                            _ => return Err(()),
+                        }
                     }
                 }
 
@@ -838,8 +828,34 @@ mod tests {
     }
 
     #[test]
+    fn reject_invalid_outbound_tunnel_quantity() {
+        let test_cases = ["0", "17", "abc", "-1", "1.1"];
+        for invalid_out_qty in test_cases {
+            let invalid_cmd = ParsedCommand::<MockRuntime> {
+                command: "SESSION",
+                subcommand: Some("CREATE"),
+                key_value_pairs: HashMap::from([
+                    ("STYLE", "STREAM"),
+                    ("ID", "test"),
+                    ("DESTINATION", "TRANSIENT"),
+                    ("outbound.quantity", invalid_out_qty),
+                ]),
+                _runtime: Default::default(),
+            };
+
+            match SamCommand::try_from(invalid_cmd) {
+                Ok(_) => panic!(
+                    "Failed to reject the invalid outbound tunnel quantity {:?}",
+                    (invalid_out_qty)
+                ),
+                Err(_) => {}
+            }
+        }
+    }
+
+    #[test]
     fn reject_invalid_inbound_tunnel_length() {
-        let test_cases = [("0"), ("8"), ("abc"), ("-1"), ("1.1")];
+        let test_cases = ["0", "8", "abc", "-1", "1.1"];
         for invalid_in_len in test_cases {
             let invalid_cmd = ParsedCommand::<MockRuntime> {
                 command: "SESSION",
@@ -865,7 +881,7 @@ mod tests {
 
     #[test]
     fn reject_invalid_outbound_tunnel_length() {
-        let test_cases = [("0"), ("9"), ("abc"), ("-1"), ("1.1")];
+        let test_cases = ["0", "9", "abc", "-1", "1.1"];
         for invalid_out_len in test_cases {
             let invalid_cmd = ParsedCommand::<MockRuntime> {
                 command: "SESSION",
