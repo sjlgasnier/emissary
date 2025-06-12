@@ -306,32 +306,36 @@ impl fmt::Display for SamCommand {
 impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
     type Error = ();
 
-    fn try_from(mut value: ParsedCommand<'a, R>) -> Result<Self, Self::Error> {
-        match (value.command, value.subcommand) {
+    fn try_from(mut parsed_cmd: ParsedCommand<'a, R>) -> Result<Self, Self::Error> {
+        match (parsed_cmd.command, parsed_cmd.subcommand) {
             ("HELLO", Some("VERSION")) => Ok(Self::Hello {
-                min: value
+                min: parsed_cmd
                     .key_value_pairs
                     .get("MIN")
                     .and_then(|value| SamVersion::try_from(*value).ok()),
-                max: value
+                max: parsed_cmd
                     .key_value_pairs
                     .get("MAX")
                     .and_then(|value| SamVersion::try_from(*value).ok()),
             }),
             ("SESSION", Some("CREATE")) => {
                 // checking that the options have valid values
-                let data_for_options_check:[(&'static str, u8,u8,&'static str);4] = [("inbound.quantity",1,16,"invalid inbound tunnel quantity, 16 is the maximum quantity"),
-("outbound.quantity",1,16,"invalid outbound tunnel quantity, 16 is the maximum quantity"), 
-("inbound.length",1,7,"invalid inbound tunnel length, 0-hop is not supported and 7 is the maximum length"), 
-("outbound.length",1,8,"invalid outbound tunnel length, 0-hop is not supported and 8 is the maximum length")];
+                let data_for_options_check:[(&'static str, u8,u8,&'static str);4] = [
+                ("inbound.quantity",1,16,"invalid inbound tunnel quantity, 16 is the maximum quantity"),
+                ("outbound.quantity",1,16,"invalid outbound tunnel quantity, 16 is the maximum quantity"), 
+                ("inbound.length",1,7,"invalid inbound tunnel length, 0-hop is not supported and 7 is the maximum length"), 
+                ("outbound.length",1,8,"invalid outbound tunnel length, 0-hop is not supported and 8 is the maximum length")
+                ];
                 for (option, min, max, error_msg) in data_for_options_check {
-                    if let Some(x) = value.key_value_pairs.get(option) {
-                        match x.parse::<u8>() {
-                            Ok(x_u8) =>
-                                if x_u8 > max || x_u8 < min {
+                    if let Some(value) = parsed_cmd.key_value_pairs.get(option) {
+                        match value.parse::<u8>() {
+                            Ok(value) =>
+                                if value > max || value < min {
                                     tracing::warn!(
                                         target: LOG_TARGET,
-                                        ?x_u8,
+                                        ?min,
+                                        ?max,
+                                        ?value,
                                         error_msg);
                                     return Err(());
                                 },
@@ -340,7 +344,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     }
                 }
 
-                let session_id = value
+                let session_id = parsed_cmd
                     .key_value_pairs
                     .remove("ID")
                     .ok_or_else(|| {
@@ -351,13 +355,13 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     })?
                     .to_string();
 
-                let session_kind = match value.key_value_pairs.remove("STYLE") {
+                let session_kind = match parsed_cmd.key_value_pairs.remove("STYLE") {
                     Some("STREAM") => SessionKind::Stream,
                     style @ (Some("RAW") | Some("DATAGRAM")) => {
                         // currently only forwarded datagrams are supported
                         //
                         // TODO: why is port unused?
-                        let _ = value.key_value_pairs.get("PORT").ok_or_else(|| {
+                        let _ = parsed_cmd.key_value_pairs.get("PORT").ok_or_else(|| {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 "only forwarded raw datagrams are supported",
@@ -365,8 +369,8 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                         })?;
 
                         // if no host was specified, default to localhost
-                        if value.key_value_pairs.get("HOST").is_none() {
-                            value.key_value_pairs.insert("HOST", "127.0.0.1");
+                        if parsed_cmd.key_value_pairs.get("HOST").is_none() {
+                            parsed_cmd.key_value_pairs.insert("HOST", "127.0.0.1");
                         }
 
                         match style {
@@ -386,7 +390,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     }
                 };
 
-                let destination = match value.key_value_pairs.remove("DESTINATION") {
+                let destination = match parsed_cmd.key_value_pairs.remove("DESTINATION") {
                     Some("TRANSIENT") => {
                         let signing_key = SigningPrivateKey::random(R::rng());
                         let encryption_key = StaticPrivateKey::random(R::rng());
@@ -406,7 +410,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                             take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
                         let (_, signing_key) = take::<_, _, ()>(32usize)(rest).map_err(|_| ())?;
 
-                        // conversions are expected succeed since the client is interacting with
+                        // conversions are expected to succeed since the client is interacting with
                         // a local router and would only crash their onw router if they provided
                         // invalid keying material
                         DestinationContext {
@@ -433,7 +437,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                     session_id,
                     session_kind,
                     destination: Box::new(destination),
-                    options: value
+                    options: parsed_cmd
                         .key_value_pairs
                         .into_iter()
                         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -441,18 +445,19 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                 })
             }
             ("STREAM", Some("CONNECT")) => {
-                let session_id = value.key_value_pairs.get("ID").ok_or_else(|| {
+                let session_id = parsed_cmd.key_value_pairs.get("ID").ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         "session id missing for `STREAM CONNECT`"
                     );
                 })?;
-                let destination = value.key_value_pairs.get("DESTINATION").ok_or_else(|| {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        "destination missing for `STREAM CONNECT`"
-                    );
-                })?;
+                let destination =
+                    parsed_cmd.key_value_pairs.get("DESTINATION").ok_or_else(|| {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            "destination missing for `STREAM CONNECT`"
+                        );
+                    })?;
 
                 let host = if let Some(end) = destination.find(".b32.i2p") {
                     tracing::trace!(
@@ -509,7 +514,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                 Ok(SamCommand::Connect {
                     host,
                     session_id: session_id.to_string(),
-                    options: value
+                    options: parsed_cmd
                         .key_value_pairs
                         .into_iter()
                         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -517,7 +522,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                 })
             }
             ("STREAM", Some("ACCEPT")) => {
-                let session_id = value.key_value_pairs.get("ID").ok_or_else(|| {
+                let session_id = parsed_cmd.key_value_pairs.get("ID").ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         "session id missing for `STREAM ACCEPT`"
@@ -526,7 +531,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
 
                 Ok(SamCommand::Accept {
                     session_id: session_id.to_string(),
-                    options: value
+                    options: parsed_cmd
                         .key_value_pairs
                         .into_iter()
                         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -534,13 +539,13 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                 })
             }
             ("STREAM", Some("FORWARD")) => {
-                let session_id = value.key_value_pairs.get("ID").ok_or_else(|| {
+                let session_id = parsed_cmd.key_value_pairs.get("ID").ok_or_else(|| {
                     tracing::warn!(
                         target: LOG_TARGET,
                         "session id missing for `STREAM FORWARD`"
                     );
                 })?;
-                let port = value
+                let port = parsed_cmd
                     .key_value_pairs
                     .get("PORT")
                     .ok_or_else(|| {
@@ -555,7 +560,7 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                 Ok(SamCommand::Forward {
                     session_id: session_id.to_string(),
                     port,
-                    options: value
+                    options: parsed_cmd
                         .key_value_pairs
                         .into_iter()
                         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -563,9 +568,9 @@ impl<'a, R: Runtime> TryFrom<ParsedCommand<'a, R>> for SamCommand {
                 })
             }
             ("NAMING", Some("LOOKUP")) => Ok(SamCommand::NamingLookup {
-                name: value.key_value_pairs.get("NAME").ok_or(())?.to_string(),
+                name: parsed_cmd.key_value_pairs.get("NAME").ok_or(())?.to_string(),
             }),
-            ("DEST", Some("GENERATE")) => match value.key_value_pairs.get("SIGNATURE_TYPE") {
+            ("DEST", Some("GENERATE")) => match parsed_cmd.key_value_pairs.get("SIGNATURE_TYPE") {
                 Some(signature_type) if *signature_type == "7" =>
                     Ok(SamCommand::GenerateDestination),
                 Some(signature_type) => {

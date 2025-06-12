@@ -198,7 +198,7 @@ pub struct SamServer<R: Runtime> {
     ///
     /// Inbound connections which are in the state of being handshaked and reading a command from
     /// the client. After the command has been read, `SamServer` validates it against the current
-    /// state, ensuring, e.g., that the it's not a duplicate `SESSION CREATE` request.
+    /// state, ensuring, e.g., that it's not a duplicate `SESSION CREATE` request.
     pending_inbound_connections: R::JoinSet<crate::Result<ConnectionKind<R>>>,
 
     /// Pending SAMv3 sessions that are in the process of building a tunnel pool.
@@ -452,8 +452,6 @@ impl<R: Runtime> Future for SamServer<R> {
 
                             match this.tunnel_manager_handle.create_tunnel_pool(TunnelPoolConfig {
                                 name: Str::from(Arc::clone(&session_id)),
-                                // to be noted: potential errors arising from parse() are turned
-                                // into None by ok(), and thus ignored
                                 num_inbound: options
                                     .get("inbound.quantity")
                                     .and_then(|v| v.parse().ok())
